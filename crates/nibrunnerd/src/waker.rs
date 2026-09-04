@@ -70,7 +70,7 @@ impl AppWaker {
         })
     }
 
-    async fn boot(&self, app_id: &AppId, joined: u64) -> Outcome {
+    async fn boot(&self, app_id: &AppId) -> Outcome {
         let started = Instant::now();
         let wanted = {
             let cache = self.host.cache.lock().await;
@@ -157,6 +157,17 @@ impl AppWaker {
         // is told now rather than on its next tick. Until it refreshes, the record still says this
         // app is coming up and every request behind this one is answered by the activator.
         self.host.state.signal_refresh();
+        // Counted here rather than when the wake started, because when it started is before any
+        // of them had arrived: a burst reaches a sleeping app over the same tens of milliseconds
+        // this wake spends, so reading the count first reports nothing waited on a wake that the
+        // whole burst waited on. The requests that join between this line and the removal below
+        // go uncounted, which is a window measured against a boot rather than against a burst.
+        let joined = self
+            .in_flight
+            .lock()
+            .await
+            .get(app_id)
+            .map_or(0, |(_, count)| *count);
         // `waited_ms` is the whole of what the visitor paid, `outcome` is what they paid it for: a
         // restore and a cold boot are the same line otherwise, and the difference between them is
         // the feature. `coalesced` is how many more requests waited on this same wake, so a count
@@ -200,15 +211,7 @@ impl Waker for AppWaker {
             };
         }
 
-        let outcome = {
-            let joined = self
-                .in_flight
-                .lock()
-                .await
-                .get(app_id)
-                .map_or(0, |(_, count)| *count);
-            self.boot(app_id, joined).await
-        };
+        let outcome = self.boot(app_id).await;
         let mut in_flight = self.in_flight.lock().await;
         if let Some((sender, _)) = in_flight.remove(app_id) {
             let _ = sender.send(outcome.clone());
@@ -264,6 +267,85 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The count on that one wake is the only thing that tells an operator coalescing is working,
+    /// and a burst reaches a sleeping app over the same milliseconds the wake spends: sampled
+    /// before the wake it is always zero, however many requests waited.
+    #[tokio::test]
+    async fn the_requests_that_waited_on_a_wake_are_counted_on_it() {
+        use std::net::SocketAddr;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let counted = CountsCoalesced::default();
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(counted.clone()));
+
+        // The wake only reaches its log once something answers inside the guest, so the probe is
+        // pointed at a socket on this machine that accepts and says nothing.
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+                record.guest_ipv4 = crate::health::probe::loopback();
+                record.http_port = protocol::HttpPort::try_from(u32::from(port)).unwrap();
+            }))
+            .await;
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
+
+        let waker = AppWaker::new(host.arc().clone());
+        let outcomes = futures::future::join_all((0..10).map(|_| {
+            let waker = waker.clone();
+            let app_id = app_id();
+            async move { waker.wake(&app_id).await }
+        }))
+        .await;
+
+        assert!(outcomes.iter().all(Result::is_ok));
+        // One wake, and the nine behind the one that led it.
+        assert_eq!(counted.taken(), vec![9]);
+    }
+
+    /// A count that is only ever logged is only testable through the log.
+    #[derive(Clone, Default)]
+    struct CountsCoalesced(Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl CountsCoalesced {
+        fn taken(&self) -> Vec<u64> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountsCoalesced {
+        fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            struct Pick(Option<u64>);
+            impl tracing::field::Visit for Pick {
+                fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                    if field.name() == "coalesced" {
+                        self.0 = Some(value);
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            let mut pick = Pick(None);
+            event.record(&mut pick);
+            if let Some(value) = pick.0 {
+                self.0.lock().unwrap().push(value);
+            }
+        }
     }
 
     /// Refusing converges: the app stays down, its owner is told why, and the repair is to move
