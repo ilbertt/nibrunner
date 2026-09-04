@@ -118,9 +118,33 @@ while an operator is still watching rather than on the pass that first needed th
 | `network.control_plane_cidrs_v4` | `[]` | Ranges a guest is denied by name |
 | `network.control_plane_cidrs_v6` | `[]` | The same, where no blanket rule covers them |
 | `control_plane.url` | none | The addon that polls a remote control plane |
+| `exports.store_url` | `<state>/exports/written` | Where a finished bundle goes |
+| `exports.staging_dir` | `<state>/exports` | Where one is assembled, and removed after |
 
 `NIBRUNNER_LOG` is still an environment variable, and the only one besides `NIBRUNNER_CONFIG`: it
 is a `tracing` filter an operator changes to debug one restart, not a property of the host.
+
+### Exports
+
+An export hands a tenant their data back: their filesystem, the binary that was running on it, and
+the environment it ran under, as one `bundle.tar.gz` in `exports.store_url`.
+
+The order is the guarantee. The guest is frozen over its control vsock, because only its kernel can
+checkpoint the ext4 journal and `debugfs` never replays one — an unfrozen filesystem is missing
+recent metadata however durable the storage under it is. Then the checkpoint, which captures *now*.
+Then the freeze is released, and everything whose cost scales with the tenant's data — the read,
+the archive, the upload — runs against that pinned view while they are writing again. The bundle is
+still of the moment it always was, because the cut happened inside the freeze.
+
+The filesystem is read with `debugfs`, which walks inodes in userspace. Mounting it — even
+read-only — would mean asking this host's kernel to interpret tenant-controlled metadata, which is
+the one thing it never does.
+
+Checkpoints are named after the export they belong to, so a daemon killed mid-export comes back to
+a name it recognises: the reap is derived from what the store says exists rather than from anything
+this process remembers, which makes retrying the same code path as the first attempt. That matters
+more than it sounds — while any checkpoint exists, ZeroFS pauses segment deletion, compaction and
+metadata reclamation for *every* tenant on the host.
 
 ### Volumes that outlive the host
 
@@ -134,7 +158,9 @@ epoch only *after* a window of acknowledging writes it then discards, so it lose
 rather than failing to start. Whatever supervises the host is the lock; a single-instance unit is
 how it is held. This daemon only ever runs its admin CLI, and there is a test asserting so.
 
-A host on this backend needs two tools the local-file one does not: `nbd-client` and `zerofs`. It
+A host on this backend needs three tools the local-file one does not: `nbd-client`, `zerofs`, and
+`debugfs` for exports — that last one ships in `e2fsprogs` beside `mke2fs`, so it is no new
+package. It
 also holds ZeroFS's configured `[cache]` back from both the memory a guest may be given and the
 disk a snapshot may go on — read from ZeroFS's own config file rather than written down twice, and
 assumed rather than treated as zero when it cannot be read, because a host that promises memory

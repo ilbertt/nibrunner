@@ -76,6 +76,17 @@ value is validated at startup — paths absolute, CIDRs parseable, ports outside
 take, storage prefixes that will not become a key nobody can find. `NIBRUNNER_LOG` stays in the
 environment because it is a thing an operator changes to debug one restart.
 
+**A checkpoint server is started by this daemon, not by systemd.** nibrun starts one through a
+templated unit and waits for `systemctl start` to return, which works only because that unit ends
+with an `ExecStartPost` polling for the socket. This daemon has no systemd, so it spawns the
+process and does that same wait itself — the readiness signal is the socket appearing either way,
+because ZeroFS execs well before it answers on anything. It is killed with the daemon rather than
+outliving it, unlike a tenant's microVM: it holds nothing a restart would want back.
+
+**`tar` is not spawned.** The archive is written in-process with the `tar` and `flate2` crates. An
+export already needs `debugfs`, and an archive whose entry names come from a tenant's own filenames
+is one more surface than a library that takes them as data.
+
 **systemd is not the supervisor.** The agent runs each microVM as a `nibrun-vm@<app>.service` and
 reads its state out of `systemctl show`. This daemon spawns Firecracker itself into a session of
 its own — `setsid`, no `kill_on_drop` — and keeps a pidfile carrying the pid, the host boot id and
@@ -127,8 +138,8 @@ this being a static cross-compiled binary, so the feature set is `aws-base` + `r
   Exports are a checkpoint server started per checkpoint, an NBD attach against it and a read of
   the filesystem it pins — the attach half is written (`NbdDevices::attach_checkpoint`), the
   server and the reader are not.
-- **Exports have no server or reader**, so nothing observes one and nothing is ever planned. The
-  `Vec::new()` in `reconcile/mod.rs` says so rather than leaving a reader to wonder.
+- **The vsock filesystem browse.** The codecs are written and tested against the C headers
+  (`crates/guest-contract/src/filesystem.rs`); nothing calls them.
 - **Usage reporting.** A non-goal for v1.
 - **ACME.** Phase 5. The proxy serves a certificate and key from disk, or plain HTTP, or nothing.
 - **The `guestImage` version in a report** is read from the manifest beside the image. The image in

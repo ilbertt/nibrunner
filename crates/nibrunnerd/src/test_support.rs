@@ -222,6 +222,14 @@ pub struct TestHost {
     pub host: Arc<crate::host::Host>,
     pub vms: Arc<crate::services::RecordingVmm>,
     pub commands: Arc<crate::services::RecordingCommandRunner>,
+    pub exports: Arc<crate::exports::store::RecordingExportStore>,
+}
+
+impl TestHost {
+    /// What left the box, for a test that wants to assert nothing did.
+    pub fn exports_written(&self) -> Vec<(std::path::PathBuf, protocol::ObjectKey)> {
+        self.exports.uploads()
+    }
 }
 
 impl Deref for TestHost {
@@ -265,6 +273,7 @@ pub async fn test_host() -> TestHost {
     let state = HostState::shared();
     let commands = RecordingCommandRunner::succeeding();
     let vms = RecordingVmm::new();
+    let exports = crate::exports::store::RecordingExportStore::accepting();
     let host = Arc::new(Host {
         // Room for four apps at the default size, so a test that wants a host with no room says
         // so rather than depending on what the machine running it happens to have.
@@ -279,6 +288,12 @@ pub async fn test_host() -> TestHost {
             commands.clone(),
         )),
         artifacts: StubArtifactStore::holding(ARTIFACT_BYTES.to_vec()),
+        exports: exports.clone(),
+        // A test host keeps its volumes as local files, which is not something a checkpoint can be
+        // cut from — so an export against one fails saying so rather than half-running.
+        checkpoint_servers: None,
+        nbd: crate::volumes::nbd::NbdDevices::new(commands.clone()),
+        commands: commands.clone(),
         firewall: Arc::new(HostFirewall::new(commands.clone())),
         router: Router::new(),
         activator: AppActivator::new(state, Arc::new(NeverWoken)),
@@ -289,5 +304,6 @@ pub async fn test_host() -> TestHost {
         host,
         vms,
         commands,
+        exports,
     }
 }

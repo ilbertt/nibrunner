@@ -20,6 +20,7 @@ pub mod config;
 pub mod control;
 pub mod desired;
 pub mod exec;
+pub mod exports;
 pub mod health;
 pub mod host;
 pub mod json_store;

@@ -583,10 +583,13 @@ mod tests {
         assert!(!filesystem(root.path()).device_file_for(&volume_id).exists());
     }
 
-    /// This daemon never starts a read-write server, so the only thing it may ever run is the
-    /// admin CLI and the tools that attach what the service already exports.
+    /// The invariant is about *writers*, not about processes. A checkpoint server is started by
+    /// this daemon and is also a `zerofs run` — but `--checkpoint` opens read-only against a
+    /// pinned manifest, so it takes no writer epoch. What must never happen is a `run` without it:
+    /// a second writer per prefix is fenced only after a window of acknowledging writes that are
+    /// then discarded, so it loses a tenant's data rather than failing to start.
     #[tokio::test]
-    async fn nothing_here_ever_runs_zerofs_as_a_server() {
+    async fn nothing_here_ever_runs_zerofs_as_a_second_writer() {
         let root = tempfile::tempdir().unwrap();
         let commands = RecordingCommandRunner::succeeding();
         let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
@@ -598,12 +601,17 @@ mod tests {
             .create_checkpoint(&crate::test_support::checkpoint_id())
             .await;
         let _ = volumes.observe_checkpoints().await;
+        let _ = volumes
+            .delete_checkpoint(&crate::test_support::checkpoint_id())
+            .await;
         let _ = volumes.teardown(&volume_id, &app_id()).await;
 
         for call in commands.calls() {
+            let writes = call.command.contains(&"run".to_string())
+                && !call.command.contains(&"--checkpoint".to_string());
             assert!(
-                !call.command.contains(&"run".to_string()),
-                "a second writer would be fenced only after acknowledging writes it then discards: {:?}",
+                !writes,
+                "a second writer would lose a tenant's data: {:?}",
                 call.command
             );
         }

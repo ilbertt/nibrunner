@@ -21,6 +21,9 @@ pub struct HostSnapshot {
     pub deleted_volumes: BTreeMap<VolumeId, ReportedVolume>,
     pub volume_reports: Vec<ReportedVolume>,
     pub checkpoint_reports: Vec<protocol::ReportedCheckpoint>,
+    /// Remembered rather than observed: this host holds write-only credentials on the export store,
+    /// so re-writing on doubt would re-upload a tenant's whole dataset on every restart.
+    pub export_reports: Vec<protocol::ReportedExport>,
     pub next_probe_at_ms: BTreeMap<AppId, i64>,
     /// The apps a snapshot is being taken of right now. Here rather than on the record because it
     /// may not outlive the daemon that set it: one that died mid-capture comes back with this

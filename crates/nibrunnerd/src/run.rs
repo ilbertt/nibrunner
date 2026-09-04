@@ -11,6 +11,7 @@ use crate::artifact_store::ObjectArtifactStore;
 use crate::config::HostConfig;
 use crate::desired::{DesiredStateCache, DesiredStateWatch};
 use crate::exec::HostCommands;
+use crate::exports::reader::CheckpointServers;
 use crate::host::Host;
 use crate::logs::receiver::TenantLogReceiver;
 use crate::logs::FileLogSink;
@@ -125,10 +126,33 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         }),
     );
 
+    // Where a finished export goes. A host that names none has nowhere to put one, and an export
+    // asked of it fails saying so rather than reading a tenant's whole dataset to drop it.
+    let exports: Arc<dyn crate::exports::store::ExportStore> = Arc::new(
+        crate::exports::store::ObjectExportStore::open(
+            config
+                .export_store_url
+                .as_deref()
+                .unwrap_or(&config.export_staging_dir.join("written").display().to_string()),
+        )
+        .map_err(|error| StartupError::Config(error.message()))?,
+    );
+    // Only where a volume is something a checkpoint can be cut from.
+    let checkpoint_servers = config.zerofs.as_ref().map(|settings| CheckpointServers {
+        binary: settings.binary.clone(),
+        config_file: settings.checkpoint_config_file.clone(),
+        runtime_dir: settings.checkpoint_runtime_dir.clone(),
+        cache_dir: settings.checkpoint_cache_dir.clone(),
+    });
+
     let host = Arc::new(Host {
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
         state,
         allocator: allocator.clone(),
+        exports,
+        checkpoint_servers,
+        nbd: crate::volumes::nbd::NbdDevices::new(commands.clone()),
+        commands: commands.clone(),
         cache: Mutex::new(DesiredStateCache::new()),
         vms,
         volumes,

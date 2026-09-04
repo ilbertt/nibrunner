@@ -4,11 +4,17 @@
 //! the hypervisor — it does itself or carries, so a host's dependency list is two packages rather
 //! than a paragraph.
 //!
-//! A host whose volumes live in an object store adds two more: `nbd-client`, because attaching an
-//! export is a fork that holds `NBD_DO_IT` for the life of the device and not a call this daemon
-//! could make and return from, and `zerofs`, whose admin CLI is the only interface a service this
-//! daemon does not own exposes. Both are spawned only by the ZeroFS backend, and only for a host
-//! that asked for it in `volumes.backend`.
+//! A host whose volumes live in an object store adds three more, all of them only for a host that
+//! asked for it in `volumes.backend`:
+//!
+//! - `nbd-client`, because attaching an export is a fork that holds `NBD_DO_IT` for the life of
+//!   the device and not a call this daemon could make and return from.
+//! - `zerofs`, whose admin CLI is the only interface a service this daemon does not own exposes,
+//!   and which is also the read-only server an export's checkpoint is read through.
+//! - `debugfs`, which walks a tenant's filesystem in userspace. This one is not a convenience: an
+//!   export is built from a filesystem the host must never ask its kernel to interpret, and
+//!   mounting it — even read-only — would give that up. It ships in `e2fsprogs` beside `mke2fs`,
+//!   so it costs a host no package it did not already have.
 
 use std::process::Stdio;
 

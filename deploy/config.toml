@@ -40,6 +40,22 @@ storage_prefix = "volumes"
 # mount_path = "/mnt/zerofs"
 # nbd_socket_path = "/run/zerofs/nbd.sock"
 # checkpoint_runtime_dir = "/run/zerofs-checkpoint"
+# The read-only server an export's checkpoint is read through — a second config, deliberately not
+# the live server's: every setting in that one is about writing, and copying them across would
+# suggest this process takes part in any of it.
+# checkpoint_config_file = "/etc/zerofs/checkpoint.toml"
+# checkpoint_cache_dir = "/data/zerofs-checkpoint"
+
+[exports]
+# Where a finished bundle goes: an s3:// URL for a fleet, a directory for one machine. Its own
+# store rather than the artifact one, because a bundle is a tenant's whole dataset in the clear and
+# the two want different permissions — an export needs no delete (a failed multipart is reaped by
+# the bucket's own abort rule) and an artifact is never reaped at all.
+# store_url = "s3://nibrun-exports"
+# Where a bundle is assembled. Under the state directory, because it is a second copy of a tenant's
+# dataset and belongs on the disk this host already treats as private. Removed after every export,
+# whether or not it worked.
+staging_dir = "/var/lib/nibrunner/exports"
 
 [proxy]
 # Absent means this host serves no edge of its own, which is what it wants behind a load balancer.

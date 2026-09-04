@@ -87,6 +87,32 @@ pub fn artifact_image_path(cache_dir: &Path, digest: &Sha256Digest) -> PathBuf {
 ///
 /// The bytes are hashed before anything is packed, and the image is only moved into the
 /// content-addressed cache once it is proven to be what it claims.
+/// The artifact's bytes, proven against what the document said they would be.
+///
+/// Separate from the image build because an export wants the same guarantee and none of the
+/// packing: it hands the binary over as a file rather than as a drive, and the download is what
+/// proves the digest either way.
+pub async fn fetch_verified(
+    store: &Arc<dyn ArtifactStore>,
+    artifact: &DesiredArtifact,
+) -> Result<Vec<u8>, ArtifactError> {
+    let bytes = store.read(&artifact.object_key).await?;
+    let actual = digest_of(&bytes);
+    if actual != artifact.digest.as_str() {
+        return Err(ArtifactError::DigestMismatch {
+            expected: artifact.digest.clone(),
+            actual,
+        });
+    }
+    if bytes.len() as u64 != artifact.size_bytes {
+        return Err(ArtifactError::SizeMismatch {
+            expected: artifact.size_bytes,
+            actual: bytes.len() as u64,
+        });
+    }
+    Ok(bytes)
+}
+
 pub async fn ensure_artifact_image(
     store: &Arc<dyn ArtifactStore>,
     cache_dir: &Path,
@@ -108,20 +134,7 @@ pub async fn ensure_artifact_image(
         return Ok(image_path);
     }
 
-    let bytes = store.read(&artifact.object_key).await?;
-    let actual = digest_of(&bytes);
-    if actual != artifact.digest.as_str() {
-        return Err(ArtifactError::DigestMismatch {
-            expected: artifact.digest.clone(),
-            actual,
-        });
-    }
-    if bytes.len() as u64 != artifact.size_bytes {
-        return Err(ArtifactError::SizeMismatch {
-            expected: artifact.size_bytes,
-            actual: bytes.len() as u64,
-        });
-    }
+    let bytes = fetch_verified(store, artifact).await?;
 
     let image = pack(&[(GUEST_BINARY_NAME, &bytes, BINARY_MODE)])?;
     let directory = image_path

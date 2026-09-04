@@ -9,12 +9,15 @@ use tokio::sync::Mutex;
 
 use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
+use crate::exports::reader::CheckpointServers;
+use crate::exports::store::ExportStore;
 use crate::net::allocator::SlotAllocator;
 use crate::net::firewall::HostFirewall;
 use crate::proxy::activator::AppActivator;
 use crate::proxy::Router;
-use crate::services::{ArtifactStore, Vmm};
+use crate::services::{ArtifactStore, CommandRunner, Vmm};
 use crate::state::SharedState;
+use crate::volumes::nbd::NbdDevices;
 use crate::volumes::VolumeBackend;
 
 pub struct Host {
@@ -33,6 +36,14 @@ pub struct Host {
     pub vms: Arc<dyn Vmm>,
     pub volumes: Arc<dyn VolumeBackend>,
     pub artifacts: Arc<dyn ArtifactStore>,
+    /// Where a finished bundle goes. Its own store because a bundle is a tenant's whole dataset in
+    /// the clear, and it wants different permissions from the artifacts one.
+    pub exports: Arc<dyn ExportStore>,
+    /// Present only where a volume is something a checkpoint can be cut from. A host on local
+    /// files has no server to start, and an export against one says so rather than half-running.
+    pub checkpoint_servers: Option<CheckpointServers>,
+    pub nbd: NbdDevices,
+    pub commands: Arc<dyn CommandRunner>,
     pub firewall: Arc<HostFirewall>,
     pub router: Arc<Router>,
     pub activator: Arc<AppActivator>,

@@ -87,6 +87,12 @@ pub struct ZerofsSettings {
     pub mount_path: PathBuf,
     pub nbd_socket_path: PathBuf,
     pub checkpoint_runtime_dir: PathBuf,
+    /// A second config, read by the read-only server an export's checkpoint is served from. Not
+    /// the live server's: every setting about writing is absent from it, and copying them across
+    /// would suggest that process takes part in any of it.
+    pub checkpoint_config_file: PathBuf,
+    /// Scratch for one pass over one filesystem, made on the way in and removed on the way out.
+    pub checkpoint_cache_dir: PathBuf,
 }
 
 const DEFAULT_ZEROFS_BINARY: &str = "/opt/nibrun/bin/zerofs/zerofs";
@@ -94,6 +100,8 @@ const DEFAULT_ZEROFS_CONFIG: &str = "/etc/zerofs/config.toml";
 const DEFAULT_ZEROFS_MOUNT: &str = "/mnt/zerofs";
 const DEFAULT_ZEROFS_NBD_SOCKET: &str = "/run/zerofs/nbd.sock";
 const DEFAULT_ZEROFS_CHECKPOINT_RUNTIME_DIR: &str = "/run/zerofs-checkpoint";
+const DEFAULT_ZEROFS_CHECKPOINT_CONFIG: &str = "/etc/zerofs/checkpoint.toml";
+const DEFAULT_ZEROFS_CHECKPOINT_CACHE_DIR: &str = "/data/zerofs-checkpoint";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
@@ -131,6 +139,13 @@ pub struct HostConfig {
     /// source that ships.
     pub control_plane_url: Option<String>,
     pub versions_file: PathBuf,
+    /// Where a finished export's bundle is put. Its own store rather than the artifact one: a
+    /// bundle is a tenant's whole dataset in the clear, and the two want different lifecycle rules
+    /// and different permissions — an export needs no delete, and an artifact is never reaped.
+    pub export_store_url: Option<String>,
+    /// Where a bundle is assembled. Under the state directory by default, because it is a second
+    /// copy of a tenant's dataset and belongs on the disk this host already treats as private.
+    pub export_staging_dir: PathBuf,
 }
 
 impl HostConfig {
@@ -219,6 +234,15 @@ mod file {
         pub(super) network: Network,
         #[serde(default)]
         pub(super) control_plane: ControlPlane,
+        #[serde(default)]
+        pub(super) exports: Exports,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Exports {
+        pub(super) store_url: Option<String>,
+        pub(super) staging_dir: Option<String>,
     }
 
     #[derive(Debug, Default, Deserialize)]
@@ -256,6 +280,8 @@ mod file {
         pub(super) mount_path: Option<String>,
         pub(super) nbd_socket_path: Option<String>,
         pub(super) checkpoint_runtime_dir: Option<String>,
+        pub(super) checkpoint_config_file: Option<String>,
+        pub(super) checkpoint_cache_dir: Option<String>,
     }
 
     #[derive(Debug, Default, Deserialize)]
@@ -415,6 +441,16 @@ impl HostConfig {
                         named.and_then(|zerofs| zerofs.checkpoint_runtime_dir.as_deref()),
                         DEFAULT_ZEROFS_CHECKPOINT_RUNTIME_DIR,
                     )?,
+                    checkpoint_config_file: directory(
+                        "volumes.zerofs.checkpoint_config_file",
+                        named.and_then(|zerofs| zerofs.checkpoint_config_file.as_deref()),
+                        DEFAULT_ZEROFS_CHECKPOINT_CONFIG,
+                    )?,
+                    checkpoint_cache_dir: directory(
+                        "volumes.zerofs.checkpoint_cache_dir",
+                        named.and_then(|zerofs| zerofs.checkpoint_cache_dir.as_deref()),
+                        DEFAULT_ZEROFS_CHECKPOINT_CACHE_DIR,
+                    )?,
                 })
             }
         };
@@ -504,6 +540,18 @@ impl HostConfig {
                 .as_deref()
                 .map(|url| control_plane_url("control_plane.url", url))
                 .transpose()?,
+            export_store_url: document
+                .exports
+                .store_url
+                .as_deref()
+                .map(|url| object_store_url("exports.store_url", url))
+                .transpose()?,
+            export_staging_dir: beneath(
+                "exports.staging_dir",
+                document.exports.staging_dir.as_deref(),
+                &state_dir,
+                "exports",
+            )?,
             state_dir,
             runtime_dir,
         })
@@ -533,6 +581,8 @@ impl HostConfig {
             proxy_tls_key: None,
             control_plane_url: None,
             versions_file: root.join("state/versions.json"),
+            export_store_url: None,
+            export_staging_dir: root.join("state/exports"),
         }
     }
 }
