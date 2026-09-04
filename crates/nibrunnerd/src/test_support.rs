@@ -11,8 +11,10 @@ use crate::report::instance_record::{InstanceRecord, RecordFields};
 pub const VOLUME_SIZE_BYTES: u64 = 4_096;
 pub const OBSERVED_AT: &str = "2026-08-03T10:00:00.000Z";
 pub const HOST_STORAGE_PREFIX: &str = "filesystems/host-1";
-/// The digest of the bytes `artifact_bytes` holds, so nothing has to hash them twice.
-pub const ARTIFACT_DIGEST: &str = "b8a4dfa5b6e79b0f1c1cbb2b5a24bd2c1a6cbf3a5b1f0e8c9d7a6b5c4d3e2f10";
+/// What stands in for a tenant's binary, and the digest of exactly these bytes — asserted in
+/// `vm::artifacts`, so the fixture cannot drift from what it claims to be.
+pub const ARTIFACT_BYTES: &[u8] = b"#!/usr/bin/env fake-binary\n";
+pub const ARTIFACT_DIGEST: &str = "8eacc8ea7f20363ff4eeb79bc80edf5926effee2e7e13207a198ce341a0326f5";
 
 pub fn app_id() -> AppId {
     AppId::parse("app-1").unwrap()
@@ -60,7 +62,7 @@ pub fn tenant_environment(values: &[(&str, &str)]) -> TenantEnvironment {
 pub fn artifact(edit: impl FnOnce(&mut DesiredArtifact)) -> DesiredArtifact {
     let mut value = DesiredArtifact {
         digest: Sha256Digest::parse(ARTIFACT_DIGEST).unwrap(),
-        size_bytes: 27,
+        size_bytes: ARTIFACT_BYTES.len() as u64,
         // A uuid, as the api will assign: it carries no name, which is why `filename` exists.
         object_key: ObjectKey::parse("artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45").unwrap(),
         filename: Filename::parse("pocketbase").unwrap(),
