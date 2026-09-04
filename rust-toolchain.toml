@@ -1,11 +1,5 @@
-# Pins the toolchain for everyone who builds this, including CI: rustup reads it and installs
-# what is named rather than using whatever the machine happens to have. The version moves
-# deliberately, in a commit, rather than under a contributor who ran `rustup update`.
 [toolchain]
 channel = "1.90.0"
-# `rustfmt` and `clippy` because `just fmt` and `just lint` need them and a fresh toolchain does
-# not carry them by default. `rust-src` so rust-analyzer can read the standard library.
 components = ["rustfmt", "clippy", "rust-src"]
-# The host a nibrunner box is: one static binary, built here or on the box itself.
 targets = ["x86_64-unknown-linux-musl"]
 profile = "minimal"

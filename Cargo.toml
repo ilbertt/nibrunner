@@ -37,14 +37,12 @@ expect_used = "allow"
 panic = "warn"
 indexing_slicing = "allow"
 
-# Arithmetic that can wrap silently. Slot numbers, byte counts and memory sizes are all here.
 cast_possible_truncation = "allow"
 # `integer_division` is allowed rather than warned: every division in this codebase is a
 # deliberate floor — mebibytes from bytes, an octet from an index — and each is commented where
 # the rounding matters. A lint that fires on all of them says nothing about any of them.
 integer_division = "allow"
 
-# What this codebase is deliberately full of, and does not want flagged.
 too_many_lines = "allow"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
