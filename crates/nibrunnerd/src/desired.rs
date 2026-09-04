@@ -88,10 +88,18 @@ impl DesiredStateCache {
 /// What the daemon holds open on the file. On Linux this is an inotify watch on the directory
 /// rather than on the file itself: a document is replaced by a rename, which leaves a watch on
 /// the old inode watching a file nothing will ever write to again.
+///
+/// Watching a directory means hearing about every file in it, and the daemon writes its own
+/// state — the report, the records, the slots — into whatever directory it was pointed at. So
+/// the events are read by name and everything but the document is dropped: without that, this
+/// host wakes its own watch several times a second and re-parses a document nothing touched.
 pub struct DesiredStateWatch {
     directory: PathBuf,
+    /// Read only where there is an inotify to filter. Off Linux the backstop is the whole watch.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    filename: std::ffi::OsString,
     #[cfg(target_os = "linux")]
-    inotify: Option<std::os::fd::OwnedFd>,
+    inotify: Option<nix::sys::inotify::Inotify>,
 }
 
 impl DesiredStateWatch {
@@ -101,6 +109,7 @@ impl DesiredStateWatch {
         Self {
             #[cfg(target_os = "linux")]
             inotify: linux::watch(&directory),
+            filename: path.file_name().unwrap_or_default().to_os_string(),
             directory,
         }
     }
@@ -109,14 +118,21 @@ impl DesiredStateWatch {
         &self.directory
     }
 
-    /// Settles when the directory holding the document has changed, or when the backstop runs
-    /// out. A watch that could not be established never settles early, which leaves the backstop
-    /// doing the whole job rather than the daemon doing none of it.
+    /// Settles when the document has changed, or when the backstop runs out. A watch that could
+    /// not be established never settles early, which leaves the backstop doing the whole job
+    /// rather than the daemon doing none of it.
     pub async fn changed(&self) {
         #[cfg(target_os = "linux")]
         if let Some(inotify) = &self.inotify {
-            if linux::wait(inotify, WATCH_BACKSTOP).await {
-                return;
+            let deadline = tokio::time::Instant::now() + WATCH_BACKSTOP;
+            loop {
+                match linux::wait_for(inotify, &self.filename, deadline).await {
+                    linux::Settled::Named => return,
+                    linux::Settled::RanOut => return,
+                    // Something else in the directory moved, which on a host is this daemon
+                    // writing its own state. Nothing to converge on, so it waits again.
+                    linux::Settled::SomethingElse => continue,
+                }
             }
         }
         tokio::time::sleep(WATCH_BACKSTOP).await;
@@ -125,8 +141,8 @@ impl DesiredStateWatch {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::os::fd::{AsRawFd, OwnedFd};
-    use std::time::Duration;
+    use std::ffi::OsStr;
+    use std::os::fd::{AsFd, AsRawFd};
 
     use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 
@@ -137,30 +153,55 @@ mod linux {
         .union(AddWatchFlags::IN_DELETE)
         .union(AddWatchFlags::IN_MOVED_FROM);
 
-    pub fn watch(directory: &std::path::Path) -> Option<OwnedFd> {
-        let inotify = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).ok()?;
-        inotify.add_watch(directory, WATCHED).ok()?;
-        Some(OwnedFd::from(inotify))
+    /// What a wait came back for, which is what tells the caller whether it has news, whether to
+    /// wait again, or whether the backstop is now its job.
+    pub(super) enum Settled {
+        /// The document itself moved.
+        Named,
+        /// Something else in the directory moved, which on a host is this daemon's own writing.
+        SomethingElse,
+        /// The deadline arrived first.
+        RanOut,
     }
 
-    /// True where the kernel reported something, false where the wait ran out — which is what
-    /// tells the caller whether the backstop still has to be served.
-    pub async fn wait(inotify: &OwnedFd, backstop: Duration) -> bool {
-        let raw = inotify.as_raw_fd();
+    pub(super) fn watch(directory: &std::path::Path) -> Option<Inotify> {
+        let inotify = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).ok()?;
+        inotify.add_watch(directory, WATCHED).ok()?;
+        Some(inotify)
+    }
+
+    /// Read by name rather than drained blind: the name is the only thing separating a deploy from
+    /// this daemon writing its own report into the same directory.
+    pub(super) async fn wait_for(
+        inotify: &Inotify,
+        filename: &OsStr,
+        deadline: tokio::time::Instant,
+    ) -> Settled {
+        let raw = inotify.as_fd().as_raw_fd();
         let Ok(async_fd) =
             tokio::io::unix::AsyncFd::with_interest(RawDescriptor(raw), tokio::io::Interest::READABLE)
         else {
-            return false;
+            return Settled::RanOut;
         };
-        let Ok(Ok(mut ready)) = tokio::time::timeout(backstop, async_fd.readable()).await else {
-            return false;
+        let Ok(Ok(mut ready)) = tokio::time::timeout_at(deadline, async_fd.readable()).await else {
+            return Settled::RanOut;
         };
-        // Drained here rather than parsed: what changed does not matter, only that something did,
-        // and an unread queue would make every later wait return at once.
-        let mut buffer = [0u8; 4096];
-        while nix::unistd::read(inotify, &mut buffer).is_ok() {}
+        // The whole queue is read before answering, because a rename over the document can arrive
+        // behind something this daemon wrote a moment earlier, and an event left unread would make
+        // the next wait return at once on news already spent.
+        let mut named = false;
+        while let Ok(events) = inotify.read_events() {
+            if events.is_empty() {
+                break;
+            }
+            named |= events.iter().any(|event| event.name.as_deref() == Some(filename));
+        }
         ready.clear_ready();
-        true
+        if named {
+            Settled::Named
+        } else {
+            Settled::SomethingElse
+        }
     }
 
     /// A descriptor tokio may poll without owning: the watch outlives every wait taken on it.
@@ -231,5 +272,32 @@ mod tests {
         if cfg!(target_os = "linux") {
             assert!(settled.is_ok(), "the watch should have settled on the write");
         }
+    }
+
+    /// The daemon writes its own state — the report, the records, the slots — into whatever
+    /// directory it was pointed at. A watch that settled on those would have this host re-reading
+    /// a document nothing touched several times a second.
+    #[tokio::test]
+    async fn a_write_to_something_else_in_the_directory_does_not_settle_the_watch() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("desired.json");
+        cache_desired_state(&path, &desired_state(|_| {})).unwrap();
+        let watch = DesiredStateWatch::on(&path);
+
+        let writer = tokio::spawn({
+            let sibling = directory.path().join("reported.json");
+            async move {
+                for _ in 0..5 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    crate::json_store::write_json(&sibling, &serde_json::json!({ "a": 1 })).unwrap();
+                }
+            }
+        });
+        let settled = tokio::time::timeout(Duration::from_millis(400), watch.changed()).await;
+        writer.await.unwrap();
+        assert!(settled.is_err(), "a sibling moving is not the document moving");
     }
 }

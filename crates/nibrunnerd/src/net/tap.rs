@@ -153,6 +153,10 @@ mod linux {
     /// Created persistent through `/dev/net/tun` rather than by netlink, because a tap opened by
     /// a process and not made persistent goes away with the descriptor — and the process that
     /// should own it is the Firecracker this daemon is about to start, not this daemon.
+    ///
+    /// The only unsafe in this daemon. `TUNSETIFF` and `TUNSETPERSIST` have no safe wrapper in
+    /// either `nix` or `rtnetlink`, and writing one would be this same call with a type around it.
+    #[allow(unsafe_code)]
     fn create_persistent_tap(tap_name: &str) -> Result<(), NetworkError> {
         use std::os::fd::AsRawFd;
 
@@ -188,6 +192,7 @@ mod linux {
         if created < 0 {
             return Err(failed("a tap device", tap_name, std::io::Error::last_os_error()));
         }
+        // Safety: same descriptor, and this request takes an int rather than a pointer.
         let persisted = unsafe { libc::ioctl(device.as_raw_fd(), TUNSETPERSIST, 1) };
         if persisted < 0 {
             return Err(failed(
@@ -272,7 +277,7 @@ mod linux {
 
     /// Only ever built where a tap can be made, so a daemon on any other kernel says so at
     /// startup rather than at the first boot.
-    pub fn _assert_send_sync() {
+    pub(super) fn _assert_send_sync() {
         fn is_send_sync<T: Send + Sync>() {}
         is_send_sync::<KernelNetwork>();
     }
