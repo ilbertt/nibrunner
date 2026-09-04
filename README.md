@@ -251,15 +251,38 @@ by the same pass that starts it and the activator that owns its port had already
 the count of requests coalesced onto one wake was read before the wake rather than after it, so a
 burst that entirely waited on one restore reported that none had. Both now have tests.
 
-**The guest side of that run is not what `crates/init` now holds.** The image in `guest/` is
-nibrun's stub build, whose manifest says `"init_is_stub": true`. That stub was replaced, for the
-run above, by a throwaway `/init` whose source was not kept — so what phase 2 proves is this
-daemon's half of the guest contract, exercised by something that satisfied the other half.
+### What phase 3 proved: the guest is ours
 
-`crates/init` is that other half, written properly: it cross-compiles for musl and is covered by
-the round-trip tests in `guest-contract`, but **no microVM has booted it**. Building a rootfs image
-around it and running the phase-2 lane again is what would close this, and it is the first thing to
-do before trusting any of those numbers twice.
+The image in `guest/` is nibrun's stub build, whose manifest says `"init_is_stub": true`. Phase 3
+replaced that stub with `crates/init` — this repository's own PID 1 — and ran the lane again on an
+`m7i-flex.large` with nested virtualisation.
+
+- **It boots.** Mounts, config drive, DNS, artifact drive, data drive, and a tenant started as uid
+  65534. Cold boot to first answer: 603 ms.
+- **The whole `instance.env` contract holds end to end.** The tenant was handed
+  `DERIVED=port 3000` — a `$NIBRUN_HTTP_PORT` reference the host wrote and this guest expanded —
+  along with its own variables, the platform's, and the `PORT` alias.
+- **Tenant output reaches the host over vsock**, both streams, correctly labelled.
+- **Every filesystem verb answers**: `list`, `stat`, `read`, `write`, `mkdir`, `remove`, `usage`,
+  `compute`. So do the refusals — removing a directory that still holds something is refused, and
+  a path that is not there is `there is nothing at that path` rather than a failure.
+- **The freeze holds and lets go.** A write blocks while the lease is held and succeeds once the
+  connection drops. There is no path out of answering that connection which leaves a tenant frozen,
+  which an export that failed *after* freezing then demonstrated by accident: it refused, and the
+  tenant was writing again a second later.
+- **All of it survives a snapshot and restore.** Slept after going quiet, 1.2-second snapshot,
+  restored in 27 ms, ten concurrent requests served by one restore — and the browse, the write and
+  the freeze all still answered afterwards.
+
+Booting it found four things the port had dropped, all of them in the mounts: `EBUSY` treated as
+fatal where the reference tolerates it for a pseudo-filesystem and refuses it for a drive, a
+missing `noatime` on the data drive, `/dev/shm` never created, and the tmpfs modes left off. The
+first of those is why the first boot rebooted at 0.17 s with nothing on the console.
+
+**What the guest still has not done.** No export has been written, because that needs a checkpoint
+and this host kept its volumes as local files — the refusal is the correct answer and is as far as
+the lane went. Nothing ran for longer than an hour, no second app has ever been on a host, and the
+ZeroFS backend has still never met a real ZeroFS.
 
 **What is otherwise still unknown.** Nothing here ran for longer than an hour, so nothing is known
 about a host that has been up for a week. The vsock log and filesystem paths, the checkpoint and
