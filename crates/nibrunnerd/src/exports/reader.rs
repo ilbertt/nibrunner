@@ -204,8 +204,6 @@ mod tests {
         assert!(servers.socket_path_for(&one).ends_with("export-one/nbd.sock"));
     }
 
-    /// The process execs long before it is answering, so a server whose socket never appears has
-    /// to be an export that reports rather than one that hangs.
     #[tokio::test]
     async fn a_server_whose_socket_never_appears_is_given_up_on() {
         let root = tempfile::tempdir().unwrap();
@@ -216,8 +214,6 @@ mod tests {
         assert!(error.message().contains("did not answer"), "{error}");
     }
 
-    /// A daemon that died mid-export leaves the kernel holding the minor, and an attach over it
-    /// would find it busy — so the reader takes the device down before bringing it up.
     #[tokio::test]
     async fn the_reader_device_is_taken_down_before_it_is_attached() {
         let sysfs = tempfile::tempdir().unwrap();
@@ -250,8 +246,6 @@ mod tests {
         );
     }
 
-    /// Reserved rather than taken from the free ones on the day, because an app's slot persists
-    /// and an export's does not.
     #[test]
     fn the_reader_device_is_not_one_an_app_could_hold() {
         let reserved = nft_render::export_reader_device_path();

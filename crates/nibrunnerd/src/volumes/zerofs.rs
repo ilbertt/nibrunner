@@ -133,9 +133,6 @@ impl ZerofsVolumes {
             .map(|slot| slot.nbd_device_path)
     }
 
-    /// Growing preserves the data and shrinking discards everything past the new size, so a
-    /// smaller desired size is refused: truncating a tenant's filesystem is not a way to discover
-    /// a bug.
     fn ensure_device_file(&self, volume_id: &VolumeId, size_bytes: u64) -> Result<u64, VolumeError> {
         let path = self.filesystem.device_file_for(volume_id);
         let target = align_to_sector(size_bytes);
@@ -162,10 +159,6 @@ impl ZerofsVolumes {
         Ok(target)
     }
 
-    /// Comparing a constant, not parsing a filesystem: the host must never let its kernel
-    /// interpret tenant-controlled metadata, and this is the only thing distinguishing a blank
-    /// device.
-    ///
     /// Raised rather than guessed when the device will not answer. Both guesses are wrong in a way
     /// this is not allowed to be: unformatted destroys a tenant's filesystem, and formatted
     /// reports a volume ready that nothing can read. A failure here is a volume reported failed,
@@ -459,9 +452,6 @@ impl VolumeBackend for ZerofsVolumes {
                 Some(app_id) => self.device_for(app_id).await,
                 None => None,
             };
-            // Whether the device *works*, not whether it has a client: this is what the planner
-            // reads to decide a volume needs nothing done to it, so a backing that lies here is
-            // one nothing ever repairs.
             let attached = match &device_path {
                 Some(path) => self.devices.is_usable(path).await,
                 None => false,
@@ -583,11 +573,6 @@ mod tests {
         assert!(!filesystem(root.path()).device_file_for(&volume_id).exists());
     }
 
-    /// The invariant is about *writers*, not about processes. A checkpoint server is started by
-    /// this daemon and is also a `zerofs run` — but `--checkpoint` opens read-only against a
-    /// pinned manifest, so it takes no writer epoch. What must never happen is a `run` without it:
-    /// a second writer per prefix is fenced only after a window of acknowledging writes that are
-    /// then discarded, so it loses a tenant's data rather than failing to start.
     #[tokio::test]
     async fn nothing_here_ever_runs_zerofs_as_a_second_writer() {
         let root = tempfile::tempdir().unwrap();
@@ -647,8 +632,6 @@ mod tests {
         assert!(volumes.observe(&Default::default()).await.is_empty());
     }
 
-    /// The two callers of this — the memory a guest may be given, and the disk a snapshot may go
-    /// on — have to agree by construction, so both come from here.
     #[tokio::test]
     async fn what_zerofs_was_promised_is_held_back_from_both_memory_and_disk() {
         let root = tempfile::tempdir().unwrap();
@@ -667,9 +650,6 @@ mod tests {
         assert_eq!(reserved.memory_mib(), 2048);
     }
 
-    /// A host that reports memory it does not have kills a tenant, and ZeroFS being the disk every
-    /// app runs through, most likely several — so a reading that could not be taken is the assumed
-    /// number and never none.
     #[tokio::test]
     async fn a_cache_that_cannot_be_read_is_assumed_rather_than_treated_as_nothing() {
         let root = tempfile::tempdir().unwrap();

@@ -90,7 +90,6 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
     let traffic = firewall.traffic().await.expect("the kernel lists its counters");
     assert!(traffic.contains_key(&protocol::AppId::parse("app-1").unwrap()));
 
-    // And a rerun converges rather than accumulating: the table is deleted and rebuilt.
     firewall.apply(&state).await.expect("a rerun is not an error");
 }
 
@@ -161,7 +160,6 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
         subnet_prefix_length: slot.subnet_prefix_length,
     };
     network.ensure_tap(&tap).await.expect("the tap is made");
-    // Idempotent, which is what a converged host re-running a pass depends on.
     network
         .ensure_tap(&tap)
         .await

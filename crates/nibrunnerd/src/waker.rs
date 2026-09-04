@@ -27,8 +27,6 @@ use crate::report::capacity::{committed_resources, memory_shortfall_mib};
 /// to a guest that either has the port open or does not.
 const PROBE_INTERVAL: Duration = Duration::from_millis(5);
 
-/// What a wake ended as, shared with everyone who joined it. `Result<(), String>` rather than the
-/// refusal type, because a broadcast has to carry something clonable and a reason reads the same.
 type Outcome = Result<(), WakeRefusal>;
 
 pub struct AppWaker {
@@ -94,8 +92,6 @@ impl AppWaker {
                 reason: format!("it is {}", wanted.desired_state.as_str()),
             });
         }
-        // The same bar a reconcile start has to clear: a tenant boots onto a host whose isolation
-        // ruleset is in the kernel, and a request is not a reason to make an exception.
         if !self.host.state.snapshot().await.isolated {
             return Err(WakeRefusal::Failed {
                 reason: "the isolation ruleset is not applied".into(),
@@ -168,10 +164,6 @@ impl AppWaker {
             .await
             .get(app_id)
             .map_or(0, |(_, count)| *count);
-        // `waited_ms` is the whole of what the visitor paid, `outcome` is what they paid it for: a
-        // restore and a cold boot are the same line otherwise, and the difference between them is
-        // the feature. `coalesced` is how many more requests waited on this same wake, so a count
-        // of these lines is a count of wakes rather than of requests.
         tracing::info!(
             %app_id,
             outcome = outcome.as_str(),
@@ -226,7 +218,6 @@ mod tests {
     use crate::test_support::*;
     use protocol::InstanceState;
 
-    /// A burst of requests to a sleeping app is one wake and a count of how many waited on it.
     #[tokio::test]
     async fn concurrent_requests_to_one_app_cause_one_wake() {
         let host = test_host().await;
@@ -249,7 +240,6 @@ mod tests {
             .accept(desired_state(|state| state.instances = vec![on_request]));
 
         let waker = AppWaker::new(host.arc().clone());
-        // Every one of these finds no microVM; only one of them may reach the VMM.
         let outcomes = futures::future::join_all((0..10).map(|_| {
             let waker = waker.clone();
             let app_id = app_id();
@@ -257,7 +247,6 @@ mod tests {
         }))
         .await;
 
-        // The guest never answers here, so every request is told so — but by one wake, not ten.
         assert_eq!(outcomes.len(), 10);
         assert_eq!(
             host.vms
@@ -269,9 +258,6 @@ mod tests {
         );
     }
 
-    /// The count on that one wake is the only thing that tells an operator coalescing is working,
-    /// and a burst reaches a sleeping app over the same milliseconds the wake spends: sampled
-    /// before the wake it is always zero, however many requests waited.
     #[tokio::test]
     async fn the_requests_that_waited_on_a_wake_are_counted_on_it() {
         use std::net::SocketAddr;

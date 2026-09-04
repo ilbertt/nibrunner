@@ -16,7 +16,6 @@ use crate::report::instance_record::{InstanceRecord, RecordFields};
 use crate::services::{BootRequest, SuspendRequest, VmError, WakeOutcome};
 use crate::vm::{VmStatus, UNKNOWN_VM};
 
-/// What desired state says about an app, as the record's own fields.
 fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> RecordFields {
     RecordFields {
         app_id: desired.app_id.clone(),
@@ -66,9 +65,6 @@ pub async fn stop_instance(host: &Host, app_id: &AppId, reason: &str) {
         .await;
 }
 
-/// A microVM taken down at a point it can be put back on, so the next request restores the guest
-/// that was serving rather than booting a new one.
-///
 /// `stop_requested` is written after the snapshot and never before it: a sleep refuses a microVM
 /// with a stop in flight, so setting the flag first would refuse every sleep this asked for. It
 /// still has to be written afterwards, because it is what tells the health loop that a microVM
@@ -276,9 +272,6 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     }
 }
 
-/// The microVM an idle app had, back where it was — and a cold boot only where there is nothing
-/// to come back to.
-///
 /// None of the accounting a start does. No attempt is charged to the restart budget and
 /// `restart_count` does not move, because a wake is not a restart: an app woken every morning for
 /// a year would otherwise report three hundred crashes. The budget still bounds the damage,
@@ -550,7 +543,6 @@ mod tests {
         let wanted = artifacts_to_start(&plan);
         assert_eq!(wanted.len(), 1);
         assert_eq!(wanted[0].digest, same.digest);
-        // A sleep needs no image: nothing is being started.
         assert!(artifacts_to_start(&ReconcilePlan {
             instances: vec![InstancePlan::Sleep {
                 desired: desired_instance(|_| {})
@@ -582,7 +574,6 @@ mod tests {
         assert!(!is_startable(Some(&exhausted), 10_000_000, &desired));
     }
 
-    /// A boot that follows a stop somebody asked for is the instance coming back.
     #[test]
     fn only_a_boot_nobody_asked_for_counts_as_a_restart() {
         assert!(!restarted(None));

@@ -98,7 +98,6 @@ fn ready(desired: &DesiredCheckpoint, ready_at: Option<Timestamp>) -> ReportedCh
     }
 }
 
-/// The document's entry for a checkpoint the plan left alone, which is where its volume comes from.
 async fn plan_subject(host: &Host, checkpoint_id: &protocol::CheckpointId) -> Option<DesiredCheckpoint> {
     host.cache
         .lock()
@@ -147,8 +146,6 @@ mod tests {
             .contains("cannot be checkpointed"));
     }
 
-    /// The store knows names and the document knows what they are for, so a name nothing asked for
-    /// is left out rather than reported under a guessed volume.
     #[tokio::test]
     async fn only_the_checkpoints_the_document_names_are_reported() {
         let host = test_host().await;

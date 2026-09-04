@@ -526,8 +526,6 @@ mod tests {
             }),
             InstanceState::Failed
         );
-        // The snapshot is what takes the VMM down, and `stop_requested` is only written once it
-        // has been taken: reading that as a crash fails the deployment.
         assert_eq!(
             evaluate(Evaluate {
                 unit: exited(),
@@ -596,8 +594,6 @@ mod tests {
             ),
             "the microVM stopped without being asked to"
         );
-        // The exit code beside a stopped VM is Firecracker's, and a guest that powered itself off
-        // deliberately leaves it 0 — so an owner reading it is told the failure succeeded.
         assert_eq!(
             failure(
                 &exited(),

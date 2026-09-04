@@ -179,8 +179,6 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
     host.state.signal_report();
 }
 
-/// What the status tick does: probe what is due, put the result in the kernel and in the routes,
-/// and write down what changed.
 pub async fn refresh(host: &Arc<Host>) {
     instances::refresh_states(host).await;
     network::apply_network(host).await;
@@ -216,7 +214,6 @@ mod tests {
         }
     }
 
-    /// One app with somewhere to write, which is the least a host can be asked to run.
     fn running_app() -> protocol::HostDesiredState {
         desired_state(|state| {
             state.volumes = vec![desired_volume(|_| {})];
@@ -226,8 +223,6 @@ mod tests {
         })
     }
 
-    /// A wake is a restore, and a cold boot is only what is left when there is nothing to restore.
-    /// Which one ran is the difference between a visitor waiting thirty milliseconds and a second.
     #[tokio::test]
     async fn an_app_is_woken_by_putting_back_the_microvm_it_had() {
         let host = test_host().await;
@@ -272,7 +267,6 @@ mod tests {
         assert_eq!(host.vms.calls(), vec![VmCall::Wake, VmCall::Boot]);
     }
 
-    /// An app woken every morning for a year is not an app that crashed three hundred times.
     #[tokio::test]
     async fn a_restore_is_not_a_restart_so_it_costs_the_app_nothing() {
         let host = test_host().await;
@@ -293,8 +287,6 @@ mod tests {
         assert_eq!(record.start_attempts.attempts, 0);
     }
 
-    /// Firecracker takes a snapshot load only from a process that has configured nothing, and
-    /// starting one for a microVM already up is what would have hidden that.
     #[tokio::test]
     async fn a_microvm_that_is_already_up_is_left_alone_rather_than_restored_onto() {
         let host = test_host().await;
@@ -322,13 +314,10 @@ mod tests {
         assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Idle);
-        // What tells the health loop a microVM that is gone is asleep rather than crashed.
         assert!(record.stop_requested);
         assert!(!host.state.snapshot().await.snapshotting.contains(&app_id()));
     }
 
-    /// A refusal is an outcome, not a failure: the microVM is left running, so the app goes on
-    /// serving and the next measurement tick asks again.
     #[tokio::test]
     async fn one_that_may_not_be_snapshotted_is_left_up_rather_than_called_broken() {
         let host = test_host().await;
@@ -346,12 +335,9 @@ mod tests {
             host.state.record(&app_id()).await.unwrap().state,
             InstanceState::Running
         );
-        // The mark is cleared however the sleep ended, or the next real crash would read as one.
         assert!(!host.state.snapshot().await.snapshotting.contains(&app_id()));
     }
 
-    /// No slot is no tap, no address and no device for a restore to land on. Stopping still
-    /// reclaims the memory, which is what the sleep was for.
     #[tokio::test]
     async fn one_with_no_slot_to_come_back_to_is_stopped() {
         let host = test_host().await;
@@ -406,8 +392,6 @@ mod tests {
         assert!(record.message.unwrap().as_str().contains("used its 5 restarts"));
     }
 
-    /// Instances are authoritative, so a microVM this host holds and desired state does not
-    /// mention is stopped and forgotten — and a volume is only ever removed by an explicit absent.
     #[tokio::test]
     async fn one_pass_converges_a_host_onto_a_document_it_has_never_seen() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
@@ -415,13 +399,11 @@ mod tests {
 
         reconcile(host.arc(), &running_app()).await;
 
-        // The volume was provisioned, the slot allocated, the record written and the app booted.
         assert!(host.slot_of(&app_id()).await.is_some());
         assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Starting);
         assert_eq!(record.deployment_id, deployment_id());
-        // The ruleset went in before the boot, and the route is rendered for the hostname it holds.
         assert!(host.state.snapshot().await.isolated);
         assert_eq!(
             host.router
@@ -430,13 +412,10 @@ mod tests {
                 .port_for(app_hostname().hostname.as_str()),
             Some(record.host_port)
         );
-        // And it is written down, so a restart adopts rather than re-derives from nothing.
         assert!(host.config.instances_file().exists());
         assert!(host.config.slots_file().exists());
     }
 
-    /// Two passes, and deliberately: the first stops what is running, and only a microVM that is
-    /// down is one there is nothing left to stop before forgetting it.
     /// The port an app is reached on has to answer from the pass that created it. A slot that
     /// exists with nothing listening on it is a request meeting a refused connection, which an
     /// edge in front of this host cannot tell from a host that is not there.
@@ -474,8 +453,6 @@ mod tests {
     async fn an_instance_whose_volume_is_not_here_does_not_boot() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
-        // The instance is named and the volume is not, which is what a host that never provisioned
-        // it looks like.
         reconcile(
             host.arc(),
             &desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
@@ -506,7 +483,6 @@ mod tests {
             host.state.record(&app_id()).await.unwrap().deployment_id.as_str(),
             "dep-2"
         );
-        // The outgoing microVM was stopped and discarded before the new one was booted.
         let calls = host.vms.calls();
         let stopped = calls.iter().position(|call| *call == VmCall::Stop).unwrap();
         let booted = calls.iter().rposition(|call| *call == VmCall::Boot).unwrap();

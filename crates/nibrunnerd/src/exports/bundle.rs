@@ -254,8 +254,6 @@ mod tests {
     use crate::services::{CommandResult, RecordingCommandRunner, StubArtifactStore};
     use crate::test_support::{artifact, tenant_environment, ARTIFACT_BYTES};
 
-    /// The schema constrains this already, so anything that reaches here came from a peer that did
-    /// not honour the contract — and it becomes a path inside an archive somebody extracts.
     #[test]
     fn a_filename_that_is_a_path_never_reaches_an_archive_somebody_extracts() {
         assert_eq!(bundle_binary_name(&artifact(|_| {})).unwrap(), "pocketbase");
@@ -272,8 +270,6 @@ mod tests {
         }
     }
 
-    /// Read by whatever the owner runs the binary under next, so a value nobody could represent is
-    /// an export that fails on something somebody set rather than one that hands it over.
     #[test]
     fn a_value_with_a_newline_in_it_stays_on_one_line() {
         let environment = tenant_environment(&[("PLAIN", "value"), ("AWKWARD", "one\ntwo\"three\\four")]);
@@ -285,8 +281,6 @@ mod tests {
         assert_eq!(rendered.lines().count(), 2);
     }
 
-    /// `debugfs` reports a failed `rdump` on stderr and exits 0, so nothing coming out is the only
-    /// reliable signal that it did not work.
     #[tokio::test]
     async fn a_dump_that_produced_nothing_is_a_failure_however_debugfs_exited() {
         let root = tempfile::tempdir().unwrap();
@@ -297,8 +291,6 @@ mod tests {
         assert!(matches!(error, BundleError::EmptyDump { .. }), "{error}");
     }
 
-    /// A filesystem holding nothing but `lost+found` is a tenant who has written no data, so it is
-    /// dropped after the emptiness check and never before it — otherwise that reads as a failure.
     #[tokio::test]
     async fn a_tenant_who_wrote_nothing_exports_an_empty_data_directory() {
         let root = tempfile::tempdir().unwrap();
@@ -338,8 +330,6 @@ mod tests {
         );
     }
 
-    /// A transfer writes what a transfer writes, and without this the owner has to chmod the copy
-    /// they were handed before it will run.
     #[tokio::test]
     async fn the_binary_in_a_bundle_is_executable() {
         let root = tempfile::tempdir().unwrap();
@@ -361,8 +351,6 @@ mod tests {
         assert_eq!(binary.header().mode().unwrap() & 0o777, BINARY_MODE);
     }
 
-    /// An empty file is an answer; no file at all is the control plane not having said. The two
-    /// must not read the same to whoever opens the bundle.
     #[tokio::test]
     async fn an_app_whose_environment_is_unknown_gets_no_env_file_at_all() {
         let root = tempfile::tempdir().unwrap();

@@ -4,7 +4,6 @@ use crate::slot::{GUEST_NETWORK_CIDR, TAP_NAME_PREFIX};
 
 pub const NFTABLES_TABLE: &str = "nibrun";
 
-/// The families `render_ruleset` writes, and so the ones a kernel still holding it answers with.
 pub const NFTABLES_FAMILIES: [&str; 2] = ["ip", "ip6"];
 
 pub const INSTANCE_METADATA_ADDRESS_V4: &str = "169.254.169.254";
@@ -55,7 +54,6 @@ pub struct ForwardedInstance {
     pub app_id: AppId,
     pub host_port: HostPort,
     pub http_port: HttpPort,
-    /// Absent unless the app asked for one, which is what keeps a port off every app that did not.
     pub extra_public_port: Option<HostPort>,
     pub host_ipv4: Ipv4Address,
     pub guest_ipv4: Ipv4Address,

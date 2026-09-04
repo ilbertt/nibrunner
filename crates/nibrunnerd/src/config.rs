@@ -800,8 +800,6 @@ mod tests {
         assert_eq!(config.tls_material(), None);
     }
 
-    /// Moving the state directory has to move what was derived from it, or a host is configured
-    /// in one place and keeps its notes in another.
     #[test]
     fn what_was_not_named_follows_the_directory_it_belongs_to() {
         let config = parsed("[paths]\nstate_dir = \"/srv/nibrunner\"\nruntime_dir = \"/run/nbr\"\n");
@@ -817,8 +815,6 @@ mod tests {
         assert_eq!(config.firecracker_dir, PathBuf::from("/run/nbr/firecracker"));
     }
 
-    /// The whole reason this is a file: a setting that does not exist can be said so, where an
-    /// environment variable nobody set and one mistyped are the same absence.
     #[test]
     fn a_key_this_daemon_does_not_have_is_refused_by_name() {
         let message = refused("[proxy]\nhttp_prot = 80\n");
@@ -838,8 +834,6 @@ mod tests {
         assert!(message.contains("absolute"), "{message}");
     }
 
-    /// The collision would otherwise surface as a listener that will not bind, on a pass that has
-    /// nothing to do with the proxy.
     #[test]
     fn a_proxy_port_a_slot_would_take_is_refused() {
         let message = refused("[proxy]\nhttp_port = 21000\n");
@@ -914,8 +908,6 @@ mod tests {
         assert!(refused("[volumes]\nbackend = \"nfs\"\n").contains("no nfs"));
     }
 
-    /// Settings nothing would read are the mistake this file exists to catch: a host configured
-    /// for ZeroFS and running on local files is one whose volumes quietly do not survive it.
     #[test]
     fn zerofs_settings_under_a_backend_that_would_not_read_them_are_refused() {
         let message = refused("[volumes.zerofs]\nmount_path = \"/mnt/zerofs\"\n");
@@ -951,8 +943,6 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
         );
     }
 
-    /// The staging tree is removed whole by the reap, so a store nested in it would lose every
-    /// bundle this host had written the first time an export was left behind.
     #[test]
     fn a_finished_bundle_is_never_kept_inside_the_tree_the_reap_removes() {
         for text in [
@@ -997,8 +987,6 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
         assert!(message.contains("config.toml"), "{message}");
     }
 
-    /// Naming a file is saying it matters, so reading past a missing one would leave a host on
-    /// defaults its operator believes it is not on.
     #[test]
     fn a_file_that_was_named_and_is_not_there_is_an_error() {
         let error = HostConfig::from_file(Path::new("/nonexistent/nibrunner/config.toml")).unwrap_err();

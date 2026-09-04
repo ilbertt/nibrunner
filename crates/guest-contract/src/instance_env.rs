@@ -20,9 +20,6 @@ const TENANT_PREFIX: &str = "ENV_";
 /// a resolver inside one would mean opening that back up for whatever else answers on the address.
 const DNS_SERVERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
 
-/// Where a tenant's own port is reached, for an app that asked for one. The two together, because
-/// half of what a binary has to announce is not an announcement, and neither half is something a
-/// guest can find out for itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicAddress {
     pub ipv4: Ipv4Address,
@@ -595,9 +592,6 @@ mod both_ends {
         assert_eq!(config.nameservers, vec!["1.1.1.1", "1.0.0.1"]);
     }
 
-    /// The prefixes exist so the two namespaces can never collide: a tenant variable actually
-    /// called `NIBRUN_HTTP_PORT` arrives as `ENV_NIBRUN_HTTP_PORT` and stays the tenant's — right
-    /// up to the point where exporting it would describe an instance that does not exist.
     #[test]
     fn a_tenant_variable_named_like_a_runtime_one_stays_the_tenants_and_is_then_dropped() {
         let config = parse_instance_env(&written(&[("NIBRUN_HTTP_PORT", "9999")], &[])).unwrap();

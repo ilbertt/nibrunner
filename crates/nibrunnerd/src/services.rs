@@ -12,9 +12,6 @@ use protocol::{AppId, DeploymentId, DesiredInstance, ObjectKey, Sha256Digest};
 
 use crate::vm::VmStatus;
 
-// ---------------------------------------------------------------------------------------------
-// Running a host tool
-
 /// `nft` and `mke2fs` are the only two host tools this daemon spawns besides the Firecracker it
 /// carries. Anything else it needs, it does itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,9 +113,6 @@ pub trait CommandRunner: Send + Sync {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// The VMM
-
 #[derive(Debug, Clone)]
 pub struct BootRequest {
     pub desired: DesiredInstance,
@@ -199,9 +193,6 @@ pub trait Vmm: Send + Sync {
     fn working_dir(&self, app_id: &AppId) -> PathBuf;
 }
 
-// ---------------------------------------------------------------------------------------------
-// The artifact bucket
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArtifactError {
     #[error("the artifact could not be fetched: {0}")]
@@ -226,9 +217,6 @@ pub trait ArtifactStore: Send + Sync {
     /// bytes are hashed and packed into an image before anything runs them.
     async fn read(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ArtifactError>;
 }
-
-// ---------------------------------------------------------------------------------------------
-// Tenant output
 
 /// What the receiver hands the sink, before a host id exists to stamp it with. The daemon learns
 /// its host id from a session it may not hold yet when a guest starts writing, and keeping that
@@ -259,9 +247,6 @@ pub trait LogSink: Send + Sync {
     async fn publish(&self, events: Vec<TenantLogEvent>);
 }
 
-// ---------------------------------------------------------------------------------------------
-// Where desired state comes from
-
 /// The three sources produce the same document and the reconciler never learns which one did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesiredStateOrigin {
@@ -282,10 +267,6 @@ impl DesiredStateOrigin {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Recording implementations
-
-/// Records every command and answers each one, so a call shape can be asserted without a host.
 /// What a recorded runner answers one request with.
 type CommandAnswer = dyn Fn(&CommandRequest) -> Result<CommandResult, CommandError> + Send + Sync;
 

@@ -203,8 +203,6 @@ mod tests {
         panic!("a guest that hung up was still reported as holding the freeze");
     }
 
-    /// A VMM that is running and will not freeze is the case that must never be waved through:
-    /// its journal still holds writes the bundle would otherwise miss without saying so.
     #[tokio::test]
     async fn a_guest_that_refuses_is_not_read_from() {
         let (_directory, path) = guest_that(&["OK 1234", "BUSY"], false).await;

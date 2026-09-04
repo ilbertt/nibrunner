@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::domain::*;
 use crate::wire::*;
 
-// ---------------------------------------------------------------------------------------------
 // desired-state.ts
 
 /// `on-request` is `running` with the microVM left out until something asks for it. A third
@@ -116,7 +115,6 @@ pub struct HostDesiredState {
     pub exports: Vec<DesiredExport>,
 }
 
-// ---------------------------------------------------------------------------------------------
 // reported-state.ts
 
 pub const MAX_DEVICE_PATH_LENGTH: usize = 256;
@@ -160,7 +158,6 @@ pub struct ReportedVolume {
     pub app_id: AppId,
     pub state: VolumeState,
     pub size_bytes: u64,
-    /// Which storage prefix the host put it in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_prefix: Option<ObjectKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,7 +214,6 @@ pub struct HostReportedState {
     pub exports: Vec<ReportedExport>,
 }
 
-// ---------------------------------------------------------------------------------------------
 // session.ts
 
 pub const MIN_POLL_INTERVAL_MS: u64 = 100;
@@ -260,7 +256,6 @@ pub struct AgentSession {
     pub poll: AgentPollSettings,
 }
 
-// ---------------------------------------------------------------------------------------------
 // transport.ts
 
 /// The protocol's own version, sent on every request. Still 1 while the first version is being
@@ -288,7 +283,6 @@ pub struct DesiredStateRequest {}
 
 pub type DesiredStateResponse = HostDesiredState;
 
-// ---------------------------------------------------------------------------------------------
 // filesystem-query.ts
 
 pub const MAX_QUERY_MESSAGE_LENGTH: usize = 512;

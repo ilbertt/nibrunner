@@ -189,8 +189,6 @@ mod tests {
     use super::*;
     use crate::test_support::*;
 
-    /// The control plane naming a volume is what makes it this app's, so desired state wins over
-    /// a record that says otherwise.
     #[test]
     fn a_volume_being_deleted_is_still_owned_once_its_record_is_gone() {
         let desired = desired_state(|state| state.volumes = vec![desired_volume(|_| {})]);
@@ -228,7 +226,6 @@ mod tests {
         assert!(host.slot_of(&app_id()).await.is_none());
         let snapshot = host.state.snapshot().await;
         assert_eq!(snapshot.volume_reports[0].state, VolumeState::Deleted);
-        // Remembered too, so a restart before anybody read the report can still say it happened.
         assert!(snapshot.deleted_volumes.contains_key(&volume_id()));
         assert!(host.volumes.observe(&Default::default()).await.is_empty());
     }

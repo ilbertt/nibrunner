@@ -78,8 +78,6 @@ impl GuestFilesystemRequest {
     }
 }
 
-/// Read as a sentence rather than as a code, because this is the half of a failure that reaches
-/// whoever asked. None of them names the path.
 pub fn refusal_for(status: u8) -> &'static str {
     match status {
         1 => "there is nothing at that path",
@@ -106,8 +104,6 @@ fn field(value: &[u8]) -> Vec<u8> {
 }
 
 fn body_of(request: &GuestFilesystemRequest) -> Vec<u8> {
-    // The verbs that name no path, because what they answer about is the guest rather than a
-    // place in the tenant's filesystem.
     match request {
         GuestFilesystemRequest::Usage | GuestFilesystemRequest::Compute => Vec::new(),
         GuestFilesystemRequest::Read { path, offset, length } => {
@@ -194,7 +190,6 @@ const DETAILS_BYTES: usize = 17;
 const UINT32_BYTES: usize = 4;
 const UINT64_BYTES: usize = 8;
 
-/// Everything a listing says about one entry except its name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemDetails {
     pub kind: FilesystemEntryKind,
@@ -258,7 +253,6 @@ pub fn decode_written(body: &[u8]) -> Result<u32, MalformedGuestReply> {
     Ok(u32::from_be_bytes([body[0], body[1], body[2], body[3]]))
 }
 
-/// What the guest measured, without the moment it was measured, which is this end's to stamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeasuredBytes {
     pub total_bytes: u64,
@@ -476,7 +470,6 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // The guest's half
 //
 // The same frame, read the other way round. Kept here rather than in the guest so that there is
@@ -749,10 +742,6 @@ pub fn encode_listing(entries: &[(String, EntryDetails)]) -> Vec<u8> {
 
 #[cfg(test)]
 mod both_ends {
-    //! What having both halves here is for: a change to the wire that breaks one end fails
-    //! against the other, rather than being discovered by a guest and a host disagreeing on a
-    //! machine somewhere.
-
     use super::*;
 
     fn path(text: &str) -> GuestPath {
@@ -836,8 +825,6 @@ mod both_ends {
         assert_eq!(listing.entries[0].name, "it's a \"file\"");
     }
 
-    /// A guest reads into a buffer it sized once at startup, so a header claiming more than the
-    /// ceiling is refused before anything is allocated for it.
     #[test]
     fn a_header_claiming_more_than_one_frame_holds_is_refused_before_any_body_is_read() {
         let mut frame = encode_request(&GuestFilesystemRequest::Usage);
@@ -846,7 +833,6 @@ mod both_ends {
         assert_eq!(error.reason, "the body exceeds the limit");
     }
 
-    /// A truncated or lying frame is a refusal, never a read past the end of the buffer.
     #[test]
     fn a_body_cut_short_is_refused_rather_than_read_past() {
         let frame = encode_request(&GuestFilesystemRequest::Read {
@@ -864,8 +850,6 @@ mod both_ends {
         }
     }
 
-    /// The one thing a guest must never do is walk out of the volume because something asked it
-    /// to, so a path is parsed on the way in and the rest of the server can treat it as checked.
     #[test]
     fn a_path_that_leads_out_of_the_volume_never_becomes_a_request() {
         for escape in ["../etc/shadow", "/../etc/shadow", "relative", ""] {
@@ -925,8 +909,6 @@ mod both_ends {
         assert_eq!(listing.entries[2].name, "it's a \"file\"\nreally");
     }
 
-    /// The guest sets `truncated` when the body would not hold another entry; the host sets the
-    /// same flag when its own limit is reached first. Either way the reader is told.
     #[test]
     fn a_directory_that_outgrew_one_frame_says_so() {
         let many: Vec<(String, EntryDetails)> = (0..4000)
@@ -939,8 +921,6 @@ mod both_ends {
         assert!(listing.entries.len() < many.len());
     }
 
-    /// Half a filename is a name that points at nothing, so one too long for the wire is left out
-    /// rather than cut down to fit.
     #[test]
     fn a_name_too_long_for_the_wire_is_left_out_rather_than_shown_wrong() {
         let long = "n".repeat(MAX_ENTRY_NAME_BYTES + 1);
@@ -992,8 +972,6 @@ mod both_ends {
         assert_eq!(decode_compute(&frame[FRAME_HEADER_BYTES..]).unwrap(), compute);
     }
 
-    /// A refusal carries no body: the status is the whole of what travels, because the sentence it
-    /// becomes is the host's to render and a tenant's path is not an operator's to read.
     #[test]
     fn a_refusal_carries_a_status_and_nothing_else() {
         let frame = encode_refusal(STATUS_MALFORMED_REQUEST);

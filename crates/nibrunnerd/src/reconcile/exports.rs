@@ -1,16 +1,6 @@
 //! Writing an export, and clearing up after one that did not finish.
 //!
 //! Ported from `apps/agent/src/services/export-manager.service.ts`.
-//!
-//! The freeze is over before the read begins. The tenant is held still only long enough to cut a
-//! checkpoint; the dump, the archive and the upload — everything whose cost scales with their data
-//! — run against that pinned view while they are writing again. The bundle is still of the moment
-//! it always was, because the checkpoint was cut inside the freeze.
-//!
-//! The checkpoint is released as soon as the bytes are in the staging tree rather than held to the
-//! end: nothing after the dump reads it, and holding one costs the *whole host* its storage
-//! reclamation. The staging tree goes whether or not the upload worked, because it is a second
-//! copy of a tenant's dataset in the clear on a shared host.
 
 use protocol::{
     CheckpointId, DesiredExport, ExportId, ExportState, HostDesiredState, ReportedExport, StateMessage,
@@ -321,12 +311,9 @@ mod tests {
         let reports = host.state.snapshot().await.export_reports;
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].state, ExportState::Failed);
-        // Nothing left the box, and nothing was read.
         assert!(host.exports_written().is_empty());
     }
 
-    /// Expiry is the bucket's lifecycle rule, which is what makes it unforgettable. All this host
-    /// drops is its own note.
     #[tokio::test]
     async fn forgetting_an_export_drops_the_note_and_nothing_else() {
         let host = test_host().await;

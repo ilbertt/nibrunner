@@ -258,8 +258,6 @@ mod tests {
         assert_eq!((events[0].sequence, events[1].sequence), (0, 1));
     }
 
-    /// A character split across two frames is held until the rest of it arrives: an event
-    /// carrying half a glyph is one nobody can read.
     #[tokio::test]
     async fn a_character_split_across_frames_is_not_emitted_in_halves() {
         let directory = tempfile::tempdir().unwrap();

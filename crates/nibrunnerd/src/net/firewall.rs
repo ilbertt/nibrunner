@@ -196,8 +196,6 @@ mod tests {
         assert_eq!(writes(&commands), 2);
     }
 
-    /// Rebuilt by something else carries new handles, which reads as a table that is no longer
-    /// the one this daemon wrote.
     #[tokio::test]
     async fn a_table_rebuilt_under_this_daemon_is_written_again() {
         let handles = Arc::new(std::sync::atomic::AtomicU64::new(2));
@@ -218,7 +216,6 @@ mod tests {
         assert_eq!(writes(&commands), 2);
     }
 
-    /// A kernel that cannot be asked leaves the next pass nothing to compare against.
     #[tokio::test]
     async fn a_kernel_that_would_not_answer_is_not_taken_as_proof_the_rules_are_in_place() {
         let commands = RecordingCommandRunner::answering(|request| {

@@ -533,14 +533,11 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("clocksource=kvm-clock"));
-        // Relative, so Firecracker resolves it inside this app's own directory.
         assert_eq!(config["vsock"]["uds_path"], "logs.vsock");
         assert_eq!(config["vsock"]["guest_cid"], 3);
 
-        // The tap and the neighbour are both written before the guest exists.
         assert_eq!(fixture.network.taps()[0].tap_name, "nbr0");
         assert_eq!(fixture.network.neighbours()[0].guest_mac, "02:00:0a:c9:00:02");
-        // And the host is listening for the guest's own output before it can write any.
         assert_eq!(fixture.manager.logs.attached().await, vec![app_id()]);
     }
 
@@ -583,7 +580,6 @@ mod tests {
             deployment_id: deployment_id(),
             slot: nft_render::describe_slot(0, app_id()),
         };
-        // A host that holds no record of it.
         let refused = fixture.manager.sleep(request.clone()).await.unwrap_err();
         assert!(refused.message().contains("holds no record"));
 

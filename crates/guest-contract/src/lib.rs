@@ -3,8 +3,6 @@
 //! and the byte formats spoken over the vsock. None of this is the host's to change; the C runtime
 //! and the guest image are consumed as they are.
 
-// A test that unwraps and panics *is* its own failure report, and one written to avoid saying
-// so reads worse than the assertion it replaced. The lint stays on for everything else.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
 
 pub mod control;

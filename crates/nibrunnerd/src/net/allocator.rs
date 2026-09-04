@@ -174,8 +174,6 @@ mod tests {
         assert_eq!(allocator.allocate(&app(1000)).unwrap().slot, freed.slot);
     }
 
-    /// The address a tenant hands its own users is this slot's, and a slot handed straight back
-    /// out is that address pointing at somebody else.
     #[test]
     fn a_released_slot_is_not_the_next_one_handed_out() {
         let mut allocator = SlotAllocator::empty();
@@ -184,8 +182,6 @@ mod tests {
         assert_ne!(allocator.allocate(&app(2)).unwrap().slot, first.slot);
     }
 
-    /// A redeploy asks for a slot the app already holds. Moving the cursor there would park it
-    /// wherever the busiest app sits, and a slot freed beside it would go straight back out.
     #[test]
     fn being_handed_the_slot_an_app_already_holds_does_not_move_the_cursor() {
         let mut allocator = SlotAllocator::empty();
@@ -211,8 +207,6 @@ mod tests {
         );
     }
 
-    /// The cursor is a hint and the scan is the authority: nothing a file holds can make this
-    /// give away a slot another app has.
     #[test]
     fn a_cursor_read_off_disk_cannot_hand_out_a_slot_somebody_holds() {
         assert_eq!(read_slot_cursor(None), i64::from(FIRST_SLOT));

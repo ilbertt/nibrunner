@@ -44,8 +44,6 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
         "nibrunnerd starting"
     );
 
-    // Before the first document is read: the microVMs this host is already running are adopted
-    // from what an earlier daemon wrote down, so a restart is a non-event for a tenant.
     host.load().await;
     let adopted = host.vms.adopted_app_ids().await;
     if !adopted.is_empty() {
@@ -63,8 +61,6 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
     ];
 
     shutdown().await;
-    // Nothing stops a tenant: the microVMs are in sessions of their own, so what this cancels is
-    // only the daemon's own work. That is what makes redeploying this component a non-event.
     tracing::info!("nibrunnerd stopping; every microVM on this host keeps running");
     for task in loops {
         task.abort();
@@ -97,9 +93,6 @@ async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-/// JSON on stderr, one line per event. The `<n>` prefix is the only thing a journal reads a
-/// severity from: without it every line a service writes is recorded at `info`, including a stack
-/// trace, because the priority is a property of the stream rather than of what travels down it.
 fn install_logger() {
     use tracing_subscriber::prelude::*;
     let filter = tracing_subscriber::EnvFilter::try_from_env("NIBRUNNER_LOG")

@@ -22,7 +22,6 @@ pub enum StoreError {
 }
 
 impl StoreError {
-    /// What a report carries to the control plane, and from there to whoever is looking.
     pub fn message(&self) -> String {
         self.to_string()
     }

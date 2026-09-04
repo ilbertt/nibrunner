@@ -298,9 +298,6 @@ mod tests {
         assert_eq!(devices.attached_size_bytes("/dev/nbd1"), 0);
     }
 
-    /// Reading one block of a zero-length device succeeds and returns nothing, so a probe that
-    /// asked only whether the read worked would call every device on a freshly rebooted host
-    /// healthy — and nothing would ever attach them.
     #[tokio::test]
     async fn a_device_of_no_size_is_unusable_without_the_device_being_opened() {
         let sysfs = tempfile::tempdir().unwrap();
@@ -345,8 +342,6 @@ mod tests {
         );
     }
 
-    /// A checkpoint server is started for one export and stopped after it, so reconnecting for
-    /// ever would turn a server that died into an export that hangs.
     #[tokio::test]
     async fn a_checkpoint_is_attached_without_persist() {
         let sysfs = tempfile::tempdir().unwrap();
@@ -363,8 +358,6 @@ mod tests {
         assert!(!asked(&commands)[0].contains(&"-persist".to_string()));
     }
 
-    /// The minor would be busy otherwise: the failure this repairs is a device the kernel still
-    /// holds, and only a detach frees one.
     #[tokio::test]
     async fn a_reattach_takes_a_held_device_down_first_and_leaves_an_unheld_one_alone() {
         let sysfs = tempfile::tempdir().unwrap();

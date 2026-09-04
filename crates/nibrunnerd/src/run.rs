@@ -126,7 +126,6 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         }),
     );
 
-    // Where a finished export goes.
     let exports: Arc<dyn crate::exports::store::ExportStore> = Arc::new(
         crate::exports::store::ObjectExportStore::open(&config.export_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
@@ -341,8 +340,6 @@ mod tests {
 
         assert!(host.state.record(&app_id()).await.is_some());
         assert_eq!(host.vms.calls(), vec![crate::services::VmCall::Boot]);
-        // And it is cached, so a restart during an outage of whatever writes the file converges
-        // on the last thing it was given rather than on nothing.
         assert_eq!(host.cached_desired_state().await.as_ref(), Some(&desired));
     }
 

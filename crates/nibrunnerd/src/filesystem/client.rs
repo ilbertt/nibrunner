@@ -162,8 +162,6 @@ impl GuestFilesystem {
     }
 
     async fn exchange(&mut self, request: &GuestFilesystemRequest) -> Result<Vec<u8>, GuestFilesystemError> {
-        // Asked before sending rather than discovered afterwards: the guest answers an oversized
-        // frame by hanging up, which would cost the connection as well as the request.
         if !fits_one_request(request) {
             return Err(GuestFilesystemError::TooLarge {
                 app_id: self.app_id.clone(),
@@ -281,8 +279,6 @@ mod tests {
         body
     }
 
-    /// A guest that is not running has no socket to dial, which is the ordinary answer for an app
-    /// that is asleep or stopped rather than a failure worth a stack trace.
     #[tokio::test]
     async fn a_guest_that_is_not_running_cannot_be_browsed() {
         let directory = tempfile::tempdir().unwrap();
@@ -296,8 +292,6 @@ mod tests {
         );
     }
 
-    /// A tenant's binary created these names and ext4 allows anything in them but `/` and NUL, so
-    /// a name with a quote or a newline in it has to survive the round trip.
     #[tokio::test]
     async fn a_name_a_tokeniser_would_have_choked_on_comes_back_whole() {
         let awkward = "it's a \"file\"\nreally";
@@ -313,9 +307,6 @@ mod tests {
         assert!(!listing.truncated);
     }
 
-    /// `lost+found` is what `mke2fs` put at the root, which is the host's knowledge and not the
-    /// guest's — and only at the root, because the same name one directory down is a directory a
-    /// tenant made.
     #[tokio::test]
     async fn what_mke2fs_left_at_the_root_is_not_a_tenants_to_see() {
         let entries = [("lost+found", 2u8, 0u64, 0i64), ("notes.txt", 1, 10, 0)];
@@ -342,7 +333,6 @@ mod tests {
         );
     }
 
-    /// The half of a failure that reaches whoever asked, and none of them names the path.
     #[tokio::test]
     async fn a_refusal_reads_as_a_sentence_and_never_names_the_path() {
         let (_directory, path) = guest_answering(vec![(1, Vec::new())]).await;
@@ -357,8 +347,6 @@ mod tests {
         assert!(!error.message().contains("/secrets"), "{error}");
     }
 
-    /// The guest answers an oversized frame by hanging up, which would cost the connection as well
-    /// as the request — so it is asked before sending rather than discovered afterwards.
     #[tokio::test]
     async fn more_than_one_frame_carries_is_refused_before_the_connection_pays_for_it() {
         let (_directory, path) = guest_answering(vec![(0, usage_body(1_000, 400))]).await;
@@ -380,7 +368,6 @@ mod tests {
         assert!(client.usage().await.is_ok());
     }
 
-    /// Browsing is many small reads on one connection, and the guest holds nothing between them.
     #[tokio::test]
     async fn one_connection_serves_as_many_requests_as_the_caller_makes() {
         let (_directory, path) = guest_answering(vec![

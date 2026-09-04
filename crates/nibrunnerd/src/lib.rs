@@ -9,8 +9,6 @@
 //! writes the same file, so the reconciler still has exactly one source and cannot learn which
 //! of them produced the document it converged on.
 
-// A test that unwraps and panics *is* its own failure report, and one written to avoid saying
-// so reads worse than the assertion it replaced. The lint stays on for everything else.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
 
 pub mod artifact_store;

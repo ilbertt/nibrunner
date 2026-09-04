@@ -37,7 +37,6 @@ pub async fn list(
     guest.list(path).await
 }
 
-/// The answer, whichever way it went.
 pub async fn answer(host: &Host, query: &FilesystemQuery) -> FilesystemQueryResult {
     let outcome = match list(host, &query.app_id, &query.path).await {
         Ok(listing) => FilesystemQueryOutcome::Listed { listing },
@@ -64,8 +63,6 @@ mod tests {
     use super::*;
     use crate::test_support::*;
 
-    /// The failure is the answer: a host that stayed quiet about a guest it could not reach would
-    /// turn a refusal somebody could act on into a timeout they cannot.
     #[tokio::test]
     async fn a_guest_this_host_cannot_reach_is_answered_rather_than_left_waiting() {
         let host = test_host().await;
@@ -82,8 +79,6 @@ mod tests {
         assert!(message.contains("no microVM is running"), "{message}");
     }
 
-    /// A read this host can serve is one it holds a slot for, and a slot released between two
-    /// polls stops being offered with nothing to invalidate.
     #[tokio::test]
     async fn only_the_apps_this_host_holds_a_slot_for_are_offered() {
         let host = test_host().await;

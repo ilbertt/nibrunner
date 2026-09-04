@@ -95,7 +95,6 @@ mod tests {
         assert_eq!(result.stderr.trim(), "err");
     }
 
-    /// A ruleset is handed to `nft` on stdin, so the pipe closing is what makes the tool answer.
     #[tokio::test]
     async fn what_is_fed_on_stdin_reaches_the_tool_and_the_pipe_is_closed_behind_it() {
         let result = HostCommands

@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::wire::*;
 
-// ---------------------------------------------------------------------------------------------
 // app.ts
 
 const ENVIRONMENT_RESERVED_NAME: &str = "__proto__";
@@ -82,20 +81,16 @@ fn runtime_references(value: &str) -> Vec<(String, bool)> {
     found
 }
 
-/// Whether every runtime value `value` names is one the guest offers, which most values name
-/// none of.
 pub fn names_offered_runtime_values(value: &str) -> bool {
     runtime_references(value).iter().all(|(_, allowed)| *allowed)
 }
 
-/// Whether `value` names a runtime value only an app with an extra public port is given.
 pub fn names_extra_public_port_values(value: &str) -> bool {
     runtime_references(value)
         .iter()
         .any(|(name, allowed)| *allowed && EXTRA_PUBLIC_PORT_VALUES.contains(&name.as_str()))
 }
 
-/// A runtime value as it is named in a tenant value, which is the form worth showing back.
 pub fn interpolable_runtime_value(name: &str) -> String {
     format!("${{{name}}}")
 }
@@ -319,7 +314,6 @@ pub enum AppState {
     Deleted,
 }
 
-// ---------------------------------------------------------------------------------------------
 // instance.ts
 
 pub const MIN_VCPU_COUNT: u32 = 1;
@@ -430,7 +424,6 @@ impl InstanceState {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // volume.ts, checkpoint.ts, export.ts, host.ts
 
 pub const DEFAULT_VOLUME_SIZE_BYTES: u64 = 8_589_934_592;
@@ -493,7 +486,6 @@ pub enum HostState {
     Unreachable,
 }
 
-// ---------------------------------------------------------------------------------------------
 // compute.ts, filesystem.ts
 
 /// What a running app is spending on the machine it was given, as the guest kernel accounts for
@@ -587,7 +579,6 @@ pub struct FilesystemUsage {
     pub measured_at: Timestamp,
 }
 
-// ---------------------------------------------------------------------------------------------
 // log.ts
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

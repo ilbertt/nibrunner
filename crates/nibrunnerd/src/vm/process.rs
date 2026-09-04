@@ -457,7 +457,6 @@ mod embedding {
         assert!(binary.starts_with(directory.path().join(FIRECRACKER_VERSION)));
         let size = std::fs::metadata(&binary).unwrap().len();
         assert!(size > 1_000_000, "a hypervisor is more than a megabyte");
-        // A second extraction finds what the first left and does not write again.
         let before = std::fs::metadata(&binary).unwrap().modified().unwrap();
         assert_eq!(extract_firecracker(directory.path()).unwrap(), binary);
         assert_eq!(std::fs::metadata(&binary).unwrap().modified().unwrap(), before);

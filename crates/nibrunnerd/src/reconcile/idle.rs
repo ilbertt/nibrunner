@@ -72,8 +72,6 @@ mod tests {
         ));
     }
 
-    /// An app failing its probes has gone quiet because it is broken, so the silence is a symptom
-    /// of the fault rather than evidence nobody wants it.
     #[test]
     fn an_unhealthy_app_is_not_a_quiet_one_however_long_nobody_has_asked_for_it() {
         assert!(!quiet(
@@ -127,9 +125,6 @@ mod tests {
         ));
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// The measurement tick
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -193,7 +188,6 @@ pub fn activity_after(
     }
 }
 
-/// One reading of what the kernel has counted, folded into what this host already knew.
 pub async fn record_activity(host: &Host) {
     let now = crate::clock::now_ms();
     let snapshot = host.state.snapshot().await;
@@ -237,8 +231,6 @@ pub async fn record_activity(host: &Host) {
         .await;
 }
 
-/// Puts the `on-request` apps nobody has asked for in a while to sleep.
-///
 /// Runs on the measurement tick rather than the status one: the moment it reads is only written
 /// there, so asking sixty times more often would be sixty readings of the same answer — and a
 /// sleep flushes a filesystem and snapshots a microVM, which is not work to put in front of the
@@ -337,7 +329,6 @@ mod activity_tests {
         assert!(!same.moved.contains(&app_id()));
     }
 
-    /// The first reading starts the clock rather than answering it.
     #[test]
     fn a_first_reading_is_not_an_app_that_was_just_used() {
         let after = activity_after(reading(4096), &BTreeMap::new(), &BTreeMap::new(), NOW);
@@ -346,15 +337,12 @@ mod activity_tests {
         assert!(!after.moved.contains(&app_id()));
     }
 
-    /// A count below the one before it is the table having been rewritten, which every health
-    /// flip on every app does — and not an app that has gone quiet.
     #[test]
     fn a_rewritten_ruleset_is_not_an_app_going_quiet() {
         let (traffic, moments) = previously(9_000_000, EARLIER);
         let after = activity_after(reading(16), &traffic, &moments, NOW);
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
         assert!(!after.moved.contains(&app_id()));
-        // And the reset reading becomes what the next one is measured against.
         assert_eq!(after.traffic.get(&app_id()).map(|t| t.bytes), Some(16));
     }
 
@@ -363,7 +351,6 @@ mod activity_tests {
         let (traffic, moments) = previously(1024, EARLIER);
         let after = activity_after(BTreeMap::new(), &traffic, &moments, NOW);
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
-        // And stops being measured against a baseline it no longer has.
         assert!(!after.traffic.contains_key(&app_id()));
     }
 
@@ -389,7 +376,6 @@ mod activity_tests {
         assert_eq!(after.traffic.len(), 2);
     }
 
-    /// A slot this host no longer holds takes its history with it.
     #[tokio::test]
     async fn what_the_host_stops_holding_it_stops_answering_about() {
         let host = test_host().await;

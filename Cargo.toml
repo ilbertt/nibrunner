@@ -17,7 +17,6 @@ rust-version = "1.90"
 # to change them, and a crate that opts in with `[lints] workspace = true` cannot drift from the
 # rest by forgetting an attribute.
 [workspace.lints.rust]
-# A public item with no `///` is one a reader has to infer the purpose of from its name.
 missing_docs = "allow"
 unsafe_code = "warn"
 unreachable_pub = "warn"

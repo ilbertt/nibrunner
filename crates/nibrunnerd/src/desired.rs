@@ -274,9 +274,6 @@ mod tests {
         }
     }
 
-    /// The daemon writes its own state — the report, the records, the slots — into whatever
-    /// directory it was pointed at. A watch that settled on those would have this host re-reading
-    /// a document nothing touched several times a second.
     #[tokio::test]
     async fn a_write_to_something_else_in_the_directory_does_not_settle_the_watch() {
         if !cfg!(target_os = "linux") {

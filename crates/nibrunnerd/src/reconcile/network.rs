@@ -51,7 +51,6 @@ pub async fn apply_network(host: &Host) {
     }
 }
 
-/// A listener on every port this host holds a slot for, so one with no forward still answers.
 pub async fn apply_activators(host: &Arc<Host>) {
     let slots: Vec<_> = host
         .slots()

@@ -191,8 +191,6 @@ impl VolumeBackend for LocalFileVolumes {
         Ok(())
     }
 
-    /// A sparse file has no pinned view to hand out. Said rather than faked, because a checkpoint
-    /// reported ready that nothing pinned is a reader watching the tenant write underneath it.
     async fn create_checkpoint(&self, _checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
         Err(VolumeError::NoCheckpoints {
             what: "a volume kept as a file on this host's own disk",

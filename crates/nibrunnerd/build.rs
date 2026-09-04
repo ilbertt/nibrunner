@@ -29,9 +29,6 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     let embedded = out_dir.join("firecracker");
 
-    // The release upstream publishes is x86_64, and so is the guest image built against it. A
-    // build for any other architecture carries no hypervisor rather than one that cannot exec:
-    // the daemon then says so at startup instead of at the first deploy.
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let resolved = if target_arch == "x86_64" {
         resolve(&out_dir)
