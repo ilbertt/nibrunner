@@ -162,6 +162,12 @@ filesystems, forks, execs, drops privileges, freezes a filesystem and reboots a 
 is a syscall with no safe wrapper, and twenty individual allows would say the same thing less
 clearly. Each block still carries its own safety note.
 
+**The tenant's data drive is not `noexec`.** I mounted it that way and took it back out: a tenant
+running a binary it wrote to its own disk is a deploy nothing on the host has a digest for, which
+is a real objection but not this port's to make. nibrun allows it, an app that works there has to
+work here, and adding the flag would break one silently. What I would change is the contract, not
+one end of it.
+
 ## Not done, and named as such
 
 - **Exports and the vsock filesystem browse.** The codecs for the filesystem channel are written
