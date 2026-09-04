@@ -1,0 +1,21 @@
+{
+  "version": "6.1.180-98db6df338f0",
+  "artifacts": [
+    {"name":"vmlinux","bytes":44490520,"sha256":"b6ada6ce51628084d1ba1d8b0b9b7a9785d183ab34e3824cf408b274a86ef221"},
+    {"name":"rootfs.ext4","bytes":25907200,"sha256":"77f6a3b644dac5020723c258c7c2d551548baf60790f24ef7759efe0539c8d2b"},
+    {"name":"kernel.config","bytes":92056,"sha256":"f86ae4bc9a348efee41dcb402d1b96eeda8ebe13d292a2ff79b31a256ce0ddac"}
+  ],
+  "inputs": {
+    "kernel_version": "6.1.180",
+    "kernel_sha256": "4f0e601759b55cfc4d0bf4990859b93bc74fb915cde532284f0765b77ca0f86a",
+    "firecracker_ref": "v1.16.1",
+    "firecracker_commit": "2038188f145fb81b8d098147a10e9d9f392fd22f",
+    "firecracker_config_sha256": "adbc70ab5e89213ba00594b12d25e09bdf8bb1ed3c252d7449326bb14c22963b",
+    "debian_image": "debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd",
+    "debian_snapshot": "20260714T000000Z",
+    "source_date_epoch": 1783987200,
+    "rootfs_packages": {"ca-certificates":"20250419","libc6":"2.41-12+deb13u3","libgcc-s1":"14.2.0-19","libstdc++6":"14.2.0-19"},
+    "init_sha256": "33fac388c3472fd119620b25abac425efb0188e5a7bffb81e31101abc0ec5ec8",
+    "init_is_stub": true
+  }
+}

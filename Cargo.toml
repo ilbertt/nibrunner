@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/protocol",
+  "crates/guest-contract",
+  "crates/nft-render",
+  "crates/hostd",
+  "crates/hostctl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.90"
+
+[workspace.dependencies]
+protocol = { path = "crates/protocol", package = "hostd-protocol" }
+guest-contract = { path = "crates/guest-contract", package = "hostd-guest-contract" }
+nft-render = { path = "crates/nft-render", package = "hostd-nft-render" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "process", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt"] }
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1", "server", "server-auto"] }
+http-body-util = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+object_store = { version = "0.14", default-features = false, features = ["fs", "aws-base", "reqwest", "ring"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+slatedb = { version = "0.16", default-features = false, features = ["moka"] }
+backhand = { version = "0.25", default-features = false, features = ["gzip"] }
+sha2 = "0.10"
+hex = "0.4"
+libc = "0.2"
+nix = { version = "0.30", features = ["ioctl", "signal", "process", "fs", "socket", "net"] }
+rtnetlink = { version = "0.23", default-features = false, features = ["tokio"] }
+netlink-packet-route = "0.33"
+nbd-netlink = "0.3"
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 4

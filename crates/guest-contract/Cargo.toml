@@ -1,0 +1,17 @@
+[package]
+name = "hostd-guest-contract"
+description = "The guest boot contract: drive order, kernel args, vsock ports and the frame codecs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "guest_contract"
+path = "src/lib.rs"
+
+[dependencies]
+protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
