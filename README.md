@@ -143,8 +143,45 @@ Run on a real Linux kernel, as root, with `nft`, `mke2fs` and `/dev/net/tun`:
   and machine description staged, the slot allocated, the ruleset applied, and the proxy answers
   503 with a sentence for a hostname it holds and 404 for one it does not.
 
-**No guest has been booted, slept or woken.** That needs `/dev/kvm`, which no machine in this
-project's reach has, and a published guest image — the one in `guest/` is nibrun's stub build,
-whose manifest says `"init_is_stub": true`, so it carries a throwaway `/init` rather than the
-runtime that boots a tenant. Until both are in place, the boot, the snapshot, the restore and the
-wake latency are unknown rather than working.
+### What phase 2 proved, and what it did not
+
+The lane above has no `/dev/kvm`. The boot, the sleep and the wake were run instead on an
+`m7i-flex.large` with `NestedVirtualization` enabled, which is an ordinary shared instance and not
+a metal one, against a tenant written for the occasion: a static binary that listens on the port
+it is handed, writes to both streams, and counts its own starts into a file on its data volume.
+
+- **A tenant cold-boots.** The artifact is fetched, verified against its digest, packed into a
+  squashfs, given a config drive and a data volume, and the guest comes up and answers.
+- **An idle app sleeps.** After 84 seconds of no traffic the sweep paused the microVM and wrote a
+  snapshot in 1.2 seconds; the memory file is the guest's whole 256 MiB.
+- **The next request wakes it, from the snapshot and not from scratch.** A restore took 20 ms on
+  the first burst and 37 ms on the second. The tenant's answer still named the boot it was
+  snapshotted in, and that number is incremented once per process start and kept on the volume —
+  so a cold boot would have named the next one. The same file is what says the disk persists.
+- **A burst is one wake.** Ten concurrent requests to a sleeping app produced one restore and ten
+  `200`s, and the nine behind the first waited on its wake rather than racing it.
+- **A snapshot is restored at most once.** The snapshot directory is gone after the restore, so
+  the invariant is enforced on disk and not only in the record.
+- **A daemon restart does not disturb a tenant.** Stopping the daemon leaves every microVM
+  running, and the daemon that replaces it adopts them from their pidfiles.
+- **A quiet host costs nothing.** 50 ms of CPU over 60 idle seconds, with one app asleep.
+
+Two defects survived the whole unit lane and were found only here. An app the document says is
+`running` was refused with a connection error rather than answered, because its slot is allocated
+by the same pass that starts it and the activator that owns its port had already been placed. And
+the count of requests coalesced onto one wake was read before the wake rather than after it, so a
+burst that entirely waited on one restore reported that none had. Both now have tests.
+
+**The guest side of that run is not reproducible from this repository.** The image in `guest/` is
+nibrun's stub build, whose manifest says `"init_is_stub": true`: it carries a throwaway `/init`
+rather than the runtime that boots a tenant. That stub was replaced, for the run above, by a
+stand-in `/init` that mounts the drives in the order this daemon writes them, exports the
+`NIBRUN_*` environment and execs the artifact — and that stand-in's source was not kept. So what
+phase 2 proves is this daemon's half of the guest contract, exercised by something that satisfies
+the other half. Rebuilding a published image with a real init is what would make the lane
+repeatable, and it is the first thing to do before trusting any of these numbers twice.
+
+**What is otherwise still unknown.** Nothing here ran for longer than an hour, so nothing is known
+about a host that has been up for a week. The vsock log and filesystem paths, the checkpoint and
+export work, TLS, the port relay, and every second app on a host are untried: one app on one host
+is what this proved.
