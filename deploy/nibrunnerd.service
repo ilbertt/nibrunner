@@ -11,7 +11,15 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/nibrunnerd
-EnvironmentFile=-/etc/nibrunner/nibrunnerd.env
+
+# The daemon reads /etc/nibrunner/config.toml, and reads it once: a changed file is a restart and
+# not a reload, because what it configures is where this host keeps everything and moving that
+# under a running daemon would leave half its state behind.
+#
+# Not named here as NIBRUNNER_CONFIG, though that would be the more discoverable spelling. That
+# variable means "this exact file, and fail if it is not there", which is what an operator wants
+# when they point at a file deliberately. The path below is the default, and a default is allowed
+# to be absent — which is what lets this unit start a host that has not been configured yet.
 
 Restart=always
 RestartSec=5s

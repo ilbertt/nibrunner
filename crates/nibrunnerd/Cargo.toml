@@ -21,6 +21,7 @@ guest-contract.workspace = true
 nft-render.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 tokio.workspace = true

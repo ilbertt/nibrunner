@@ -10,7 +10,7 @@ fn main() -> std::process::ExitCode {
     nibrunnerd::install_crypto_provider();
     install_logger();
 
-    let config = match HostConfig::from_environment() {
+    let config = match HostConfig::load() {
         Ok(config) => config,
         Err(error) => {
             tracing::error!(error = %error.message(), "this host is not configured");

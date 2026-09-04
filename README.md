@@ -87,22 +87,38 @@ it down and leaves the app reachable enough to say so.
 
 ## Configuration
 
-Everything is read once from the environment. A host that names nothing gets a working default.
+One TOML file, read once at startup and validated whole. `/etc/nibrunner/config.toml` unless
+`NIBRUNNER_CONFIG` names another — the difference being that a file named deliberately must exist,
+where the default is allowed to be absent. A host that names nothing gets a working default, so an
+empty file and no file are the same host.
 
-| Variable | Default | What it is |
+A key this daemon does not have is an error that names the key, which is the thing an environment
+could never do: a mistyped variable and one nobody set are the same absence, so the typo silently
+takes the default. The same goes for the values — a relative path, a CIDR `nft` would choke on, an
+`s3://` URL with no bucket, or a proxy port that an app slot is going to want are all refused
+while an operator is still watching rather than on the pass that first needed them.
+
+`deploy/config.toml` is the annotated copy, every key at its default. The short version:
+
+| Key | Default | What it is |
 | --- | --- | --- |
-| `NIBRUNNER_STATE_DIR` | `/var/lib/nibrunner` | Where everything this host keeps lives |
-| `NIBRUNNER_RUNTIME_DIR` | `/run/nibrunner` | Sockets and pidfiles that outlive the daemon |
-| `NIBRUNNER_DESIRED_STATE_FILE` | `<state>/desired.json` | The document it watches |
-| `NIBRUNNER_GUEST_IMAGE_DIR` | `<state>/guest` | `vmlinux`, `rootfs.ext4`, `manifest.json` |
-| `NIBRUNNER_ARTIFACT_STORE_URL` | `<state>/artifact-store` | A directory, or `s3://bucket/prefix` |
-| `NIBRUNNER_SNAPSHOT_DIR` | `<state>/snapshots` | Where a sleeping app's memory goes |
-| `NIBRUNNER_PROXY_HTTP_PORT` | none | Serve plain HTTP on this port |
-| `NIBRUNNER_PROXY_HTTPS_PORT` | none | With `NIBRUNNER_TLS_CERTIFICATE` and `NIBRUNNER_TLS_KEY` |
-| `NIBRUNNER_CONTROL_PLANE_CIDRS_V4` | none | Ranges a guest is denied by name |
-| `NIBRUNNER_CONTROL_PLANE_CIDRS_V6` | none | The same, where no blanket rule covers them |
-| `NIBRUNNER_PORT_RELAY_PUBLIC_IPV4` | none | Where an app's own public port is reached |
-| `NIBRUNNER_LOG` | `info` | `tracing` filter |
+| `paths.state_dir` | `/var/lib/nibrunner` | Where everything this host keeps lives |
+| `paths.runtime_dir` | `/run/nibrunner` | Sockets and pidfiles that outlive the daemon |
+| `paths.desired_state_file` | `<state>/desired.json` | The document it watches |
+| `paths.guest_image_dir` | `<state>/guest` | `vmlinux`, `rootfs.ext4`, `manifest.json` |
+| `paths.snapshot_dir` | `<state>/snapshots` | Where a sleeping app's memory goes |
+| `artifacts.store_url` | `<state>/artifact-store` | A directory, or `s3://bucket/prefix` |
+| `volumes.store_url` | none | Where a volume's blocks live, for an object-store backend |
+| `volumes.storage_prefix` | `volumes` | Prepended to every key this host writes |
+| `proxy.http_port` | none | Serve plain HTTP on this port |
+| `proxy.https_port` | none | With `proxy.tls_certificate` and `proxy.tls_key` |
+| `proxy.port_relay_public_ipv4` | none | Where an app's own public port is reached |
+| `network.control_plane_cidrs_v4` | `[]` | Ranges a guest is denied by name |
+| `network.control_plane_cidrs_v6` | `[]` | The same, where no blanket rule covers them |
+| `control_plane.url` | none | The addon that polls a remote control plane |
+
+`NIBRUNNER_LOG` is still an environment variable, and the only one besides `NIBRUNNER_CONFIG`: it
+is a `tracing` filter an operator changes to debug one restart, not a property of the host.
 
 ## The workspace
 

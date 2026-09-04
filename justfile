@@ -29,13 +29,23 @@ run-dev:
     root="$PWD/.nibrunner-dev"
     mkdir -p "$root"/{state,run,guest,artifacts}
     cp -n guest/vmlinux guest/rootfs.ext4 guest/manifest.json "$root/guest/" 2>/dev/null || true
-    export NIBRUNNER_STATE_DIR="$root/state" NIBRUNNER_RUNTIME_DIR="$root/run"
-    export NIBRUNNER_GUEST_IMAGE_DIR="$root/guest" NIBRUNNER_SNAPSHOT_DIR="$root/state/snapshots"
-    export NIBRUNNER_DESIRED_STATE_FILE="$root/desired.json"
-    export NIBRUNNER_ARTIFACT_STORE_URL="$root/artifacts"
-    export NIBRUNNER_PROXY_HTTP_PORT="${NIBRUNNER_PROXY_HTTP_PORT:-8080}"
+    cat > "$root/config.toml" <<TOML
+    [paths]
+    state_dir = "$root/state"
+    runtime_dir = "$root/run"
+    snapshot_dir = "$root/state/snapshots"
+    guest_image_dir = "$root/guest"
+    desired_state_file = "$root/desired.json"
+
+    [artifacts]
+    store_url = "$root/artifacts"
+
+    [proxy]
+    http_port = ${NIBRUNNER_HTTP_PORT:-8080}
+    TOML
+    export NIBRUNNER_CONFIG="$root/config.toml"
     export NIBRUNNER_LOG="${NIBRUNNER_LOG:-info}"
-    echo "watching $NIBRUNNER_DESIRED_STATE_FILE"
+    echo "watching $root/desired.json, configured by $NIBRUNNER_CONFIG"
     exec cargo run -p nibrunnerd
 
 fmt:

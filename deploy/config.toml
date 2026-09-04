@@ -1,0 +1,47 @@
+# nibrunnerd, as one host is configured. Every key here is optional and shown at its default;
+# delete what this host does not change. A key this daemon does not have is an error at startup
+# rather than a setting silently ignored, so a typo here costs a failed start and not a mystery.
+
+[paths]
+# Everything this host keeps: its records, its volumes, its artifact cache and its logs.
+state_dir = "/var/lib/nibrunner"
+# Sockets and pidfiles that outlive the daemon. A tenant's Firecracker holds its API socket here.
+runtime_dir = "/run/nibrunner"
+# A snapshot is a cache — losing one costs a cold boot and nothing else — so this is the one path
+# worth moving to a cheaper disk.
+snapshot_dir = "/var/lib/nibrunner/snapshots"
+# vmlinux, rootfs.ext4 and the manifest they were built with.
+guest_image_dir = "/var/lib/nibrunner/guest"
+# The document this host converges on. Whatever writes it is not this daemon's concern.
+desired_state_file = "/var/lib/nibrunner/desired.json"
+
+[artifacts]
+# A directory for one machine, "s3://bucket/prefix" for a fleet.
+store_url = "/var/lib/nibrunner/artifact-store"
+
+[volumes]
+# Where a volume's blocks live, for the backend that keeps them in an object store.
+# store_url = "s3://nibrun-volumes"
+storage_prefix = "volumes"
+
+[proxy]
+# Absent means this host serves no edge of its own, which is what it wants behind a load balancer.
+# http_port = 80
+# https_port = 443
+# tls_certificate = "/etc/nibrunner/origin.crt"
+# tls_key = "/etc/nibrunner/origin.key"
+# Where a tenant's own public port is reached. Not this host's address, and not something a guest
+# can discover for itself.
+# port_relay_public_ipv4 = "203.0.113.10"
+
+[network]
+# Ranges a guest is denied by name, on top of the blanket rules. The metadata endpoint, the guest
+# network and this host are already denied; these are for a control plane that shares the VPC.
+control_plane_cidrs_v4 = []
+control_plane_cidrs_v6 = []
+
+[control_plane]
+# The addon that polls a remote control plane and writes the document above. Absent is ordinary:
+# the file is the source that ships, and a host that loses its control plane goes on converging on
+# the last document it was given.
+# url = "https://nibrun.example.com"
