@@ -120,6 +120,254 @@ pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, U
     Ok(format!("{}\n", lines.join("\n")))
 }
 
+// ---------------------------------------------------------------------------------------------
+// The guest's half
+//
+// The same file, read the other way round. Here rather than in the guest for the same reason the
+// filesystem codec's two halves sit together: a round-trip test can only exist where both
+// directions are in reach of each other.
+
+/// What the guest could not read. Names the key and never the value, which is the tenant's.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InstanceEnvError {
+    #[error("{key} is missing, which is a bug in whatever wrote this file")]
+    Missing { key: String },
+    #[error("{key} is not {rule}")]
+    Malformed { key: String, rule: &'static str },
+    #[error("{key} names {reference}, which this runtime does not offer")]
+    UnknownReference { key: String, reference: String },
+    #[error("there are more {what} than this runtime carries")]
+    TooMany { what: &'static str },
+}
+
+/// glibc's resolver reads at most this many and silently drops the rest.
+pub const MAX_NAMESERVERS: usize = 3;
+/// Mirrors `MAX_ARGUMENTS` in the protocol, which refuses to write more.
+pub const MAX_ARGUMENTS: usize = 64;
+pub const MAX_TENANT_VARIABLES: usize = 256;
+pub const CONFIG_MAX_BYTES: usize = 128 * 1024;
+
+/// What one boot was configured with.
+///
+/// The runtime carries no defaults for any of it. `DEFAULT_RESTART_POLICY` in the protocol is the
+/// only place those values exist; the host resolves them and writes them out, so a missing key is
+/// a bug in the writer and is reported as one rather than papered over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceConfig {
+    pub http_port: u32,
+    /// `None` where the writer sent none, which is what lets a host adopt this image before the
+    /// agent that writes it. Every other key here is required, and an agent older than the image
+    /// would otherwise fail every boot.
+    pub hostname: Option<String>,
+    pub public_ipv4: Option<String>,
+    pub extra_public_port: Option<u32>,
+    pub max_restarts: u32,
+    pub initial_backoff_ms: u32,
+    pub max_backoff_ms: u32,
+    pub backoff_factor: f64,
+    pub reset_after_ms: u32,
+    pub nameservers: Vec<String>,
+    /// `argv[1..]`; `argv[0]` is the binary itself, which the runtime owns.
+    pub arguments: Vec<String>,
+    /// The tenant's own, with references already expanded.
+    pub environment: Vec<(String, String)>,
+}
+
+/// Only a `$NIBRUN_NAME` or `${NIBRUN_NAME}` expands, and only inside a tenant's value.
+///
+/// The prefix is what keeps the substitution off values it was never meant for: a secret holding
+/// `$`, `$$` or `$HOME` arrives byte for byte. A name this runtime does not offer fails the boot
+/// rather than reaching the tenant as itself — a tenant that asked for a value and silently got
+/// the text of the question is worse served than one told. The cost is that a value holding a
+/// literal `$NIBRUN_` has no representation, which is the bargain the format already makes for
+/// one holding a newline.
+fn expand(key: &str, value: &str, runtime: &[(String, String)]) -> Result<String, InstanceEnvError> {
+    if !value.contains(&format!("${RUNTIME_PREFIX}")) && !value.contains(&format!("${{{RUNTIME_PREFIX}")) {
+        return Ok(value.to_string());
+    }
+    let mut expanded = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'$' {
+            expanded.push(value[at..].chars().next().unwrap_or('$'));
+            at += value[at..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        let braced = value[at + 1..].starts_with('{');
+        let names_at = at + 1 + usize::from(braced);
+        let rest = &value[names_at..];
+        if !rest.starts_with(RUNTIME_PREFIX) {
+            expanded.push('$');
+            at += 1;
+            continue;
+        }
+        let end = if braced {
+            match rest.find('}') {
+                Some(end) => end,
+                None => {
+                    return Err(InstanceEnvError::Malformed {
+                        key: key.to_string(),
+                        rule: "a closed reference",
+                    })
+                }
+            }
+        } else {
+            rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(rest.len())
+        };
+        let reference = &rest[..end];
+        let Some((_, found)) = runtime.iter().find(|(name, _)| name == reference) else {
+            return Err(InstanceEnvError::UnknownReference {
+                key: key.to_string(),
+                reference: reference.to_string(),
+            });
+        };
+        expanded.push_str(found);
+        at = names_at + end + usize::from(braced);
+    }
+    Ok(expanded)
+}
+
+/// Line-oriented `KEY=VALUE`, so nothing here is a parser in the sense the format was avoiding.
+///
+/// Reports the first thing it rejects and never a partial config: a guest that booted a tenant
+/// with half its configuration would be a deploy that looked like it worked.
+pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError> {
+    let mut runtime: Vec<(String, String)> = Vec::new();
+    let mut tenant: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(InstanceEnvError::Malformed {
+                key: line.chars().take(32).collect(),
+                rule: "a KEY=VALUE line",
+            });
+        };
+        if let Some(name) = key.strip_prefix(RUNTIME_PREFIX) {
+            runtime.push((format!("{RUNTIME_PREFIX}{name}"), value.to_string()));
+        } else if let Some(name) = key.strip_prefix(TENANT_PREFIX) {
+            tenant.push((name.to_string(), value.to_string()));
+        }
+        // A key in neither namespace is not this runtime's to interpret, and refusing one would
+        // stop a host that learned a new key from booting an image older than it.
+    }
+
+    let named = |key: &str| {
+        runtime
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    };
+    let required = |key: &str| -> Result<&String, InstanceEnvError> {
+        named(key).ok_or_else(|| InstanceEnvError::Missing { key: key.to_string() })
+    };
+    let number = |key: &str| -> Result<u32, InstanceEnvError> {
+        required(key)?.parse().map_err(|_| InstanceEnvError::Malformed {
+            key: key.to_string(),
+            rule: "a number",
+        })
+    };
+
+    let nameservers: Vec<String> = required("NIBRUN_DNS")?
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .take(MAX_NAMESERVERS)
+        .map(str::to_string)
+        .collect();
+
+    // Numbered from zero, and a gap is refused rather than shifting the rest down: an argument
+    // list silently one short is a tenant started with somebody else's command line.
+    let mut arguments = Vec::new();
+    while let Some(argument) = named(&format!("{RUNTIME_PREFIX}ARG_{}", arguments.len())) {
+        if arguments.len() == MAX_ARGUMENTS {
+            return Err(InstanceEnvError::TooMany { what: "arguments" });
+        }
+        arguments.push(argument.clone());
+    }
+    let numbered = runtime
+        .iter()
+        .filter(|(name, _)| name.starts_with(&format!("{RUNTIME_PREFIX}ARG_")))
+        .count();
+    if numbered != arguments.len() {
+        return Err(InstanceEnvError::Malformed {
+            key: format!("{RUNTIME_PREFIX}ARG_{}", arguments.len()),
+            rule: "the next argument in an unbroken run from 0",
+        });
+    }
+
+    if tenant.len() > MAX_TENANT_VARIABLES {
+        return Err(InstanceEnvError::TooMany {
+            what: "environment variables",
+        });
+    }
+    let mut environment = Vec::with_capacity(tenant.len());
+    for (name, value) in &tenant {
+        environment.push((name.clone(), expand(name, value, &runtime)?));
+    }
+
+    Ok(InstanceConfig {
+        http_port: number("NIBRUN_HTTP_PORT")?,
+        hostname: named("NIBRUN_HOSTNAME").cloned(),
+        public_ipv4: named("NIBRUN_PUBLIC_IPV4").cloned(),
+        extra_public_port: match named("NIBRUN_EXTRA_PUBLIC_PORT") {
+            None => None,
+            Some(_) => Some(number("NIBRUN_EXTRA_PUBLIC_PORT")?),
+        },
+        max_restarts: number("NIBRUN_MAX_RESTARTS")?,
+        initial_backoff_ms: number("NIBRUN_INITIAL_BACKOFF_MS")?,
+        max_backoff_ms: number("NIBRUN_MAX_BACKOFF_MS")?,
+        backoff_factor: required("NIBRUN_BACKOFF_FACTOR")?.parse().map_err(|_| {
+            InstanceEnvError::Malformed {
+                key: "NIBRUN_BACKOFF_FACTOR".to_string(),
+                rule: "a number",
+            }
+        })?,
+        reset_after_ms: number("NIBRUN_RESET_AFTER_MS")?,
+        nameservers,
+        arguments,
+        environment,
+    })
+}
+
+impl InstanceConfig {
+    /// The environment the tenant is exec'd with.
+    ///
+    /// The platform's own first — the port the host probes, the name the edge routes to, the path
+    /// the volume is mounted at, and the address and port a tenant hands to its own users. Then
+    /// the tenant's. A tenant variable of any of those names is dropped rather than exported: it
+    /// would describe an instance that does not exist.
+    ///
+    /// `PORT` carries the same number as `NIBRUN_HTTP_PORT` under the name every other host uses,
+    /// and is dropped from the tenant's for the same reason. It is an alias and never a second
+    /// choice: nothing reads it back, and a reference names the prefixed one.
+    pub fn tenant_environment(&self) -> Vec<(String, String)> {
+        let mut owned = vec![
+            ("NIBRUN_HTTP_PORT".to_string(), self.http_port.to_string()),
+            ("PORT".to_string(), self.http_port.to_string()),
+            ("NIBRUN_DATA_DIR".to_string(), crate::paths::DATA_DIR.to_string()),
+        ];
+        if let Some(hostname) = &self.hostname {
+            owned.push(("NIBRUN_HOSTNAME".to_string(), hostname.clone()));
+        }
+        if let Some(ipv4) = &self.public_ipv4 {
+            owned.push(("NIBRUN_PUBLIC_IPV4".to_string(), ipv4.clone()));
+        }
+        if let Some(port) = self.extra_public_port {
+            owned.push(("NIBRUN_EXTRA_PUBLIC_PORT".to_string(), port.to_string()));
+        }
+        let platform: Vec<String> = owned.iter().map(|(name, _)| name.clone()).collect();
+        for (name, value) in &self.environment {
+            if !platform.contains(name) {
+                owned.push((name.clone(), value.clone()));
+            }
+        }
+        owned
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +542,205 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(refused.variable_name, "NIBRUN_ARG_0");
+    }
+}
+
+#[cfg(test)]
+mod both_ends {
+    //! The host writes this file and the guest reads it. Both are here, so a key one end starts
+    //! writing and the other never learned to read is a test that fails rather than a boot that
+    //! does something unexpected on a machine somewhere.
+
+    use super::*;
+    use protocol::{TenantValue, DEFAULT_HTTP_PORT, DEFAULT_RESTART_POLICY};
+
+    fn written(environment: &[(&str, &str)], args: &[&str]) -> String {
+        let environment: TenantEnvironment = environment
+            .iter()
+            .map(|(name, value)| (name.to_string(), TenantValue::parse(*value).unwrap()))
+            .collect();
+        let args: TenantArguments = args
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let hostnames = [AppHostname {
+            hostname: Hostname::parse("my-app.nibrun.app").unwrap(),
+            kind: AppHostnameKind::Platform,
+        }];
+        render_instance_env(&InstanceEnvContent {
+            http_port: DEFAULT_HTTP_PORT,
+            public_address: None,
+            hostnames: &hostnames,
+            args: &args,
+            environment: &environment,
+            restart_policy: &DEFAULT_RESTART_POLICY,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn what_the_host_writes_is_what_the_guest_reads() {
+        let config = parse_instance_env(&written(&[("TOKEN", "hunter2")], &["--verbose", "-p"])).unwrap();
+        assert_eq!(config.http_port, u32::from(DEFAULT_HTTP_PORT.get()));
+        assert_eq!(config.hostname.as_deref(), Some("my-app.nibrun.app"));
+        assert_eq!(config.arguments, vec!["--verbose", "-p"]);
+        assert_eq!(
+            config.environment,
+            vec![("TOKEN".to_string(), "hunter2".to_string())]
+        );
+        assert_eq!(config.max_restarts, DEFAULT_RESTART_POLICY.max_restarts);
+        assert_eq!(config.backoff_factor, DEFAULT_RESTART_POLICY.backoff_factor);
+        assert_eq!(config.nameservers, vec!["1.1.1.1", "1.0.0.1"]);
+    }
+
+    /// The prefixes exist so the two namespaces can never collide: a tenant variable actually
+    /// called `NIBRUN_HTTP_PORT` arrives as `ENV_NIBRUN_HTTP_PORT` and stays the tenant's — right
+    /// up to the point where exporting it would describe an instance that does not exist.
+    #[test]
+    fn a_tenant_variable_named_like_a_runtime_one_stays_the_tenants_and_is_then_dropped() {
+        let config = parse_instance_env(&written(&[("NIBRUN_HTTP_PORT", "9999")], &[])).unwrap();
+        assert_eq!(
+            config.environment,
+            vec![("NIBRUN_HTTP_PORT".to_string(), "9999".to_string())],
+            "it is read as the tenant's"
+        );
+        let exported = config.tenant_environment();
+        let port = exported
+            .iter()
+            .find(|(name, _)| name == "NIBRUN_HTTP_PORT")
+            .unwrap();
+        assert_eq!(
+            port.1,
+            DEFAULT_HTTP_PORT.to_string(),
+            "and never exported over the real one"
+        );
+    }
+
+    /// `PORT` is the name every other host uses, and an alias rather than a second choice.
+    #[test]
+    fn the_tenant_is_handed_the_port_under_both_names() {
+        let exported = parse_instance_env(&written(&[("PORT", "1234")], &[]))
+            .unwrap()
+            .tenant_environment();
+        for name in ["PORT", "NIBRUN_HTTP_PORT"] {
+            let found = exported.iter().find(|(each, _)| each == name).unwrap();
+            assert_eq!(found.1, DEFAULT_HTTP_PORT.to_string(), "{name}");
+        }
+        assert_eq!(exported.iter().filter(|(name, _)| name == "PORT").count(), 1);
+    }
+
+    /// The prefix is what keeps the substitution off values it was never meant for.
+    #[test]
+    fn only_a_reference_to_a_runtime_value_expands() {
+        let config = parse_instance_env(&written(
+            &[
+                ("BARE", "port $NIBRUN_HTTP_PORT here"),
+                ("BRACED", "port ${NIBRUN_HTTP_PORT} here"),
+                ("SHELL_LIKE", "$HOME and $$ and a bare $"),
+                ("BOTH", "$NIBRUN_HOSTNAME:$NIBRUN_HTTP_PORT"),
+            ],
+            &[],
+        ))
+        .unwrap();
+        let value = |name: &str| {
+            config
+                .environment
+                .iter()
+                .find(|(each, _)| each == name)
+                .map(|(_, value)| value.clone())
+                .unwrap()
+        };
+        let port = DEFAULT_HTTP_PORT.to_string();
+        assert_eq!(value("BARE"), format!("port {port} here"));
+        assert_eq!(value("BRACED"), format!("port {port} here"));
+        assert_eq!(value("SHELL_LIKE"), "$HOME and $$ and a bare $");
+        assert_eq!(value("BOTH"), format!("my-app.nibrun.app:{port}"));
+    }
+
+    /// A tenant that asked for a value and silently got the text of the question is worse served
+    /// than one told the boot failed — and both ends say so on their own.
+    ///
+    /// The host refuses to *write* one: `TenantValue` will not accept a value naming a runtime
+    /// value the guest does not offer, so this never reaches a config drive by the ordinary route.
+    /// The guest refuses to *read* one anyway, because a file it was handed is a file it has to
+    /// judge for itself.
+    #[test]
+    fn a_reference_this_runtime_does_not_offer_fails_the_boot_at_both_ends() {
+        assert!(
+            TenantValue::parse("$NIBRUN_NO_SUCH_THING").is_err(),
+            "the host would have written it"
+        );
+
+        let handed = format!("{}ENV_BAD=$NIBRUN_NO_SUCH_THING\n", written(&[], &[]));
+        let error = parse_instance_env(&handed).unwrap_err();
+        assert!(
+            matches!(&error, InstanceEnvError::UnknownReference { reference, .. } if reference == "NIBRUN_NO_SUCH_THING"),
+            "{error}"
+        );
+        // The key is named and the value is not: what a tenant configured is theirs.
+        assert!(error.to_string().contains("BAD"), "{error}");
+    }
+
+    /// The runtime carries no defaults, so a missing key is a bug in the writer and is reported as
+    /// one rather than papered over.
+    #[test]
+    fn a_key_the_writer_left_out_is_reported_rather_than_defaulted() {
+        let whole = written(&[], &[]);
+        for key in [
+            "NIBRUN_HTTP_PORT",
+            "NIBRUN_MAX_RESTARTS",
+            "NIBRUN_BACKOFF_FACTOR",
+            "NIBRUN_DNS",
+        ] {
+            let without: String = whole
+                .lines()
+                .filter(|line| !line.starts_with(&format!("{key}=")))
+                .map(|line| format!("{line}\n"))
+                .collect();
+            let error = parse_instance_env(&without).unwrap_err();
+            assert!(
+                matches!(&error, InstanceEnvError::Missing { key: named } if named == key),
+                "{key}: {error}"
+            );
+        }
+    }
+
+    /// Absent is allowed for exactly one key, which is what lets a host adopt this image before
+    /// the agent that writes it.
+    #[test]
+    fn a_hostname_is_the_one_thing_a_boot_can_do_without() {
+        let without: String = written(&[], &[])
+            .lines()
+            .filter(|line| !line.starts_with("NIBRUN_HOSTNAME="))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let config = parse_instance_env(&without).unwrap();
+        assert_eq!(config.hostname, None);
+        assert!(!config
+            .tenant_environment()
+            .iter()
+            .any(|(name, _)| name == "NIBRUN_HOSTNAME"));
+    }
+
+    /// An argument list silently one short is a tenant started with somebody else's command line.
+    #[test]
+    fn a_gap_in_the_arguments_is_refused_rather_than_shifting_the_rest_down() {
+        let with_gap: String = written(&[], &["--one", "--two", "--three"])
+            .lines()
+            .filter(|line| !line.starts_with("NIBRUN_ARG_1="))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let error = parse_instance_env(&with_gap).unwrap_err();
+        assert!(matches!(error, InstanceEnvError::Malformed { .. }), "{error}");
+    }
+
+    /// A key in neither namespace is not this runtime's to interpret, and refusing one would stop
+    /// a host that learned a new key from booting an image older than it.
+    #[test]
+    fn a_key_from_neither_namespace_is_ignored_rather_than_refused() {
+        let extended = format!("{}SOMETHING_NEW=from a later agent\n", written(&[], &[]));
+        assert!(parse_instance_env(&extended).is_ok());
     }
 }
