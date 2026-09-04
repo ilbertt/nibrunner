@@ -5,6 +5,7 @@ members = [
   "crates/guest-contract",
   "crates/nft-render",
   "crates/nibrunnerd",
+  "crates/init",
 ]
 
 [workspace.package]

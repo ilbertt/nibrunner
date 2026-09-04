@@ -145,6 +145,23 @@ schema is the contract with the control plane and one end relaxing it alone is a
 accepts and that one refuses. What I would change is the schema, at both ends at once, and the
 entry-name rule shows the shape it should take.
 
+**The guest runtime is Rust, not C.** nibrun's is 3,585 lines of C across nine files. This is a
+crate in the same workspace, and the reason is the one the user asked for: the wire the guest
+speaks is the wire the host speaks, and `nibrunner-guest-contract` now holds both halves of the
+frame codec, the `instance.env` format, the vsock ports and the boot paths. What was a header, an
+encoder and a decoder agreeing by review is one definition each with round-trip tests across it.
+
+The guest keeps the C's process shape rather than reaching for async. Each vsock channel is a fork
+of PID 1, because the supervisor's loop does not run while the tenant is between restarts and a
+host asking about a filesystem should not have to know whether the tenant is up. The tenant is
+forked and exec'd directly rather than through `std::process`, because PID 1 owns the reaping of
+every child in the guest and a second reaper racing it would lose exit statuses.
+
+`unsafe` is allowed crate-wide there, where the daemon warns on it. A guest PID 1 mounts
+filesystems, forks, execs, drops privileges, freezes a filesystem and reboots a machine; every one
+is a syscall with no safe wrapper, and twenty individual allows would say the same thing less
+clearly. Each block still carries its own safety note.
+
 ## Not done, and named as such
 
 - **Exports and the vsock filesystem browse.** The codecs for the filesystem channel are written

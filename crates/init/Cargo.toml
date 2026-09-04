@@ -1,0 +1,23 @@
+[package]
+name = "nibrunner-init"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nibrunner-init"
+path = "src/main.rs"
+
+[dependencies]
+protocol.workspace = true
+guest-contract.workspace = true
+libc.workspace = true
+thiserror.workspace = true
+nix = { version = "0.30", features = ["mount", "signal", "process", "fs", "socket", "user", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

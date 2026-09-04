@@ -11,9 +11,9 @@ const LENGTH_OFFSET: usize = 5;
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 65_536;
 const GAP_PAYLOAD_BYTES: usize = 8;
 
-const KIND_STDOUT: u8 = 1;
-const KIND_STDERR: u8 = 2;
-const KIND_GAP: u8 = 3;
+pub const KIND_STDOUT: u8 = 1;
+pub const KIND_STDERR: u8 = 2;
+pub const KIND_GAP: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestLogFrame {
@@ -93,7 +93,23 @@ fn frame_from(kind: u8, payload: &[u8]) -> Result<GuestLogFrame, InvalidGuestLog
 }
 
 /// The wire format restated rather than derived from the decoder, so the tests check the codec
-/// against the bytes the C side writes and not against itself.
+/// against the bytes on the wire and not against themselves.
+///
+/// `kind` rather than a `TenantLogStream`, because a gap is a frame too and is not a stream: it is
+/// the guest saying how much of a tenant's output it had to drop.
+pub fn kind_of(stream: TenantLogStream) -> u8 {
+    match stream {
+        TenantLogStream::Stdout => KIND_STDOUT,
+        TenantLogStream::Stderr => KIND_STDERR,
+    }
+}
+
+/// What the guest sends when it had to drop a tenant's output: a count rather than the bytes,
+/// because the bytes are gone and a buffer would have been guest memory the tenant was not given.
+pub fn encode_gap(dropped_bytes: u64) -> Vec<u8> {
+    encode_frame(KIND_GAP, &dropped_bytes.to_be_bytes())
+}
+
 pub fn encode_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
     frame.extend_from_slice(FRAME_MAGIC);
