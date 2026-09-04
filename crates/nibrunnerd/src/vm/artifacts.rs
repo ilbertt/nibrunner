@@ -29,13 +29,15 @@ const CONFIG_MODE: u16 = 0o600;
 const CACHE_DIR_MODE: u32 = 0o755;
 const VM_DIR_MODE: u32 = 0o700;
 
-/// Stored rather than compressed. The image is built once per digest on the path a deploy waits
-/// on and is read back off a local disk by one guest, so nothing here crosses a network and the
-/// compressor was only ever spending a deploy's seconds to save a host's disk.
+/// gzip, because it is the one decompressor the guest kernel is guaranteed to have: the image
+/// declares it in its superblock and the kernel registers it at mount.
 ///
-/// The superblock still names gzip, because nothing here is what makes it uncompressed: a guest
-/// mounts one of these exactly as it mounts a compressed one.
-fn uncompressed() -> FilesystemCompressor {
+/// nibrun's agent packs these with `-noI -noD -noF -noX`, storing everything uncompressed to save
+/// a deploy the compressor's seconds. There is no equivalent here, and squashfs already stores a
+/// block whose compressed form is no smaller — which covers the artifact, where the bytes are a
+/// binary. What is left is the config drive, a few hundred bytes of text compressed once per
+/// boot, and that is not a cost worth a fork of the writer.
+fn image_compressor() -> FilesystemCompressor {
     FilesystemCompressor::new(Compressor::Gzip, None).expect("gzip needs no options")
 }
 
@@ -49,7 +51,7 @@ fn header(permissions: u16) -> NodeHeader {
 
 fn pack(files: &[(&str, &[u8], u16)]) -> Result<Vec<u8>, ArtifactError> {
     let mut writer = FilesystemWriter::default();
-    writer.set_compressor(uncompressed());
+    writer.set_compressor(image_compressor());
     writer.set_time(FIXED_MTIME);
     writer.set_root_mode(0o755);
     for (name, bytes, permissions) in files {
@@ -148,6 +150,23 @@ mod tests {
         assert_eq!(digest_of(&artifact_bytes()), ARTIFACT_DIGEST);
     }
 
+    /// Reads one file out of an image the way the guest's kernel would, so a test asserts on
+    /// what a guest would find rather than on bytes that happen to be in the file.
+    fn read_back(image: &[u8], path: &str) -> Vec<u8> {
+        use std::io::Read;
+        let filesystem = backhand::FilesystemReader::from_reader(Cursor::new(image.to_vec())).unwrap();
+        let node = filesystem
+            .files()
+            .find(|node| node.fullpath.to_string_lossy() == path)
+            .unwrap_or_else(|| panic!("the image holds nothing at {path}"));
+        let backhand::InnerNode::File(file) = &node.inner else {
+            panic!("{path} is not a file");
+        };
+        let mut bytes = Vec::new();
+        filesystem.file(file).reader().read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
     #[tokio::test]
     async fn an_image_is_built_once_per_digest_and_holds_the_binary_at_the_boot_path() {
         let directory = tempfile::tempdir().unwrap();
@@ -157,8 +176,8 @@ mod tests {
         let image = std::fs::read(&image_path).unwrap();
         // The squashfs superblock's own magic, so this is an image and not a copy of the binary.
         assert_eq!(&image[..4], b"hsqs");
-        // The tenant's bytes travel uncompressed, so they are findable in the image as they are.
-        assert!(image.windows(artifact_bytes().len()).any(|window| window == artifact_bytes()));
+        // Read back the way a guest reads it: the tenant's binary, whole, at the path init execs.
+        assert_eq!(read_back(&image, "/server"), artifact_bytes());
 
         let before = std::fs::metadata(&image_path).unwrap().len();
         let again = ensure_artifact_image(&store, directory.path(), &artifact(|_| {})).await.unwrap();
@@ -193,12 +212,12 @@ mod tests {
         assert!(first.ends_with(guest_contract::instance_env::INSTANCE_CONFIG_IMAGE));
         let image = std::fs::read(&first).unwrap();
         assert_eq!(&image[..4], b"hsqs");
-        assert!(image.windows(21).any(|window| window == b"NIBRUN_HTTP_PORT=3000"));
+        assert_eq!(read_back(&image, "/instance.env"), b"NIBRUN_HTTP_PORT=3000\n");
 
         let second = build_instance_config_image(directory.path(), "NIBRUN_HTTP_PORT=8080\n").unwrap();
         assert_eq!(second, first);
         let rebuilt = std::fs::read(&second).unwrap();
-        assert!(rebuilt.windows(21).any(|window| window == b"NIBRUN_HTTP_PORT=8080"));
+        assert_eq!(read_back(&rebuilt, "/instance.env"), b"NIBRUN_HTTP_PORT=8080\n");
     }
 
     /// Two builds of the same bytes are the same image, which is what makes a digest a cache key
