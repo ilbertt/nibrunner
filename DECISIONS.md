@@ -131,6 +131,20 @@ rather than a service that has to be asked.
 this being a static cross-compiled binary, so the feature set is `aws-base` + `ring`, reqwest gets
 `rustls-no-provider`, and `main` installs ring's provider before anything dials.
 
+**The guest half of the filesystem wire lives beside the host half.** nibrun has the format stated
+in a C header, encoded by the guest's C, and decoded by the agent's TypeScript — three copies that
+agree by review. Here there is one module with both directions in it and round-trip tests across
+them, so a change to the wire that breaks one end fails to compile against the other rather than
+being found by a guest and a host disagreeing on a machine somewhere.
+
+**A `GuestPath` still refuses quotes and backslashes, and on this wire it need not.** nibrun's
+schema excludes them because its path ends up in a command string the reader's tooling tokenises
+— which is why, in its own words, a directory named `it's` can be listed and never descended into.
+Nothing here tokenises anything: the path goes out behind its own length. Kept anyway, because the
+schema is the contract with the control plane and one end relaxing it alone is a path this host
+accepts and that one refuses. What I would change is the schema, at both ends at once, and the
+entry-name rule shows the shape it should take.
+
 ## Not done, and named as such
 
 - **Exports and the vsock filesystem browse.** The codecs for the filesystem channel are written

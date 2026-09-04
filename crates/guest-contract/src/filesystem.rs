@@ -191,6 +191,8 @@ pub fn is_refusal(status: u8) -> bool {
 
 /// One kind byte, an unsigned size, then a signed instant in seconds.
 const DETAILS_BYTES: usize = 17;
+const UINT32_BYTES: usize = 4;
+const UINT64_BYTES: usize = 8;
 
 /// Everything a listing says about one entry except its name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,5 +473,533 @@ mod tests {
             truncate: false,
         };
         assert!(!fits_one_request(&large));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The guest's half
+//
+// The same frame, read the other way round. Kept here rather than in the guest so that there is
+// one definition of the format and not two that agree by hand: a round-trip test can only exist
+// where both directions are in reach of each other, and a change to the wire that breaks one end
+// fails to compile against the other.
+
+/// A frame the guest could not read. The status it answers with is the one the host renders as
+/// "the guest could not read the request", so the reason is for this side's log and never travels.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("a request about the tenant's files could not be read: {reason}")]
+pub struct MalformedRequest {
+    pub reason: &'static str,
+}
+
+/// What the guest answers a request it could not read with.
+pub const STATUS_MALFORMED_REQUEST: u8 = 6;
+
+struct Cursor<'a> {
+    body: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(body: &'a [u8]) -> Self {
+        Self { body, at: 0 }
+    }
+
+    fn take(&mut self, count: usize, reason: &'static str) -> Result<&'a [u8], MalformedRequest> {
+        let end = self.at.checked_add(count).ok_or(MalformedRequest { reason })?;
+        let taken = self.body.get(self.at..end).ok_or(MalformedRequest { reason })?;
+        self.at = end;
+        Ok(taken)
+    }
+
+    fn field(&mut self, reason: &'static str) -> Result<&'a [u8], MalformedRequest> {
+        let length = u32::from_be_bytes(
+            self.take(UINT32_BYTES, reason)?
+                .try_into()
+                .map_err(|_| MalformedRequest { reason })?,
+        );
+        self.take(length as usize, reason)
+    }
+
+    fn path(&mut self, reason: &'static str) -> Result<GuestPath, MalformedRequest> {
+        let bytes = self.field(reason)?;
+        // Parsed rather than taken as given. A path arrives from off this machine, and the one
+        // thing the guest must never do is walk out of the volume because something asked it to;
+        // the rest of the server can then treat a `GuestPath` as a path that has been checked.
+        let text = std::str::from_utf8(bytes).map_err(|_| MalformedRequest { reason })?;
+        GuestPath::parse(text).map_err(|_| MalformedRequest { reason })
+    }
+
+    fn offset(&mut self, reason: &'static str) -> Result<u64, MalformedRequest> {
+        Ok(u64::from_be_bytes(
+            self.take(UINT64_BYTES, reason)?
+                .try_into()
+                .map_err(|_| MalformedRequest { reason })?,
+        ))
+    }
+
+    fn length(&mut self, reason: &'static str) -> Result<u32, MalformedRequest> {
+        Ok(u32::from_be_bytes(
+            self.take(UINT32_BYTES, reason)?
+                .try_into()
+                .map_err(|_| MalformedRequest { reason })?,
+        ))
+    }
+
+    fn byte(&mut self, reason: &'static str) -> Result<u8, MalformedRequest> {
+        Ok(self.take(1, reason)?[0])
+    }
+}
+
+/// The header of a request, read by the guest. Separate from the body for the same reason the
+/// host reads a reply in two goes: the length says how much more to wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestHeader {
+    pub verb: u8,
+    pub body_length: usize,
+}
+
+pub fn decode_request_header(header: &[u8]) -> Result<RequestHeader, MalformedRequest> {
+    if header.len() != FRAME_HEADER_BYTES {
+        return Err(MalformedRequest {
+            reason: "the header is the wrong length",
+        });
+    }
+    if &header[..FRAME_MAGIC.len()] != FRAME_MAGIC {
+        return Err(MalformedRequest {
+            reason: "invalid magic value",
+        });
+    }
+    let body_length = u32::from_be_bytes([
+        header[LENGTH_OFFSET],
+        header[LENGTH_OFFSET + 1],
+        header[LENGTH_OFFSET + 2],
+        header[LENGTH_OFFSET + 3],
+    ]) as usize;
+    // Refused rather than allocated for. The ceiling is what lets the guest read into a buffer it
+    // sized once at startup, which is the whole reason it never allocates per request.
+    if body_length > BODY_MAX_BYTES {
+        return Err(MalformedRequest {
+            reason: "the body exceeds the limit",
+        });
+    }
+    Ok(RequestHeader {
+        verb: header[CODE_OFFSET],
+        body_length,
+    })
+}
+
+/// The request a verb and its body describe.
+///
+/// Every field is bounds-checked against the body it came from, so a truncated or lying frame is a
+/// refusal rather than a read past the end of a buffer. Trailing bytes are not an error: a host
+/// that learns a longer form of a verb this guest is older than should still be understood as far
+/// as this guest goes.
+pub fn decode_request(
+    header: RequestHeader,
+    body: &[u8],
+) -> Result<GuestFilesystemRequest, MalformedRequest> {
+    if body.len() != header.body_length {
+        return Err(MalformedRequest {
+            reason: "the body is not the length the header gave",
+        });
+    }
+    let mut cursor = Cursor::new(body);
+    match header.verb {
+        1 => Ok(GuestFilesystemRequest::List {
+            path: cursor.path("a list names no readable path")?,
+        }),
+        2 => Ok(GuestFilesystemRequest::Stat {
+            path: cursor.path("a stat names no readable path")?,
+        }),
+        3 => {
+            let path = cursor.path("a read names no readable path")?;
+            Ok(GuestFilesystemRequest::Read {
+                path,
+                offset: cursor.offset("a read carries no offset")?,
+                length: cursor.length("a read carries no length")?,
+            })
+        }
+        4 => {
+            let path = cursor.path("a write names no readable path")?;
+            let offset = cursor.offset("a write carries no offset")?;
+            let truncate = cursor.byte("a write carries no flags")? == TRUNCATE;
+            Ok(GuestFilesystemRequest::Write {
+                path,
+                offset,
+                truncate,
+                content: cursor.field("a write carries no content")?.to_vec(),
+            })
+        }
+        5 => Ok(GuestFilesystemRequest::MakeDirectory {
+            path: cursor.path("a mkdir names no readable path")?,
+        }),
+        6 => Ok(GuestFilesystemRequest::Remove {
+            path: cursor.path("a remove names no readable path")?,
+        }),
+        7 => {
+            let path = cursor.path("a move names no readable path")?;
+            Ok(GuestFilesystemRequest::Move {
+                path,
+                destination: cursor.path("a move names no readable destination")?,
+            })
+        }
+        8 => Ok(GuestFilesystemRequest::Usage),
+        9 => Ok(GuestFilesystemRequest::Compute),
+        _ => Err(MalformedRequest {
+            reason: "a verb this guest does not have",
+        }),
+    }
+}
+
+/// One reply. A refusal carries no body: the status is the whole of what travels, because the
+/// sentence it becomes is the host's to render and a tenant's path is not an operator's to read.
+pub fn encode_reply(status: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + body.len());
+    frame.extend_from_slice(FRAME_MAGIC);
+    frame.push(status);
+    frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
+pub fn encode_refusal(status: u8) -> Vec<u8> {
+    encode_reply(status, &[])
+}
+
+/// What the guest has about one entry, which is what `stat` gave it.
+///
+/// The instant is seconds, not a `Timestamp`: seconds are all a filesystem stamps a file with, and
+/// what to do about one that cannot be written down is the *host's* decision — it costs that field
+/// rather than the entry carrying it. A guest that made that decision would be making it for a
+/// renderer it cannot see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryDetails {
+    pub kind: FilesystemEntryKind,
+    pub size_bytes: u64,
+    pub modified_seconds: i64,
+}
+
+fn details_bytes(details: &EntryDetails) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(DETAILS_BYTES);
+    encoded.push(match details.kind {
+        FilesystemEntryKind::File => 1,
+        FilesystemEntryKind::Directory => 2,
+        FilesystemEntryKind::Other => 0,
+    });
+    encoded.extend_from_slice(&details.size_bytes.to_be_bytes());
+    encoded.extend_from_slice(&details.modified_seconds.to_be_bytes());
+    encoded
+}
+
+pub fn encode_details(details: &EntryDetails) -> Vec<u8> {
+    encode_reply(STATUS_OK, &details_bytes(details))
+}
+
+pub fn encode_written(count: u32) -> Vec<u8> {
+    encode_reply(STATUS_OK, &count.to_be_bytes())
+}
+
+pub fn encode_usage(measured: &MeasuredBytes) -> Vec<u8> {
+    let mut body = Vec::with_capacity(UINT64_BYTES * 2);
+    body.extend_from_slice(&measured.total_bytes.to_be_bytes());
+    body.extend_from_slice(&measured.used_bytes.to_be_bytes());
+    encode_reply(STATUS_OK, &body)
+}
+
+pub fn encode_compute(measured: &MeasuredCompute) -> Vec<u8> {
+    let mut body = Vec::with_capacity(UINT64_BYTES * 4);
+    body.extend_from_slice(&measured.memory_total_bytes.to_be_bytes());
+    body.extend_from_slice(&measured.memory_used_bytes.to_be_bytes());
+    body.extend_from_slice(&measured.cpu_total_ticks.to_be_bytes());
+    body.extend_from_slice(&measured.cpu_busy_ticks.to_be_bytes());
+    encode_reply(STATUS_OK, &body)
+}
+
+/// One name per entry, behind a single length byte — which is what caps a name at 255 bytes on
+/// this wire, well under what ext4 allows in the filesystem itself.
+pub const MAX_ENTRY_NAME_BYTES: usize = 255;
+
+/// A listing, filled until the frame is full rather than until the directory ends.
+///
+/// `truncated` is set here when the body would not hold another entry, which is the guest's half
+/// of the same flag the host sets when its own limit is reached first. A name longer than one
+/// length byte is skipped rather than truncated: half a filename is a name that points at nothing,
+/// and one that cannot be shown is better left out than shown wrong.
+pub fn encode_listing(entries: &[(String, EntryDetails)]) -> Vec<u8> {
+    let mut body = vec![0u8];
+    let mut truncated = false;
+    for (name, details) in entries {
+        let name = name.as_bytes();
+        if name.is_empty() || name.len() > MAX_ENTRY_NAME_BYTES {
+            continue;
+        }
+        let entry_bytes = DETAILS_BYTES + 1 + name.len();
+        if body.len() + entry_bytes > BODY_MAX_BYTES {
+            truncated = true;
+            break;
+        }
+        body.extend(details_bytes(details));
+        body.push(name.len() as u8);
+        body.extend_from_slice(name);
+    }
+    body[0] = u8::from(truncated);
+    encode_reply(STATUS_OK, &body)
+}
+
+#[cfg(test)]
+mod both_ends {
+    //! What having both halves here is for: a change to the wire that breaks one end fails
+    //! against the other, rather than being discovered by a guest and a host disagreeing on a
+    //! machine somewhere.
+
+    use super::*;
+
+    fn path(text: &str) -> GuestPath {
+        GuestPath::parse(text).expect("a fixture is a valid guest path")
+    }
+
+    fn decoded(request: &GuestFilesystemRequest) -> GuestFilesystemRequest {
+        let frame = encode_request(request);
+        let header = decode_request_header(&frame[..FRAME_HEADER_BYTES]).expect("a header it wrote");
+        decode_request(header, &frame[FRAME_HEADER_BYTES..]).expect("a body it wrote")
+    }
+
+    #[test]
+    fn every_verb_the_host_sends_is_a_verb_the_guest_reads_back_unchanged() {
+        let requests = [
+            GuestFilesystemRequest::List { path: path("/") },
+            GuestFilesystemRequest::Stat {
+                path: path("/notes.txt"),
+            },
+            GuestFilesystemRequest::Read {
+                path: path("/big.bin"),
+                offset: 4_294_967_296,
+                length: 32_768,
+            },
+            GuestFilesystemRequest::Write {
+                path: path("/notes.txt"),
+                offset: 17,
+                content: b"some bytes".to_vec(),
+                truncate: true,
+            },
+            GuestFilesystemRequest::Write {
+                path: path("/notes.txt"),
+                offset: 0,
+                content: Vec::new(),
+                truncate: false,
+            },
+            GuestFilesystemRequest::MakeDirectory {
+                path: path("/uploads"),
+            },
+            GuestFilesystemRequest::Remove {
+                path: path("/uploads"),
+            },
+            GuestFilesystemRequest::Move {
+                path: path("/a"),
+                destination: path("/b"),
+            },
+            GuestFilesystemRequest::Usage,
+            GuestFilesystemRequest::Compute,
+        ];
+        for request in requests {
+            assert_eq!(decoded(&request), request, "{request:?} did not survive the wire");
+        }
+    }
+
+    /// A name is reported and a path is accepted, and the asymmetry is the design: the tenant's
+    /// own binary created these names, so anything ext4 allows has to survive being *described* —
+    /// while the direction that carries a request stays strict.
+    ///
+    /// The quote rule is the one that costs something. It is there because nibrun's path ends up
+    /// in a command string its reader's tooling tokenises, so a directory named `it's` can be
+    /// listed and never descended into. Nothing on *this* wire tokenises anything — the path goes
+    /// out behind its own length — so the restriction buys this daemon nothing. Kept anyway,
+    /// because the schema is the contract with the control plane and one end relaxing it alone
+    /// would be a path this host accepts and that one refuses. See DECISIONS.md.
+    #[test]
+    fn a_name_may_hold_what_a_path_may_not() {
+        for awkward in ["/-leading-dash", "/a b c", "/naïve", "/a.file", "/deep/er/still"] {
+            let request = GuestFilesystemRequest::List { path: path(awkward) };
+            assert_eq!(decoded(&request), request);
+        }
+        for refused in ["/it's", "/a \"quoted\" name", "/back\\slash", "/a\tb"] {
+            assert!(
+                GuestPath::parse(refused).is_err(),
+                "{refused} was accepted as a path"
+            );
+        }
+        // The same text, as a name in a listing that comes back: reported without complaint.
+        let entries = [entry("it's a \"file\"", FilesystemEntryKind::File, 1)];
+        let frame = encode_listing(&entries);
+        let listing = decode_listing(&frame[FRAME_HEADER_BYTES..], &path("/data")).unwrap();
+        assert_eq!(listing.entries[0].name, "it's a \"file\"");
+    }
+
+    /// A guest reads into a buffer it sized once at startup, so a header claiming more than the
+    /// ceiling is refused before anything is allocated for it.
+    #[test]
+    fn a_header_claiming_more_than_one_frame_holds_is_refused_before_any_body_is_read() {
+        let mut frame = encode_request(&GuestFilesystemRequest::Usage);
+        frame[LENGTH_OFFSET..LENGTH_OFFSET + 4].copy_from_slice(&((BODY_MAX_BYTES + 1) as u32).to_be_bytes());
+        let error = decode_request_header(&frame[..FRAME_HEADER_BYTES]).unwrap_err();
+        assert_eq!(error.reason, "the body exceeds the limit");
+    }
+
+    /// A truncated or lying frame is a refusal, never a read past the end of the buffer.
+    #[test]
+    fn a_body_cut_short_is_refused_rather_than_read_past() {
+        let frame = encode_request(&GuestFilesystemRequest::Read {
+            path: path("/notes.txt"),
+            offset: 0,
+            length: 16,
+        });
+        let header = decode_request_header(&frame[..FRAME_HEADER_BYTES]).unwrap();
+        for cut in 1..frame.len() - FRAME_HEADER_BYTES {
+            let body = &frame[FRAME_HEADER_BYTES..frame.len() - cut];
+            assert!(
+                decode_request(header, body).is_err(),
+                "a body {cut} bytes short was read anyway"
+            );
+        }
+    }
+
+    /// The one thing a guest must never do is walk out of the volume because something asked it
+    /// to, so a path is parsed on the way in and the rest of the server can treat it as checked.
+    #[test]
+    fn a_path_that_leads_out_of_the_volume_never_becomes_a_request() {
+        for escape in ["../etc/shadow", "/../etc/shadow", "relative", ""] {
+            let mut body = (escape.len() as u32).to_be_bytes().to_vec();
+            body.extend_from_slice(escape.as_bytes());
+            let header = RequestHeader {
+                verb: 1,
+                body_length: body.len(),
+            };
+            assert!(
+                decode_request(header, &body).is_err(),
+                "{escape} was read as a path to list"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verb_this_guest_does_not_have_is_refused_rather_than_guessed_at() {
+        let header = RequestHeader {
+            verb: 200,
+            body_length: 0,
+        };
+        assert_eq!(
+            decode_request(header, &[]).unwrap_err().reason,
+            "a verb this guest does not have"
+        );
+    }
+
+    fn entry(name: &str, kind: FilesystemEntryKind, size: u64) -> (String, EntryDetails) {
+        (
+            name.to_string(),
+            EntryDetails {
+                kind,
+                size_bytes: size,
+                modified_seconds: 1_760_000_000,
+            },
+        )
+    }
+
+    #[test]
+    fn a_listing_the_guest_writes_is_a_listing_the_host_reads() {
+        let entries = [
+            entry("notes.txt", FilesystemEntryKind::File, 42),
+            entry("uploads", FilesystemEntryKind::Directory, 4096),
+            entry("it's a \"file\"\nreally", FilesystemEntryKind::File, 7),
+        ];
+        let frame = encode_listing(&entries);
+        let header = decode_header(&frame[..FRAME_HEADER_BYTES]).unwrap();
+        assert!(!is_refusal(header.status));
+        let listing = decode_listing(&frame[FRAME_HEADER_BYTES..], &path("/data")).unwrap();
+
+        assert!(!listing.truncated);
+        assert_eq!(listing.entries.len(), 3);
+        assert_eq!(listing.entries[0].name, "notes.txt");
+        assert_eq!(listing.entries[0].size_bytes, 42);
+        assert_eq!(listing.entries[1].kind, FilesystemEntryKind::Directory);
+        assert_eq!(listing.entries[2].name, "it's a \"file\"\nreally");
+    }
+
+    /// The guest sets `truncated` when the body would not hold another entry; the host sets the
+    /// same flag when its own limit is reached first. Either way the reader is told.
+    #[test]
+    fn a_directory_that_outgrew_one_frame_says_so() {
+        let many: Vec<(String, EntryDetails)> = (0..4000)
+            .map(|index| entry(&format!("file-{index:040}"), FilesystemEntryKind::File, 1))
+            .collect();
+        let frame = encode_listing(&many);
+        assert!(frame.len() <= FRAME_HEADER_BYTES + BODY_MAX_BYTES);
+        let listing = decode_listing(&frame[FRAME_HEADER_BYTES..], &path("/data")).unwrap();
+        assert!(listing.truncated);
+        assert!(listing.entries.len() < many.len());
+    }
+
+    /// Half a filename is a name that points at nothing, so one too long for the wire is left out
+    /// rather than cut down to fit.
+    #[test]
+    fn a_name_too_long_for_the_wire_is_left_out_rather_than_shown_wrong() {
+        let long = "n".repeat(MAX_ENTRY_NAME_BYTES + 1);
+        let entries = [
+            entry(&long, FilesystemEntryKind::File, 1),
+            entry("short", FilesystemEntryKind::File, 1),
+        ];
+        let frame = encode_listing(&entries);
+        let listing = decode_listing(&frame[FRAME_HEADER_BYTES..], &path("/data")).unwrap();
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["short"]
+        );
+    }
+
+    #[test]
+    fn every_answer_the_guest_writes_is_one_the_host_reads() {
+        let details = EntryDetails {
+            kind: FilesystemEntryKind::File,
+            size_bytes: 1234,
+            modified_seconds: 1_760_000_000,
+        };
+        let frame = encode_details(&details);
+        let read = decode_details(&frame[FRAME_HEADER_BYTES..]).unwrap();
+        assert_eq!(read.kind, details.kind);
+        assert_eq!(read.size_bytes, details.size_bytes);
+
+        let frame = encode_written(4096);
+        assert_eq!(decode_written(&frame[FRAME_HEADER_BYTES..]).unwrap(), 4096);
+
+        let usage = MeasuredBytes {
+            total_bytes: 8 * 1024 * 1024 * 1024,
+            used_bytes: 1234,
+        };
+        let frame = encode_usage(&usage);
+        assert_eq!(decode_usage(&frame[FRAME_HEADER_BYTES..]).unwrap(), usage);
+
+        let compute = MeasuredCompute {
+            memory_total_bytes: 268_435_456,
+            memory_used_bytes: 1024,
+            cpu_total_ticks: 90_000,
+            cpu_busy_ticks: 1_200,
+        };
+        let frame = encode_compute(&compute);
+        assert_eq!(decode_compute(&frame[FRAME_HEADER_BYTES..]).unwrap(), compute);
+    }
+
+    /// A refusal carries no body: the status is the whole of what travels, because the sentence it
+    /// becomes is the host's to render and a tenant's path is not an operator's to read.
+    #[test]
+    fn a_refusal_carries_a_status_and_nothing_else() {
+        let frame = encode_refusal(STATUS_MALFORMED_REQUEST);
+        let header = decode_header(&frame).unwrap();
+        assert!(is_refusal(header.status));
+        assert_eq!(header.body_length, 0);
+        assert_eq!(refusal_for(header.status), "the guest could not read the request");
     }
 }
