@@ -74,7 +74,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
         volumes: snapshot.volume_reports.clone(),
         volume_usage: &snapshot.volume_usage,
         compute_usage: &snapshot.compute_usage,
-        checkpoints: Vec::new(),
+        checkpoints: snapshot.checkpoint_reports.clone(),
         exports: Vec::new(),
     })
 }

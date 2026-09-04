@@ -9,7 +9,7 @@ pub mod zerofs;
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use protocol::{AppId, DesiredVolume, ObjectKey, VolumeId};
+use protocol::{AppId, CheckpointId, DesiredVolume, ObjectKey, VolumeId};
 
 /// Firecracker computes sectors as `size >> 9`, and leaves an unaligned tail invisible to the
 /// guest.
@@ -32,6 +32,8 @@ pub enum VolumeError {
     Unusable(String),
     #[error("this host does not serve {volume_id}")]
     NotHere { volume_id: VolumeId },
+    #[error("{what} cannot be checkpointed")]
+    NoCheckpoints { what: &'static str },
 }
 
 impl VolumeError {
@@ -103,9 +105,17 @@ pub trait VolumeBackend: Send + Sync {
     /// has to be asked.
     async fn flush(&self) -> Result<(), VolumeError>;
 
-    /// A pinned, non-advancing view, for a reader that must not see the tenant move. Absent until
-    /// exports exist; a backend that cannot cut one says so rather than pretending.
-    async fn checkpoint(&self, volume_id: &VolumeId) -> Result<String, VolumeError>;
+    /// A pinned, non-advancing view, for a reader that must not see the tenant move. A backend
+    /// that cannot cut one says so rather than pretending: a checkpoint reported ready that
+    /// nothing pinned is a reader that sees the tenant move underneath it.
+    async fn create_checkpoint(&self, checkpoint_id: &CheckpointId) -> Result<(), VolumeError>;
+
+    async fn delete_checkpoint(&self, checkpoint_id: &CheckpointId) -> Result<(), VolumeError>;
+
+    /// The checkpoints this host is actually holding, by name. Which volume each was cut for is
+    /// not in the answer, for the same reason a volume's owner is not: the store knows names, and
+    /// only the document knows what they are for.
+    async fn observe_checkpoints(&self) -> Vec<CheckpointId>;
 
     /// What this host is actually holding, which is what a restarted daemon converges against.
     /// The owners come from the document for the same reason they are passed to `attach`.

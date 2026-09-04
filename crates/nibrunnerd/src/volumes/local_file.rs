@@ -191,10 +191,22 @@ impl VolumeBackend for LocalFileVolumes {
         Ok(())
     }
 
-    async fn checkpoint(&self, _volume_id: &VolumeId) -> Result<String, VolumeError> {
-        Err(VolumeError::Unusable(
-            "a volume kept as a local file cannot be checkpointed".into(),
-        ))
+    /// A sparse file has no pinned view to hand out. Said rather than faked, because a checkpoint
+    /// reported ready that nothing pinned is a reader watching the tenant write underneath it.
+    async fn create_checkpoint(&self, _checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+        Err(VolumeError::NoCheckpoints {
+            what: "a volume kept as a file on this host's own disk",
+        })
+    }
+
+    async fn delete_checkpoint(&self, _checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+        Err(VolumeError::NoCheckpoints {
+            what: "a volume kept as a file on this host's own disk",
+        })
+    }
+
+    async fn observe_checkpoints(&self) -> Vec<protocol::CheckpointId> {
+        Vec::new()
     }
 
     async fn observe(
@@ -227,7 +239,7 @@ impl VolumeBackend for LocalFileVolumes {
 mod tests {
     use super::*;
     use crate::services::{CommandResult, RecordingCommandRunner};
-    use crate::test_support::{app_id, desired_volume, volume_id, VOLUME_SIZE_BYTES};
+    use crate::test_support::{app_id, checkpoint_id, desired_volume, volume_id, VOLUME_SIZE_BYTES};
 
     fn backend(directory: &Path, commands: Arc<RecordingCommandRunner>) -> LocalFileVolumes {
         LocalFileVolumes::new(
@@ -330,7 +342,8 @@ mod tests {
     async fn a_volume_kept_as_a_local_file_says_it_cannot_be_checkpointed() {
         let directory = tempfile::tempdir().unwrap();
         let volumes = backend(directory.path(), RecordingCommandRunner::succeeding());
-        assert!(volumes.checkpoint(&volume_id()).await.is_err());
+        assert!(volumes.create_checkpoint(&checkpoint_id()).await.is_err());
+        assert!(volumes.observe_checkpoints().await.is_empty());
         volumes.flush().await.unwrap();
     }
 }

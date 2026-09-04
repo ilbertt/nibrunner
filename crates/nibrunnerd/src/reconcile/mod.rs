@@ -1,6 +1,7 @@
 //! Pull, converge, report. Nothing here is driven by a command: desired state describes a world,
 //! this compares it with what the host is observed to be doing, and the difference is the work.
 
+pub mod checkpoints;
 pub mod idle;
 pub mod instances;
 pub mod network;
@@ -48,7 +49,9 @@ pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
             })
             .collect(),
         volumes: volumes::observe_volumes(host, &volumes::volume_owners(desired, &snapshot.records)).await,
-        checkpoints: Vec::new(),
+        checkpoints: checkpoints::observe_checkpoints(host, desired).await,
+        // Exports are the half of this that is not written: a checkpoint server per export and a
+        // reader over the filesystem it pins. Nothing observes them, so nothing is ever planned.
         exports: Vec::new(),
     }
 }
@@ -157,6 +160,10 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
     network::apply_network(host).await;
     apply_starts(host, &plan).await;
     volumes::apply_teardowns(host, &plan).await;
+    // After the volumes and before the report: a checkpoint is cut against a filesystem this pass
+    // may have only just provisioned into, and what it reports is read on the strength of the same
+    // document that asked for it.
+    checkpoints::apply_checkpoints(host, &plan).await;
     // Again, because a start is where an app that is not `on-request` first gets a slot: without
     // this its loopback port stays nobody's until the next pass, and a request arriving in
     // between is refused by the kernel rather than answered by this daemon saying why.

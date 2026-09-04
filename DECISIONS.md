@@ -127,10 +127,8 @@ this being a static cross-compiled binary, so the feature set is `aws-base` + `r
   Exports are a checkpoint server started per checkpoint, an NBD attach against it and a read of
   the filesystem it pins — the attach half is written (`NbdDevices::attach_checkpoint`), the
   server and the reader are not.
-- **Checkpoints are cut but not tracked.** `VolumeBackend::checkpoint` runs `zerofs checkpoint
-  create` and the planner has verbs for them, but `reconcile/mod.rs` observes an empty list, so
-  nothing is ever created or deleted by a pass. Deliberate for now, and the two `Vec::new()` lines
-  say so.
+- **Exports have no server or reader**, so nothing observes one and nothing is ever planned. The
+  `Vec::new()` in `reconcile/mod.rs` says so rather than leaving a reader to wonder.
 - **Usage reporting.** A non-goal for v1.
 - **ACME.** Phase 5. The proxy serves a certificate and key from disk, or plain HTTP, or nothing.
 - **The `guestImage` version in a report** is read from the manifest beside the image. The image in

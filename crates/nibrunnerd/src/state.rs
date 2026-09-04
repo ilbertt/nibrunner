@@ -20,6 +20,7 @@ pub struct HostSnapshot {
     /// nothing behind to observe, so this is the only thing that keeps saying it happened.
     pub deleted_volumes: BTreeMap<VolumeId, ReportedVolume>,
     pub volume_reports: Vec<ReportedVolume>,
+    pub checkpoint_reports: Vec<protocol::ReportedCheckpoint>,
     pub next_probe_at_ms: BTreeMap<AppId, i64>,
     /// The apps a snapshot is being taken of right now. Here rather than on the record because it
     /// may not outlive the daemon that set it: one that died mid-capture comes back with this

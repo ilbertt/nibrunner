@@ -379,12 +379,33 @@ impl VolumeBackend for ZerofsVolumes {
         self.admin(&["flush"]).await.map(|_| ())
     }
 
-    async fn checkpoint(&self, volume_id: &VolumeId) -> Result<String, VolumeError> {
-        // A checkpoint is of the filesystem and not of one volume: every volume on this host
-        // shares one ZeroFS, so the name has to be unique across them rather than per disk.
-        let name = format!("{volume_id}-{}", protocol::Timestamp::now().epoch_ms());
-        self.admin(&["checkpoint", "create", &name]).await?;
-        Ok(name)
+    /// Named by the document rather than by this host. A checkpoint is of the whole filesystem —
+    /// one ZeroFS per host, every volume in it — so the name is the only thing that says which one
+    /// was asked for, and an agent killed between cutting one and reporting it comes back to a
+    /// list of names it recognises rather than to a recovery mode.
+    async fn create_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+        self.admin(&["checkpoint", "create", checkpoint_id.as_str()])
+            .await
+            .map(|_| ())
+    }
+
+    async fn delete_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+        self.admin(&["checkpoint", "delete", checkpoint_id.as_str()])
+            .await
+            .map(|_| ())
+    }
+
+    /// An empty list where ZeroFS would not answer, which reads as a host holding no checkpoints.
+    /// That is the safe way round: a name this host cannot see is one the pass will try to cut
+    /// again, where a name it invents is one nothing will ever delete.
+    async fn observe_checkpoints(&self) -> Vec<protocol::CheckpointId> {
+        let Ok(listed) = self.admin(&["checkpoint", "list"]).await else {
+            return Vec::new();
+        };
+        parse_checkpoint_names(&listed)
+            .into_iter()
+            .filter_map(|name| protocol::CheckpointId::parse(&name).ok())
+            .collect()
     }
 
     /// A reading that could not be taken is the assumed number rather than none, and it is said
@@ -573,7 +594,10 @@ mod tests {
         let volume_id = VolumeId::parse("vol-1").unwrap();
         volumes.ensure_device_file(&volume_id, 1024).unwrap();
         let _ = volumes.flush().await;
-        let _ = volumes.checkpoint(&volume_id).await;
+        let _ = volumes
+            .create_checkpoint(&crate::test_support::checkpoint_id())
+            .await;
+        let _ = volumes.observe_checkpoints().await;
         let _ = volumes.teardown(&volume_id, &app_id()).await;
 
         for call in commands.calls() {
