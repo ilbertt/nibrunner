@@ -120,8 +120,6 @@ fn prepare_tenant_filesystem() -> Result<(), String> {
         ));
     }
     mounts::tmpfs(paths::APP_DIR, "mode=0755,size=1M").map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(paths::DATA_DIR)
-        .map_err(|error| format!("{} could not be made: {error}", paths::DATA_DIR))?;
     mounts::tenant_data(
         paths::DATA_DEVICE,
         paths::DATA_DIR,
