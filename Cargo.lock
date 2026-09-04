@@ -1463,22 +1463,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nibrunnerctl"
-version = "0.1.0"
-dependencies = [
- "clap",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "nibrunner-protocol",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
 name = "nibrunnerd"
 version = "0.1.0"
 dependencies = [
@@ -1952,6 +1936,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

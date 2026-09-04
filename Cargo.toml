@@ -5,7 +5,6 @@ members = [
   "crates/guest-contract",
   "crates/nft-render",
   "crates/nibrunnerd",
-  "crates/nibrunnerctl",
 ]
 
 [workspace.package]
@@ -42,7 +41,7 @@ object_store = { version = "0.14", default-features = false, features = ["fs", "
 # object_store's own `reqwest` feature turns on the dependency without a TLS backend, so the
 # backend is chosen here. `rustls-no-provider` keeps aws-lc-rs out; `main` installs ring's
 # provider before anything dials, because rustls refuses to pick one for itself.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "http2", "json"] }
 slatedb = { version = "0.16", default-features = false, features = ["moka"] }
 backhand = { version = "0.25", default-features = false, features = ["gzip"] }
 sha2 = "0.10"
