@@ -51,7 +51,9 @@ pub fn assignments_from(records: BTreeMap<String, serde_json::Value>) -> BTreeMa
         let Ok(app_id) = AppId::parse(app_id) else {
             continue;
         };
-        if slot < FIRST_SLOT || slot >= SLOT_COUNT || taken.contains(&slot) {
+        // Past what this host has, or already somebody else's. A file can say anything; what it
+        // says can only ever cost this app a slot, never give it one another app holds.
+        if !(FIRST_SLOT..SLOT_COUNT).contains(&slot) || taken.contains(&slot) {
             continue;
         }
         assignments.insert(app_id, slot);

@@ -10,7 +10,7 @@ use crate::vm::VmStatus;
 /// that interval. This is the grid a first answer lands on instead.
 pub const STARTUP_PROBE_INTERVAL_MS: u64 = 250;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthTracker {
     pub consecutive_successes: u32,
@@ -18,12 +18,6 @@ pub struct HealthTracker {
     pub ever_healthy: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_healthy_at: Option<Timestamp>,
-}
-
-impl Default for HealthTracker {
-    fn default() -> Self {
-        Self { consecutive_successes: 0, consecutive_failures: 0, ever_healthy: false, last_healthy_at: None }
-    }
 }
 
 pub fn initial_tracker() -> HealthTracker {

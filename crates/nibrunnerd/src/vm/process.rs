@@ -25,7 +25,9 @@ const EXECUTABLE_MODE: u32 = 0o755;
 /// every test but the ones that boot runs on it — and saying so at startup is better than
 /// failing at the first deploy.
 pub fn carries_firecracker() -> bool {
-    !FIRECRACKER.is_empty()
+    // Asked of the build rather than of the bytes: the build script is what knows whether it
+    // found a hypervisor to embed, and reading the length back would be inferring that.
+    option_env!("NIBRUNNER_FIRECRACKER_EMBEDDED").is_some()
 }
 
 /// Extracted to a versioned directory, so two daemons of different versions on one host cannot

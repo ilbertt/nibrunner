@@ -176,7 +176,7 @@ fn u64_at(body: &[u8], offset: usize) -> u64 {
 fn timestamp_from(seconds: i64) -> Timestamp {
     seconds
         .checked_mul(1000)
-        .and_then(|ms| chrono_seconds(ms))
+        .and_then(chrono_seconds)
         .unwrap_or_else(|| Timestamp::parse("1970-01-01T00:00:00Z").expect("the epoch"))
 }
 

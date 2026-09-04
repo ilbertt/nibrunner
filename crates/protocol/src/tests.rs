@@ -85,7 +85,7 @@ fn environment_names_follow_the_shell_rule_minus_one() {
 fn identifiers_timestamps_and_addresses_are_checked() {
     assert!(AppId::parse("0198f3aa-1c2d-7e4b-9f11-a0b1c2d3e4f5").is_ok());
     assert!(AppId::parse("has.a.dot").is_err());
-    assert!(AppId::parse(&"x".repeat(64)).is_err());
+    assert!(AppId::parse("x".repeat(64)).is_err());
     assert!(Timestamp::parse("2026-08-03T10:00:00.000Z").is_ok());
     assert!(Timestamp::parse("2026-08-03T10:00:00+02:00").is_ok());
     assert!(Timestamp::parse("2026-08-03T10:00:00").is_err());
@@ -99,7 +99,7 @@ fn identifiers_timestamps_and_addresses_are_checked() {
     assert!(Filename::parse("pocketbase").is_ok());
     assert!(Filename::parse("../x").is_err());
     assert!(Filename::parse("-flag").is_err());
-    assert!(Sha256Digest::parse(&"A".repeat(64)).is_err());
+    assert!(Sha256Digest::parse("A".repeat(64)).is_err());
     assert!(HttpPort::try_from(0u32).is_err());
     assert!(HttpPort::try_from(70000u32).is_err());
     assert!(GuestPath::parse("/a/b").is_ok());

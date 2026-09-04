@@ -264,9 +264,12 @@ impl DesiredStateOrigin {
 // Recording implementations
 
 /// Records every command and answers each one, so a call shape can be asserted without a host.
+/// What a recorded runner answers one request with.
+type CommandAnswer = dyn Fn(&CommandRequest) -> Result<CommandResult, CommandError> + Send + Sync;
+
 pub struct RecordingCommandRunner {
     calls: Mutex<Vec<CommandRequest>>,
-    answer: Box<dyn Fn(&CommandRequest) -> Result<CommandResult, CommandError> + Send + Sync>,
+    answer: Box<CommandAnswer>,
 }
 
 impl RecordingCommandRunner {

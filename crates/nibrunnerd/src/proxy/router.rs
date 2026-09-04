@@ -174,7 +174,7 @@ mod tests {
                 },
             ];
         });
-        let table = RouteTable::from_targets(&renderable_routes(&[record.clone()]));
+        let table = RouteTable::from_targets(&renderable_routes(std::slice::from_ref(&record)));
         assert_eq!(table.port_for(app_hostname().hostname.as_str()), Some(record.host_port));
         // Matched without regard to case, because a client chooses that and a host does not.
         assert_eq!(table.port_for("www.example.com"), Some(record.host_port));
