@@ -35,8 +35,14 @@ http-body-util = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2"
+# `aws-base` + `ring` rather than the `aws` feature: `aws` forces the aws-lc-rs backend, whose
+# `aws-lc-sys` needs cmake and a C toolchain for the target — which is the one thing that would
+# stop this being a static cross-compiled binary. object_store signs with ring instead.
 object_store = { version = "0.14", default-features = false, features = ["fs", "aws-base", "reqwest", "ring"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+# object_store's own `reqwest` feature turns on the dependency without a TLS backend, so the
+# backend is chosen here. `rustls-no-provider` keeps aws-lc-rs out; `main` installs ring's
+# provider before anything dials, because rustls refuses to pick one for itself.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "http2"] }
 slatedb = { version = "0.16", default-features = false, features = ["moka"] }
 backhand = { version = "0.25", default-features = false, features = ["gzip"] }
 sha2 = "0.10"
