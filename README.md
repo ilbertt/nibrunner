@@ -124,6 +124,22 @@ while an operator is still watching rather than on the pass that first needed th
 `NIBRUNNER_LOG` is still an environment variable, and the only one besides `NIBRUNNER_CONFIG`: it
 is a `tracing` filter an operator changes to debug one restart, not a property of the host.
 
+### Browsing a tenant's files
+
+A listing comes from a `readdir` *inside* the microVM, against the filesystem the tenant has
+mounted — so it shows what is there rather than what had reached the block device by the last
+flush. The slot table is what scopes it: an app resolves to the single microVM this host runs for
+it, so a path is only ever resolved inside the filesystem its own app owns.
+
+Nothing on the wire is text. A path goes out behind its own length and a name comes back behind
+one, because a tenant's binary created those names and ext4 allows anything in them but `/` and
+NUL — a space, a quote, a newline, a leading dash. Length prefixes are what make that restriction
+unnecessary rather than merely relaxed.
+
+A failure is answered rather than swallowed: a host that stays quiet about a guest it could not
+reach turns a refusal somebody could act on into a timeout they cannot. The refusal reads as a
+sentence and never names the path — what a tenant keeps in their own filesystem is theirs to know.
+
 ### Exports
 
 An export hands a tenant their data back: their filesystem, the binary that was running on it, and

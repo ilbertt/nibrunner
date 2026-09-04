@@ -138,8 +138,9 @@ this being a static cross-compiled binary, so the feature set is `aws-base` + `r
   Exports are a checkpoint server started per checkpoint, an NBD attach against it and a read of
   the filesystem it pins — the attach half is written (`NbdDevices::attach_checkpoint`), the
   server and the reader are not.
-- **The vsock filesystem browse.** The codecs are written and tested against the C headers
-  (`crates/guest-contract/src/filesystem.rs`); nothing calls them.
+- **Writing through the filesystem browse.** The client carries every verb the guest speaks —
+  `stat`, `read`, `write`, `mkdir`, `remove`, `move`, `usage`, `compute` — and the control plane
+  only ever asks for a listing, so the rest are reachable and untested against a real guest.
 - **Usage reporting.** A non-goal for v1.
 - **ACME.** Phase 5. The proxy serves a certificate and key from disk, or plain HTTP, or nothing.
 - **The `guestImage` version in a report** is read from the manifest beside the image. The image in

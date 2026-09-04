@@ -5,9 +5,9 @@
 //! which of them produced the document, a host that loses the control plane goes on converging on
 //! the last one it was given, and this can be run as a separate process or not at all.
 //!
-//! v1 ships the client types and the shape of the loop. What is not here is a session that
-//! renews, a report that goes back, and the filesystem-query channel — the seams are named so
-//! that adding them is this file and nothing else.
+//! v1 ships the client types, the shape of the loop, and the filesystem-query channel. What is
+//! not here is a session that renews and a report that goes back — the seams are named so that
+//! adding them is this file and nothing else.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -123,6 +123,42 @@ impl ControlPlaneClient {
             Some(session_token),
         )
         .await
+    }
+
+    /// A read somebody is waiting for, or nothing.
+    ///
+    /// The control plane holds this request open until a read arrives, so a poll that came back
+    /// with nothing has already spent longer than any pause this side would add. The apps offered
+    /// are sent on every poll rather than registered once: one torn down between two polls stops
+    /// being offered on the next, with nothing to invalidate.
+    pub async fn fetch_filesystem_query(
+        &self,
+        session_token: &protocol::SecretString,
+        served_app_ids: Vec<protocol::AppId>,
+    ) -> Result<protocol::FilesystemQueryResponse, ControlPlaneError> {
+        self.post(
+            agent_routes::FILESYSTEM_QUERY,
+            &protocol::FilesystemQueryRequest { served_app_ids },
+            Some(session_token),
+        )
+        .await
+    }
+
+    /// Sent whatever the answer was, because a failure is the answer as far as whoever asked is
+    /// concerned: a host that stays quiet turns a refusal somebody could act on into a timeout.
+    pub async fn send_filesystem_query_result(
+        &self,
+        session_token: &protocol::SecretString,
+        result: &protocol::FilesystemQueryResult,
+    ) -> Result<(), ControlPlaneError> {
+        let _: serde::de::IgnoredAny = self
+            .post(agent_routes::FILESYSTEM_QUERY_RESULT, result, Some(session_token))
+            .await
+            .or_else(|error| match error {
+                ControlPlaneError::Mismatch { .. } => Ok(serde::de::IgnoredAny),
+                other => Err(other),
+            })?;
+        Ok(())
     }
 
     /// Nothing comes back. The desired-state poll is the only channel carrying state to a host, so
