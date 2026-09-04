@@ -62,8 +62,6 @@ pub async fn apply_exports(host: &Host, plan: &ReconcilePlan) {
                 reports.retain(|held| held.export_id != report.export_id);
                 reports.push(report);
             }
-            // `Forget`, not delete: expiry is the bucket's lifecycle rule, which is what makes it
-            // unforgettable. All this host drops is its own note that it wrote one.
             ExportPlan::Forget { export_id } => reports.retain(|held| &held.export_id != export_id),
             ExportPlan::None { .. } => {}
         }
@@ -73,8 +71,7 @@ pub async fn apply_exports(host: &Host, plan: &ReconcilePlan) {
         .await;
 }
 
-/// One export at a time on a host, because the reader is one device: a second export attaching a
-/// second checkpoint to it would read the first export's filesystem.
+/// One export at a time on a host, because the reader is one device.
 async fn write(host: &Host, desired: &DesiredExport) -> ReportedExport {
     let Some(checkpoint_id) = export_checkpoint_id(&desired.export_id) else {
         return failed(

@@ -494,8 +494,7 @@ mod tests {
         }
 
         /// The shape a reboot produces: the daemon's records survive on disk, so the instance is
-        /// still present and still wanted, but nothing has run since the host came up. Reading
-        /// that as an exit leaves the host serving nothing until somebody logs in.
+        /// still present and still wanted, but nothing has run since the host came up.
         #[test]
         fn a_vm_that_has_not_run_since_the_host_booted_is_started() {
             let result = plan(

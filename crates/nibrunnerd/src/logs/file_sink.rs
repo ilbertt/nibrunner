@@ -13,7 +13,7 @@ use crate::services::{LogSink, TenantLogBody, TenantLogEvent};
 const LOG_DIR_MODE: u32 = 0o700;
 
 /// A gap is a line rather than a counter, so it lands in the same ordered stream as the output it
-/// replaces: reading the log is how you find out something is missing, and from where.
+/// replaces.
 const GAP_MESSAGE: &str = "tenant output dropped by host buffering";
 
 pub struct FileLogSink {

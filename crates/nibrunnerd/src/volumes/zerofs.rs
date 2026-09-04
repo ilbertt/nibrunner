@@ -351,9 +351,8 @@ impl VolumeBackend for ZerofsVolumes {
         self.devices.detach(&device_path).await
     }
 
-    /// The only path that destroys tenant data, and it runs only for an explicit `absent`. The
-    /// flush first, so the detach happens at a durability point rather than dropping whatever the
-    /// periodic flush had not yet uploaded.
+    /// The flush first, so the detach happens at a durability point rather than dropping whatever
+    /// the periodic flush had not yet uploaded.
     async fn teardown(&self, volume_id: &VolumeId, app_id: &protocol::AppId) -> Result<(), VolumeError> {
         let _ = self.flush().await;
         let _ = self.detach(volume_id, app_id).await;

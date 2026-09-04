@@ -391,9 +391,8 @@ impl Vmm for VmManager {
         self.processes.adopted_app_ids()
     }
 
-    /// `/init` ends every way it can stop with a line saying which one it took, so the last of
-    /// them is its verdict. The console is truncated on every start, so the whole file belongs to
-    /// the run in progress and nothing has to bound the read by time.
+    /// The console is truncated on every start, so the whole file belongs to the run in progress
+    /// and nothing has to bound the read by time.
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String> {
         let console = std::fs::read_to_string(self.processes.console_path(app_id)).ok()?;
         guest_contract::control::last_guest_line(&console)

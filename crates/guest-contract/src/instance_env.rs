@@ -625,7 +625,6 @@ mod both_ends {
         assert_eq!(exported.iter().filter(|(name, _)| name == "PORT").count(), 1);
     }
 
-    /// The prefix is what keeps the substitution off values it was never meant for.
     #[test]
     fn only_a_reference_to_a_runtime_value_expands() {
         let config = parse_instance_env(&written(
@@ -718,7 +717,6 @@ mod both_ends {
             .any(|(name, _)| name == "NIBRUN_HOSTNAME"));
     }
 
-    /// An argument list silently one short is a tenant started with somebody else's command line.
     #[test]
     fn a_gap_in_the_arguments_is_refused_rather_than_shifting_the_rest_down() {
         let with_gap: String = written(&[], &["--one", "--two", "--three"])
@@ -730,8 +728,6 @@ mod both_ends {
         assert!(matches!(error, InstanceEnvError::Malformed { .. }), "{error}");
     }
 
-    /// A key in neither namespace is not this runtime's to interpret, and refusing one would stop
-    /// a host that learned a new key from booting an image older than it.
     #[test]
     fn a_key_from_neither_namespace_is_ignored_rather_than_refused() {
         let extended = format!("{}SOMETHING_NEW=from a later agent\n", written(&[], &[]));

@@ -33,8 +33,7 @@ pub enum GuestFilesystemError {
     #[error("the guest running {app_id} took a request about its files and never answered")]
     Silent { app_id: AppId },
     /// Read as a sentence rather than as a code, because this is the half of a failure that
-    /// reaches whoever asked. None of them names the path: what a tenant keeps in their own
-    /// filesystem is theirs to know and not an operator's.
+    /// reaches whoever asked. None of them names the path.
     #[error("the guest running {app_id} would not do that with its files: {refusal}")]
     Refused { app_id: AppId, refusal: &'static str },
     #[error("more was asked of the guest running {app_id} at once than one request carries")]
@@ -141,7 +140,8 @@ impl GuestFilesystem {
             .map(|_| ())
     }
 
-    /// One entry, never a tree: a directory that still holds something is refused.
+    /// One entry, never a tree: a directory that still holds something is refused, because a
+    /// recursive delete is not something a browse should be able to ask for by accident.
     pub async fn remove(&mut self, path: &GuestPath) -> Result<(), GuestFilesystemError> {
         self.exchange(&GuestFilesystemRequest::Remove { path: path.clone() })
             .await

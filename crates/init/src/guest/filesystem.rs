@@ -3,10 +3,6 @@
 //! Ported from `apps/runtime/src/guest-filesystem.c`, and much shorter than it: the frame codec is
 //! `guest_contract::filesystem`, which is the same module the host decodes with. What is left here
 //! is the part that touches the filesystem.
-//!
-//! Every answer is a `readdir`, a `pread` or a `pwrite` against the filesystem this guest has
-//! mounted read-write — which is why a listing shows what is there rather than what had reached
-//! the block device by the last flush, and why a write is possible at all.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::OwnedFd;
@@ -192,8 +188,6 @@ fn make_directory(path: &Path) -> Vec<u8> {
     }
 }
 
-/// One entry, never a tree: a directory that still holds something is refused, because a recursive
-/// delete is not something a browse should be able to ask for by accident.
 fn remove(path: &Path) -> Vec<u8> {
     let removed = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => std::fs::remove_dir(path),
@@ -206,7 +200,6 @@ fn remove(path: &Path) -> Vec<u8> {
     }
 }
 
-/// Short of `length` is the end of the file, which is how a reader in chunks learns to stop.
 fn read(path: &Path, offset: u64, length: u32) -> Vec<u8> {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -228,7 +221,6 @@ fn read(path: &Path, offset: u64, length: u32) -> Vec<u8> {
     encode_reply(STATUS_OK, &content)
 }
 
-/// `truncate` cuts the file at `offset` first, so a replacement leaves none of the old tail.
 fn write(path: &Path, offset: u64, content: &[u8], truncate: bool) -> Vec<u8> {
     let file = std::fs::OpenOptions::new().write(true).create(true).open(path);
     let mut file = match file {
@@ -247,7 +239,6 @@ fn write(path: &Path, offset: u64, content: &[u8], truncate: bool) -> Vec<u8> {
     }
 }
 
-/// How full the volume is. No path, because the volume is one filesystem all the way down.
 fn usage() -> Vec<u8> {
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     let Ok(mount) = std::ffi::CString::new(paths::DATA_DIR) else {
@@ -271,9 +262,6 @@ fn usage() -> Vec<u8> {
     })
 }
 
-/// What the guest is spending. Not about the filesystem at all — the ticks are cumulative since
-/// this guest booted and mean nothing on their own: a share is the difference between two readings
-/// over the time between them, which is why the counters travel rather than a rate.
 fn compute() -> Vec<u8> {
     let memory = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let total_kb = meminfo_kb(&memory, "MemTotal:");
