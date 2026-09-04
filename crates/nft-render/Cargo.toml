@@ -1,5 +1,5 @@
 [package]
-name = "hostd-nft-render"
+name = "nibrunner-nft-render"
 description = "Slot arithmetic, the nftables ruleset rendered whole, and the parsers for what nft answers"
 version.workspace = true
 edition.workspace = true

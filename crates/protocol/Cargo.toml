@@ -1,6 +1,6 @@
 [package]
-name = "hostd-protocol"
-description = "The nibrun host protocol: desired state, reported state, session and filesystem query documents"
+name = "nibrunner-protocol"
+description = "The nibrun control-plane protocol: desired state, reported state, session and filesystem query documents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,13 +1,13 @@
 [package]
-name = "hostctl"
-description = "CLI over the hostd unix socket: apply, status, wake, logs"
+name = "nibrunnerctl"
+description = "CLI over the nibrunnerd unix socket: apply, status, wake, logs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "hostctl"
+name = "nibrunnerctl"
 path = "src/main.rs"
 
 [dependencies]

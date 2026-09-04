@@ -878,95 +878,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hostctl"
-version = "0.1.0"
-dependencies = [
- "clap",
- "hex",
- "hostd-protocol",
- "http-body-util",
- "hyper",
- "hyper-util",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
-name = "hostd"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "backhand",
- "bytes",
- "chrono",
- "clap",
- "flate2",
- "futures",
- "hex",
- "hostd-guest-contract",
- "hostd-nft-render",
- "hostd-protocol",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "nbd-netlink",
- "netlink-packet-route",
- "nix 0.30.1",
- "object_store",
- "reqwest",
- "rtnetlink",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha2",
- "slatedb",
- "tar",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "uuid",
-]
-
-[[package]]
-name = "hostd-guest-contract"
-version = "0.1.0"
-dependencies = [
- "hostd-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "hostd-nft-render"
-version = "0.1.0"
-dependencies = [
- "hostd-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "hostd-protocol"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1519,6 +1430,95 @@ dependencies = [
  "bytes",
  "libc",
  "log",
+]
+
+[[package]]
+name = "nibrunner-guest-contract"
+version = "0.1.0"
+dependencies = [
+ "nibrunner-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nibrunner-nft-render"
+version = "0.1.0"
+dependencies = [
+ "nibrunner-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nibrunner-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nibrunnerctl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nibrunner-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "nibrunnerd"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "backhand",
+ "bytes",
+ "chrono",
+ "clap",
+ "flate2",
+ "futures",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "nbd-netlink",
+ "netlink-packet-route",
+ "nibrunner-guest-contract",
+ "nibrunner-nft-render",
+ "nibrunner-protocol",
+ "nix 0.30.1",
+ "object_store",
+ "reqwest",
+ "rtnetlink",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2",
+ "slatedb",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]

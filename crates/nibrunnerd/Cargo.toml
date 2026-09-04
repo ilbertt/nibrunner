@@ -1,6 +1,6 @@
 [package]
-name = "hostd"
-description = "One static daemon that turns a Linux machine with /dev/kvm into a nibrun app host"
+name = "nibrunnerd"
+description = "One static daemon that turns a Linux machine with /dev/kvm into an app host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,11 @@ rust-version.workspace = true
 build = "build.rs"
 
 [lib]
-name = "hostd"
+name = "nibrunnerd"
 path = "src/lib.rs"
 
 [[bin]]
-name = "hostd"
+name = "nibrunnerd"
 path = "src/main.rs"
 
 [dependencies]
