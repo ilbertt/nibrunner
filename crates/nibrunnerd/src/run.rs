@@ -126,16 +126,10 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         }),
     );
 
-    // Where a finished export goes. A host that names none has nowhere to put one, and an export
-    // asked of it fails saying so rather than reading a tenant's whole dataset to drop it.
+    // Where a finished export goes.
     let exports: Arc<dyn crate::exports::store::ExportStore> = Arc::new(
-        crate::exports::store::ObjectExportStore::open(
-            config
-                .export_store_url
-                .as_deref()
-                .unwrap_or(&config.export_staging_dir.join("written").display().to_string()),
-        )
-        .map_err(|error| StartupError::Config(error.message()))?,
+        crate::exports::store::ObjectExportStore::open(&config.export_store_url)
+            .map_err(|error| StartupError::Config(error.message()))?,
     );
     // Only where a volume is something a checkpoint can be cut from.
     let checkpoint_servers = config.zerofs.as_ref().map(|settings| CheckpointServers {

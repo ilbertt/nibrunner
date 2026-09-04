@@ -118,7 +118,7 @@ while an operator is still watching rather than on the pass that first needed th
 | `network.control_plane_cidrs_v4` | `[]` | Ranges a guest is denied by name |
 | `network.control_plane_cidrs_v6` | `[]` | The same, where no blanket rule covers them |
 | `control_plane.url` | none | The addon that polls a remote control plane |
-| `exports.store_url` | `<state>/exports/written` | Where a finished bundle goes |
+| `exports.store_url` | `<state>/export-store` | Where a finished bundle goes |
 | `exports.staging_dir` | `<state>/exports` | Where one is assembled, and removed after |
 
 `NIBRUNNER_LOG` is still an environment variable, and the only one besides `NIBRUNNER_CONFIG`: it

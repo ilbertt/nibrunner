@@ -142,7 +142,11 @@ pub struct HostConfig {
     /// Where a finished export's bundle is put. Its own store rather than the artifact one: a
     /// bundle is a tenant's whole dataset in the clear, and the two want different lifecycle rules
     /// and different permissions — an export needs no delete, and an artifact is never reaped.
-    pub export_store_url: Option<String>,
+    ///
+    /// Never inside `export_staging_dir`, and the default is deliberately a sibling: the staging
+    /// tree is removed whole by the reap, so a store nested in it would lose every bundle this
+    /// host had written the first time an export was left behind.
+    pub export_store_url: String,
     /// Where a bundle is assembled. Under the state directory by default, because it is a second
     /// copy of a tenant's dataset and belongs on the disk this host already treats as private.
     pub export_staging_dir: PathBuf,
@@ -540,12 +544,10 @@ impl HostConfig {
                 .as_deref()
                 .map(|url| control_plane_url("control_plane.url", url))
                 .transpose()?,
-            export_store_url: document
-                .exports
-                .store_url
-                .as_deref()
-                .map(|url| object_store_url("exports.store_url", url))
-                .transpose()?,
+            export_store_url: match document.exports.store_url.as_deref() {
+                Some(url) => object_store_url("exports.store_url", url)?,
+                None => state_dir.join("export-store").display().to_string(),
+            },
             export_staging_dir: beneath(
                 "exports.staging_dir",
                 document.exports.staging_dir.as_deref(),
@@ -581,7 +583,7 @@ impl HostConfig {
             proxy_tls_key: None,
             control_plane_url: None,
             versions_file: root.join("state/versions.json"),
-            export_store_url: None,
+            export_store_url: root.join("state/export-store").display().to_string(),
             export_staging_dir: root.join("state/exports"),
         }
     }
@@ -947,6 +949,26 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
             refused("[volumes]\nbackend = \"zerofs\"\n\n[volumes.zerofs]\nmount_path = \"mnt\"\n")
                 .contains("volumes.zerofs.mount_path")
         );
+    }
+
+    /// The staging tree is removed whole by the reap, so a store nested in it would lose every
+    /// bundle this host had written the first time an export was left behind.
+    #[test]
+    fn a_finished_bundle_is_never_kept_inside_the_tree_the_reap_removes() {
+        for text in [
+            "",
+            "[paths]\nstate_dir = \"/srv/nibrunner\"\n",
+            "[exports]\nstaging_dir = \"/mnt/scratch/exports\"\n",
+        ] {
+            let config = parsed(text);
+            let store = PathBuf::from(&config.export_store_url);
+            assert!(
+                !store.starts_with(&config.export_staging_dir),
+                "{} is inside {}",
+                store.display(),
+                config.export_staging_dir.display()
+            );
+        }
     }
 
     #[test]
