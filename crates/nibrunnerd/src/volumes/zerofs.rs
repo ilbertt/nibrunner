@@ -159,10 +159,6 @@ impl ZerofsVolumes {
         Ok(target)
     }
 
-    /// Raised rather than guessed when the device will not answer. Both guesses are wrong in a way
-    /// this is not allowed to be: unformatted destroys a tenant's filesystem, and formatted
-    /// reports a volume ready that nothing can read. A failure here is a volume reported failed,
-    /// which is the only one of the three an operator can act on.
     async fn is_formatted(&self, device_path: &str) -> Result<bool, VolumeError> {
         let path = device_path.to_string();
         let unreadable = || VolumeError::SuperblockUnreadable {

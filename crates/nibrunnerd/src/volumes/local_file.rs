@@ -83,9 +83,6 @@ impl LocalFileVolumes {
         Ok(target)
     }
 
-    /// Raised rather than guessed when the image will not answer. Both guesses are wrong in a way
-    /// this is not allowed to be: unformatted destroys a tenant's filesystem, and formatted
-    /// reports a volume ready that nothing can read.
     fn is_formatted(&self, volume_id: &VolumeId) -> Result<bool, VolumeError> {
         use std::io::{Read, Seek, SeekFrom};
         let path = self.path_for(volume_id);

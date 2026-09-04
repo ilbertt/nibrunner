@@ -26,6 +26,10 @@ pub enum VolumeError {
     /// a bug.
     #[error("a volume of {current} bytes cannot be resized down to {requested}")]
     ShrinkRefused { current: u64, requested: u64 },
+    /// Raised rather than guessed when a device or an image will not answer. Both guesses are
+    /// wrong in a way a backend is not allowed to be: unformatted destroys a tenant's filesystem,
+    /// and formatted reports a volume ready that nothing can read. A volume reported failed is the
+    /// only one of the three an operator can act on.
     #[error("{device_path} did not answer a read of its superblock")]
     SuperblockUnreadable { device_path: String },
     #[error("the volume could not be made ready: {0}")]
