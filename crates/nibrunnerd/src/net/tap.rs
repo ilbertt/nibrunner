@@ -101,7 +101,7 @@ mod linux {
     use futures::TryStreamExt;
     use netlink_packet_route::link::LinkAttribute;
     use netlink_packet_route::neighbour::NeighbourState;
-    use rtnetlink::{Handle, LinkTun, LinkUnspec};
+    use rtnetlink::{Handle, LinkUnspec};
 
     use super::{HostNetwork, Neighbour, NetworkError, TapInterface};
 
@@ -148,8 +148,10 @@ mod linux {
 
         const IFF_TAP: libc::c_short = 0x0002;
         const IFF_NO_PI: libc::c_short = 0x1000;
-        const TUNSETIFF: libc::c_ulong = 0x400454ca;
-        const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
+        // `libc::Ioctl` rather than a fixed width: the request argument is `c_ulong` against
+        // glibc and `c_int` against musl, and this daemon is built against both.
+        const TUNSETIFF: libc::Ioctl = 0x400454ca;
+        const TUNSETPERSIST: libc::Ioctl = 0x400454cb;
 
         #[repr(C)]
         struct InterfaceRequest {

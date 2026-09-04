@@ -19,6 +19,10 @@ use crate::volumes::VolumeBackend;
 
 pub struct Host {
     pub config: HostConfig,
+    /// The memory a guest may be given, read once at startup rather than per decision: a host is
+    /// resized by being replaced, and the number a wake is refused on has to be the number the
+    /// report was built from or a full host goes on being placed onto for as long as it refuses.
+    pub guest_memory_mib: u64,
     pub state: SharedState,
     pub allocator: Mutex<SlotAllocator>,
     pub cache: Mutex<DesiredStateCache>,

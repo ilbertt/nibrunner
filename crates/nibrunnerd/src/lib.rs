@@ -13,7 +13,9 @@ pub mod backoff;
 pub mod clock;
 pub mod config;
 pub mod control;
+pub mod artifact_store;
 pub mod desired;
+pub mod exec;
 pub mod health;
 pub mod host;
 pub mod json_store;
@@ -22,12 +24,14 @@ pub mod net;
 pub mod proxy;
 pub mod reconcile;
 pub mod report;
+pub mod run;
 pub mod services;
 pub mod state;
 #[cfg(test)]
 pub mod test_support;
 pub mod vm;
 pub mod volumes;
+pub mod waker;
 
 /// rustls is built here without a default cryptography provider, because the one it would pick is
 /// aws-lc-rs — whose `aws-lc-sys` needs cmake and a C toolchain for the target, which is what

@@ -54,6 +54,7 @@ nbd-netlink.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+nft-render.workspace = true
 
 [build-dependencies]
 sha2.workspace = true

@@ -253,13 +253,20 @@ mod tests {
         }
     }
 
-    /// A port the kernel has just handed out and taken back, rather than the one an app's slot
-    /// really carries: a test must not need 21000 to be free on whatever machine runs it.
-    async fn unused_port() -> HostPort {
-        let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        HostPort::new(port).unwrap()
+    /// A port the activator is actually listening on, rather than one that was free a moment
+    /// ago: a test must not need 21000 to be free on whatever machine runs it, and the window
+    /// between letting a probe port go and binding it again is one another test can take.
+    async fn serving(activator: &Arc<AppActivator>, app_id: &AppId) -> HostPort {
+        for _ in 0..50 {
+            let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.unwrap();
+            let port = HostPort::new(probe.local_addr().unwrap().port()).unwrap();
+            drop(probe);
+            activator.serve(&[(app_id.clone(), port)]).await;
+            if activator.listening_for().await.contains(app_id) {
+                return port;
+            }
+        }
+        panic!("the activator could not be given a port to listen on");
     }
 
     async fn get(port: HostPort) -> reqwest::Response {
@@ -307,8 +314,7 @@ mod tests {
         let state = HostState::shared();
         state.put_record(instance_record(|record| record.on_request = false)).await;
         let activator = AppActivator::new(state, CountingWaker::allowing());
-        let host_port = unused_port().await;
-        activator.serve(&[(app_id(), host_port)]).await;
+        let host_port = serving(&activator, &app_id()).await;
         let response = get(host_port).await;
         assert_eq!(response.status(), 503);
         assert!(response.text().await.unwrap().contains("not running"));
@@ -320,8 +326,7 @@ mod tests {
         guest(&state, "served by the tenant\n").await;
         let waker = CountingWaker::allowing();
         let activator = AppActivator::new(state, waker.clone());
-        let host_port = unused_port().await;
-        activator.serve(&[(app_id(), host_port)]).await;
+        let host_port = serving(&activator, &app_id()).await;
 
         let response = get(host_port).await;
         assert_eq!(response.status(), 200);
@@ -341,8 +346,7 @@ mod tests {
             }))
             .await;
         let activator = AppActivator::new(state, CountingWaker::refusing(WakeRefusal::NoRoom { shortfall_mib: 256 }));
-        let host_port = unused_port().await;
-        activator.serve(&[(app_id(), host_port)]).await;
+        let host_port = serving(&activator, &app_id()).await;
         assert!(get(host_port).await.text().await.unwrap().contains("out of memory"));
     }
 
@@ -357,8 +361,7 @@ mod tests {
             .await;
         let activator =
             AppActivator::new(state, CountingWaker::refusing(WakeRefusal::Failed { reason: "no slots left".into() }));
-        let host_port = unused_port().await;
-        activator.serve(&[(app_id(), host_port)]).await;
+        let host_port = serving(&activator, &app_id()).await;
         assert!(get(host_port).await.text().await.unwrap().contains("could not be started"));
     }
 
@@ -375,8 +378,7 @@ mod tests {
             .await;
         let waker = CountingWaker::allowing();
         let activator = AppActivator::new(state, waker.clone());
-        let host_port = unused_port().await;
-        activator.serve(&[(app_id(), host_port)]).await;
+        let host_port = serving(&activator, &app_id()).await;
         assert_eq!(get(host_port).await.status(), 503);
         assert_eq!(waker.count(), 0);
     }
@@ -386,11 +388,9 @@ mod tests {
         let state = HostState::shared();
         state.put_record(instance_record(|_| {})).await;
         let activator = AppActivator::new(state, CountingWaker::allowing());
-        let host_port = unused_port().await;
-        let slots = vec![(app_id(), host_port)];
-        activator.serve(&slots).await;
+        let host_port = serving(&activator, &app_id()).await;
         // A sync that changes nothing keeps the port, so nothing goes out under it.
-        activator.serve(&slots).await;
+        activator.serve(&[(app_id(), host_port)]).await;
         assert_eq!(activator.listening_for().await, vec![app_id()]);
         assert_eq!(get(host_port).await.status(), 503);
 

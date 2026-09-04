@@ -47,8 +47,8 @@ backhand = { version = "0.25", default-features = false, features = ["gzip"] }
 sha2 = "0.10"
 hex = "0.4"
 libc = "0.2"
-nix = { version = "0.30", features = ["ioctl", "signal", "process", "fs", "socket", "net"] }
-rtnetlink = { version = "0.23", default-features = false, features = ["tokio"] }
+nix = { version = "0.30", features = ["inotify", "ioctl", "signal", "process", "fs", "socket", "net"] }
+rtnetlink = { version = "0.23", default-features = false, features = ["tokio_socket"] }
 netlink-packet-route = "0.33"
 nbd-netlink = "0.3"
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }

@@ -1,0 +1,36 @@
+[Unit]
+Description=nibrunner app host
+After=network-online.target
+Wants=network-online.target
+
+# Deliberately not BindsTo or Requires on anything: the daemon must be restartable, and
+# stoppable, without that being an event for anything it manages. A tenant microVM runs in a
+# session of its own rather than as a child of this process, so restarting the daemon leaves
+# every running app alone — it comes back and converges against what it finds.
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/nibrunnerd
+EnvironmentFile=-/etc/nibrunner/nibrunnerd.env
+
+Restart=always
+RestartSec=5s
+
+StateDirectory=nibrunner
+RuntimeDirectory=nibrunner
+# systemd removes a RuntimeDirectory when its unit stops, and what lives in this one belongs to
+# the microVMs rather than to the daemon: each Firecracker holds its API socket there and keeps
+# running across a restart. Removing it takes away the only handle on a VM that outlived the
+# daemon, which is precisely the case the VMs are put in their own session to survive.
+RuntimeDirectoryPreserve=yes
+
+# It creates tap devices, writes firewall rules and starts microVMs, so it runs as root.
+# Containerising it would hand back every privilege the container removed.
+NoNewPrivileges=false
+
+# What this unit is called in the log store. journald attaches this to every entry the unit
+# writes, and systemd requires the field name to be uppercase.
+LogExtraFields=SOURCE=nibrunnerd
+
+[Install]
+WantedBy=multi-user.target

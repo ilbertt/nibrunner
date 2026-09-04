@@ -261,6 +261,9 @@ pub async fn test_host() -> TestHost {
     let commands = RecordingCommandRunner::succeeding();
     let vms = RecordingVmm::new();
     let host = Arc::new(Host {
+        // Room for four apps at the default size, so a test that wants a host with no room says
+        // so rather than depending on what the machine running it happens to have.
+        guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         state: state.clone(),
         allocator: Mutex::new(SlotAllocator::empty()),
         cache: Mutex::new(DesiredStateCache::new()),
