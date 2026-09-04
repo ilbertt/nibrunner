@@ -58,6 +58,43 @@ impl ConfigError {
     }
 }
 
+/// What a volume is made of, which is the one thing about this host that is meant to change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeBackendKind {
+    /// A sparse file on this host's own disk. Needs nothing of the machine but a filesystem, and
+    /// gives nothing back when the machine goes.
+    LocalFile,
+    /// A file inside a ZeroFS filesystem, reached by the guest over NBD. What makes a volume
+    /// outlive the host it was written on.
+    Zerofs,
+}
+
+impl VolumeBackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalFile => "local-file",
+            Self::Zerofs => "zerofs",
+        }
+    }
+}
+
+/// Where this host's ZeroFS is, and where what it serves can be reached. Every path here belongs
+/// to a service this daemon does not own and must never start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZerofsSettings {
+    pub binary: PathBuf,
+    pub config_file: PathBuf,
+    pub mount_path: PathBuf,
+    pub nbd_socket_path: PathBuf,
+    pub checkpoint_runtime_dir: PathBuf,
+}
+
+const DEFAULT_ZEROFS_BINARY: &str = "/opt/nibrun/bin/zerofs/zerofs";
+const DEFAULT_ZEROFS_CONFIG: &str = "/etc/zerofs/config.toml";
+const DEFAULT_ZEROFS_MOUNT: &str = "/mnt/zerofs";
+const DEFAULT_ZEROFS_NBD_SOCKET: &str = "/run/zerofs/nbd.sock";
+const DEFAULT_ZEROFS_CHECKPOINT_RUNTIME_DIR: &str = "/run/zerofs-checkpoint";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
     pub state_dir: PathBuf,
@@ -76,6 +113,9 @@ pub struct HostConfig {
     /// Where a volume's blocks live, for the backend that keeps them in an object store.
     pub volume_store_url: Option<String>,
     pub storage_prefix: String,
+    pub volume_backend: VolumeBackendKind,
+    /// Present exactly when the backend is `zerofs`, so nothing downstream has to ask twice.
+    pub zerofs: Option<ZerofsSettings>,
     /// Where a tenant's own public port is reached, which is not this host's address and not
     /// something a guest can discover.
     pub port_relay_public_ipv4: Option<Ipv4Address>,
@@ -202,8 +242,20 @@ mod file {
     #[derive(Debug, Default, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Volumes {
+        pub(super) backend: Option<String>,
         pub(super) store_url: Option<String>,
         pub(super) storage_prefix: Option<String>,
+        pub(super) zerofs: Option<Zerofs>,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Zerofs {
+        pub(super) binary: Option<String>,
+        pub(super) config_file: Option<String>,
+        pub(super) mount_path: Option<String>,
+        pub(super) nbd_socket_path: Option<String>,
+        pub(super) checkpoint_runtime_dir: Option<String>,
     }
 
     #[derive(Debug, Default, Deserialize)]
@@ -311,6 +363,62 @@ impl HostConfig {
             }
         }
 
+        let backend = match document.volumes.backend.as_deref() {
+            None | Some("local-file") => VolumeBackendKind::LocalFile,
+            Some("zerofs") => VolumeBackendKind::Zerofs,
+            Some(named) => {
+                return Err(ConfigError::invalid(
+                    "volumes.backend",
+                    format!("a backend this host has, and there is no {named}"),
+                ))
+            }
+        };
+        // Named settings that nothing would read are the mistake this file exists to catch: a host
+        // configured for ZeroFS and running on local files is one whose volumes quietly do not
+        // survive it.
+        if document.volumes.zerofs.is_some() && backend != VolumeBackendKind::Zerofs {
+            return Err(ConfigError::invalid(
+                "volumes.zerofs",
+                format!(
+                    "read by any backend but {}, which is what volumes.backend says",
+                    backend.as_str()
+                ),
+            ));
+        }
+        let zerofs_settings = match backend {
+            VolumeBackendKind::LocalFile => None,
+            VolumeBackendKind::Zerofs => {
+                let named = document.volumes.zerofs.as_ref();
+                Some(ZerofsSettings {
+                    binary: directory(
+                        "volumes.zerofs.binary",
+                        named.and_then(|zerofs| zerofs.binary.as_deref()),
+                        DEFAULT_ZEROFS_BINARY,
+                    )?,
+                    config_file: directory(
+                        "volumes.zerofs.config_file",
+                        named.and_then(|zerofs| zerofs.config_file.as_deref()),
+                        DEFAULT_ZEROFS_CONFIG,
+                    )?,
+                    mount_path: directory(
+                        "volumes.zerofs.mount_path",
+                        named.and_then(|zerofs| zerofs.mount_path.as_deref()),
+                        DEFAULT_ZEROFS_MOUNT,
+                    )?,
+                    nbd_socket_path: directory(
+                        "volumes.zerofs.nbd_socket_path",
+                        named.and_then(|zerofs| zerofs.nbd_socket_path.as_deref()),
+                        DEFAULT_ZEROFS_NBD_SOCKET,
+                    )?,
+                    checkpoint_runtime_dir: directory(
+                        "volumes.zerofs.checkpoint_runtime_dir",
+                        named.and_then(|zerofs| zerofs.checkpoint_runtime_dir.as_deref()),
+                        DEFAULT_ZEROFS_CHECKPOINT_RUNTIME_DIR,
+                    )?,
+                })
+            }
+        };
+
         Ok(Self {
             snapshot_dir: directory(
                 "paths.snapshot_dir",
@@ -355,6 +463,8 @@ impl HostConfig {
                 Some(prefix) => storage_prefix("volumes.storage_prefix", prefix)?,
                 None => DEFAULT_STORAGE_PREFIX.to_string(),
             },
+            volume_backend: backend,
+            zerofs: zerofs_settings,
             port_relay_public_ipv4: document
                 .proxy
                 .port_relay_public_ipv4
@@ -412,6 +522,8 @@ impl HostConfig {
             artifact_store_url: root.join("state/artifact-store").display().to_string(),
             volume_store_url: None,
             storage_prefix: DEFAULT_STORAGE_PREFIX.to_string(),
+            volume_backend: VolumeBackendKind::LocalFile,
+            zerofs: None,
             port_relay_public_ipv4: None,
             control_plane_cidrs_v4: vec![],
             control_plane_cidrs_v6: vec![],
@@ -734,6 +846,56 @@ mod tests {
         assert_eq!(
             parsed("[volumes]\nstorage_prefix = \"hosts/one/volumes\"\n").storage_prefix,
             "hosts/one/volumes"
+        );
+    }
+
+    #[test]
+    fn a_host_keeps_its_volumes_on_its_own_disk_unless_it_says_otherwise() {
+        assert_eq!(parsed("").volume_backend, VolumeBackendKind::LocalFile);
+        assert_eq!(parsed("").zerofs, None);
+        let zerofs = parsed("[volumes]\nbackend = \"zerofs\"\n");
+        assert_eq!(zerofs.volume_backend, VolumeBackendKind::Zerofs);
+        assert_eq!(
+            zerofs.zerofs.as_ref().map(|settings| settings.mount_path.clone()),
+            Some(PathBuf::from("/mnt/zerofs"))
+        );
+        assert!(refused("[volumes]\nbackend = \"nfs\"\n").contains("no nfs"));
+    }
+
+    /// Settings nothing would read are the mistake this file exists to catch: a host configured
+    /// for ZeroFS and running on local files is one whose volumes quietly do not survive it.
+    #[test]
+    fn zerofs_settings_under_a_backend_that_would_not_read_them_are_refused() {
+        let message = refused("[volumes.zerofs]\nmount_path = \"/mnt/zerofs\"\n");
+        assert!(message.contains("volumes.zerofs"), "{message}");
+        assert!(message.contains("local-file"), "{message}");
+    }
+
+    #[test]
+    fn where_this_hosts_zerofs_is_can_be_moved_whole() {
+        let zerofs = parsed(
+            r#"
+[volumes]
+backend = "zerofs"
+
+[volumes.zerofs]
+binary = "/usr/local/bin/zerofs"
+config_file = "/etc/zerofs/one.toml"
+mount_path = "/srv/zerofs"
+nbd_socket_path = "/run/zerofs/one.sock"
+checkpoint_runtime_dir = "/run/zerofs-checkpoints"
+"#,
+        )
+        .zerofs
+        .unwrap();
+        assert_eq!(zerofs.binary, PathBuf::from("/usr/local/bin/zerofs"));
+        assert_eq!(
+            zerofs.checkpoint_runtime_dir,
+            PathBuf::from("/run/zerofs-checkpoints")
+        );
+        assert!(
+            refused("[volumes]\nbackend = \"zerofs\"\n\n[volumes.zerofs]\nmount_path = \"mnt\"\n")
+                .contains("volumes.zerofs.mount_path")
         );
     }
 

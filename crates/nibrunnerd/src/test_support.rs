@@ -270,7 +270,7 @@ pub async fn test_host() -> TestHost {
         // so rather than depending on what the machine running it happens to have.
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         state: state.clone(),
-        allocator: Mutex::new(SlotAllocator::empty()),
+        allocator: Arc::new(Mutex::new(SlotAllocator::empty())),
         cache: Mutex::new(DesiredStateCache::new()),
         vms: vms.clone(),
         volumes: Arc::new(LocalFileVolumes::new(

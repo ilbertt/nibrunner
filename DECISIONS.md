@@ -47,6 +47,35 @@ and it means a host that loses the control plane goes on converging on the last 
 given rather than on nothing. `crates/nibrunnerd/src/control.rs` holds the client and the poll;
 the session renewal, the report upload and the filesystem-query channel are the part still to write.
 
+**ZeroFS is spawned, not linked.** The brief said not to link it: AGPL, and a private server
+API. Reading nibrun's own agent shows it does not link it either. ZeroFS is a long-running service
+the agent never starts and only ever talks to over its admin CLI — `zerofs flush`, `zerofs
+checkpoint create|delete|list`, plus a read of the `[cache]` sizes out of the config file the
+service was itself started with. So the licence question does not arise: nothing here is derived
+from it, and the interface is a command line rather than a private API. What it does need is
+permission to spawn two host tools beyond the three the brief allowed — `zerofs` for that CLI, and
+`nbd-client`, whose attach is a fork that holds `NBD_DO_IT` for the life of the device rather than
+a call this daemon could make and return from. Granted at the user's request. The one thing this
+daemon must never do is start a read-write `zerofs run`: a second writer per storage prefix is
+fenced by SlateDB's epoch only after a window of acknowledging writes it then discards, so it
+loses tenant data rather than failing to start. There is a test asserting nothing here ever runs
+one.
+
+**`dd` is not spawned for the liveness probe.** nibrun reads a device's first block with `dd
+iflag=direct` in a subprocess, because a read the kernel has accepted cannot be cancelled and the
+process therefore has to be *abandoned* rather than waited for. The same property holds for a
+`spawn_blocking` thread doing an `O_DIRECT` read, so this daemon does that instead: one fewer host
+tool, the same bound on what is left behind — the repair the failed probe triggers is a detach,
+which errors every queued request on that device and frees the reader. If that turns out to differ
+on a real wedged host, the change is one function.
+
+**Configuration is a file, not the environment.** The brief did not say either way, and the agent
+reads environment variables. A file can refuse a setting that does not exist; an environment
+cannot, because a variable nobody set and one whose name was mistyped are the same absence. Every
+value is validated at startup — paths absolute, CIDRs parseable, ports outside the range slots
+take, storage prefixes that will not become a key nobody can find. `NIBRUNNER_LOG` stays in the
+environment because it is a thing an operator changes to debug one restart.
+
 **systemd is not the supervisor.** The agent runs each microVM as a `nibrun-vm@<app>.service` and
 reads its state out of `systemctl show`. This daemon spawns Firecracker itself into a session of
 its own — `setsid`, no `kill_on_drop` — and keeps a pidfile carrying the pid, the host boot id and
@@ -93,9 +122,16 @@ this being a static cross-compiled binary, so the feature set is `aws-base` + `r
 
 ## Not done, and named as such
 
-- **Exports, checkpoints, the vsock filesystem browse, usage reporting.** Non-goals for v1. The
-  codecs for the filesystem channel are written and tested against the C headers
-  (`crates/guest-contract/src/filesystem.rs`); nothing calls them.
+- **Exports and the vsock filesystem browse.** The codecs for the filesystem channel are written
+  and tested against the C headers (`crates/guest-contract/src/filesystem.rs`); nothing calls them.
+  Exports are a checkpoint server started per checkpoint, an NBD attach against it and a read of
+  the filesystem it pins — the attach half is written (`NbdDevices::attach_checkpoint`), the
+  server and the reader are not.
+- **Checkpoints are cut but not tracked.** `VolumeBackend::checkpoint` runs `zerofs checkpoint
+  create` and the planner has verbs for them, but `reconcile/mod.rs` observes an empty list, so
+  nothing is ever created or deleted by a pass. Deliberate for now, and the two `Vec::new()` lines
+  say so.
+- **Usage reporting.** A non-goal for v1.
 - **ACME.** Phase 5. The proxy serves a certificate and key from disk, or plain HTTP, or nothing.
 - **The `guestImage` version in a report** is read from the manifest beside the image. The image in
   `guest/` is nibrun's own `dist/`, whose manifest says `"init_is_stub": true` — it carries a

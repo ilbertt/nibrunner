@@ -155,18 +155,24 @@ impl VolumeBackend for LocalFileVolumes {
     /// Nothing to attach: the guest is handed the file itself, and Firecracker opens it. What
     /// this checks is that the file is still there, because a volume this host has lost is not
     /// one it may report as ready.
-    async fn attach(&self, volume_id: &VolumeId) -> Result<AttachedVolume, VolumeError> {
+    /// The app is not consulted: a sparse file is named for the volume and lives where this
+    /// backend put it, so the slot an app holds has nothing to do with reaching one.
+    async fn attach(
+        &self,
+        volume_id: &VolumeId,
+        _app_id: &protocol::AppId,
+    ) -> Result<AttachedVolume, VolumeError> {
         let size_bytes = Self::size_of(&self.path_for(volume_id)).ok_or_else(|| VolumeError::NotHere {
             volume_id: volume_id.clone(),
         })?;
         Ok(self.attached(volume_id, size_bytes))
     }
 
-    async fn detach(&self, _volume_id: &VolumeId) -> Result<(), VolumeError> {
+    async fn detach(&self, _volume_id: &VolumeId, _app_id: &protocol::AppId) -> Result<(), VolumeError> {
         Ok(())
     }
 
-    async fn teardown(&self, volume_id: &VolumeId) -> Result<(), VolumeError> {
+    async fn teardown(&self, volume_id: &VolumeId, _app_id: &protocol::AppId) -> Result<(), VolumeError> {
         let path = self.path_for(volume_id);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -191,7 +197,10 @@ impl VolumeBackend for LocalFileVolumes {
         ))
     }
 
-    async fn observe(&self) -> Vec<ObservedBacking> {
+    async fn observe(
+        &self,
+        _owners: &std::collections::BTreeMap<VolumeId, protocol::AppId>,
+    ) -> Vec<ObservedBacking> {
         let Ok(entries) = std::fs::read_dir(&self.directory) else {
             return Vec::new();
         };
@@ -218,7 +227,7 @@ impl VolumeBackend for LocalFileVolumes {
 mod tests {
     use super::*;
     use crate::services::{CommandResult, RecordingCommandRunner};
-    use crate::test_support::{desired_volume, volume_id, VOLUME_SIZE_BYTES};
+    use crate::test_support::{app_id, desired_volume, volume_id, VOLUME_SIZE_BYTES};
 
     fn backend(directory: &Path, commands: Arc<RecordingCommandRunner>) -> LocalFileVolumes {
         LocalFileVolumes::new(
@@ -297,22 +306,22 @@ mod tests {
     async fn what_the_host_holds_is_observed_from_the_disk_rather_than_remembered() {
         let directory = tempfile::tempdir().unwrap();
         let volumes = backend(directory.path(), RecordingCommandRunner::succeeding());
-        assert!(volumes.observe().await.is_empty());
+        assert!(volumes.observe(&Default::default()).await.is_empty());
         volumes.provision(&desired_volume(|_| {})).await.unwrap();
         // A file whose name is not a volume id belongs to something else and is left out.
         std::fs::write(directory.path().join("not a volume"), b"").unwrap();
-        let observed = volumes.observe().await;
+        let observed = volumes.observe(&Default::default()).await;
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].volume_id, volume_id());
         assert!(observed[0].attached);
         assert_eq!(observed[0].size_bytes, VOLUME_SIZE_BYTES);
 
-        volumes.teardown(&volume_id()).await.unwrap();
-        assert!(volumes.observe().await.is_empty());
+        volumes.teardown(&volume_id(), &app_id()).await.unwrap();
+        assert!(volumes.observe(&Default::default()).await.is_empty());
         // Tearing down what is already gone is what a second pass does, and it is not a failure.
-        volumes.teardown(&volume_id()).await.unwrap();
+        volumes.teardown(&volume_id(), &app_id()).await.unwrap();
         assert!(matches!(
-            volumes.attach(&volume_id()).await,
+            volumes.attach(&volume_id(), &app_id()).await,
             Err(VolumeError::NotHere { .. })
         ));
     }

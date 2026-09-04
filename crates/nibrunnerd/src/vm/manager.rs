@@ -196,7 +196,7 @@ impl VmManager {
         })) {
             return Some(refusal.to_string());
         }
-        match measure_snapshot_disk(&self.snapshot_dir, 0) {
+        match measure_snapshot_disk(&self.snapshot_dir, self.volumes.reserved_cache().disk_bytes) {
             Err(error) => {
                 tracing::warn!(%app_id, %error, "snapshot disk could not be measured");
                 Some("the disk it would be written to cannot be measured".into())

@@ -3,9 +3,13 @@
 //! are what makes a volume survive the machine.
 
 pub mod local_file;
+pub mod nbd;
+pub mod zerofs;
+
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use protocol::{DesiredVolume, ObjectKey, VolumeId};
+use protocol::{AppId, DesiredVolume, ObjectKey, VolumeId};
 
 /// Firecracker computes sectors as `size >> 9`, and leaves an unaligned tail invisible to the
 /// guest.
@@ -59,6 +63,21 @@ pub struct ObservedBacking {
     pub storage_prefix: ObjectKey,
 }
 
+/// What a storage service on this host has been promised: disk and memory it has not taken yet
+/// rather than what it is holding now. It grows into both lazily, so free space on a fresh host is
+/// space already spoken for, and anything else helping itself to either has to hold this much back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheReservation {
+    pub disk_bytes: u64,
+    pub memory_bytes: u64,
+}
+
+impl CacheReservation {
+    pub fn memory_mib(self) -> u64 {
+        self.memory_bytes.div_ceil(1_048_576)
+    }
+}
+
 #[async_trait]
 pub trait VolumeBackend: Send + Sync {
     /// A volume of at least this size, formatted if it has never been, and reachable at a device
@@ -67,12 +86,17 @@ pub trait VolumeBackend: Send + Sync {
 
     /// The device behind a volume that already exists, put back where a guest can reach it. What
     /// a host does on the way up for every volume it still holds.
-    async fn attach(&self, volume_id: &VolumeId) -> Result<AttachedVolume, VolumeError>;
+    ///
+    /// The app is passed rather than derived, here and below. A backend that keeps blocks in an
+    /// object store reaches them on the NBD minor the app's slot names, and the only party that
+    /// knows which app a volume belongs to is the one holding the document — a backend that
+    /// guessed would attach one tenant's disk under another's name.
+    async fn attach(&self, volume_id: &VolumeId, app_id: &AppId) -> Result<AttachedVolume, VolumeError>;
 
-    async fn detach(&self, volume_id: &VolumeId) -> Result<(), VolumeError>;
+    async fn detach(&self, volume_id: &VolumeId, app_id: &AppId) -> Result<(), VolumeError>;
 
     /// The only path that destroys tenant data, and it runs only for an explicit `absent`.
-    async fn teardown(&self, volume_id: &VolumeId) -> Result<(), VolumeError>;
+    async fn teardown(&self, volume_id: &VolumeId, app_id: &AppId) -> Result<(), VolumeError>;
 
     /// Everything acknowledged, durable. The durability point every stop and every sleep is taken
     /// at: a backend whose writes are already durable answers immediately, and one that batches
@@ -84,7 +108,16 @@ pub trait VolumeBackend: Send + Sync {
     async fn checkpoint(&self, volume_id: &VolumeId) -> Result<String, VolumeError>;
 
     /// What this host is actually holding, which is what a restarted daemon converges against.
-    async fn observe(&self) -> Vec<ObservedBacking>;
+    /// The owners come from the document for the same reason they are passed to `attach`.
+    async fn observe(&self, owners: &BTreeMap<VolumeId, AppId>) -> Vec<ObservedBacking>;
+
+    /// What this backend's storage service has been promised. Asked of the backend rather than
+    /// read from the config by whoever needs it, because the two callers — the memory a guest may
+    /// be given, and the disk a snapshot may go on — have to agree by construction: a host that
+    /// held memory back by one measure and disk by another would refuse and over-commit at once.
+    fn reserved_cache(&self) -> CacheReservation {
+        CacheReservation::default()
+    }
 }
 
 /// What `mkfs.ext4` writes at offset 1080 of a filesystem it made. Comparing a constant, not

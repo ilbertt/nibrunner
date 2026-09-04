@@ -1,8 +1,14 @@
-//! Running the two host tools this daemon spawns.
+//! Running the host tools this daemon spawns.
 //!
-//! `nft` and `mke2fs`, and nothing else. Everything else it needs — the tap, the netlink, the
-//! squashfs, the hypervisor — it does itself or carries, so a host's dependency list is two
-//! packages rather than a paragraph.
+//! `nft` and `mke2fs` on any host. Everything else it needs — the tap, the netlink, the squashfs,
+//! the hypervisor — it does itself or carries, so a host's dependency list is two packages rather
+//! than a paragraph.
+//!
+//! A host whose volumes live in an object store adds two more: `nbd-client`, because attaching an
+//! export is a fork that holds `NBD_DO_IT` for the life of the device and not a call this daemon
+//! could make and return from, and `zerofs`, whose admin CLI is the only interface a service this
+//! daemon does not own exposes. Both are spawned only by the ZeroFS backend, and only for a host
+//! that asked for it in `volumes.backend`.
 
 use std::process::Stdio;
 

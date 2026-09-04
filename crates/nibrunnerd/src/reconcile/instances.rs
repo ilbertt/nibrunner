@@ -224,7 +224,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     let booted = match artifact {
         Err(error) => Err(error.message()),
         Ok(artifact_image_path) => {
-            let data_device_path = match host.volumes.attach(&desired.volume_id).await {
+            let data_device_path = match host.volumes.attach(&desired.volume_id, &desired.app_id).await {
                 Ok(attached) => attached.device_path,
                 Err(error) => {
                     host.state

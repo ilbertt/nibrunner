@@ -24,6 +24,7 @@ use crate::state::HostState;
 use crate::vm::manager::{read_guest_image_version, VmManager};
 use crate::vm::process::{extract_firecracker, VmProcesses, FIRECRACKER_VERSION};
 use crate::volumes::local_file::LocalFileVolumes;
+use crate::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
 use crate::waker::AppWaker;
 
 /// One tick of the status loop on a host where nothing is settling. A probe cannot land sooner
@@ -62,16 +63,35 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         .map_err(|error| StartupError::Unusable(error.to_string()))?;
     let commands: Arc<dyn crate::services::CommandRunner> = Arc::new(HostCommands);
     let state = HostState::shared();
-    let allocator = SlotAllocator::load(&config.slots_file(), &config.slot_cursor_file())
-        .map_err(|error| StartupError::Config(error.message()))?;
+    let allocator = Arc::new(Mutex::new(
+        SlotAllocator::load(&config.slots_file(), &config.slot_cursor_file())
+            .map_err(|error| StartupError::Config(error.message()))?,
+    ));
 
     let storage_prefix = ObjectKey::parse(&config.storage_prefix)
-        .map_err(|_| StartupError::Config("NIBRUNNER_STORAGE_PREFIX is not a key".into()))?;
-    let volumes = Arc::new(LocalFileVolumes::new(
-        config.volumes_dir(),
-        storage_prefix,
-        commands.clone(),
-    ));
+        .map_err(|_| StartupError::Config("volumes.storage_prefix is not a key".into()))?;
+    // Chosen once, here, rather than asked per volume: what a volume is made of is a property of
+    // the host, and a daemon that could answer differently on two passes is one whose tenant finds
+    // its disk somewhere else.
+    let volumes: Arc<dyn crate::volumes::VolumeBackend> = match &config.zerofs {
+        None => Arc::new(LocalFileVolumes::new(
+            config.volumes_dir(),
+            storage_prefix,
+            commands.clone(),
+        )),
+        Some(settings) => Arc::new(ZerofsVolumes::new(
+            ZerofsFilesystem {
+                storage_prefix,
+                mount_path: settings.mount_path.clone(),
+                nbd_socket_path: settings.nbd_socket_path.clone(),
+                checkpoint_runtime_dir: settings.checkpoint_runtime_dir.clone(),
+                binary: settings.binary.clone(),
+                config_file: settings.config_file.clone(),
+            },
+            allocator.clone(),
+            commands.clone(),
+        )),
+    };
     let artifacts = Arc::new(
         ObjectArtifactStore::open(&config.artifact_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
@@ -106,9 +126,9 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     );
 
     let host = Arc::new(Host {
-        guest_memory_mib: guest_memory_mib(read_host_memory_mib(), 0),
+        guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
         state,
-        allocator: Mutex::new(allocator),
+        allocator: allocator.clone(),
         cache: Mutex::new(DesiredStateCache::new()),
         vms,
         volumes,

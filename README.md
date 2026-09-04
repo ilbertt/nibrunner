@@ -108,8 +108,10 @@ while an operator is still watching rather than on the pass that first needed th
 | `paths.guest_image_dir` | `<state>/guest` | `vmlinux`, `rootfs.ext4`, `manifest.json` |
 | `paths.snapshot_dir` | `<state>/snapshots` | Where a sleeping app's memory goes |
 | `artifacts.store_url` | `<state>/artifact-store` | A directory, or `s3://bucket/prefix` |
+| `volumes.backend` | `local-file` | `local-file` or `zerofs` |
 | `volumes.store_url` | none | Where a volume's blocks live, for an object-store backend |
 | `volumes.storage_prefix` | `volumes` | Prepended to every key this host writes |
+| `volumes.zerofs.*` | see below | Only read when the backend is `zerofs` |
 | `proxy.http_port` | none | Serve plain HTTP on this port |
 | `proxy.https_port` | none | With `proxy.tls_certificate` and `proxy.tls_key` |
 | `proxy.port_relay_public_ipv4` | none | Where an app's own public port is reached |
@@ -119,6 +121,24 @@ while an operator is still watching rather than on the pass that first needed th
 
 `NIBRUNNER_LOG` is still an environment variable, and the only one besides `NIBRUNNER_CONFIG`: it
 is a `tracing` filter an operator changes to debug one restart, not a property of the host.
+
+### Volumes that outlive the host
+
+`volumes.backend = "zerofs"` puts a volume's blocks in an object store and reaches them from the
+guest over NBD. The device file lives at `<mount>/.nbd/<volume-id>`, and the minor it is attached
+on comes from the same slot integer as the app's tap, ports and addresses.
+
+**ZeroFS is a service this daemon does not own and never starts.** There must be exactly one
+read-write `zerofs run` per storage prefix, fleet-wide — a second writer is fenced by SlateDB's
+epoch only *after* a window of acknowledging writes it then discards, so it loses a tenant's data
+rather than failing to start. Whatever supervises the host is the lock; a single-instance unit is
+how it is held. This daemon only ever runs its admin CLI, and there is a test asserting so.
+
+A host on this backend needs two tools the local-file one does not: `nbd-client` and `zerofs`. It
+also holds ZeroFS's configured `[cache]` back from both the memory a guest may be given and the
+disk a snapshot may go on — read from ZeroFS's own config file rather than written down twice, and
+assumed rather than treated as zero when it cannot be read, because a host that promises memory
+the cache will take back kills tenants.
 
 ## The workspace
 

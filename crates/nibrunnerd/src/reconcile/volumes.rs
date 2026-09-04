@@ -38,7 +38,7 @@ pub fn volume_owners(
 /// it remembers.
 pub async fn observe_volumes(host: &Host, owners: &BTreeMap<VolumeId, AppId>) -> Vec<ObservedVolume> {
     host.volumes
-        .observe()
+        .observe(owners)
         .await
         .into_iter()
         .filter_map(|backing| {
@@ -151,7 +151,7 @@ pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
         let VolumePlan::Teardown { desired } = action else {
             continue;
         };
-        match host.volumes.teardown(&desired.volume_id).await {
+        match host.volumes.teardown(&desired.volume_id, &desired.app_id).await {
             Ok(()) => {
                 host.allocator.lock().await.release(&desired.app_id);
                 // `deleted` rather than `deleting`: everything above has already happened, and the
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(snapshot.volume_reports[0].state, VolumeState::Deleted);
         // Remembered too, so a restart before anybody read the report can still say it happened.
         assert!(snapshot.deleted_volumes.contains_key(&volume_id()));
-        assert!(host.volumes.observe().await.is_empty());
+        assert!(host.volumes.observe(&Default::default()).await.is_empty());
     }
 
     #[tokio::test]

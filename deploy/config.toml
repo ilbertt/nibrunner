@@ -20,9 +20,26 @@ desired_state_file = "/var/lib/nibrunner/desired.json"
 store_url = "/var/lib/nibrunner/artifact-store"
 
 [volumes]
-# Where a volume's blocks live, for the backend that keeps them in an object store.
+# "local-file" is a sparse file on this host's own disk: it needs nothing of the machine but a
+# filesystem, and gives nothing back when the machine goes. "zerofs" puts the blocks in an object
+# store and reaches them over NBD, which is what makes a volume outlive the host it was written on.
+backend = "local-file"
 # store_url = "s3://nibrun-volumes"
 storage_prefix = "volumes"
+
+# Read only when backend = "zerofs", and naming any of it under another backend is an error rather
+# than a setting quietly ignored.
+#
+# ZeroFS is a long-running service this daemon does not own and never starts. There must be exactly
+# one read-write `zerofs run` per storage prefix, fleet-wide: a second writer is fenced only after
+# a window of acknowledging writes it then discards, so it loses tenant data rather than failing to
+# start. Whatever supervises this host is the lock — a single-instance unit is how it is held.
+# [volumes.zerofs]
+# binary = "/opt/nibrun/bin/zerofs/zerofs"
+# config_file = "/etc/zerofs/config.toml"
+# mount_path = "/mnt/zerofs"
+# nbd_socket_path = "/run/zerofs/nbd.sock"
+# checkpoint_runtime_dir = "/run/zerofs-checkpoint"
 
 [proxy]
 # Absent means this host serves no edge of its own, which is what it wants behind a load balancer.

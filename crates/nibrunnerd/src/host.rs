@@ -24,7 +24,11 @@ pub struct Host {
     /// report was built from or a full host goes on being placed onto for as long as it refuses.
     pub guest_memory_mib: u64,
     pub state: SharedState,
-    pub allocator: Mutex<SlotAllocator>,
+    /// Shared rather than owned, because a slot is not the network's alone: the tap, the
+    /// forward, the addresses and — for the backend that keeps blocks in an object store — the
+    /// NBD minor a volume is reached on all come from the same integer. Two copies of that
+    /// arithmetic is two answers to which device a tenant's disk is.
+    pub allocator: Arc<Mutex<SlotAllocator>>,
     pub cache: Mutex<DesiredStateCache>,
     pub vms: Arc<dyn Vmm>,
     pub volumes: Arc<dyn VolumeBackend>,
