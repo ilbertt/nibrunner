@@ -92,11 +92,6 @@ fn frame_from(kind: u8, payload: &[u8]) -> Result<GuestLogFrame, InvalidGuestLog
     }
 }
 
-/// The wire format restated rather than derived from the decoder, so the tests check the codec
-/// against the bytes on the wire and not against themselves.
-///
-/// `kind` rather than a `TenantLogStream`, because a gap is a frame too and is not a stream: it is
-/// the guest saying how much of a tenant's output it had to drop.
 pub fn kind_of(stream: TenantLogStream) -> u8 {
     match stream {
         TenantLogStream::Stdout => KIND_STDOUT,
@@ -110,6 +105,11 @@ pub fn encode_gap(dropped_bytes: u64) -> Vec<u8> {
     encode_frame(KIND_GAP, &dropped_bytes.to_be_bytes())
 }
 
+/// The wire format restated rather than derived from the decoder, so the tests check the codec
+/// against the bytes on the wire and not against themselves.
+///
+/// `kind` rather than a `TenantLogStream`, because a gap is a frame too and is not a stream: it is
+/// the guest saying how much of a tenant's output it had to drop.
 pub fn encode_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
     frame.extend_from_slice(FRAME_MAGIC);

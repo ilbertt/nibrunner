@@ -18,17 +18,12 @@ use guest_contract::paths;
 const TENANT_UMASK: libc::mode_t = 0o022;
 
 pub(crate) fn run() -> ExitCode {
-    // Before anything else, because until devtmpfs is mounted there is no `/dev/console` for the
-    // kernel or for this to report anything on — including the failure to mount it.
     if mounts::dev().is_err() {
         return shutdown(None);
     }
     adopt_console();
     log("guest runtime starting");
 
-    // Early enough that a shutdown arriving during boot is still honoured: PID 1 discards signals
-    // it has neither blocked nor handled, so an unblocked SIGINT before this point is gone for
-    // good.
     supervisor::block_signals();
     route_ctrl_alt_del_here();
 
@@ -124,8 +119,6 @@ fn prepare_tenant_filesystem() -> Result<(), String> {
             paths::TENANT_BINARY
         ));
     }
-    // The tenant's working directory is a tmpfs it does not own: the only path it can write is the
-    // data filesystem mounted inside it.
     mounts::tmpfs(paths::APP_DIR, "mode=0755,size=1M").map_err(|error| error.to_string())?;
     std::fs::create_dir_all(paths::DATA_DIR)
         .map_err(|error| format!("{} could not be made: {error}", paths::DATA_DIR))?;

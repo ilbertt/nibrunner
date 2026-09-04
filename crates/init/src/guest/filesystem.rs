@@ -327,8 +327,6 @@ mod tests {
         assert_eq!(meminfo_kb(meminfo, "NotThere:"), 0);
     }
 
-    /// A guest blocked on its own disk is not a guest doing work, and counting iowait as busy
-    /// would bill a tenant for waiting on the host's storage.
     #[test]
     fn waiting_on_the_disk_is_not_time_a_tenant_spent() {
         let stat = "cpu  100 20 30 400 50 0 0 0 0 0\ncpu0 50 10 15 200 25 0 0 0 0 0\n";

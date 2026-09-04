@@ -33,9 +33,6 @@ fn main() -> std::process::ExitCode {
     {
         guest::run()
     }
-    // Built on a developer's machine so the logic above it can be tested there. A guest init that
-    // is not PID 1 on Linux has nothing to mount and nothing to supervise, and saying so is better
-    // than a binary that looks runnable and is not.
     #[cfg(not(target_os = "linux"))]
     {
         eprintln!("nibrunner-init is a Linux guest's PID 1 and has nothing to do here");

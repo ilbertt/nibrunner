@@ -40,7 +40,6 @@ fn waited_signals() -> SigSet {
     set
 }
 
-/// Runs the tenant until it is asked to stop or has exhausted its restart budget.
 pub(crate) fn supervise(config: &InstanceConfig) -> Ended {
     let mut restarts = 0u32;
     let mut forwarder = Forwarder::new();
@@ -58,9 +57,6 @@ pub(crate) fn supervise(config: &InstanceConfig) -> Ended {
             Watched::Exited { status } => {
                 let uptime_ms = started.elapsed().as_millis() as u64;
                 if budget_resets(config, uptime_ms) {
-                    // Measured from the last start rather than from the first: an app that served
-                    // for an hour and then crashed is not the app that crashed five times in a
-                    // minute.
                     restarts = 0;
                 }
                 if restarts >= config.max_restarts {
@@ -99,8 +95,6 @@ fn watch(tenant: Pid, mut output: TenantOutput, forwarder: &mut Forwarder) -> Wa
         output.forward(forwarder);
         match wait_for_signal(POLL_INTERVAL) {
             Arrived::Shutdown => return Watched::ShutdownRequested,
-            // Every child, not only the tenant: PID 1 inherits whatever a tenant orphaned, and
-            // nobody else in this guest will reap one.
             Arrived::ChildDied | Arrived::Nothing => {
                 if let Some(status) = reap_until(tenant) {
                     // Whatever the tenant wrote before it went, before the pipes are dropped.
@@ -192,8 +186,7 @@ fn wait_for_signal(within: Duration) -> Arrived {
     }
 }
 
-/// SIGTERM, then SIGKILL once the grace period is up. The host's own wait for the microVM has to
-/// be longer than this, or a tenant taking its time looks the same as one that hung.
+/// SIGTERM, then SIGKILL once the grace period is up.
 fn stop(tenant: Pid) {
     let _ = nix::sys::signal::kill(tenant, Signal::SIGTERM);
     let deadline = Instant::now() + Duration::from_millis(u64::from(SHUTDOWN_GRACE_MS));

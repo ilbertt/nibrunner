@@ -76,13 +76,11 @@ pub(crate) fn dev() -> Result<(), MountFailed> {
     )
 }
 
-/// `/proc`, `/sys`, `/run`, `/tmp` and `/dev/shm`.
 pub(crate) fn pseudo_filesystems() -> Result<(), MountFailed> {
     let no_privileges = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
     mounted("proc", Some("proc"), "/proc", Some("proc"), no_privileges, None)?;
     mounted("sysfs", Some("sysfs"), "/sys", Some("sysfs"), no_privileges, None)?;
     tmpfs("/run", RUNTIME_TMPFS_SIZE)?;
-    // The tenant's, and the two that scale with the guest.
     tmpfs("/tmp", TENANT_TMPFS_SIZE)?;
     tmpfs("/dev/shm", TENANT_TMPFS_SIZE)
 }

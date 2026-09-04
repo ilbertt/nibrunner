@@ -70,8 +70,6 @@ mod tests {
         value
     }
 
-    /// The point of a budget is to leave time for somebody to look, which a tenant exiting
-    /// instantly would otherwise spend inside one scheduler tick.
     #[test]
     fn the_first_restart_waits_rather_than_going_straight_back() {
         assert_eq!(backoff_ms(&config(|_| {}), 0), 500);
@@ -86,8 +84,6 @@ mod tests {
         assert_eq!(backoff_ms(&config, 20), 30_000, "capped, not overflowed");
     }
 
-    /// Computed rather than accumulated, so a restart count that came back from anywhere gives the
-    /// same answer.
     #[test]
     fn the_delay_is_a_function_of_the_count_and_not_of_the_history() {
         let config = config(|_| {});
@@ -105,8 +101,6 @@ mod tests {
         }
     }
 
-    /// An app serving for an hour then crashing is not the app that crashed five times in a
-    /// minute, and treating them alike spends the budget of the first on the history of the second.
     #[test]
     fn a_tenant_that_stayed_up_earns_its_budget_back() {
         let config = config(|_| {});
