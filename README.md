@@ -126,5 +126,25 @@ text, the codecs against byte fixtures taken from the C headers, and the reconci
 against recording services. The second is the only place a ruleset load, a real `mke2fs` or a tap
 is ever considered proven.
 
-**Nothing in either lane boots a guest.** That needs `/dev/kvm` and a published guest image, and
-it is the one claim this repository cannot make for itself yet.
+### What phase 1 proved, and what it did not
+
+Run on a real Linux kernel, as root, with `nft`, `mke2fs` and `/dev/net/tun`:
+
+- **The isolation ruleset loads and the kernel holds it.** Read back from the kernel, not from
+  what was sent: the metadata endpoint, guest-to-guest, guest-to-host and the named control-plane
+  ranges are all `reject`; the DNAT reaches the guest's HTTP port; egress masquerades; nothing is
+  `drop`. nibrun's own notes list this as rendered and asserted as text, never loaded.
+- **A tap is created, addressed, brought up and given its neighbour entry**, and a second pass
+  changes nothing. Also listed there as never run.
+- **A volume is formatted by the real `mke2fs`** and a converged host does not reformat it.
+- **The embedded hypervisor runs and names the version this build pins.**
+- **A whole pass converges**: the watched document is noticed, the volume provisioned, the
+  artifact fetched and verified against its digest, both squashfs images built, the config drive
+  and machine description staged, the slot allocated, the ruleset applied, and the proxy answers
+  503 with a sentence for a hostname it holds and 404 for one it does not.
+
+**No guest has been booted, slept or woken.** That needs `/dev/kvm`, which no machine in this
+project's reach has, and a published guest image — the one in `guest/` is nibrun's stub build,
+whose manifest says `"init_is_stub": true`, so it carries a throwaway `/init` rather than the
+runtime that boots a tenant. Until both are in place, the boot, the snapshot, the restore and the
+wake latency are unknown rather than working.

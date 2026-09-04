@@ -151,7 +151,11 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
     network::apply_network(host).await;
     apply_starts(host, &plan).await;
     volumes::apply_teardowns(host, &plan).await;
-    // Again, because the instances started above are the ones whose forwards this renders.
+    // Again, because a start is where an app that is not `on-request` first gets a slot: without
+    // this its loopback port stays nobody's until the next pass, and a request arriving in
+    // between is refused by the kernel rather than answered by this daemon saying why.
+    network::apply_activators(host).await;
+    // And again, because the instances started above are the ones whose forwards this renders.
     network::apply_network(host).await;
     network::apply_routes(host).await;
     host.persist().await;
@@ -352,6 +356,7 @@ mod tests {
     /// mention is stopped and forgotten — and a volume is only ever removed by an explicit absent.
     #[tokio::test]
     async fn one_pass_converges_a_host_onto_a_document_it_has_never_seen() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
 
         reconcile(host.arc(), &running_app()).await;
@@ -375,8 +380,20 @@ mod tests {
 
     /// Two passes, and deliberately: the first stops what is running, and only a microVM that is
     /// down is one there is nothing left to stop before forgetting it.
+    /// The port an app is reached on has to answer from the pass that created it. A slot that
+    /// exists with nothing listening on it is a request meeting a refused connection, which an
+    /// edge in front of this host cannot tell from a host that is not there.
+    #[tokio::test]
+    async fn the_port_an_app_is_reached_on_answers_from_the_pass_that_allocated_it() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let host = test_host().await;
+        reconcile(host.arc(), &running_app()).await;
+        assert_eq!(host.activator.listening_for().await, vec![app_id()]);
+    }
+
     #[tokio::test]
     async fn an_instance_desired_state_stops_naming_is_stopped_then_forgotten() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
         reconcile(host.arc(), &running_app()).await;
         host.vms.set_status(running_vm());
@@ -395,6 +412,7 @@ mod tests {
     /// pointed at a device that is not there would come up with no data at all.
     #[tokio::test]
     async fn an_instance_whose_volume_is_not_here_does_not_boot() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
         // The instance is named and the volume is not, which is what a host that never provisioned
         // it looks like.
@@ -407,6 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_deploy_replaces_the_release_rather_than_restarting_it() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
         reconcile(host.arc(), &running_app()).await;
         host.vms.set_status(running_vm());

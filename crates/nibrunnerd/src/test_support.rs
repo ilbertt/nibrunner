@@ -209,6 +209,11 @@ pub fn instance_record(edit: impl FnOnce(&mut InstanceRecord)) -> InstanceRecord
     value
 }
 
+/// Every app in these fixtures is `app-1`, which is slot 0, which is one fixed loopback port.
+/// A test that runs a whole pass binds it, so the ones that do take this first — otherwise they
+/// race each other for a port and the loser looks like a daemon that failed to listen.
+pub static ONE_HOST_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A whole host built out of recording services, under a directory that goes away with the test.
 /// What it substitutes is everything that would need a hypervisor or a kernel; what it does not
 /// substitute is the daemon's own logic, which is the thing being tested.
