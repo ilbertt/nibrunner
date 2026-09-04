@@ -56,7 +56,10 @@ fn main() {
             );
         }
     }
-    println!("cargo:rustc-env=NIBRUNNER_FIRECRACKER_PATH={}", embedded.display());
+    println!(
+        "cargo:rustc-env=NIBRUNNER_FIRECRACKER_PATH={}",
+        embedded.display()
+    );
 }
 
 /// A binary named outright, then a cached tarball, then the network. The first is what a build
@@ -87,7 +90,11 @@ fn resolve(out_dir: &Path) -> Option<Vec<u8>> {
 
 fn cache_path() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".cache/nibrunner").join(format!("firecracker-{FIRECRACKER_VERSION}.tgz")))
+    Some(
+        PathBuf::from(home)
+            .join(".cache/nibrunner")
+            .join(format!("firecracker-{FIRECRACKER_VERSION}.tgz")),
+    )
 }
 
 fn download() -> Option<Vec<u8>> {

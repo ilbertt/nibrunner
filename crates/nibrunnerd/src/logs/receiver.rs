@@ -71,7 +71,14 @@ impl TenantLogReceiver {
         }
         let source = Arc::new(Mutex::new((app_id.clone(), deployment_id)));
         let task = tokio::spawn(serve(listener, source.clone(), sink));
-        attachments.insert(app_id, Attachment { source, socket_path, task });
+        attachments.insert(
+            app_id,
+            Attachment {
+                source,
+                socket_path,
+                task,
+            },
+        );
         Ok(())
     }
 
@@ -219,14 +226,20 @@ mod tests {
         let socket_path = tenant_log_socket_path(directory.path());
         let sink = RecordingLogSink::new();
         let receiver = TenantLogReceiver::new();
-        receiver.attach(app_id(), deployment_id(), socket_path.clone(), sink.clone()).await.unwrap();
+        receiver
+            .attach(app_id(), deployment_id(), socket_path.clone(), sink.clone())
+            .await
+            .unwrap();
 
         let mut guest = UnixStream::connect(&socket_path).await.unwrap();
         // Split across two writes, which is what a transport does to a frame.
         let frame = encode_frame(ENCODE_KIND_STDOUT, "listening\n".as_bytes());
         guest.write_all(&frame[..5]).await.unwrap();
         guest.write_all(&frame[5..]).await.unwrap();
-        guest.write_all(&encode_frame(ENCODE_KIND_GAP, &4096u64.to_be_bytes())).await.unwrap();
+        guest
+            .write_all(&encode_frame(ENCODE_KIND_GAP, &4096u64.to_be_bytes()))
+            .await
+            .unwrap();
         guest.flush().await.unwrap();
 
         until(|| sink.events().len() == 2).await;
@@ -234,7 +247,10 @@ mod tests {
         assert_eq!(events[0].app_id, app_id());
         assert_eq!(
             events[0].body,
-            TenantLogBody::Data { stream: TenantLogStream::Stdout, text: "listening\n".into() }
+            TenantLogBody::Data {
+                stream: TenantLogStream::Stdout,
+                text: "listening\n".into()
+            }
         );
         assert_eq!(events[1].body, TenantLogBody::Gap { dropped_bytes: 4096 });
         // One source across the connection, and a sequence that says where a record sat in it.
@@ -250,18 +266,30 @@ mod tests {
         let socket_path = tenant_log_socket_path(directory.path());
         let sink = RecordingLogSink::new();
         let receiver = TenantLogReceiver::new();
-        receiver.attach(app_id(), deployment_id(), socket_path.clone(), sink.clone()).await.unwrap();
+        receiver
+            .attach(app_id(), deployment_id(), socket_path.clone(), sink.clone())
+            .await
+            .unwrap();
 
         let mut guest = UnixStream::connect(&socket_path).await.unwrap();
         let snowman = "☃".as_bytes();
-        guest.write_all(&encode_frame(ENCODE_KIND_STDOUT, &snowman[..1])).await.unwrap();
-        guest.write_all(&encode_frame(ENCODE_KIND_STDOUT, &snowman[1..])).await.unwrap();
+        guest
+            .write_all(&encode_frame(ENCODE_KIND_STDOUT, &snowman[..1]))
+            .await
+            .unwrap();
+        guest
+            .write_all(&encode_frame(ENCODE_KIND_STDOUT, &snowman[1..]))
+            .await
+            .unwrap();
         guest.flush().await.unwrap();
 
         until(|| !sink.events().is_empty()).await;
         assert_eq!(
             sink.events()[0].body,
-            TenantLogBody::Data { stream: TenantLogStream::Stdout, text: "☃".into() }
+            TenantLogBody::Data {
+                stream: TenantLogStream::Stdout,
+                text: "☃".into()
+            }
         );
     }
 
@@ -271,14 +299,23 @@ mod tests {
         let socket_path = tenant_log_socket_path(directory.path());
         let sink = RecordingLogSink::new();
         let receiver = TenantLogReceiver::new();
-        receiver.attach(app_id(), deployment_id(), socket_path.clone(), sink.clone()).await.unwrap();
+        receiver
+            .attach(app_id(), deployment_id(), socket_path.clone(), sink.clone())
+            .await
+            .unwrap();
         let guest = UnixStream::connect(&socket_path).await.unwrap();
         let newer = DeploymentId::parse("dep-2").unwrap();
-        receiver.attach(app_id(), newer.clone(), socket_path.clone(), sink.clone()).await.unwrap();
+        receiver
+            .attach(app_id(), newer.clone(), socket_path.clone(), sink.clone())
+            .await
+            .unwrap();
         // The guest's connection survived, which is what a redeploy of the daemon must not break.
         drop(guest);
         let mut second = UnixStream::connect(&socket_path).await.unwrap();
-        second.write_all(&encode_frame(ENCODE_KIND_STDOUT, b"after\n")).await.unwrap();
+        second
+            .write_all(&encode_frame(ENCODE_KIND_STDOUT, b"after\n"))
+            .await
+            .unwrap();
         second.flush().await.unwrap();
         until(|| !sink.events().is_empty()).await;
         assert_eq!(sink.events()[0].deployment_id, newer);

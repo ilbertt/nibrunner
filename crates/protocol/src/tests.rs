@@ -38,7 +38,10 @@ fn a_desired_state_round_trips_with_its_wire_names() {
     });
     let parsed: HostDesiredState = serde_json::from_value(document).expect("parses");
     assert_eq!(parsed.instances[0].desired_state, DesiredInstanceState::OnRequest);
-    assert_eq!(parsed.instances[0].idle_timeout_ms.map(|t| t.get()), Some(300_000));
+    assert_eq!(
+        parsed.instances[0].idle_timeout_ms.map(|t| t.get()),
+        Some(300_000)
+    );
     let written = serde_json::to_value(&parsed).expect("serialises");
     assert_eq!(written["instances"][0]["config"]["httpPort"], 3000);
     assert_eq!(written["instances"][0]["desiredState"], "on-request");
@@ -56,8 +59,9 @@ fn unknown_fields_are_tolerated_and_mistyped_ones_are_not() {
 fn a_secret_never_prints_itself() {
     let secret = SecretString::parse("hunter2").unwrap();
     assert_eq!(format!("{secret:?}"), REDACTED);
-    let environment: TenantEnvironment =
-        [("KEY".to_string(), TenantValue::parse("hunter2").unwrap())].into_iter().collect();
+    let environment: TenantEnvironment = [("KEY".to_string(), TenantValue::parse("hunter2").unwrap())]
+        .into_iter()
+        .collect();
     assert!(!format!("{environment:?}").contains("hunter2"));
 }
 
@@ -69,7 +73,9 @@ fn a_tenant_value_may_name_only_offered_runtime_values() {
     assert!(TenantValue::parse("$NIBRUN_HTTP_PORTS").is_err());
     assert!(TenantValue::parse("${NIBRUN_NOPE}").is_err());
     assert!(TenantValue::parse("${NIBRUN_HTTP_PORT").is_err());
-    assert!(names_extra_public_port_values("${NIBRUN_PUBLIC_IPV4}:${NIBRUN_EXTRA_PUBLIC_PORT}"));
+    assert!(names_extra_public_port_values(
+        "${NIBRUN_PUBLIC_IPV4}:${NIBRUN_EXTRA_PUBLIC_PORT}"
+    ));
     assert!(!names_extra_public_port_values("${NIBRUN_HTTP_PORT}"));
 }
 
@@ -89,8 +95,14 @@ fn identifiers_timestamps_and_addresses_are_checked() {
     assert!(Timestamp::parse("2026-08-03T10:00:00.000Z").is_ok());
     assert!(Timestamp::parse("2026-08-03T10:00:00+02:00").is_ok());
     assert!(Timestamp::parse("2026-08-03T10:00:00").is_err());
-    assert_eq!(Timestamp::from_epoch_ms(1_785_751_200_000).as_str(), "2026-08-03T10:00:00.000Z");
-    assert_eq!(Timestamp::parse("2026-08-03T10:00:00.000Z").unwrap().epoch_ms(), 1_785_751_200_000);
+    assert_eq!(
+        Timestamp::from_epoch_ms(1_785_751_200_000).as_str(),
+        "2026-08-03T10:00:00.000Z"
+    );
+    assert_eq!(
+        Timestamp::parse("2026-08-03T10:00:00.000Z").unwrap().epoch_ms(),
+        1_785_751_200_000
+    );
     assert!(Ipv4Address::parse("10.201.0.2").is_ok());
     assert!(Ipv4Address::parse("10.201.0.256").is_err());
     assert!(Ipv4Address::parse("01.2.3.4").is_err());
@@ -143,9 +155,8 @@ fn state_messages_are_cut_to_the_wire_ceiling() {
 fn a_filesystem_query_response_is_a_tagged_union() {
     let none: FilesystemQueryResponse = serde_json::from_str(r#"{"result":"none"}"#).unwrap();
     assert_eq!(none, FilesystemQueryResponse::None);
-    let query: FilesystemQueryResponse = serde_json::from_str(
-        r#"{"result":"query","query":{"queryId":"q1","appId":"app-1","path":"/"}}"#,
-    )
-    .unwrap();
+    let query: FilesystemQueryResponse =
+        serde_json::from_str(r#"{"result":"query","query":{"queryId":"q1","appId":"app-1","path":"/"}}"#)
+            .unwrap();
     assert!(matches!(query, FilesystemQueryResponse::Query { .. }));
 }

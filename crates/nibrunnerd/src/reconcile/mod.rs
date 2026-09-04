@@ -78,7 +78,8 @@ async fn apply_stops(host: &Host, plan: &ReconcilePlan) {
                 instances::stop_instance(host, app_id, reason.as_str()).await;
             }
             InstancePlan::Replace { desired } => {
-                instances::stop_instance(host, &desired.app_id, InstanceStopReason::Superseded.as_str()).await;
+                instances::stop_instance(host, &desired.app_id, InstanceStopReason::Superseded.as_str())
+                    .await;
                 let _ = host.vms.discard(&desired.app_id).await;
                 host.state.drop_record(&desired.app_id).await;
             }
@@ -117,7 +118,10 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
         return;
     }
     if !host.state.snapshot().await.isolated {
-        tracing::error!(refused = starts.len(), "instance starts refused: isolation ruleset not applied");
+        tracing::error!(
+            refused = starts.len(),
+            "instance starts refused: isolation ruleset not applied"
+        );
         return;
     }
     for desired in starts {
@@ -131,7 +135,9 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
 pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
     let observed = observe(host, desired).await;
     let plan = plan_reconcile(desired, &observed);
-    host.state.modify(|snapshot| snapshot.deferred_work = plan.has_deferred_work()).await;
+    host.state
+        .modify(|snapshot| snapshot.deferred_work = plan.has_deferred_work())
+        .await;
     sync_desired(host, desired).await;
 
     // The fetch does not need the host to have stopped anything, so it runs beside the stops
@@ -182,18 +188,32 @@ mod tests {
     use protocol::InstanceState;
 
     fn running_vm() -> VmStatus {
-        VmStatus { loaded: true, active: true, failed: false, started_this_boot: true, exit_code: None }
+        VmStatus {
+            loaded: true,
+            active: true,
+            failed: false,
+            started_this_boot: true,
+            exit_code: None,
+        }
     }
 
     fn stopped_vm() -> VmStatus {
-        VmStatus { loaded: true, active: false, failed: false, started_this_boot: true, exit_code: Some(0) }
+        VmStatus {
+            loaded: true,
+            active: false,
+            failed: false,
+            started_this_boot: true,
+            exit_code: Some(0),
+        }
     }
 
     /// One app with somewhere to write, which is the least a host can be asked to run.
     fn running_app() -> protocol::HostDesiredState {
         desired_state(|state| {
             state.volumes = vec![desired_volume(|_| {})];
-            state.instances = vec![desired_instance(|instance| instance.hostnames = vec![app_hostname()])];
+            state.instances = vec![desired_instance(|instance| {
+                instance.hostnames = vec![app_hostname()]
+            })];
         })
     }
 
@@ -203,13 +223,15 @@ mod tests {
     async fn an_app_is_woken_by_putting_back_the_microvm_it_had() {
         let host = test_host().await;
         host.vms.set_status(stopped_vm());
-        host.state.put_record(instance_record(|record| {
-            record.on_request = true;
-            record.state = InstanceState::Idle;
-        }))
-        .await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+            }))
+            .await;
 
-        let on_request = desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
         let outcome = instances::resume_instance(&host, &on_request).await.unwrap();
         assert_eq!(outcome, crate::services::WakeOutcome::Restored);
         assert_eq!(host.vms.calls(), vec![VmCall::Wake]);
@@ -223,15 +245,19 @@ mod tests {
         let host = test_host().await;
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.vms.set_status(stopped_vm());
-        host.vms.refuse_wake(VmError::SnapshotUnusable { reason: "the host has rebooted".into() });
+        host.vms.refuse_wake(VmError::SnapshotUnusable {
+            reason: "the host has rebooted".into(),
+        });
         host.state.modify(|snapshot| snapshot.isolated = true).await;
-        host.state.put_record(instance_record(|record| {
-            record.on_request = true;
-            record.state = InstanceState::Idle;
-        }))
-        .await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+            }))
+            .await;
 
-        let on_request = desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
         let outcome = instances::resume_instance(&host, &on_request).await.unwrap();
         assert_eq!(outcome, crate::services::WakeOutcome::ColdBoot);
         assert_eq!(host.vms.calls(), vec![VmCall::Wake, VmCall::Boot]);
@@ -242,14 +268,16 @@ mod tests {
     async fn a_restore_is_not_a_restart_so_it_costs_the_app_nothing() {
         let host = test_host().await;
         host.vms.set_status(stopped_vm());
-        host.state.put_record(instance_record(|record| {
-            record.on_request = true;
-            record.state = InstanceState::Idle;
-            record.restart_count = 4;
-        }))
-        .await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+                record.restart_count = 4;
+            }))
+            .await;
 
-        let on_request = desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
         instances::resume_instance(&host, &on_request).await.unwrap();
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.restart_count, 4);
@@ -262,8 +290,11 @@ mod tests {
     async fn a_microvm_that_is_already_up_is_left_alone_rather_than_restored_onto() {
         let host = test_host().await;
         host.vms.set_status(running_vm());
-        host.state.put_record(instance_record(|record| record.on_request = true)).await;
-        let on_request = desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.state
+            .put_record(instance_record(|record| record.on_request = true))
+            .await;
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
         let outcome = instances::resume_instance(&host, &on_request).await.unwrap();
         assert_eq!(outcome, crate::services::WakeOutcome::AlreadyRunning);
         assert!(host.vms.calls().is_empty());
@@ -273,7 +304,9 @@ mod tests {
     async fn an_app_that_has_gone_quiet_is_put_down_where_it_can_be_picked_up() {
         let host = test_host().await;
         host.slot_for(&app_id()).await.unwrap();
-        host.state.put_record(instance_record(|record| record.on_request = true)).await;
+        host.state
+            .put_record(instance_record(|record| record.on_request = true))
+            .await;
 
         instances::suspend_instance(&host, &app_id(), "idle").await;
 
@@ -291,12 +324,19 @@ mod tests {
     async fn one_that_may_not_be_snapshotted_is_left_up_rather_than_called_broken() {
         let host = test_host().await;
         host.slot_for(&app_id()).await.unwrap();
-        host.vms.refuse_sleep(VmError::SleepRefused { reason: "it has already been asked to stop".into() });
-        host.state.put_record(instance_record(|record| record.on_request = true)).await;
+        host.vms.refuse_sleep(VmError::SleepRefused {
+            reason: "it has already been asked to stop".into(),
+        });
+        host.state
+            .put_record(instance_record(|record| record.on_request = true))
+            .await;
 
         instances::suspend_instance(&host, &app_id(), "idle").await;
 
-        assert_eq!(host.state.record(&app_id()).await.unwrap().state, InstanceState::Running);
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Running
+        );
         // The mark is cleared however the sleep ended, or the next real crash would read as one.
         assert!(!host.state.snapshot().await.snapshotting.contains(&app_id()));
     }
@@ -306,7 +346,9 @@ mod tests {
     #[tokio::test]
     async fn one_with_no_slot_to_come_back_to_is_stopped() {
         let host = test_host().await;
-        host.state.put_record(instance_record(|record| record.on_request = true)).await;
+        host.state
+            .put_record(instance_record(|record| record.on_request = true))
+            .await;
         instances::suspend_instance(&host, &app_id(), "idle").await;
         assert_eq!(host.vms.calls(), vec![VmCall::Stop]);
     }
@@ -318,11 +360,12 @@ mod tests {
     async fn a_pass_that_lands_mid_capture_reads_the_microvm_as_asleep_rather_than_crashed() {
         let host = test_host().await;
         host.vms.set_status(stopped_vm());
-        host.state.put_record(instance_record(|record| {
-            record.on_request = true;
-            record.started_at = Some(observed_at());
-        }))
-        .await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.started_at = Some(observed_at());
+            }))
+            .await;
         host.state.mark_snapshotting(&app_id(), true).await;
 
         instances::refresh_states(host.arc()).await;
@@ -336,12 +379,14 @@ mod tests {
     async fn and_fails_it_once_the_snapshot_is_no_longer_in_flight() {
         let host = test_host().await;
         host.vms.set_status(stopped_vm());
-        host.vms.set_verdict("the tenant used its 5 restarts without staying up; shutting the guest down");
-        host.state.put_record(instance_record(|record| {
-            record.on_request = true;
-            record.started_at = Some(observed_at());
-        }))
-        .await;
+        host.vms
+            .set_verdict("the tenant used its 5 restarts without staying up; shutting the guest down");
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.started_at = Some(observed_at());
+            }))
+            .await;
 
         instances::refresh_states(host.arc()).await;
 
@@ -370,7 +415,10 @@ mod tests {
         // The ruleset went in before the boot, and the route is rendered for the hostname it holds.
         assert!(host.state.snapshot().await.isolated);
         assert_eq!(
-            host.router.routes().await.port_for(app_hostname().hostname.as_str()),
+            host.router
+                .routes()
+                .await
+                .port_for(app_hostname().hostname.as_str()),
             Some(record.host_port)
         );
         // And it is written down, so a restart adopts rather than re-derives from nothing.
@@ -400,7 +448,10 @@ mod tests {
 
         reconcile(host.arc(), &desired_state(|_| {})).await;
         assert!(host.vms.calls().contains(&VmCall::Stop));
-        assert_eq!(host.state.record(&app_id()).await.unwrap().state, InstanceState::Stopped);
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Stopped
+        );
 
         host.vms.set_status(stopped_vm());
         reconcile(host.arc(), &desired_state(|_| {})).await;
@@ -416,7 +467,11 @@ mod tests {
         let host = test_host().await;
         // The instance is named and the volume is not, which is what a host that never provisioned
         // it looks like.
-        reconcile(host.arc(), &desired_state(|state| state.instances = vec![desired_instance(|_| {})])).await;
+        reconcile(
+            host.arc(),
+            &desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
+        )
+        .await;
         assert!(host.vms.calls().is_empty());
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Failed);
@@ -438,7 +493,10 @@ mod tests {
         });
         reconcile(host.arc(), &newer).await;
 
-        assert_eq!(host.state.record(&app_id()).await.unwrap().deployment_id.as_str(), "dep-2");
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().deployment_id.as_str(),
+            "dep-2"
+        );
         // The outgoing microVM was stopped and discarded before the new one was booted.
         let calls = host.vms.calls();
         let stopped = calls.iter().position(|call| *call == VmCall::Stop).unwrap();

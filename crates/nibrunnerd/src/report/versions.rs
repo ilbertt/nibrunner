@@ -34,7 +34,9 @@ pub fn compiled_versions(firecracker: &str, guest_image: &str) -> HostVersions {
 }
 
 pub fn read_host_versions(path: &Path) -> Result<HostVersions, VersionsError> {
-    read_json(path)?.ok_or_else(|| VersionsError::Missing { path: path.display().to_string() })
+    read_json(path)?.ok_or_else(|| VersionsError::Missing {
+        path: path.display().to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -45,7 +47,10 @@ mod tests {
     fn a_versions_file_is_read_and_a_missing_one_says_so() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("versions.json");
-        assert!(read_host_versions(&path).unwrap_err().message().contains("names no versions"));
+        assert!(read_host_versions(&path)
+            .unwrap_err()
+            .message()
+            .contains("names no versions"));
         std::fs::write(
             &path,
             r#"{"agent":"sha","guestImage":"6.1.180-x","zerofs":"none","firecracker":"v1.16.1"}"#,

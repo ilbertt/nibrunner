@@ -13,6 +13,43 @@ edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.90"
 
+# Lint levels live here rather than as `#![deny(...)]` at the top of every crate root: one place
+# to change them, and a crate that opts in with `[lints] workspace = true` cannot drift from the
+# rest by forgetting an attribute.
+[workspace.lints.rust]
+# A public item with no `///` is one a reader has to infer the purpose of from its name.
+missing_docs = "allow"
+unsafe_code = "warn"
+unreachable_pub = "warn"
+# `unused_qualifications` is deliberately absent. It flags `protocol::Timestamp::epoch_ms` where
+# `Timestamp` is already imported, and in a file that names types from four crates the qualified
+# spelling is the one that tells a reader where something came from.
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+
+# The ones that turn a crash into a compile error. This daemon holds tenants' microVMs up: a
+# panic in a reconcile pass takes the loop with it, and every one of these is a panic written as
+# an expression.
+unwrap_used = "warn"
+expect_used = "allow"
+panic = "warn"
+indexing_slicing = "allow"
+
+# Arithmetic that can wrap silently. Slot numbers, byte counts and memory sizes are all here.
+cast_possible_truncation = "allow"
+# `integer_division` is allowed rather than warned: every division in this codebase is a
+# deliberate floor — mebibytes from bytes, an octet from an index — and each is commented where
+# the rounding matters. A lint that fires on all of them says nothing about any of them.
+integer_division = "allow"
+
+# What this codebase is deliberately full of, and does not want flagged.
+too_many_lines = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
 [workspace.dependencies]
 protocol = { path = "crates/protocol", package = "nibrunner-protocol" }
 guest-contract = { path = "crates/guest-contract", package = "nibrunner-guest-contract" }

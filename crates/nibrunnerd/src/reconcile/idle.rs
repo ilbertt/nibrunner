@@ -60,15 +60,27 @@ mod tests {
 
     #[test]
     fn a_quiet_serving_app_has_gone_quiet_and_one_asked_for_a_moment_ago_has_not() {
-        assert!(quiet(&on_request(InstanceState::Running), Some(TIMEOUT_MS), Some(QUIET_SINCE_MS)));
-        assert!(!quiet(&on_request(InstanceState::Running), Some(TIMEOUT_MS), Some(BUSY_SINCE_MS)));
+        assert!(quiet(
+            &on_request(InstanceState::Running),
+            Some(TIMEOUT_MS),
+            Some(QUIET_SINCE_MS)
+        ));
+        assert!(!quiet(
+            &on_request(InstanceState::Running),
+            Some(TIMEOUT_MS),
+            Some(BUSY_SINCE_MS)
+        ));
     }
 
     /// An app failing its probes has gone quiet because it is broken, so the silence is a symptom
     /// of the fault rather than evidence nobody wants it.
     #[test]
     fn an_unhealthy_app_is_not_a_quiet_one_however_long_nobody_has_asked_for_it() {
-        assert!(!quiet(&on_request(InstanceState::Unhealthy), Some(TIMEOUT_MS), Some(QUIET_SINCE_MS)));
+        assert!(!quiet(
+            &on_request(InstanceState::Unhealthy),
+            Some(TIMEOUT_MS),
+            Some(QUIET_SINCE_MS)
+        ));
     }
 
     #[test]
@@ -92,7 +104,10 @@ mod tests {
             .iter()
             .filter(|state| **state != InstanceState::Running && **state != InstanceState::Unhealthy)
         {
-            assert!(!quiet(&on_request(*state), Some(TIMEOUT_MS), Some(QUIET_SINCE_MS)), "{state:?}");
+            assert!(
+                !quiet(&on_request(*state), Some(TIMEOUT_MS), Some(QUIET_SINCE_MS)),
+                "{state:?}"
+            );
         }
     }
 
@@ -100,8 +115,16 @@ mod tests {
     /// desired state no longer calls `on-request` has no timeout to be measured against.
     #[test]
     fn an_app_nothing_has_been_observed_about_is_left_alone() {
-        assert!(!quiet(&on_request(InstanceState::Running), Some(TIMEOUT_MS), None));
-        assert!(!quiet(&on_request(InstanceState::Running), None, Some(QUIET_SINCE_MS)));
+        assert!(!quiet(
+            &on_request(InstanceState::Running),
+            Some(TIMEOUT_MS),
+            None
+        ));
+        assert!(!quiet(
+            &on_request(InstanceState::Running),
+            None,
+            Some(QUIET_SINCE_MS)
+        ));
     }
 }
 
@@ -152,14 +175,22 @@ pub fn activity_after(
         }
         // No interval behind the first reading of a counter, so it starts the clock rather than
         // answering it: an app whose counter has just appeared has not been idle since the epoch.
-        let moment = if moved.contains(&app_id) { now_ms } else { recorded.unwrap_or(now_ms) };
+        let moment = if moved.contains(&app_id) {
+            now_ms
+        } else {
+            recorded.unwrap_or(now_ms)
+        };
         last_active_at_ms.insert(app_id.clone(), moment);
         traffic.insert(app_id, after);
     }
     for (app_id, recorded) in previous_moments {
         last_active_at_ms.entry(app_id.clone()).or_insert(*recorded);
     }
-    Activity { traffic, last_active_at_ms, moved }
+    Activity {
+        traffic,
+        last_active_at_ms,
+        moved,
+    }
 }
 
 /// One reading of what the kernel has counted, folded into what this host already knew.
@@ -178,10 +209,16 @@ pub async fn record_activity(host: &Host) {
     // A slot this host no longer holds takes its history with it: the app is somewhere else or
     // nowhere, and either way what it last did here is not something to keep answering about.
     let held: BTreeSet<AppId> = host.slots().await.into_iter().map(|slot| slot.app_id).collect();
-    let traffic: BTreeMap<_, _> =
-        next.traffic.into_iter().filter(|(app_id, _)| held.contains(app_id)).collect();
-    let last_active_at_ms: BTreeMap<_, _> =
-        next.last_active_at_ms.into_iter().filter(|(app_id, _)| held.contains(app_id)).collect();
+    let traffic: BTreeMap<_, _> = next
+        .traffic
+        .into_iter()
+        .filter(|(app_id, _)| held.contains(app_id))
+        .collect();
+    let last_active_at_ms: BTreeMap<_, _> = next
+        .last_active_at_ms
+        .into_iter()
+        .filter(|(app_id, _)| held.contains(app_id))
+        .collect();
 
     // One line a tick, because the counts being read at all is the thing worth seeing: `measured:
     // 0` on a host running apps is a counter that never appeared, which reads the same as a quiet
@@ -221,7 +258,9 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
                     .map(|instance| {
                         (
                             instance.app_id.clone(),
-                            instance.idle_timeout_ms.map_or(DEFAULT_IDLE_TIMEOUT_MS, |timeout| timeout.get()),
+                            instance
+                                .idle_timeout_ms
+                                .map_or(DEFAULT_IDLE_TIMEOUT_MS, |timeout| timeout.get()),
                         )
                     })
                     .collect()
@@ -248,7 +287,12 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
         return;
     }
     for record in quiet {
-        let quiet_for_ms = now - snapshot.last_active_at_ms.get(&record.app_id).copied().unwrap_or(now);
+        let quiet_for_ms = now
+            - snapshot
+                .last_active_at_ms
+                .get(&record.app_id)
+                .copied()
+                .unwrap_or(now);
         tracing::info!(app_id = %record.app_id, quiet_for_ms, "app has gone quiet; letting it sleep");
         crate::reconcile::instances::suspend_instance(host, &record.app_id, "idle").await;
     }
@@ -326,8 +370,20 @@ mod activity_tests {
     #[test]
     fn every_app_in_the_table_is_read_not_just_the_first() {
         let taken = BTreeMap::from([
-            (app_id(), AppTraffic { packets: 1, bytes: 10 }),
-            (other(), AppTraffic { packets: 1, bytes: 20 }),
+            (
+                app_id(),
+                AppTraffic {
+                    packets: 1,
+                    bytes: 10,
+                },
+            ),
+            (
+                other(),
+                AppTraffic {
+                    packets: 1,
+                    bytes: 20,
+                },
+            ),
         ]);
         let after = activity_after(taken, &BTreeMap::new(), &BTreeMap::new(), NOW);
         assert_eq!(after.traffic.len(), 2);

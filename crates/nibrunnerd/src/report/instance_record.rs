@@ -1,6 +1,6 @@
 use protocol::{
-    AppHostname, AppId, DeploymentId, HealthCheck, HostPort, HttpPort, InstanceResources,
-    InstanceState, Ipv4Address, Sha256Digest, StateMessage, Timestamp, VolumeId,
+    AppHostname, AppId, DeploymentId, HealthCheck, HostPort, HttpPort, InstanceResources, InstanceState,
+    Ipv4Address, Sha256Digest, StateMessage, Timestamp, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -137,7 +137,10 @@ pub fn read_instance_records(value: Option<serde_json::Value>) -> Vec<InstanceRe
     let Some(serde_json::Value::Array(entries)) = value else {
         return Vec::new();
     };
-    entries.into_iter().filter_map(|entry| serde_json::from_value(entry).ok()).collect()
+    entries
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value(entry).ok())
+        .collect()
 }
 
 #[cfg(test)]
@@ -158,7 +161,10 @@ mod tests {
     fn a_note_missing_a_field_this_daemon_needs_is_discarded_rather_than_guessed_at() {
         let mut written = serde_json::to_value(instance_record(|_| {})).unwrap();
         written.as_object_mut().unwrap().remove("httpPort");
-        assert_eq!(read_instance_records(Some(serde_json::Value::Array(vec![written]))), vec![]);
+        assert_eq!(
+            read_instance_records(Some(serde_json::Value::Array(vec![written]))),
+            vec![]
+        );
         assert_eq!(read_instance_records(None), vec![]);
         assert_eq!(read_instance_records(Some(serde_json::json!({}))), vec![]);
     }

@@ -24,8 +24,10 @@ pub fn volume_owners(
     desired: &HostDesiredState,
     records: &BTreeMap<AppId, InstanceRecord>,
 ) -> BTreeMap<VolumeId, AppId> {
-    let mut owners: BTreeMap<VolumeId, AppId> =
-        records.values().map(|record| (record.volume_id.clone(), record.app_id.clone())).collect();
+    let mut owners: BTreeMap<VolumeId, AppId> = records
+        .values()
+        .map(|record| (record.volume_id.clone(), record.app_id.clone()))
+        .collect();
     for volume in &desired.volumes {
         owners.insert(volume.volume_id.clone(), volume.app_id.clone());
     }
@@ -62,7 +64,11 @@ pub fn to_reported_volume(observed: &ObservedVolume) -> ReportedVolume {
     ReportedVolume {
         volume_id: observed.volume_id.clone(),
         app_id: observed.app_id.clone(),
-        state: if observed.attached { VolumeState::Ready } else { VolumeState::Detached },
+        state: if observed.attached {
+            VolumeState::Ready
+        } else {
+            VolumeState::Detached
+        },
         size_bytes: observed.size_bytes,
         storage_prefix: Some(observed.storage_prefix.clone()),
         device_path: observed.device_path.clone(),
@@ -71,7 +77,12 @@ pub fn to_reported_volume(observed: &ObservedVolume) -> ReportedVolume {
     }
 }
 
-pub async fn apply_volumes(host: &Host, plan: &ReconcilePlan, observed: &ObservedState, desired: &HostDesiredState) {
+pub async fn apply_volumes(
+    host: &Host,
+    plan: &ReconcilePlan,
+    observed: &ObservedState,
+    desired: &HostDesiredState,
+) {
     let mut updates = Vec::new();
     for action in &plan.volumes {
         match action {
@@ -116,7 +127,11 @@ pub async fn apply_volumes(host: &Host, plan: &ReconcilePlan, observed: &Observe
 
     // Anything still named is still being waited on; anything not is a removal the control plane
     // has taken in, and holding it after that would report a volume nobody is asking about.
-    let still_named: BTreeSet<VolumeId> = desired.volumes.iter().map(|volume| volume.volume_id.clone()).collect();
+    let still_named: BTreeSet<VolumeId> = desired
+        .volumes
+        .iter()
+        .map(|volume| volume.volume_id.clone())
+        .collect();
     host.state.forget_deleted_volumes(&still_named).await;
 
     let existing: Vec<ReportedVolume> = observed.volumes.iter().map(to_reported_volume).collect();
@@ -126,7 +141,9 @@ pub async fn apply_volumes(host: &Host, plan: &ReconcilePlan, observed: &Observe
     let mut all_updates: Vec<ReportedVolume> = snapshot.deleted_volumes.values().cloned().collect();
     all_updates.extend(updates);
     let merged = merge_volume_reports(existing, all_updates);
-    host.state.modify(|snapshot| snapshot.volume_reports = merged).await;
+    host.state
+        .modify(|snapshot| snapshot.volume_reports = merged)
+        .await;
 }
 
 pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
@@ -221,14 +238,26 @@ mod tests {
         let host = test_host().await;
         // Asking for a volume smaller than the one on disk is the one refusal the backend makes
         // without a host tool being involved.
-        host.volumes.provision(&desired_volume(|volume| volume.size_bytes = VOLUME_SIZE_BYTES * 4)).await.unwrap();
+        host.volumes
+            .provision(&desired_volume(|volume| {
+                volume.size_bytes = VOLUME_SIZE_BYTES * 4
+            }))
+            .await
+            .unwrap();
         let plan = ReconcilePlan {
-            volumes: vec![VolumePlan::Provision { desired: desired_volume(|_| {}) }],
+            volumes: vec![VolumePlan::Provision {
+                desired: desired_volume(|_| {}),
+            }],
             ..Default::default()
         };
         apply_volumes(&host, &plan, &ObservedState::default(), &desired_state(|_| {})).await;
         let reports = host.state.snapshot().await.volume_reports;
         assert_eq!(reports[0].state, VolumeState::Failed);
-        assert!(reports[0].message.as_ref().unwrap().as_str().contains("cannot be resized down"));
+        assert!(reports[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("cannot be resized down"));
     }
 }

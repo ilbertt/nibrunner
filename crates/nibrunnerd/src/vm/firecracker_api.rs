@@ -69,7 +69,9 @@ pub struct FirecrackerApi {
 
 impl FirecrackerApi {
     pub fn at(socket_path: impl Into<PathBuf>) -> Self {
-        Self { socket_path: socket_path.into() }
+        Self {
+            socket_path: socket_path.into(),
+        }
     }
 
     async fn call<B: Serialize>(&self, method: Method, path: &str, body: &B) -> Result<(), VmError> {
@@ -98,7 +100,12 @@ impl FirecrackerApi {
             .map_err(|error| unreachable(error.to_string()))?;
         let response = tokio::time::timeout(CALL_TIMEOUT, sender.send_request(request))
             .await
-            .map_err(|_| unreachable(format!("{path} did not answer within {}s", CALL_TIMEOUT.as_secs())))?
+            .map_err(|_| {
+                unreachable(format!(
+                    "{path} did not answer within {}s",
+                    CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|error| unreachable(error.to_string()))?;
         let status = response.status();
         if status == hyper::StatusCode::NO_CONTENT {
@@ -135,11 +142,13 @@ impl FirecrackerApi {
     }
 
     pub async fn pause(&self) -> Result<(), VmError> {
-        self.call(Method::PATCH, VM_PATH, &VmState { state: "Paused" }).await
+        self.call(Method::PATCH, VM_PATH, &VmState { state: "Paused" })
+            .await
     }
 
     pub async fn resume(&self) -> Result<(), VmError> {
-        self.call(Method::PATCH, VM_PATH, &VmState { state: "Resumed" }).await
+        self.call(Method::PATCH, VM_PATH, &VmState { state: "Resumed" })
+            .await
     }
 
     /// Both files are created or truncated by this, and the microVM has to be paused already.
@@ -169,7 +178,10 @@ impl FirecrackerApi {
             SNAPSHOT_LOAD_PATH,
             &LoadSnapshot {
                 snapshot_path: &state_path.display().to_string(),
-                mem_backend: MemBackend { backend_type: "File", backend_path: &memory_path.display().to_string() },
+                mem_backend: MemBackend {
+                    backend_type: "File",
+                    backend_path: &memory_path.display().to_string(),
+                },
                 clock_realtime: true,
             },
         )
@@ -191,10 +203,18 @@ mod tests {
     }
 
     impl FakeVmm {
-        async fn listening(directory: &Path, status: hyper::StatusCode, body: &'static str) -> (PathBuf, Arc<Mutex<Vec<(String, String, String)>>>) {
+        async fn listening(
+            directory: &Path,
+            status: hyper::StatusCode,
+            body: &'static str,
+        ) -> (PathBuf, Arc<Mutex<Vec<(String, String, String)>>>) {
             let socket_path = directory.join("firecracker.sock");
             let seen = Arc::new(Mutex::new(Vec::new()));
-            let vmm = FakeVmm { seen: seen.clone(), status, body };
+            let vmm = FakeVmm {
+                seen: seen.clone(),
+                status,
+                body,
+            };
             let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
             tokio::spawn(async move {
                 loop {
@@ -205,21 +225,28 @@ mod tests {
                     let status = vmm.status;
                     let body = vmm.body;
                     tokio::spawn(async move {
-                        let service = hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
-                            let seen = seen.clone();
-                            async move {
-                                let method = request.method().to_string();
-                                let path = request.uri().path().to_string();
-                                let payload = request.into_body().collect().await.map(|body| String::from_utf8_lossy(&body.to_bytes()).into_owned()).unwrap_or_default();
-                                seen.lock().unwrap().push((method, path, payload));
-                                Ok::<_, std::convert::Infallible>(
-                                    hyper::Response::builder()
-                                        .status(status)
-                                        .body(Full::new(bytes::Bytes::from(body)))
-                                        .unwrap(),
-                                )
-                            }
-                        });
+                        let service = hyper::service::service_fn(
+                            move |request: hyper::Request<hyper::body::Incoming>| {
+                                let seen = seen.clone();
+                                async move {
+                                    let method = request.method().to_string();
+                                    let path = request.uri().path().to_string();
+                                    let payload = request
+                                        .into_body()
+                                        .collect()
+                                        .await
+                                        .map(|body| String::from_utf8_lossy(&body.to_bytes()).into_owned())
+                                        .unwrap_or_default();
+                                    seen.lock().unwrap().push((method, path, payload));
+                                    Ok::<_, std::convert::Infallible>(
+                                        hyper::Response::builder()
+                                            .status(status)
+                                            .body(Full::new(bytes::Bytes::from(body)))
+                                            .unwrap(),
+                                    )
+                                }
+                            },
+                        );
                         let _ = hyper::server::conn::http1::Builder::new()
                             .serve_connection(TokioIo::new(stream), service)
                             .await;
@@ -233,22 +260,34 @@ mod tests {
     #[tokio::test]
     async fn pausing_and_resuming_are_both_a_patch_on_the_vm_path() {
         let directory = tempfile::tempdir().unwrap();
-        let (socket_path, seen) = FakeVmm::listening(directory.path(), hyper::StatusCode::NO_CONTENT, "").await;
+        let (socket_path, seen) =
+            FakeVmm::listening(directory.path(), hyper::StatusCode::NO_CONTENT, "").await;
         let api = FirecrackerApi::at(&socket_path);
         api.pause().await.unwrap();
         api.resume().await.unwrap();
         let calls = seen.lock().unwrap().clone();
-        assert_eq!(calls[0], ("PATCH".into(), "/vm".into(), r#"{"state":"Paused"}"#.into()));
-        assert_eq!(calls[1], ("PATCH".into(), "/vm".into(), r#"{"state":"Resumed"}"#.into()));
+        assert_eq!(
+            calls[0],
+            ("PATCH".into(), "/vm".into(), r#"{"state":"Paused"}"#.into())
+        );
+        assert_eq!(
+            calls[1],
+            ("PATCH".into(), "/vm".into(), r#"{"state":"Resumed"}"#.into())
+        );
     }
 
     #[tokio::test]
     async fn a_snapshot_is_created_full_and_loaded_through_mem_backend_with_the_clock_advanced() {
         let directory = tempfile::tempdir().unwrap();
-        let (socket_path, seen) = FakeVmm::listening(directory.path(), hyper::StatusCode::NO_CONTENT, "").await;
+        let (socket_path, seen) =
+            FakeVmm::listening(directory.path(), hyper::StatusCode::NO_CONTENT, "").await;
         let api = FirecrackerApi::at(&socket_path);
-        api.create_snapshot(Path::new("/snap/vmstate"), Path::new("/snap/memory")).await.unwrap();
-        api.load_snapshot(Path::new("/snap/vmstate"), Path::new("/snap/memory")).await.unwrap();
+        api.create_snapshot(Path::new("/snap/vmstate"), Path::new("/snap/memory"))
+            .await
+            .unwrap();
+        api.load_snapshot(Path::new("/snap/vmstate"), Path::new("/snap/memory"))
+            .await
+            .unwrap();
         let calls = seen.lock().unwrap().clone();
         assert_eq!(calls[0].0, "PUT");
         assert_eq!(calls[0].1, "/snapshot/create");

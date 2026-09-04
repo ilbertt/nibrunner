@@ -102,9 +102,21 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let sink = FileLogSink::new(directory.path().join("logs"));
         sink.publish(vec![
-            event(TenantLogBody::Data { stream: TenantLogStream::Stdout, text: "listening\n".into() }, 0),
+            event(
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stdout,
+                    text: "listening\n".into(),
+                },
+                0,
+            ),
             event(TenantLogBody::Gap { dropped_bytes: 4096 }, 1),
-            event(TenantLogBody::Data { stream: TenantLogStream::Stderr, text: "warning\n".into() }, 2),
+            event(
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stderr,
+                    text: "warning\n".into(),
+                },
+                2,
+            ),
         ])
         .await;
         let written = std::fs::read_to_string(sink.path_for(&app_id())).unwrap();
@@ -113,7 +125,20 @@ mod tests {
         assert!(lines[1].contains("dropped by host buffering: 4096 bytes"));
         assert!(lines[2].ends_with("stderr source-1/2 warning"));
         // Appended rather than replaced: a redeploy does not lose what the last release said.
-        sink.publish(vec![event(TenantLogBody::Data { stream: TenantLogStream::Stdout, text: "again\n".into() }, 3)]).await;
-        assert_eq!(std::fs::read_to_string(sink.path_for(&app_id())).unwrap().lines().count(), 4);
+        sink.publish(vec![event(
+            TenantLogBody::Data {
+                stream: TenantLogStream::Stdout,
+                text: "again\n".into(),
+            },
+            3,
+        )])
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(sink.path_for(&app_id()))
+                .unwrap()
+                .lines()
+                .count(),
+            4
+        );
     }
 }

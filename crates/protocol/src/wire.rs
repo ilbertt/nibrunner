@@ -100,8 +100,7 @@ pub fn is_identifier(value: &str) -> bool {
         Some(first) if first.is_ascii_alphanumeric() => {}
         _ => return false,
     }
-    value.len() <= MAX_IDENTIFIER_LENGTH
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    value.len() <= MAX_IDENTIFIER_LENGTH && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 macro_rules! identifier {
@@ -151,7 +150,9 @@ const SHA256_HEX_LENGTH: usize = 64;
 
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == SHA256_HEX_LENGTH
-        && value.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 validated_string!(
@@ -173,7 +174,9 @@ fn is_timestamp(value: &str) -> bool {
     }
     let bytes = value.as_bytes();
     let digits = |range: std::ops::Range<usize>| {
-        bytes.get(range).is_some_and(|slice| slice.iter().all(u8::is_ascii_digit))
+        bytes
+            .get(range)
+            .is_some_and(|slice| slice.iter().all(u8::is_ascii_digit))
     };
     let at = |index: usize, expected: u8| bytes.get(index) == Some(&expected);
     if !(digits(0..4)

@@ -12,7 +12,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use nft_render::{parse_app_traffic, parse_kernel_tables, render_ruleset, AppTraffic, FirewallState, KernelTables, NFTABLES_TABLE};
+use nft_render::{
+    parse_app_traffic, parse_kernel_tables, render_ruleset, AppTraffic, FirewallState, KernelTables,
+    NFTABLES_TABLE,
+};
 use protocol::AppId;
 use tokio::sync::Mutex;
 
@@ -34,7 +37,10 @@ impl HostFirewall {
     /// Never applied by this process yet, so the first apply always runs: what is in the kernel
     /// came from whichever daemon ran before, and the host may have changed since.
     pub fn new(commands: Arc<dyn CommandRunner>) -> Self {
-        Self { commands, applied: Mutex::new(None) }
+        Self {
+            commands,
+            applied: Mutex::new(None),
+        }
     }
 
     /// `None` when nft could not be asked at all, which has to stay apart from a host holding no
@@ -65,7 +71,10 @@ impl HostFirewall {
             .await?;
         // Tables that cannot be read back leave the next pass nothing to compare against, so it
         // writes them again rather than taking this pass's success as proof they are in place.
-        *applied = self.kernel_tables().await.map(|tables| Applied { ruleset, tables });
+        *applied = self
+            .kernel_tables()
+            .await
+            .map(|tables| Applied { ruleset, tables });
         Ok(())
     }
 
@@ -74,7 +83,15 @@ impl HostFirewall {
     pub async fn traffic(&self) -> Result<BTreeMap<AppId, AppTraffic>, CommandError> {
         let json = self
             .commands
-            .stdout_of(CommandRequest::new(&["nft", "-j", "list", "counters", "table", "ip", NFTABLES_TABLE]))
+            .stdout_of(CommandRequest::new(&[
+                "nft",
+                "-j",
+                "list",
+                "counters",
+                "table",
+                "ip",
+                NFTABLES_TABLE,
+            ]))
             .await?;
         Ok(parse_app_traffic(&json))
     }
@@ -116,21 +133,40 @@ mod tests {
     }
 
     fn writes(commands: &RecordingCommandRunner) -> usize {
-        commands.calls().iter().filter(|request| request.command.contains(&"-f".to_string())).count()
+        commands
+            .calls()
+            .iter()
+            .filter(|request| request.command.contains(&"-f".to_string()))
+            .count()
     }
 
     #[tokio::test]
     async fn the_ruleset_is_piped_to_nft_whole_and_a_rerun_costs_nothing() {
         let commands = listing(holding((2, 4)));
         let firewall = HostFirewall::new(commands.clone());
-        let state = FirewallState { instances: vec![instance()], ..Default::default() };
+        let state = FirewallState {
+            instances: vec![instance()],
+            ..Default::default()
+        };
         firewall.apply(&state).await.unwrap();
-        let written = commands.calls().into_iter().find(|request| request.command.contains(&"-f".to_string())).unwrap();
+        let written = commands
+            .calls()
+            .into_iter()
+            .find(|request| request.command.contains(&"-f".to_string()))
+            .unwrap();
         assert_eq!(written.command, vec!["nft", "-f", "-"]);
-        assert!(written.stdin.as_deref().unwrap().starts_with("table ip nibrun\ndelete table ip nibrun"));
+        assert!(written
+            .stdin
+            .as_deref()
+            .unwrap()
+            .starts_with("table ip nibrun\ndelete table ip nibrun"));
 
         firewall.apply(&state).await.unwrap();
-        assert_eq!(writes(&commands), 1, "an unchanged ruleset the kernel still holds is not rewritten");
+        assert_eq!(
+            writes(&commands),
+            1,
+            "an unchanged ruleset the kernel still holds is not rewritten"
+        );
     }
 
     /// An operator's `nft flush ruleset` leaves the text unchanged and the kernel empty, which is
@@ -187,7 +223,10 @@ mod tests {
     async fn a_kernel_that_would_not_answer_is_not_taken_as_proof_the_rules_are_in_place() {
         let commands = RecordingCommandRunner::answering(|request| {
             if request.command.contains(&"list".to_string()) {
-                Err(CommandError::Unstartable { executable: "nft".into(), reason: "not found".into() })
+                Err(CommandError::Unstartable {
+                    executable: "nft".into(),
+                    reason: "not found".into(),
+                })
             } else {
                 Ok(CommandResult::succeeded())
             }
@@ -206,6 +245,12 @@ mod tests {
             app_counter_name(&app)
         );
         let firewall = HostFirewall::new(listing(counters));
-        assert_eq!(firewall.traffic().await.unwrap().get(&app), Some(&AppTraffic { packets: 3, bytes: 512 }));
+        assert_eq!(
+            firewall.traffic().await.unwrap().get(&app),
+            Some(&AppTraffic {
+                packets: 3,
+                bytes: 512
+            })
+        );
     }
 }

@@ -4,6 +4,10 @@
 //! on the wire, and unknown properties are tolerated on the way in: the two sides are deployed by
 //! different pipelines, so a field the newer side sends is not a reason to reject its message.
 
+// A test that unwraps and panics *is* its own failure report, and one written to avoid saying
+// so reads worse than the assertion it replaced. The lint stays on for everything else.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
+
 #[macro_use]
 mod wire;
 mod control;

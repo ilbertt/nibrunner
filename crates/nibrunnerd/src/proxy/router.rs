@@ -86,7 +86,10 @@ impl Router {
             return say(StatusCode::BAD_REQUEST, "This request names no host.\n");
         };
         let Some(port) = self.routes().await.port_for(&hostname) else {
-            return say(StatusCode::NOT_FOUND, "No app on this host answers for that hostname.\n");
+            return say(
+                StatusCode::NOT_FOUND,
+                "No app on this host answers for that hostname.\n",
+            );
         };
         forward(&self.client, request, LOOPBACK, port.get(), true).await
     }
@@ -109,7 +112,9 @@ pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Re
             });
             // A cold boot outlasts any sensible idle ceiling, and a request abandoned while the
             // microVM it asked for is still coming up is the one thing this must not do.
-            let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
         });
     }
 }
@@ -139,16 +144,24 @@ pub async fn serve_https(
                 let router = router.clone();
                 async move { Ok::<_, std::convert::Infallible>(router.handle(request).await) }
             });
-            let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
         });
     }
 }
 
 pub fn tls_acceptor(certificate: &Path, key: &Path) -> std::io::Result<tokio_rustls::TlsAcceptor> {
-    let certificates: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(certificate)?))
-        .collect::<Result<_, _>>()?;
+    let certificates: Vec<_> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(certificate)?))
+            .collect::<Result<_, _>>()?;
     let private_key = rustls_pemfile::private_key(&mut std::io::BufReader::new(std::fs::File::open(key)?))?
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "the key file holds no private key"))?;
+        .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the key file holds no private key",
+        )
+    })?;
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certificates, private_key)
@@ -159,8 +172,8 @@ pub fn tls_acceptor(certificate: &Path, key: &Path) -> std::io::Result<tokio_rus
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{app_hostname, instance_record};
     use crate::report::routes::renderable_routes;
+    use crate::test_support::{app_hostname, instance_record};
     use protocol::{AppHostname, AppHostnameKind, Hostname};
 
     #[test]
@@ -169,13 +182,17 @@ mod tests {
             record.hostnames = vec![
                 app_hostname(),
                 AppHostname {
-                    hostname: Hostname::parse("Www.Example.Com").unwrap_or_else(|_| Hostname::parse("www.example.com").unwrap()),
+                    hostname: Hostname::parse("Www.Example.Com")
+                        .unwrap_or_else(|_| Hostname::parse("www.example.com").unwrap()),
                     kind: AppHostnameKind::Custom,
                 },
             ];
         });
         let table = RouteTable::from_targets(&renderable_routes(std::slice::from_ref(&record)));
-        assert_eq!(table.port_for(app_hostname().hostname.as_str()), Some(record.host_port));
+        assert_eq!(
+            table.port_for(app_hostname().hostname.as_str()),
+            Some(record.host_port)
+        );
         // Matched without regard to case, because a client chooses that and a host does not.
         assert_eq!(table.port_for("www.example.com"), Some(record.host_port));
         assert_eq!(table.port_for("nobody.example.com"), None);

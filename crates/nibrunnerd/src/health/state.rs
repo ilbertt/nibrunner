@@ -187,7 +187,11 @@ pub fn evaluate_instance_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
         now_ms: inputs.now_ms,
     });
     if inputs.tracker.consecutive_failures >= inputs.health_check.unhealthy_threshold && !within_grace {
-        return if inputs.tracker.ever_healthy { InstanceState::Unhealthy } else { InstanceState::Failed };
+        return if inputs.tracker.ever_healthy {
+            InstanceState::Unhealthy
+        } else {
+            InstanceState::Failed
+        };
     }
     if inputs.tracker.ever_healthy {
         InstanceState::Running
@@ -222,15 +226,33 @@ mod tests {
     }
 
     fn active() -> VmStatus {
-        VmStatus { loaded: true, active: true, failed: false, started_this_boot: true, exit_code: None }
+        VmStatus {
+            loaded: true,
+            active: true,
+            failed: false,
+            started_this_boot: true,
+            exit_code: None,
+        }
     }
 
     fn exited() -> VmStatus {
-        VmStatus { loaded: true, active: false, failed: false, started_this_boot: true, exit_code: Some(0) }
+        VmStatus {
+            loaded: true,
+            active: false,
+            failed: false,
+            started_this_boot: true,
+            exit_code: Some(0),
+        }
     }
 
     fn crashed() -> VmStatus {
-        VmStatus { loaded: true, active: false, failed: true, started_this_boot: true, exit_code: Some(1) }
+        VmStatus {
+            loaded: true,
+            active: false,
+            failed: true,
+            started_this_boot: true,
+            exit_code: Some(1),
+        }
     }
 
     fn absent() -> VmStatus {
@@ -303,15 +325,34 @@ mod tests {
     }
 
     fn delay(tracker: &HealthTracker, now_ms: i64, health_check: &HealthCheck) -> u64 {
-        next_probe_delay_ms(tracker, &GraceInputs { health_check, started_at_ms: Some(STARTED_AT_MS), now_ms })
+        next_probe_delay_ms(
+            tracker,
+            &GraceInputs {
+                health_check,
+                started_at_ms: Some(STARTED_AT_MS),
+                now_ms,
+            },
+        )
     }
 
     #[test]
     fn how_soon_a_tenant_is_asked_again() {
-        assert_eq!(delay(&initial_tracker(), within_grace(), &DEFAULT_HEALTH_CHECK), STARTUP_PROBE_INTERVAL_MS);
-        assert_eq!(delay(&healthy_then(0), within_grace(), &DEFAULT_HEALTH_CHECK), DEFAULT_HEALTH_CHECK.interval_ms);
-        assert_eq!(delay(&initial_tracker(), past_grace(), &DEFAULT_HEALTH_CHECK), DEFAULT_HEALTH_CHECK.interval_ms);
-        let fast = HealthCheck { interval_ms: STARTUP_PROBE_INTERVAL_MS - 1, ..DEFAULT_HEALTH_CHECK };
+        assert_eq!(
+            delay(&initial_tracker(), within_grace(), &DEFAULT_HEALTH_CHECK),
+            STARTUP_PROBE_INTERVAL_MS
+        );
+        assert_eq!(
+            delay(&healthy_then(0), within_grace(), &DEFAULT_HEALTH_CHECK),
+            DEFAULT_HEALTH_CHECK.interval_ms
+        );
+        assert_eq!(
+            delay(&initial_tracker(), past_grace(), &DEFAULT_HEALTH_CHECK),
+            DEFAULT_HEALTH_CHECK.interval_ms
+        );
+        let fast = HealthCheck {
+            interval_ms: STARTUP_PROBE_INTERVAL_MS - 1,
+            ..DEFAULT_HEALTH_CHECK
+        };
         assert_eq!(delay(&initial_tracker(), within_grace(), &fast), fast.interval_ms);
     }
 
@@ -332,10 +373,19 @@ mod tests {
     fn a_booted_vm_is_not_a_running_app() {
         assert_eq!(evaluate(Evaluate::default()), InstanceState::Starting);
         assert_eq!(
-            evaluate(Evaluate { tracker: probe(&initial_tracker(), true, 1), ..Default::default() }),
+            evaluate(Evaluate {
+                tracker: probe(&initial_tracker(), true, 1),
+                ..Default::default()
+            }),
             InstanceState::Running
         );
-        assert_eq!(evaluate(Evaluate { tracker: failing(10), ..Default::default() }), InstanceState::Starting);
+        assert_eq!(
+            evaluate(Evaluate {
+                tracker: failing(10),
+                ..Default::default()
+            }),
+            InstanceState::Starting
+        );
         assert_eq!(
             evaluate(Evaluate {
                 tracker: failing(DEFAULT_HEALTH_CHECK.unhealthy_threshold),
@@ -353,7 +403,11 @@ mod tests {
             InstanceState::Unhealthy
         );
         assert_eq!(
-            evaluate(Evaluate { tracker: healthy_then(1), now_ms: past_grace(), ..Default::default() }),
+            evaluate(Evaluate {
+                tracker: healthy_then(1),
+                now_ms: past_grace(),
+                ..Default::default()
+            }),
             InstanceState::Running
         );
     }
@@ -361,15 +415,29 @@ mod tests {
     #[test]
     fn what_the_vm_itself_is_doing() {
         assert_eq!(
-            evaluate(Evaluate { unit: exited(), tracker: healthy_then(0), now_ms: past_grace(), ..Default::default() }),
+            evaluate(Evaluate {
+                unit: exited(),
+                tracker: healthy_then(0),
+                now_ms: past_grace(),
+                ..Default::default()
+            }),
             InstanceState::Failed
         );
         assert_eq!(
-            evaluate(Evaluate { unit: crashed(), tracker: probe(&initial_tracker(), true, 1), ..Default::default() }),
+            evaluate(Evaluate {
+                unit: crashed(),
+                tracker: probe(&initial_tracker(), true, 1),
+                ..Default::default()
+            }),
             InstanceState::Failed
         );
         assert_eq!(
-            evaluate(Evaluate { unit: exited(), now_ms: past_grace(), stop_requested: true, ..Default::default() }),
+            evaluate(Evaluate {
+                unit: exited(),
+                now_ms: past_grace(),
+                stop_requested: true,
+                ..Default::default()
+            }),
             InstanceState::Stopped
         );
         assert_eq!(
@@ -383,24 +451,48 @@ mod tests {
         );
         // A start still being staged is pending, though the replaced VM is still on record.
         assert_eq!(
-            evaluate(Evaluate { unit: exited(), now_ms: STARTED_AT_MS, started_at_ms: None, ..Default::default() }),
+            evaluate(Evaluate {
+                unit: exited(),
+                now_ms: STARTED_AT_MS,
+                started_at_ms: None,
+                ..Default::default()
+            }),
             InstanceState::Pending
         );
         assert_eq!(
-            evaluate(Evaluate { unit: absent(), now_ms: STARTED_AT_MS, started_at_ms: None, ..Default::default() }),
+            evaluate(Evaluate {
+                unit: absent(),
+                now_ms: STARTED_AT_MS,
+                started_at_ms: None,
+                ..Default::default()
+            }),
             InstanceState::Pending
         );
         assert_eq!(
-            evaluate(Evaluate { unit: absent(), now_ms: past_grace(), desired_running: false, ..Default::default() }),
+            evaluate(Evaluate {
+                unit: absent(),
+                now_ms: past_grace(),
+                desired_running: false,
+                ..Default::default()
+            }),
             InstanceState::Stopped
         );
     }
 
     #[test]
     fn an_app_that_runs_on_request_is_idle_rather_than_stopped() {
-        let base = Evaluate { on_request: true, started_at_ms: None, now_ms: STARTED_AT_MS, ..Default::default() };
+        let base = Evaluate {
+            on_request: true,
+            started_at_ms: None,
+            now_ms: STARTED_AT_MS,
+            ..Default::default()
+        };
         assert_eq!(
-            evaluate(Evaluate { unit: absent(), current: InstanceState::Idle, ..base }),
+            evaluate(Evaluate {
+                unit: absent(),
+                current: InstanceState::Idle,
+                ..base
+            }),
             InstanceState::Idle
         );
         // The two look identical from the unit alone; the record is what tells them apart.
@@ -416,36 +508,70 @@ mod tests {
             InstanceState::Pending
         );
         assert_eq!(
-            evaluate(Evaluate { unit: exited(), on_request: true, stop_requested: true, now_ms: past_grace(), ..Default::default() }),
+            evaluate(Evaluate {
+                unit: exited(),
+                on_request: true,
+                stop_requested: true,
+                now_ms: past_grace(),
+                ..Default::default()
+            }),
             InstanceState::Idle
         );
         assert_eq!(
-            evaluate(Evaluate { unit: exited(), on_request: true, now_ms: past_grace(), ..Default::default() }),
+            evaluate(Evaluate {
+                unit: exited(),
+                on_request: true,
+                now_ms: past_grace(),
+                ..Default::default()
+            }),
             InstanceState::Failed
         );
         // The snapshot is what takes the VMM down, and `stop_requested` is only written once it
         // has been taken: reading that as a crash fails the deployment.
         assert_eq!(
-            evaluate(Evaluate { unit: exited(), on_request: true, snapshotting: true, now_ms: past_grace(), ..Default::default() }),
+            evaluate(Evaluate {
+                unit: exited(),
+                on_request: true,
+                snapshotting: true,
+                now_ms: past_grace(),
+                ..Default::default()
+            }),
             InstanceState::Idle
         );
         assert_eq!(
-            evaluate(Evaluate { unit: absent(), on_request: true, desired_running: false, now_ms: past_grace(), ..Default::default() }),
+            evaluate(Evaluate {
+                unit: absent(),
+                on_request: true,
+                desired_running: false,
+                now_ms: past_grace(),
+                ..Default::default()
+            }),
             InstanceState::Stopped
         );
     }
 
     #[test]
     fn thresholds_are_honoured() {
-        let two = HealthCheck { healthy_threshold: 2, ..DEFAULT_HEALTH_CHECK };
+        let two = HealthCheck {
+            healthy_threshold: 2,
+            ..DEFAULT_HEALTH_CHECK
+        };
         let once = probe(&initial_tracker(), true, 2);
         assert_eq!(
-            evaluate(Evaluate { tracker: once.clone(), health_check: two.clone(), ..Default::default() }),
+            evaluate(Evaluate {
+                tracker: once.clone(),
+                health_check: two.clone(),
+                ..Default::default()
+            }),
             InstanceState::Starting
         );
         let twice = probe(&once, true, 2);
         assert_eq!(
-            evaluate(Evaluate { tracker: twice, health_check: two, ..Default::default() }),
+            evaluate(Evaluate {
+                tracker: twice,
+                health_check: two,
+                ..Default::default()
+            }),
             InstanceState::Running
         );
     }
@@ -460,22 +586,43 @@ mod tests {
             "the microVM stopped without being asked to, exit code 0"
         );
         assert_eq!(
-            failure(&VmStatus { exit_code: None, ..crashed() }, &initial_tracker(), None),
+            failure(
+                &VmStatus {
+                    exit_code: None,
+                    ..crashed()
+                },
+                &initial_tracker(),
+                None
+            ),
             "the microVM stopped without being asked to"
         );
         // The exit code beside a stopped VM is Firecracker's, and a guest that powered itself off
         // deliberately leaves it 0 — so an owner reading it is told the failure succeeded.
         assert_eq!(
-            failure(&exited(), &initial_tracker(), Some("the tenant used its 5 restarts without staying up; shutting the guest down")),
+            failure(
+                &exited(),
+                &initial_tracker(),
+                Some("the tenant used its 5 restarts without staying up; shutting the guest down")
+            ),
             "the tenant used its 5 restarts without staying up; shutting the guest down"
         );
-        let unreachable = HealthTracker { consecutive_failures: DEFAULT_HEALTH_CHECK.unhealthy_threshold, ..initial_tracker() };
+        let unreachable = HealthTracker {
+            consecutive_failures: DEFAULT_HEALTH_CHECK.unhealthy_threshold,
+            ..initial_tracker()
+        };
         let expected = format!(
             "nothing answered on port {DEFAULT_HTTP_PORT} inside the guest: {} health probes failed after the {}ms grace period",
             DEFAULT_HEALTH_CHECK.unhealthy_threshold, DEFAULT_HEALTH_CHECK.grace_period_ms
         );
         // A VM still up never stopped, so there is no console verdict to prefer.
-        assert_eq!(failure(&active(), &unreachable, Some("the tenant has stopped; shutting the guest down")), expected);
+        assert_eq!(
+            failure(
+                &active(),
+                &unreachable,
+                Some("the tenant has stopped; shutting the guest down")
+            ),
+            expected
+        );
         assert_eq!(failure(&active(), &unreachable, None), expected);
     }
 }

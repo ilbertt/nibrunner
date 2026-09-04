@@ -144,7 +144,10 @@ impl std::fmt::Debug for TenantValue {
 /// Closed, because a name the pattern does not match is otherwise neither validated nor
 /// rejected. Ordered, so what is rendered from it is rendered the same way twice.
 #[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(try_from = "BTreeMap<String, TenantValue>", into = "BTreeMap<String, TenantValue>")]
+#[serde(
+    try_from = "BTreeMap<String, TenantValue>",
+    into = "BTreeMap<String, TenantValue>"
+)]
 pub struct TenantEnvironment(BTreeMap<String, TenantValue>);
 
 impl TenantEnvironment {

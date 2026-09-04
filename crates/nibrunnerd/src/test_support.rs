@@ -284,5 +284,10 @@ pub async fn test_host() -> TestHost {
         activator: AppActivator::new(state, Arc::new(NeverWoken)),
         config,
     });
-    TestHost { _directory: directory, host, vms, commands }
+    TestHost {
+        _directory: directory,
+        host,
+        vms,
+        commands,
+    }
 }

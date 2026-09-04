@@ -53,7 +53,12 @@ pub async fn apply_network(host: &Host) {
 
 /// A listener on every port this host holds a slot for, so one with no forward still answers.
 pub async fn apply_activators(host: &Arc<Host>) {
-    let slots: Vec<_> = host.slots().await.into_iter().map(|slot| (slot.app_id, slot.host_port)).collect();
+    let slots: Vec<_> = host
+        .slots()
+        .await
+        .into_iter()
+        .map(|slot| (slot.app_id, slot.host_port))
+        .collect();
     host.activator.serve(&slots).await;
 }
 
@@ -79,7 +84,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_forward_is_what_decides_whether_a_port_reaches_the_guest() {
-        for state in INSTANCE_STATES.iter().filter(|state| **state != InstanceState::Running) {
+        for state in INSTANCE_STATES
+            .iter()
+            .filter(|state| **state != InstanceState::Running)
+        {
             let forwarded = forwards_for(vec![instance_record(|record| record.state = *state)]).await;
             assert!(forwarded.is_empty(), "{state:?} should not be forwarded");
         }
@@ -104,12 +112,18 @@ mod tests {
     /// so an app that did not ask has to be indistinguishable from one that could not have.
     #[tokio::test]
     async fn an_app_is_forwarded_the_port_it_asked_for_and_no_other() {
-        let asked = forwards_for(vec![instance_record(|record| record.has_extra_public_port = Some(true))]).await;
+        let asked = forwards_for(vec![instance_record(|record| {
+            record.has_extra_public_port = Some(true)
+        })])
+        .await;
         assert_eq!(asked[0].extra_public_port.map(|port| port.get()), Some(22_000));
         let did_not = forwards_for(vec![instance_record(|_| {})]).await;
         assert_eq!(did_not[0].extra_public_port, None);
         // A record written before an app could ask for one says nothing, and reads as the no it meant.
-        let older = forwards_for(vec![instance_record(|record| record.has_extra_public_port = None)]).await;
+        let older = forwards_for(vec![instance_record(|record| {
+            record.has_extra_public_port = None
+        })])
+        .await;
         assert_eq!(older[0].extra_public_port, None);
     }
 }

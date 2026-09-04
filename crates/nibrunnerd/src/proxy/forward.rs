@@ -91,7 +91,11 @@ pub fn say(status: StatusCode, message: &str) -> Response<ProxyBody> {
         .header("content-type", "text/plain; charset=utf-8")
         .header("cache-control", "no-store")
         .header("connection", "close")
-        .body(Full::new(Bytes::from(message.to_string())).map_err(|never| match never {}).boxed())
+        .body(
+            Full::new(Bytes::from(message.to_string()))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
         .expect("a constant response is always buildable")
 }
 
@@ -113,9 +117,15 @@ mod tests {
     #[test]
     fn a_uri_is_rewritten_onto_the_upstream_keeping_its_path_and_query() {
         let uri: Uri = "https://app.example.com/a/b?c=1".parse().unwrap();
-        assert_eq!(rewritten(&uri, "127.0.0.1", 21000).to_string(), "http://127.0.0.1:21000/a/b?c=1");
+        assert_eq!(
+            rewritten(&uri, "127.0.0.1", 21000).to_string(),
+            "http://127.0.0.1:21000/a/b?c=1"
+        );
         let bare: Uri = "/".parse().unwrap();
-        assert_eq!(rewritten(&bare, "10.201.0.2", 3000).to_string(), "http://10.201.0.2:3000/");
+        assert_eq!(
+            rewritten(&bare, "10.201.0.2", 3000).to_string(),
+            "http://10.201.0.2:3000/"
+        );
     }
 
     #[test]

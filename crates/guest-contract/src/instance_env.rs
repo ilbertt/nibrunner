@@ -3,7 +3,10 @@
 //! itself needs, `ENV_<NAME>` for one of the tenant's own variables. The prefixes exist so the two
 //! can never collide. `apps/runtime/src/config.h` is the format contract.
 
-use protocol::{AppHostname, AppHostnameKind, HostPort, Hostname, HttpPort, Ipv4Address, RestartPolicy, TenantArguments, TenantEnvironment};
+use protocol::{
+    AppHostname, AppHostnameKind, HostPort, Hostname, HttpPort, Ipv4Address, RestartPolicy, TenantArguments,
+    TenantEnvironment,
+};
 
 pub const INSTANCE_ENV_FILENAME: &str = "instance.env";
 pub const INSTANCE_CONFIG_IMAGE: &str = "config.squashfs";
@@ -50,7 +53,10 @@ fn has_forbidden_character(value: &str) -> bool {
 /// The name nibrun issued the app, never one its owner brought: it is the hostname the app is
 /// always reachable at, and the only one that cannot be taken away underneath a running binary.
 fn platform_hostname(hostnames: &[AppHostname]) -> Option<&Hostname> {
-    hostnames.iter().find(|each| each.kind == AppHostnameKind::Platform).map(|each| &each.hostname)
+    hostnames
+        .iter()
+        .find(|each| each.kind == AppHostnameKind::Platform)
+        .map(|each| &each.hostname)
 }
 
 /// `backoffFactor` is written the way JavaScript prints a number: `2` rather than `2.0`, which is
@@ -76,22 +82,38 @@ pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, U
     }
     let policy = content.restart_policy;
     lines.push(format!("{RUNTIME_PREFIX}MAX_RESTARTS={}", policy.max_restarts));
-    lines.push(format!("{RUNTIME_PREFIX}INITIAL_BACKOFF_MS={}", policy.initial_backoff_ms));
-    lines.push(format!("{RUNTIME_PREFIX}MAX_BACKOFF_MS={}", policy.max_backoff_ms));
-    lines.push(format!("{RUNTIME_PREFIX}BACKOFF_FACTOR={}", js_number(policy.backoff_factor)));
-    lines.push(format!("{RUNTIME_PREFIX}RESET_AFTER_MS={}", policy.reset_after_ms));
+    lines.push(format!(
+        "{RUNTIME_PREFIX}INITIAL_BACKOFF_MS={}",
+        policy.initial_backoff_ms
+    ));
+    lines.push(format!(
+        "{RUNTIME_PREFIX}MAX_BACKOFF_MS={}",
+        policy.max_backoff_ms
+    ));
+    lines.push(format!(
+        "{RUNTIME_PREFIX}BACKOFF_FACTOR={}",
+        js_number(policy.backoff_factor)
+    ));
+    lines.push(format!(
+        "{RUNTIME_PREFIX}RESET_AFTER_MS={}",
+        policy.reset_after_ms
+    ));
     lines.push(format!("{RUNTIME_PREFIX}DNS={}", DNS_SERVERS.join(",")));
     // Numbered rather than delimited: a format with no quoting cannot carry a separator an
     // argument might itself contain, and the guest refuses a gap rather than shifting the rest down.
     for (index, argument) in content.args.iter().enumerate() {
         if has_forbidden_character(argument) {
-            return Err(UnrepresentableEnvironment { variable_name: format!("{RUNTIME_PREFIX}ARG_{index}") });
+            return Err(UnrepresentableEnvironment {
+                variable_name: format!("{RUNTIME_PREFIX}ARG_{index}"),
+            });
         }
         lines.push(format!("{RUNTIME_PREFIX}ARG_{index}={argument}"));
     }
     for (name, value) in content.environment.iter() {
         if has_forbidden_character(value.expose()) {
-            return Err(UnrepresentableEnvironment { variable_name: name.to_string() });
+            return Err(UnrepresentableEnvironment {
+                variable_name: name.to_string(),
+            });
         }
         lines.push(format!("{TENANT_PREFIX}{name}={}", value.expose()));
     }
@@ -106,11 +128,17 @@ mod tests {
     const PLATFORM_HOSTNAME: &str = "my-app.nibrun.app";
 
     fn hostname(name: &str, kind: AppHostnameKind) -> AppHostname {
-        AppHostname { hostname: Hostname::parse(name).unwrap(), kind }
+        AppHostname {
+            hostname: Hostname::parse(name).unwrap(),
+            kind,
+        }
     }
 
     fn environment(values: &[(&str, &str)]) -> TenantEnvironment {
-        values.iter().map(|(name, value)| (name.to_string(), TenantValue::parse(*value).unwrap())).collect()
+        values
+            .iter()
+            .map(|(name, value)| (name.to_string(), TenantValue::parse(*value).unwrap()))
+            .collect()
     }
 
     struct Overrides {
@@ -172,7 +200,10 @@ mod tests {
         assert!(!without.contains("NIBRUN_PUBLIC_IPV4"));
         assert!(!without.contains("NIBRUN_EXTRA_PUBLIC_PORT"));
         let with = render(Overrides {
-            public_address: Some(PublicAddress { ipv4: Ipv4Address::parse("203.0.113.7").unwrap(), port: HostPort::new(22_000).unwrap() }),
+            public_address: Some(PublicAddress {
+                ipv4: Ipv4Address::parse("203.0.113.7").unwrap(),
+                port: HostPort::new(22_000).unwrap(),
+            }),
             ..Default::default()
         });
         let lines: Vec<&str> = with.lines().collect();
@@ -183,46 +214,85 @@ mod tests {
 
     #[test]
     fn tenant_variables_carry_the_tenant_prefix_in_a_stable_order() {
-        let rendered = render(Overrides { environment: environment(&[("ZED", "1"), ("ALPHA", "2")]), ..Default::default() });
+        let rendered = render(Overrides {
+            environment: environment(&[("ZED", "1"), ("ALPHA", "2")]),
+            ..Default::default()
+        });
         assert!(rendered.contains("\nENV_ALPHA=2\nENV_ZED=1\n"));
-        let shadowing = render(Overrides { environment: environment(&[("NIBRUN_HTTP_PORT", "9999")]), ..Default::default() });
+        let shadowing = render(Overrides {
+            environment: environment(&[("NIBRUN_HTTP_PORT", "9999")]),
+            ..Default::default()
+        });
         assert!(shadowing.contains("NIBRUN_HTTP_PORT=3000\n"));
         assert!(shadowing.contains("ENV_NIBRUN_HTTP_PORT=9999\n"));
-        let raw = render(Overrides { environment: environment(&[("DSN", "postgres://u:p@h/db?x=1 y=2")]), ..Default::default() });
+        let raw = render(Overrides {
+            environment: environment(&[("DSN", "postgres://u:p@h/db?x=1 y=2")]),
+            ..Default::default()
+        });
         assert!(raw.contains("ENV_DSN=postgres://u:p@h/db?x=1 y=2\n"));
-        assert!(render(Overrides { environment: environment(&[("EMPTY", "")]), ..Default::default() }).contains("ENV_EMPTY=\n"));
+        assert!(render(Overrides {
+            environment: environment(&[("EMPTY", "")]),
+            ..Default::default()
+        })
+        .contains("ENV_EMPTY=\n"));
     }
 
     #[test]
     fn the_hostname_written_is_the_platform_one_or_nothing() {
         let rendered = render(Overrides {
-            hostnames: vec![hostname("www.example.com", AppHostnameKind::Custom), hostname(PLATFORM_HOSTNAME, AppHostnameKind::Platform)],
+            hostnames: vec![
+                hostname("www.example.com", AppHostnameKind::Custom),
+                hostname(PLATFORM_HOSTNAME, AppHostnameKind::Platform),
+            ],
             ..Default::default()
         });
         assert!(rendered.contains("NIBRUN_HOSTNAME=my-app.nibrun.app\n"));
         assert!(!rendered.contains("www.example.com"));
-        assert!(!render(Overrides { hostnames: vec![], ..Default::default() }).contains("NIBRUN_HOSTNAME"));
-        assert!(render(Overrides { http_port: HttpPort::new(8080).unwrap(), ..Default::default() }).contains("NIBRUN_HTTP_PORT=8080\n"));
+        assert!(!render(Overrides {
+            hostnames: vec![],
+            ..Default::default()
+        })
+        .contains("NIBRUN_HOSTNAME"));
+        assert!(render(Overrides {
+            http_port: HttpPort::new(8080).unwrap(),
+            ..Default::default()
+        })
+        .contains("NIBRUN_HTTP_PORT=8080\n"));
     }
 
     #[test]
     fn what_has_no_representation_fails_the_instance_without_leaking_the_value() {
         for character in ["\n", "\r", "\0"] {
-            let refused = attempt(Overrides { environment: environment(&[("BAD", &format!("a{character}INJECTED=1"))]), ..Default::default() }).unwrap_err();
+            let refused = attempt(Overrides {
+                environment: environment(&[("BAD", &format!("a{character}INJECTED=1"))]),
+                ..Default::default()
+            })
+            .unwrap_err();
             assert_eq!(refused.variable_name, "BAD");
         }
-        let refused = attempt(Overrides { environment: environment(&[("API_KEY", "secret-value\nmore")]), ..Default::default() }).unwrap_err();
+        let refused = attempt(Overrides {
+            environment: environment(&[("API_KEY", "secret-value\nmore")]),
+            ..Default::default()
+        })
+        .unwrap_err();
         assert_eq!(refused.variable_name, "API_KEY");
         assert!(!format!("{refused:?}").contains("secret-value"));
     }
 
     #[test]
     fn arguments_reach_the_guest_as_the_user_wrote_them() {
-        let rendered = render(Overrides { args: vec!["serve".into(), "--http=0.0.0.0:8090".into()], ..Default::default() });
+        let rendered = render(Overrides {
+            args: vec!["serve".into(), "--http=0.0.0.0:8090".into()],
+            ..Default::default()
+        });
         assert!(rendered.contains("NIBRUN_ARG_0=serve"));
         assert!(rendered.contains("NIBRUN_ARG_1=--http=0.0.0.0:8090"));
         assert!(!render(Overrides::default()).contains("NIBRUN_ARG_"));
-        let refused = attempt(Overrides { args: vec!["--flag=one\ntwo".into()], ..Default::default() }).unwrap_err();
+        let refused = attempt(Overrides {
+            args: vec!["--flag=one\ntwo".into()],
+            ..Default::default()
+        })
+        .unwrap_err();
         assert_eq!(refused.variable_name, "NIBRUN_ARG_0");
     }
 }

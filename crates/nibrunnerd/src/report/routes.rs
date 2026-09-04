@@ -35,8 +35,14 @@ mod tests {
 
     #[test]
     fn a_host_answers_for_the_apps_it_holds_not_the_ones_that_happen_to_be_up() {
-        for state in INSTANCE_STATES.iter().filter(|state| **state != InstanceState::Running) {
-            assert_eq!(renderable_routes(&[instance_record(|record| record.state = *state)]).len(), 1);
+        for state in INSTANCE_STATES
+            .iter()
+            .filter(|state| **state != InstanceState::Running)
+        {
+            assert_eq!(
+                renderable_routes(&[instance_record(|record| record.state = *state)]).len(),
+                1
+            );
         }
         assert!(renderable_routes(&[instance_record(|record| record.hostnames = vec![])]).is_empty());
         let running = renderable_routes(&[instance_record(|_| {})]);

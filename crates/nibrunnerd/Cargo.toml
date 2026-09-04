@@ -62,3 +62,6 @@ hex.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 flate2 = "1"
 tar = "0.4"
+
+[lints]
+workspace = true

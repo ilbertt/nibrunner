@@ -41,12 +41,16 @@ pub fn decode_frames(
     while rest.len() - offset >= FRAME_HEADER_BYTES {
         let header = &rest[offset..offset + FRAME_HEADER_BYTES];
         if &header[..4] != FRAME_MAGIC {
-            return Err(InvalidGuestLogFrame { reason: "invalid magic value" });
+            return Err(InvalidGuestLogFrame {
+                reason: "invalid magic value",
+            });
         }
         let payload_length =
             u32::from_be_bytes([header[LENGTH_OFFSET], header[6], header[7], header[8]]) as usize;
         if payload_length > MAX_FRAME_PAYLOAD_BYTES {
-            return Err(InvalidGuestLogFrame { reason: "payload exceeds the limit" });
+            return Err(InvalidGuestLogFrame {
+                reason: "payload exceeds the limit",
+            });
         }
         let frame_length = FRAME_HEADER_BYTES + payload_length;
         if rest.len() - offset < frame_length {
@@ -62,17 +66,29 @@ pub fn decode_frames(
 
 fn frame_from(kind: u8, payload: &[u8]) -> Result<GuestLogFrame, InvalidGuestLogFrame> {
     match kind {
-        KIND_STDOUT => Ok(GuestLogFrame::Data { stream: TenantLogStream::Stdout, bytes: payload.to_vec() }),
-        KIND_STDERR => Ok(GuestLogFrame::Data { stream: TenantLogStream::Stderr, bytes: payload.to_vec() }),
+        KIND_STDOUT => Ok(GuestLogFrame::Data {
+            stream: TenantLogStream::Stdout,
+            bytes: payload.to_vec(),
+        }),
+        KIND_STDERR => Ok(GuestLogFrame::Data {
+            stream: TenantLogStream::Stderr,
+            bytes: payload.to_vec(),
+        }),
         KIND_GAP => {
             if payload.len() != GAP_PAYLOAD_BYTES {
-                return Err(InvalidGuestLogFrame { reason: "invalid gap payload length" });
+                return Err(InvalidGuestLogFrame {
+                    reason: "invalid gap payload length",
+                });
             }
             let mut encoded = [0u8; 8];
             encoded.copy_from_slice(payload);
-            Ok(GuestLogFrame::Gap { dropped_bytes: u64::from_be_bytes(encoded) })
+            Ok(GuestLogFrame::Gap {
+                dropped_bytes: u64::from_be_bytes(encoded),
+            })
         }
-        _ => Err(InvalidGuestLogFrame { reason: "unknown frame kind" }),
+        _ => Err(InvalidGuestLogFrame {
+            reason: "unknown frame kind",
+        }),
     }
 }
 
@@ -101,7 +117,13 @@ mod tests {
     #[test]
     fn a_fixture_taken_from_the_c_framing_decodes() {
         let (frames, rest) = decode_frames(&[], &STDOUT_FIXTURE).unwrap();
-        assert_eq!(frames, vec![GuestLogFrame::Data { stream: TenantLogStream::Stdout, bytes: b"one\n".to_vec() }]);
+        assert_eq!(
+            frames,
+            vec![GuestLogFrame::Data {
+                stream: TenantLogStream::Stdout,
+                bytes: b"one\n".to_vec()
+            }]
+        );
         assert!(rest.is_empty());
         assert_eq!(encode_frame(ENCODE_KIND_STDOUT, b"one\n"), STDOUT_FIXTURE);
     }
@@ -117,8 +139,14 @@ mod tests {
         assert_eq!(
             second,
             vec![
-                GuestLogFrame::Data { stream: TenantLogStream::Stdout, bytes: b"one\n".to_vec() },
-                GuestLogFrame::Data { stream: TenantLogStream::Stderr, bytes: b"two\n".to_vec() },
+                GuestLogFrame::Data {
+                    stream: TenantLogStream::Stdout,
+                    bytes: b"one\n".to_vec()
+                },
+                GuestLogFrame::Data {
+                    stream: TenantLogStream::Stderr,
+                    bytes: b"two\n".to_vec()
+                },
             ]
         );
     }
@@ -134,9 +162,15 @@ mod tests {
     fn an_invalid_peer_cannot_make_the_parser_allocate_an_unbounded_payload() {
         let mut frame = encode_frame(ENCODE_KIND_STDOUT, b"text");
         frame[5..9].copy_from_slice(&1_048_576u32.to_be_bytes());
-        assert_eq!(decode_frames(&[], &frame).unwrap_err().reason, "payload exceeds the limit");
+        assert_eq!(
+            decode_frames(&[], &frame).unwrap_err().reason,
+            "payload exceeds the limit"
+        );
         let mut bad_magic = encode_frame(ENCODE_KIND_STDOUT, b"text");
         bad_magic[0] = b'X';
-        assert_eq!(decode_frames(&[], &bad_magic).unwrap_err().reason, "invalid magic value");
+        assert_eq!(
+            decode_frames(&[], &bad_magic).unwrap_err().reason,
+            "invalid magic value"
+        );
     }
 }

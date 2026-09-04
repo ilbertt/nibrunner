@@ -52,11 +52,18 @@ pub struct CommandResult {
 
 impl CommandResult {
     pub fn succeeded() -> Self {
-        Self { code: 0, stdout: String::new(), stderr: String::new() }
+        Self {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
     }
 
     pub fn with_stdout(stdout: impl Into<String>) -> Self {
-        Self { stdout: stdout.into(), ..Self::succeeded() }
+        Self {
+            stdout: stdout.into(),
+            ..Self::succeeded()
+        }
     }
 }
 
@@ -64,7 +71,11 @@ impl CommandResult {
 pub enum CommandError {
     /// The tail of stderr: the head of a long one is a banner, and the reason is at the end.
     #[error("{executable} exited {code}{reason}")]
-    Failed { executable: String, code: i32, reason: String },
+    Failed {
+        executable: String,
+        code: i32,
+        reason: String,
+    },
     #[error("{executable} did not finish in time")]
     TimedOut { executable: String },
     #[error("{executable} could not be run: {reason}")]
@@ -81,7 +92,11 @@ impl CommandError {
         Self::Failed {
             executable: request.executable().to_string(),
             code: result.code,
-            reason: if tail.is_empty() { String::new() } else { format!(": {tail}") },
+            reason: if tail.is_empty() {
+                String::new()
+            } else {
+                format!(": {tail}")
+            },
         }
     }
 }
@@ -129,7 +144,11 @@ pub enum VmError {
     #[error("no microVM answered {socket_path}: {reason}")]
     Unreachable { socket_path: String, reason: String },
     #[error("the microVM refused {path} with {status}{detail}")]
-    Rejected { path: String, status: u16, detail: String },
+    Rejected {
+        path: String,
+        status: u16,
+        detail: String,
+    },
     #[error("{0}")]
     Host(String),
 }
@@ -226,7 +245,10 @@ pub struct TenantLogEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TenantLogBody {
-    Data { stream: protocol::TenantLogStream, text: String },
+    Data {
+        stream: protocol::TenantLogStream,
+        text: String,
+    },
     /// A record rather than a counter, so it lands in the same ordered stream as the output it
     /// replaces: reading the log is how you find out something is missing, and from where.
     Gap { dropped_bytes: u64 },
@@ -280,7 +302,10 @@ impl RecordingCommandRunner {
     pub fn answering(
         answer: impl Fn(&CommandRequest) -> Result<CommandResult, CommandError> + Send + Sync + 'static,
     ) -> Arc<Self> {
-        Arc::new(Self { calls: Mutex::new(Vec::new()), answer: Box::new(answer) })
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            answer: Box::new(answer),
+        })
     }
 
     pub fn calls(&self) -> Vec<CommandRequest> {
@@ -288,14 +313,20 @@ impl RecordingCommandRunner {
     }
 
     pub fn executables(&self) -> Vec<String> {
-        self.calls().iter().map(|request| request.executable().to_string()).collect()
+        self.calls()
+            .iter()
+            .map(|request| request.executable().to_string())
+            .collect()
     }
 }
 
 #[async_trait]
 impl CommandRunner for RecordingCommandRunner {
     async fn run(&self, request: CommandRequest) -> Result<CommandResult, CommandError> {
-        self.calls.lock().expect("no panic holds this lock").push(request.clone());
+        self.calls
+            .lock()
+            .expect("no panic holds this lock")
+            .push(request.clone());
         (self.answer)(&request)
     }
 }
@@ -446,7 +477,10 @@ impl RecordingLogSink {
 #[async_trait]
 impl LogSink for RecordingLogSink {
     async fn publish(&self, events: Vec<TenantLogEvent>) {
-        self.events.lock().expect("no panic holds this lock").extend(events);
+        self.events
+            .lock()
+            .expect("no panic holds this lock")
+            .extend(events);
     }
 }
 
@@ -457,9 +491,16 @@ mod tests {
     #[tokio::test]
     async fn a_command_that_failed_names_the_tail_of_what_it_said() {
         let runner = RecordingCommandRunner::answering(|_| {
-            Ok(CommandResult { code: 1, stdout: String::new(), stderr: "banner\nthe actual reason\n".into() })
+            Ok(CommandResult {
+                code: 1,
+                stdout: String::new(),
+                stderr: "banner\nthe actual reason\n".into(),
+            })
         });
-        let error = runner.stdout_of(CommandRequest::new(&["nft", "-f", "-"])).await.unwrap_err();
+        let error = runner
+            .stdout_of(CommandRequest::new(&["nft", "-f", "-"]))
+            .await
+            .unwrap_err();
         assert_eq!(error.message(), "nft exited 1: the actual reason");
         assert_eq!(runner.executables(), vec!["nft"]);
         assert_eq!(runner.calls()[0].command, vec!["nft", "-f", "-"]);
@@ -468,6 +509,9 @@ mod tests {
     #[tokio::test]
     async fn a_command_that_succeeded_hands_back_what_it_wrote() {
         let runner = RecordingCommandRunner::answering(|_| Ok(CommandResult::with_stdout("ok")));
-        assert_eq!(runner.stdout_of(CommandRequest::new(&["nft"])).await.unwrap(), "ok");
+        assert_eq!(
+            runner.stdout_of(CommandRequest::new(&["nft"])).await.unwrap(),
+            "ok"
+        );
     }
 }

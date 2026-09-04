@@ -45,7 +45,8 @@ pub fn parse_app_traffic(json: &str) -> BTreeMap<AppId, AppTraffic> {
 /// skipped. The prefix is what attributes a counter, and the id rule only refuses a name no id
 /// could be.
 fn app_id_from(name: &str) -> Option<AppId> {
-    name.strip_prefix(APP_COUNTER_PREFIX).and_then(|value| AppId::parse(value).ok())
+    name.strip_prefix(APP_COUNTER_PREFIX)
+        .and_then(|value| AppId::parse(value).ok())
 }
 
 #[cfg(test)]
@@ -65,8 +66,17 @@ mod tests {
     fn a_counter_is_attributed_by_its_name_and_every_app_is_read() {
         let app = AppId::parse("0198f3aa-1c2d-7e4b-9f11-a0b1c2d3e4f5").unwrap();
         let other = AppId::parse("0198f3bb-2d3e-7f5c-8a22-b1c2d3e4f5a6").unwrap();
-        let traffic = parse_app_traffic(&counters(&[(&app_counter_name(&app), 512), (&app_counter_name(&other), 1024)]));
-        assert_eq!(traffic.get(&app), Some(&AppTraffic { packets: 3, bytes: 512 }));
+        let traffic = parse_app_traffic(&counters(&[
+            (&app_counter_name(&app), 512),
+            (&app_counter_name(&other), 1024),
+        ]));
+        assert_eq!(
+            traffic.get(&app),
+            Some(&AppTraffic {
+                packets: 3,
+                bytes: 512
+            })
+        );
         assert_eq!(traffic.get(&other).map(|t| t.bytes), Some(1024));
         assert_eq!(traffic.len(), 2);
     }

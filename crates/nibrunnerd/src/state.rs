@@ -81,7 +81,11 @@ impl HostState {
     }
 
     pub async fn put_record(&self, record: InstanceRecord) {
-        self.snapshot.write().await.records.insert(record.app_id.clone(), record);
+        self.snapshot
+            .write()
+            .await
+            .records
+            .insert(record.app_id.clone(), record);
     }
 
     /// Merged into the record as it stands, never written over it. A probe is the longest thing a
@@ -106,7 +110,11 @@ impl HostState {
     /// evidence rather than as use — so without this a wake would leave the moment that had it
     /// sleeping.
     pub async fn mark_active(&self, app_id: &AppId, now_ms: i64) {
-        self.snapshot.write().await.last_active_at_ms.insert(app_id.clone(), now_ms);
+        self.snapshot
+            .write()
+            .await
+            .last_active_at_ms
+            .insert(app_id.clone(), now_ms);
     }
 
     /// Taking a snapshot ends with the VMM gone, so while one is in flight a microVM that is not
@@ -128,12 +136,20 @@ impl HostState {
     }
 
     pub async fn remember_deleted_volume(&self, report: ReportedVolume) {
-        self.snapshot.write().await.deleted_volumes.insert(report.volume_id.clone(), report);
+        self.snapshot
+            .write()
+            .await
+            .deleted_volumes
+            .insert(report.volume_id.clone(), report);
     }
 
     /// Once desired state stops naming it, the control plane has taken the removal in.
     pub async fn forget_deleted_volumes(&self, keep: &BTreeSet<VolumeId>) {
-        self.snapshot.write().await.deleted_volumes.retain(|volume_id, _| keep.contains(volume_id));
+        self.snapshot
+            .write()
+            .await
+            .deleted_volumes
+            .retain(|volume_id, _| keep.contains(volume_id));
     }
 
     pub fn signal_refresh(&self) {
@@ -155,9 +171,14 @@ impl HostState {
 
 /// Rebuilt from what a reconcile found rather than added to, so what just happened to a volume
 /// wins.
-pub fn merge_volume_reports(existing: Vec<ReportedVolume>, updates: Vec<ReportedVolume>) -> Vec<ReportedVolume> {
-    let mut merged: BTreeMap<VolumeId, ReportedVolume> =
-        existing.into_iter().map(|report| (report.volume_id.clone(), report)).collect();
+pub fn merge_volume_reports(
+    existing: Vec<ReportedVolume>,
+    updates: Vec<ReportedVolume>,
+) -> Vec<ReportedVolume> {
+    let mut merged: BTreeMap<VolumeId, ReportedVolume> = existing
+        .into_iter()
+        .map(|report| (report.volume_id.clone(), report))
+        .collect();
     for report in updates {
         merged.insert(report.volume_id.clone(), report);
     }
@@ -186,8 +207,12 @@ mod tests {
     #[tokio::test]
     async fn a_record_is_merged_rather_than_written_over() {
         let state = HostState::shared();
-        state.put_record(instance_record(|record| record.stop_requested = true)).await;
-        state.update_record(&app_id(), |record| record.state = InstanceState::Starting).await;
+        state
+            .put_record(instance_record(|record| record.stop_requested = true))
+            .await;
+        state
+            .update_record(&app_id(), |record| record.state = InstanceState::Starting)
+            .await;
         let record = state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Starting);
         assert!(record.stop_requested);
@@ -198,7 +223,9 @@ mod tests {
         let state = HostState::shared();
         state.put_record(instance_record(|_| {})).await;
         state.drop_record(&app_id()).await;
-        state.update_record(&app_id(), |record| record.state = InstanceState::Running).await;
+        state
+            .update_record(&app_id(), |record| record.state = InstanceState::Running)
+            .await;
         assert!(state.record(&app_id()).await.is_none());
     }
 
@@ -210,7 +237,9 @@ mod tests {
         state.mark_snapshotting(&app_id(), false).await;
         assert!(state.snapshot().await.snapshotting.is_empty());
 
-        state.remember_deleted_volume(reported(VolumeState::Deleted)).await;
+        state
+            .remember_deleted_volume(reported(VolumeState::Deleted))
+            .await;
         state.forget_deleted_volumes(&BTreeSet::from([volume_id()])).await;
         assert_eq!(state.snapshot().await.deleted_volumes.len(), 1);
         state.forget_deleted_volumes(&BTreeSet::new()).await;
@@ -219,7 +248,10 @@ mod tests {
 
     #[test]
     fn what_just_happened_to_a_volume_wins_over_what_was_observed_of_it() {
-        let merged = merge_volume_reports(vec![reported(VolumeState::Ready)], vec![reported(VolumeState::Deleted)]);
+        let merged = merge_volume_reports(
+            vec![reported(VolumeState::Ready)],
+            vec![reported(VolumeState::Deleted)],
+        );
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].state, VolumeState::Deleted);
     }

@@ -8,6 +8,8 @@
 //! What is *not* here is a booted guest. That needs `/dev/kvm` and the guest image beside it, and
 //! it is the one thing this lane cannot pretend to have proven by passing.
 
+#![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use nibrunnerd::services::{CommandRunner, RecordingCommandRunner};
@@ -20,6 +22,7 @@ fn enabled() -> bool {
 fn require_root() {
     #[cfg(unix)]
     // Safety: `geteuid` reads a property of this process and cannot fail.
+    #[allow(unsafe_code, reason = "asking who this process is has no safe spelling")]
     if unsafe { libc::geteuid() } != 0 {
         panic!("NIBRUNNER_INTEGRATION=1 was set but this is not running as root");
     }
@@ -52,11 +55,16 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
         control_plane_cidrs_v4: vec!["10.43.0.0/16".into()],
         control_plane_cidrs_v6: vec!["2600:1f18:abcd::/56".into()],
     };
-    firewall.apply(&state).await.expect("the kernel takes the ruleset");
+    firewall
+        .apply(&state)
+        .await
+        .expect("the kernel takes the ruleset");
 
     // Read back from the kernel rather than from what was sent: the point is what it is holding.
     let held = commands()
-        .stdout_of(nibrunnerd::services::CommandRequest::new(&["nft", "list", "table", "ip", "nibrun"]))
+        .stdout_of(nibrunnerd::services::CommandRequest::new(&[
+            "nft", "list", "table", "ip", "nibrun",
+        ]))
         .await
         .expect("the kernel names the table");
     assert!(held.contains("reject comment \"instance metadata endpoint\""));
@@ -70,7 +78,9 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
     assert!(!held.contains("drop"));
 
     let v6 = commands()
-        .stdout_of(nibrunnerd::services::CommandRequest::new(&["nft", "list", "table", "ip6", "nibrun"]))
+        .stdout_of(nibrunnerd::services::CommandRequest::new(&[
+            "nft", "list", "table", "ip6", "nibrun",
+        ]))
         .await
         .expect("the kernel names the v6 table");
     assert!(v6.contains("fe80::/10"));
@@ -117,8 +127,14 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
         protocol::ObjectKey::parse("volumes").unwrap(),
         recorded.clone(),
     );
-    second.provision(&desired).await.expect("a converged volume needs nothing");
-    assert!(recorded.executables().is_empty(), "a formatted volume must never be formatted again");
+    second
+        .provision(&desired)
+        .await
+        .expect("a converged volume needs nothing");
+    assert!(
+        recorded.executables().is_empty(),
+        "a formatted volume must never be formatted again"
+    );
 }
 
 /// The tap a slot names, made through `/dev/net/tun` and addressed over netlink. What this proves
@@ -146,7 +162,10 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
     };
     network.ensure_tap(&tap).await.expect("the tap is made");
     // Idempotent, which is what a converged host re-running a pass depends on.
-    network.ensure_tap(&tap).await.expect("a second pass changes nothing");
+    network
+        .ensure_tap(&tap)
+        .await
+        .expect("a second pass changes nothing");
     assert!(network.tap_names().await.contains(&slot.tap_name));
 
     network
@@ -161,7 +180,13 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
     // Read back from the kernel: the pairing a wake writes so the first connection after it does
     // not pay ARP re-resolution.
     let neighbours = commands()
-        .stdout_of(nibrunnerd::services::CommandRequest::new(&["ip", "neigh", "show", "dev", &slot.tap_name]))
+        .stdout_of(nibrunnerd::services::CommandRequest::new(&[
+            "ip",
+            "neigh",
+            "show",
+            "dev",
+            &slot.tap_name,
+        ]))
         .await
         .unwrap_or_default();
     assert!(
@@ -180,7 +205,10 @@ async fn the_embedded_hypervisor_runs_on_this_host() {
     let directory = tempfile::tempdir().unwrap();
     let binary = nibrunnerd::vm::process::extract_firecracker(directory.path()).expect("a hypervisor");
     let version = commands()
-        .stdout_of(nibrunnerd::services::CommandRequest::new(&[&binary.display().to_string(), "--version"]))
+        .stdout_of(nibrunnerd::services::CommandRequest::new(&[
+            &binary.display().to_string(),
+            "--version",
+        ]))
         .await
         .expect("the hypervisor answers");
     assert!(

@@ -35,14 +35,21 @@ pub struct AttemptWindow {
 
 /// A budget nothing has spent: what an instance is born with, and what a deliberate stop gives
 /// back.
-pub const NO_START_ATTEMPTS: AttemptWindow = AttemptWindow { attempts: 0, last_attempt_at_ms: None };
+pub const NO_START_ATTEMPTS: AttemptWindow = AttemptWindow {
+    attempts: 0,
+    last_attempt_at_ms: None,
+};
 
 /// Staying up longer than `reset_after_ms` restarts the budget, so a monthly failure never
 /// exhausts it.
 pub fn next_attempt_window(window: &AttemptWindow, now_ms: i64, reset_after_ms: u64) -> AttemptWindow {
     let elapsed = window.last_attempt_at_ms.map_or(0, |at| now_ms - at);
     AttemptWindow {
-        attempts: if elapsed >= reset_after_ms as i64 { 1 } else { window.attempts + 1 },
+        attempts: if elapsed >= reset_after_ms as i64 {
+            1
+        } else {
+            window.attempts + 1
+        },
         last_attempt_at_ms: Some(now_ms),
     }
 }
@@ -69,28 +76,47 @@ mod tests {
         assert_eq!(backoff_delay_ms(1, &policy()), 500);
         assert_eq!(backoff_delay_ms(2, &policy()), 1_000);
         assert_eq!(backoff_delay_ms(3, &policy()), 2_000);
-        assert_eq!(backoff_delay_ms(100, &policy()), DEFAULT_RESTART_POLICY.max_backoff_ms);
+        assert_eq!(
+            backoff_delay_ms(100, &policy()),
+            DEFAULT_RESTART_POLICY.max_backoff_ms
+        );
     }
 
     #[test]
     fn a_factor_of_one_degenerates_to_a_constant_delay_rather_than_to_zero() {
-        let flat = BackoffPolicy { initial_backoff_ms: 250, max_backoff_ms: 1_000, backoff_factor: 1.0 };
+        let flat = BackoffPolicy {
+            initial_backoff_ms: 250,
+            max_backoff_ms: 1_000,
+            backoff_factor: 1.0,
+        };
         assert_eq!(backoff_delay_ms(3, &flat), 250);
     }
 
     #[test]
     fn attempts_accumulate_inside_the_reset_window_and_a_long_gap_resets_the_budget() {
         let first = next_attempt_window(&NO_START_ATTEMPTS, 0, 60_000);
-        assert_eq!(first, AttemptWindow { attempts: 1, last_attempt_at_ms: Some(0) });
+        assert_eq!(
+            first,
+            AttemptWindow {
+                attempts: 1,
+                last_attempt_at_ms: Some(0)
+            }
+        );
         assert_eq!(next_attempt_window(&first, 1_000, 60_000).attempts, 2);
-        let spent = AttemptWindow { attempts: DEFAULT_RESTART_POLICY.max_restarts, last_attempt_at_ms: Some(0) };
+        let spent = AttemptWindow {
+            attempts: DEFAULT_RESTART_POLICY.max_restarts,
+            last_attempt_at_ms: Some(0),
+        };
         assert_eq!(next_attempt_window(&spent, 120_000, 60_000).attempts, 1);
     }
 
     #[test]
     fn a_retry_inside_the_backoff_is_refused_and_allowed_once_it_lapses() {
         assert!(is_ready_to_retry(&NO_START_ATTEMPTS, 0, &policy()));
-        let window = AttemptWindow { attempts: 3, last_attempt_at_ms: Some(0) };
+        let window = AttemptWindow {
+            attempts: 3,
+            last_attempt_at_ms: Some(0),
+        };
         let delay = backoff_delay_ms(3, &policy()) as i64;
         assert!(!is_ready_to_retry(&window, delay - 1, &policy()));
         assert!(is_ready_to_retry(&window, delay, &policy()));

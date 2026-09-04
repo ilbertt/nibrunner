@@ -41,13 +41,20 @@ pub struct AppWaker {
 
 impl AppWaker {
     pub fn new(host: Arc<Host>) -> Arc<Self> {
-        Arc::new(Self { host, in_flight: Mutex::new(BTreeMap::new()) })
+        Arc::new(Self {
+            host,
+            in_flight: Mutex::new(BTreeMap::new()),
+        })
     }
 
     /// Whether this host can find the memory for one more microVM, asked of everything *else* it
     /// is holding: the app being woken is idle, so it commits nothing until it is up, and one
     /// that is somehow already running would otherwise be counted twice and refused its own room.
-    async fn refusal_for_room(&self, app_id: &AppId, wanted: &protocol::InstanceResources) -> Option<WakeRefusal> {
+    async fn refusal_for_room(
+        &self,
+        app_id: &AppId,
+        wanted: &protocol::InstanceResources,
+    ) -> Option<WakeRefusal> {
         let others: Vec<_> = self
             .host
             .state
@@ -58,7 +65,9 @@ impl AppWaker {
             .collect();
         let shortfall =
             memory_shortfall_mib(self.host.guest_memory_mib, &committed_resources(&others), wanted);
-        (shortfall > 0).then_some(WakeRefusal::NoRoom { shortfall_mib: shortfall })
+        (shortfall > 0).then_some(WakeRefusal::NoRoom {
+            shortfall_mib: shortfall,
+        })
     }
 
     async fn boot(&self, app_id: &AppId, joined: u64) -> Outcome {
@@ -67,11 +76,18 @@ impl AppWaker {
             let cache = self.host.cache.lock().await;
             cache
                 .latest()
-                .and_then(|desired| desired.instances.iter().find(|instance| &instance.app_id == app_id))
+                .and_then(|desired| {
+                    desired
+                        .instances
+                        .iter()
+                        .find(|instance| &instance.app_id == app_id)
+                })
                 .cloned()
         };
         let Some(wanted) = wanted else {
-            return Err(WakeRefusal::Failed { reason: "the control plane no longer names it".into() });
+            return Err(WakeRefusal::Failed {
+                reason: "the control plane no longer names it".into(),
+            });
         };
         if wanted.desired_state != DesiredInstanceState::OnRequest {
             return Err(WakeRefusal::Failed {
@@ -81,7 +97,9 @@ impl AppWaker {
         // The same bar a reconcile start has to clear: a tenant boots onto a host whose isolation
         // ruleset is in the kernel, and a request is not a reason to make an exception.
         if !self.host.state.snapshot().await.isolated {
-            return Err(WakeRefusal::Failed { reason: "the isolation ruleset is not applied".into() });
+            return Err(WakeRefusal::Failed {
+                reason: "the isolation ruleset is not applied".into(),
+            });
         }
         if let Some(refusal) = self.refusal_for_room(app_id, &wanted.config.resources).await {
             // The record is the only account of this its owner will ever see, and left to say
@@ -105,16 +123,18 @@ impl AppWaker {
             .map_err(|reason| WakeRefusal::Failed { reason })?;
 
         let Some(record) = self.host.state.record(app_id).await else {
-            return Err(WakeRefusal::Failed { reason: "the microVM would not start".into() });
+            return Err(WakeRefusal::Failed {
+                reason: "the microVM would not start".into(),
+            });
         };
         if record.started_at.is_none() {
             // Neither half wrote a time, so neither reached the VMM: the artifact would not
             // fetch, the restore was refused, or the restart budget was spent on boots that
             // already failed.
-            let reason = record
-                .message
-                .as_ref()
-                .map_or_else(|| "the microVM would not start".to_string(), |message| message.as_str().to_string());
+            let reason = record.message.as_ref().map_or_else(
+                || "the microVM would not start".to_string(),
+                |message| message.as_str().to_string(),
+            );
             return Err(WakeRefusal::Failed { reason });
         }
 
@@ -174,12 +194,19 @@ impl Waker for AppWaker {
                 Ok(outcome) => outcome,
                 // The wake that was leading ended without saying so, which is the daemon shutting
                 // down: the request is told the app did not start rather than left holding.
-                Err(_) => Err(WakeRefusal::Failed { reason: "the wake was abandoned".into() }),
+                Err(_) => Err(WakeRefusal::Failed {
+                    reason: "the wake was abandoned".into(),
+                }),
             };
         }
 
         let outcome = {
-            let joined = self.in_flight.lock().await.get(app_id).map_or(0, |(_, count)| *count);
+            let joined = self
+                .in_flight
+                .lock()
+                .await
+                .get(app_id)
+                .map_or(0, |(_, count)| *count);
             self.boot(app_id, joined).await
         };
         let mut in_flight = self.in_flight.lock().await;
@@ -211,8 +238,12 @@ mod tests {
                 record.health_check.grace_period_ms = 50;
             }))
             .await;
-        let on_request = desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
-        host.cache.lock().await.accept(desired_state(|state| state.instances = vec![on_request]));
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
 
         let waker = AppWaker::new(host.arc().clone());
         // Every one of these finds no microVM; only one of them may reach the VMM.
@@ -225,7 +256,14 @@ mod tests {
 
         // The guest never answers here, so every request is told so — but by one wake, not ten.
         assert_eq!(outcomes.len(), 10);
-        assert_eq!(host.vms.calls().iter().filter(|call| **call == crate::services::VmCall::Wake).count(), 1);
+        assert_eq!(
+            host.vms
+                .calls()
+                .iter()
+                .filter(|call| **call == crate::services::VmCall::Wake)
+                .count(),
+            1
+        );
     }
 
     /// Refusing converges: the app stays down, its owner is told why, and the repair is to move
@@ -245,13 +283,19 @@ mod tests {
                 }))
                 .await;
         }
-        let on_request = desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
-        host.cache.lock().await.accept(desired_state(|state| state.instances = vec![on_request]));
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
 
         let waker = AppWaker::new(host.arc().clone());
         assert_eq!(
             waker.wake(&app_id()).await.unwrap_err(),
-            WakeRefusal::NoRoom { shortfall_mib: u64::from(protocol::DEFAULT_INSTANCE_RESOURCES.memory_mib) }
+            WakeRefusal::NoRoom {
+                shortfall_mib: u64::from(protocol::DEFAULT_INSTANCE_RESOURCES.memory_mib)
+            }
         );
     }
 
@@ -263,7 +307,9 @@ mod tests {
         let refusal = waker.wake(&app_id()).await.unwrap_err();
         assert_eq!(
             refusal,
-            WakeRefusal::Failed { reason: "the control plane no longer names it".into() }
+            WakeRefusal::Failed {
+                reason: "the control plane no longer names it".into()
+            }
         );
     }
 
@@ -272,13 +318,19 @@ mod tests {
     #[tokio::test]
     async fn a_wake_is_refused_while_the_isolation_ruleset_is_not_applied() {
         let host = test_host().await;
-        let on_request = desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
-        host.cache.lock().await.accept(desired_state(|state| state.instances = vec![on_request]));
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
         let waker = AppWaker::new(host.arc().clone());
         let refusal = waker.wake(&app_id()).await.unwrap_err();
         assert_eq!(
             refusal,
-            WakeRefusal::Failed { reason: "the isolation ruleset is not applied".into() }
+            WakeRefusal::Failed {
+                reason: "the isolation ruleset is not applied".into()
+            }
         );
     }
 
@@ -288,11 +340,16 @@ mod tests {
         let host = test_host().await;
         host.state.modify(|snapshot| snapshot.isolated = true).await;
         let stopped = desired_instance(|instance| instance.desired_state = DesiredInstanceState::Stopped);
-        host.cache.lock().await.accept(desired_state(|state| state.instances = vec![stopped]));
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![stopped]));
         let waker = AppWaker::new(host.arc().clone());
         assert_eq!(
             waker.wake(&app_id()).await.unwrap_err(),
-            WakeRefusal::Failed { reason: "it is stopped".into() }
+            WakeRefusal::Failed {
+                reason: "it is stopped".into()
+            }
         );
     }
 }

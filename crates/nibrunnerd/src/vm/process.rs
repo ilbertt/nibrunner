@@ -104,7 +104,10 @@ pub struct VmProcesses {
 
 impl VmProcesses {
     pub fn new(runtime_dir: PathBuf) -> Self {
-        Self { runtime_dir, boot_id: host_boot_id_or_session() }
+        Self {
+            runtime_dir,
+            boot_id: host_boot_id_or_session(),
+        }
     }
 
     pub fn boot_id(&self) -> &str {
@@ -216,6 +219,10 @@ impl VmProcesses {
             // Safety: `setsid` is async-signal-safe and is the whole of what runs between fork
             // and exec. Its own session and group is what keeps a signal sent to this daemon's
             // group away from every guest.
+            #[allow(
+                unsafe_code,
+                reason = "there is no safe way to call setsid between fork and exec"
+            )]
             unsafe {
                 command.pre_exec(|| {
                     if libc::setsid() < 0 {
@@ -240,10 +247,18 @@ impl VmProcesses {
         // Reaped for as long as this daemon lives, which is what makes an exit code readable at
         // all. A daemon that goes first leaves the VMM to init and the next one reads liveness
         // from the pid instead.
-        let processes = Self { runtime_dir: self.runtime_dir.clone(), boot_id: self.boot_id.clone() };
+        let processes = Self {
+            runtime_dir: self.runtime_dir.clone(),
+            boot_id: self.boot_id.clone(),
+        };
         let app_id = app_id.clone();
         tokio::spawn(async move {
-            let code = child.wait().await.ok().and_then(|status| status.code()).unwrap_or(-1);
+            let code = child
+                .wait()
+                .await
+                .ok()
+                .and_then(|status| status.code())
+                .unwrap_or(-1);
             if let Some(mut record) = processes.read_record(&app_id) {
                 if record.pid == pid {
                     record.exit_code = Some(code);
@@ -267,7 +282,8 @@ impl VmProcesses {
             return;
         }
         signal(record.pid, libc::SIGTERM);
-        let deadline = std::time::Duration::from_millis(guest_contract::control::GUEST_SHUTDOWN_GRACE_MS + 5_000);
+        let deadline =
+            std::time::Duration::from_millis(guest_contract::control::GUEST_SHUTDOWN_GRACE_MS + 5_000);
         let started = std::time::Instant::now();
         while started.elapsed() < deadline {
             if !is_alive(record.pid) {
@@ -285,12 +301,19 @@ fn is_alive(pid: i32) -> bool {
         return false;
     }
     // Safety: `kill` with signal 0 delivers nothing and only reports whether it could.
-    unsafe { libc::kill(pid, 0) == 0 }
+    #[allow(
+        unsafe_code,
+        reason = "asking the kernel whether a pid exists has no safe spelling"
+    )]
+    unsafe {
+        libc::kill(pid, 0) == 0
+    }
 }
 
 fn signal(pid: i32, signal: libc::c_int) {
     if pid > 0 {
         // Safety: the pid is one this daemon recorded having spawned.
+        #[allow(unsafe_code, reason = "signalling a recorded pid has no safe spelling")]
         unsafe {
             libc::kill(pid, signal);
         }
@@ -303,7 +326,10 @@ mod tests {
     use crate::test_support::app_id;
 
     fn processes(directory: &Path) -> VmProcesses {
-        VmProcesses { runtime_dir: directory.to_path_buf(), boot_id: "boot-1".into() }
+        VmProcesses {
+            runtime_dir: directory.to_path_buf(),
+            boot_id: "boot-1".into(),
+        }
     }
 
     #[test]
@@ -375,11 +401,21 @@ mod tests {
         assert!(crashed.failed);
         assert_eq!(crashed.exit_code, Some(1));
 
-        processes.write_record(&VmRecord { stop_requested: true, ..record.clone() }).unwrap();
+        processes
+            .write_record(&VmRecord {
+                stop_requested: true,
+                ..record.clone()
+            })
+            .unwrap();
         assert!(!processes.status(&app_id()).failed);
         // A guest that powered itself off deliberately leaves Firecracker exiting 0, so an exit
         // code of zero is never on its own a failure.
-        processes.write_record(&VmRecord { exit_code: Some(0), ..record }).unwrap();
+        processes
+            .write_record(&VmRecord {
+                exit_code: Some(0),
+                ..record
+            })
+            .unwrap();
         assert!(!processes.status(&app_id()).failed);
     }
 

@@ -7,8 +7,8 @@ use protocol::{AppId, DesiredInstance, DesiredInstanceState, InstanceState, Stat
 use crate::backoff::{is_ready_to_retry, next_attempt_window, BackoffPolicy, NO_START_ATTEMPTS};
 use crate::clock::{now_ms, now_timestamp};
 use crate::health::{
-    apply_probe, describe_instance_failure, evaluate_instance_state, initial_tracker,
-    next_probe_delay_ms, LifecycleInputs,
+    apply_probe, describe_instance_failure, evaluate_instance_state, initial_tracker, next_probe_delay_ms,
+    LifecycleInputs,
 };
 use crate::host::Host;
 use crate::reconcile::plan::{InstancePlan, ReconcilePlan};
@@ -96,7 +96,11 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, reason: &str) {
     settled(host, app_id, reason).await;
     let outcome = host
         .vms
-        .sleep(SuspendRequest { app_id: app_id.clone(), deployment_id: record.deployment_id.clone(), slot })
+        .sleep(SuspendRequest {
+            app_id: app_id.clone(),
+            deployment_id: record.deployment_id.clone(),
+            slot,
+        })
         .await;
     match outcome {
         Ok(()) => {
@@ -160,7 +164,11 @@ pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
         }
         None => {
             host.state
-                .put_record(InstanceRecord::new(fields, InstanceState::Idle, initial_tracker()))
+                .put_record(InstanceRecord::new(
+                    fields,
+                    InstanceState::Idle,
+                    initial_tracker(),
+                ))
                 .await;
             tracing::info!(app_id = %desired.app_id, host_port = %slot.host_port, "app is waiting to be asked for");
         }
@@ -184,11 +192,18 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
 
     let mut attempted = match existing.clone() {
         Some(record) => record,
-        None => InstanceRecord::new(record_fields(desired, &slot), InstanceState::Pending, initial_tracker()),
+        None => InstanceRecord::new(
+            record_fields(desired, &slot),
+            InstanceState::Pending,
+            initial_tracker(),
+        ),
     };
     attempted.adopt(record_fields(desired, &slot));
     attempted.start_attempts = next_attempt_window(
-        &existing.as_ref().map(|record| record.start_attempts).unwrap_or(NO_START_ATTEMPTS),
+        &existing
+            .as_ref()
+            .map(|record| record.start_attempts)
+            .unwrap_or(NO_START_ATTEMPTS),
         now,
         desired.config.restart_policy.reset_after_ms,
     );
@@ -375,7 +390,12 @@ pub async fn refresh_states(host: &Arc<Host>) {
     for record in snapshot.records.values().cloned() {
         let host = host.clone();
         let status = statuses.get(&record.app_id).copied().unwrap_or(UNKNOWN_VM);
-        let due = now >= snapshot.next_probe_at_ms.get(&record.app_id).copied().unwrap_or(0);
+        let due = now
+            >= snapshot
+                .next_probe_at_ms
+                .get(&record.app_id)
+                .copied()
+                .unwrap_or(0);
         let snapshotting = snapshot.snapshotting.contains(&record.app_id);
         settling.push(tokio::spawn(async move {
             settle(&host, record, status, due, snapshotting, now).await;
@@ -395,19 +415,23 @@ async fn settle(
     now_ms: i64,
 ) {
     let health = if status.active && due {
-        let healthy = crate::health::probe::probe_instance(
-            &record.guest_ipv4,
-            record.http_port,
-            &record.health_check,
-        )
-        .await;
+        let healthy =
+            crate::health::probe::probe_instance(&record.guest_ipv4, record.http_port, &record.health_check)
+                .await;
         let delay = next_probe_delay_ms(&record.health, &record.grace_inputs(now_ms));
         host.state
             .modify(|snapshot| {
-                snapshot.next_probe_at_ms.insert(record.app_id.clone(), now_ms + delay as i64);
+                snapshot
+                    .next_probe_at_ms
+                    .insert(record.app_id.clone(), now_ms + delay as i64);
             })
             .await;
-        apply_probe(&record.health, healthy, &now_timestamp(), record.health_check.healthy_threshold)
+        apply_probe(
+            &record.health,
+            healthy,
+            &now_timestamp(),
+            record.health_check.healthy_threshold,
+        )
     } else {
         record.health.clone()
     };
@@ -426,7 +450,9 @@ async fn settle(
     });
 
     if state == record.state {
-        host.state.update_record(&record.app_id, |latest| latest.health = health).await;
+        host.state
+            .update_record(&record.app_id, |latest| latest.health = health)
+            .await;
         return;
     }
     // Cleared as readily as it is written: a message outliving the state it explains is read as
@@ -480,9 +506,12 @@ pub fn artifacts_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredArtifact
 /// not be made, so a failure here is only a head start that was not taken.
 pub async fn prefetch_artifacts(host: &Host, plan: &ReconcilePlan) {
     for artifact in artifacts_to_start(plan) {
-        if let Err(error) =
-            crate::vm::artifacts::ensure_artifact_image(&host.artifacts, &host.config.artifact_cache_dir(), &artifact)
-                .await
+        if let Err(error) = crate::vm::artifacts::ensure_artifact_image(
+            &host.artifacts,
+            &host.config.artifact_cache_dir(),
+            &artifact,
+        )
+        .await
         {
             tracing::warn!(digest = %artifact.digest, error = %error.message(), "artifact prefetch failed");
         }
@@ -499,15 +528,22 @@ mod tests {
         let same = artifact(|_| {});
         let plan = ReconcilePlan {
             instances: vec![
-                InstancePlan::Start { desired: desired_instance(|_| {}) },
+                InstancePlan::Start {
+                    desired: desired_instance(|_| {}),
+                },
                 InstancePlan::Replace {
                     desired: desired_instance(|instance| {
                         instance.app_id = AppId::parse("app-2").unwrap();
                         instance.artifact = same.clone();
                     }),
                 },
-                InstancePlan::Stop { app_id: app_id(), reason: crate::reconcile::InstanceStopReason::Idle },
-                InstancePlan::Sleep { desired: desired_instance(|_| {}) },
+                InstancePlan::Stop {
+                    app_id: app_id(),
+                    reason: crate::reconcile::InstanceStopReason::Idle,
+                },
+                InstancePlan::Sleep {
+                    desired: desired_instance(|_| {}),
+                },
             ],
             ..Default::default()
         };
@@ -516,7 +552,9 @@ mod tests {
         assert_eq!(wanted[0].digest, same.digest);
         // A sleep needs no image: nothing is being started.
         assert!(artifacts_to_start(&ReconcilePlan {
-            instances: vec![InstancePlan::Sleep { desired: desired_instance(|_| {}) }],
+            instances: vec![InstancePlan::Sleep {
+                desired: desired_instance(|_| {})
+            }],
             ..Default::default()
         })
         .is_empty());
@@ -527,8 +565,10 @@ mod tests {
         let desired = desired_instance(|_| {});
         assert!(is_startable(None, 0, &desired));
         let spent = instance_record(|record| {
-            record.start_attempts =
-                crate::backoff::AttemptWindow { attempts: 3, last_attempt_at_ms: Some(0) };
+            record.start_attempts = crate::backoff::AttemptWindow {
+                attempts: 3,
+                last_attempt_at_ms: Some(0),
+            };
         });
         assert!(!is_startable(Some(&spent), 0, &desired));
         assert!(is_startable(Some(&spent), 10_000, &desired));
@@ -547,6 +587,8 @@ mod tests {
     fn only_a_boot_nobody_asked_for_counts_as_a_restart() {
         assert!(!restarted(None));
         assert!(restarted(Some(&instance_record(|_| {}))));
-        assert!(!restarted(Some(&instance_record(|record| record.stop_requested = true))));
+        assert!(!restarted(Some(&instance_record(|record| record
+            .stop_requested =
+            true))));
     }
 }

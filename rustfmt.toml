@@ -1,0 +1,16 @@
+# Formatting is not a matter of taste here, it is a matter of nobody having to think about it.
+# Only what rustfmt settles on a stable toolchain: every option below is stable, so `cargo fmt`
+# does the same thing for everyone rather than quietly doing less on a machine without nightly.
+edition = "2021"
+
+# Wide enough that a `where` clause, a long path or a comment holding a sentence does not wrap
+# into something harder to read than the line it replaced.
+max_width = 110
+
+# What a diff should look like: one item per line once a list has to break at all.
+use_small_heuristics = "Default"
+
+# Imports grouped and ordered the same way in every file, so a new one lands where a reader
+# expects rather than where the author happened to type it.
+reorder_imports = true
+reorder_modules = true

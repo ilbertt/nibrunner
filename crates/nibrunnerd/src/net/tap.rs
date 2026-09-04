@@ -76,12 +76,18 @@ impl RecordingNetwork {
 #[async_trait]
 impl HostNetwork for RecordingNetwork {
     async fn ensure_tap(&self, tap: &TapInterface) -> Result<(), NetworkError> {
-        self.taps.lock().expect("no panic holds this lock").push(tap.clone());
+        self.taps
+            .lock()
+            .expect("no panic holds this lock")
+            .push(tap.clone());
         Ok(())
     }
 
     async fn refresh_neighbour(&self, neighbour: &Neighbour) -> Result<(), NetworkError> {
-        self.neighbours.lock().expect("no panic holds this lock").push(neighbour.clone());
+        self.neighbours
+            .lock()
+            .expect("no panic holds this lock")
+            .push(neighbour.clone());
         Ok(())
     }
 
@@ -137,7 +143,11 @@ mod linux {
     }
 
     fn failed(what: &'static str, device: &str, reason: impl std::fmt::Display) -> NetworkError {
-        NetworkError { what, device: device.to_string(), reason: reason.to_string() }
+        NetworkError {
+            what,
+            device: device.to_string(),
+            reason: reason.to_string(),
+        }
     }
 
     /// Created persistent through `/dev/net/tun` rather than by netlink, because a tap opened by
@@ -180,7 +190,11 @@ mod linux {
         }
         let persisted = unsafe { libc::ioctl(device.as_raw_fd(), TUNSETPERSIST, 1) };
         if persisted < 0 {
-            return Err(failed("a persistent tap device", tap_name, std::io::Error::last_os_error()));
+            return Err(failed(
+                "a persistent tap device",
+                tap_name,
+                std::io::Error::last_os_error(),
+            ));
         }
         Ok(())
     }

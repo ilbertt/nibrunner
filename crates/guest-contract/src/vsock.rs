@@ -45,7 +45,10 @@ pub fn read_connect_reply(reply: &str, port: u32) -> Result<(), GuestPortUnreach
     if reply.starts_with(CONNECT_ACCEPTED) {
         Ok(())
     } else {
-        Err(GuestPortUnreachable { port, reply: reply.to_string() })
+        Err(GuestPortUnreachable {
+            port,
+            reply: reply.to_string(),
+        })
     }
 }
 

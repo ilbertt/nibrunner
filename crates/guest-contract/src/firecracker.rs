@@ -213,7 +213,10 @@ mod tests {
             DEFAULT_INSTANCE_RESOURCES,
             &paths(),
             &network(),
-            &VmVsock { guest_cid: 6, path: "logs.vsock".into() },
+            &VmVsock {
+                guest_cid: 6,
+                path: "logs.vsock".into(),
+            },
         )
     }
 
@@ -226,7 +229,12 @@ mod tests {
         let p = paths();
         assert_eq!(
             paths_on_host,
-            vec![p.rootfs_path, p.artifact_image_path, p.instance_config_image_path, p.data_device_path]
+            vec![
+                p.rootfs_path,
+                p.artifact_image_path,
+                p.instance_config_image_path,
+                p.data_device_path
+            ]
         );
         assert_eq!(rendered.drives.iter().filter(|d| d.is_root_device).count(), 1);
         assert!(rendered.drives[0].is_root_device);
@@ -271,9 +279,22 @@ mod tests {
     #[test]
     fn machine_network_and_vsock_come_from_the_config_and_the_slot() {
         let rendered = config();
-        assert_eq!(rendered.machine_config, MachineConfig { vcpu_count: 1, mem_size_mib: 256, smt: false });
+        assert_eq!(
+            rendered.machine_config,
+            MachineConfig {
+                vcpu_count: 1,
+                mem_size_mib: 256,
+                smt: false
+            }
+        );
         assert_eq!(rendered.network_interfaces[0].host_dev_name, "nbr3");
-        assert_eq!(rendered.vsock, VsockDevice { guest_cid: 6, uds_path: "logs.vsock".into() });
+        assert_eq!(
+            rendered.vsock,
+            VsockDevice {
+                guest_cid: 6,
+                uds_path: "logs.vsock".into()
+            }
+        );
         let json = serde_json::to_value(&rendered).unwrap();
         assert!(json.get("boot-source").is_some());
         assert!(json.get("machine-config").is_some());

@@ -5,7 +5,9 @@
 //! because the tenant's binary created these names and ext4 allows anything in them but `/` and
 //! NUL. Length prefixes are what make quoting unnecessary rather than merely relaxed.
 
-use protocol::{DirectoryListing, FilesystemEntry, FilesystemEntryKind, GuestPath, Timestamp, DIRECTORY_ENTRY_LIMIT};
+use protocol::{
+    DirectoryListing, FilesystemEntry, FilesystemEntryKind, GuestPath, Timestamp, DIRECTORY_ENTRY_LIMIT,
+};
 
 pub const FRAME_MAGIC: &[u8; 4] = b"NBF1";
 const CODE_OFFSET: usize = 4;
@@ -29,13 +31,33 @@ pub const MKFS_ROOT_ENTRIES: [&str; 1] = ["lost+found"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestFilesystemRequest {
-    List { path: GuestPath },
-    Stat { path: GuestPath },
-    Read { path: GuestPath, offset: u64, length: u32 },
-    Write { path: GuestPath, offset: u64, content: Vec<u8>, truncate: bool },
-    MakeDirectory { path: GuestPath },
-    Remove { path: GuestPath },
-    Move { path: GuestPath, destination: GuestPath },
+    List {
+        path: GuestPath,
+    },
+    Stat {
+        path: GuestPath,
+    },
+    Read {
+        path: GuestPath,
+        offset: u64,
+        length: u32,
+    },
+    Write {
+        path: GuestPath,
+        offset: u64,
+        content: Vec<u8>,
+        truncate: bool,
+    },
+    MakeDirectory {
+        path: GuestPath,
+    },
+    Remove {
+        path: GuestPath,
+    },
+    Move {
+        path: GuestPath,
+        destination: GuestPath,
+    },
     Usage,
     Compute,
 }
@@ -94,7 +116,12 @@ fn body_of(request: &GuestFilesystemRequest) -> Vec<u8> {
             body.extend_from_slice(&length.to_be_bytes());
             body
         }
-        GuestFilesystemRequest::Write { path, offset, content, truncate } => {
+        GuestFilesystemRequest::Write {
+            path,
+            offset,
+            content,
+            truncate,
+        } => {
             let mut body = field(path.as_str().as_bytes());
             body.extend_from_slice(&offset.to_be_bytes());
             body.push(if *truncate { TRUNCATE } else { NO_FLAGS });
@@ -137,16 +164,25 @@ pub struct ReplyHeader {
 
 pub fn decode_header(header: &[u8]) -> Result<ReplyHeader, MalformedGuestReply> {
     if header.len() != FRAME_HEADER_BYTES {
-        return Err(MalformedGuestReply { reason: "the header is the wrong length" });
+        return Err(MalformedGuestReply {
+            reason: "the header is the wrong length",
+        });
     }
     if &header[..4] != FRAME_MAGIC {
-        return Err(MalformedGuestReply { reason: "invalid magic value" });
+        return Err(MalformedGuestReply {
+            reason: "invalid magic value",
+        });
     }
     let body_length = u32::from_be_bytes([header[LENGTH_OFFSET], header[6], header[7], header[8]]) as usize;
     if body_length > BODY_MAX_BYTES {
-        return Err(MalformedGuestReply { reason: "the body exceeds the limit" });
+        return Err(MalformedGuestReply {
+            reason: "the body exceeds the limit",
+        });
     }
-    Ok(ReplyHeader { status: header[CODE_OFFSET], body_length })
+    Ok(ReplyHeader {
+        status: header[CODE_OFFSET],
+        body_length,
+    })
 }
 
 pub fn is_refusal(status: u8) -> bool {
@@ -204,14 +240,18 @@ fn details_at(body: &[u8], offset: usize) -> FilesystemDetails {
 
 pub fn decode_details(body: &[u8]) -> Result<FilesystemDetails, MalformedGuestReply> {
     if body.len() < DETAILS_BYTES {
-        return Err(MalformedGuestReply { reason: "the details are the wrong length" });
+        return Err(MalformedGuestReply {
+            reason: "the details are the wrong length",
+        });
     }
     Ok(details_at(body, 0))
 }
 
 pub fn decode_written(body: &[u8]) -> Result<u32, MalformedGuestReply> {
     if body.len() < 4 {
-        return Err(MalformedGuestReply { reason: "no count came back from a write" });
+        return Err(MalformedGuestReply {
+            reason: "no count came back from a write",
+        });
     }
     Ok(u32::from_be_bytes([body[0], body[1], body[2], body[3]]))
 }
@@ -225,9 +265,14 @@ pub struct MeasuredBytes {
 
 pub fn decode_usage(body: &[u8]) -> Result<MeasuredBytes, MalformedGuestReply> {
     if body.len() < 16 {
-        return Err(MalformedGuestReply { reason: "the usage is the wrong length" });
+        return Err(MalformedGuestReply {
+            reason: "the usage is the wrong length",
+        });
     }
-    Ok(MeasuredBytes { total_bytes: u64_at(body, 0), used_bytes: u64_at(body, 8) })
+    Ok(MeasuredBytes {
+        total_bytes: u64_at(body, 0),
+        used_bytes: u64_at(body, 8),
+    })
 }
 
 /// The ticks are cumulative since the guest booted and mean nothing on their own: a share is the
@@ -242,7 +287,9 @@ pub struct MeasuredCompute {
 
 pub fn decode_compute(body: &[u8]) -> Result<MeasuredCompute, MalformedGuestReply> {
     if body.len() < 32 {
-        return Err(MalformedGuestReply { reason: "the compute reading is the wrong length" });
+        return Err(MalformedGuestReply {
+            reason: "the compute reading is the wrong length",
+        });
     }
     Ok(MeasuredCompute {
         memory_total_bytes: u64_at(body, 0),
@@ -257,7 +304,9 @@ pub fn decode_compute(body: &[u8]) -> Result<MeasuredCompute, MalformedGuestRepl
 /// knowledge and not the guest's. `truncated` can come from either side.
 pub fn decode_listing(body: &[u8], path: &GuestPath) -> Result<DirectoryListing, MalformedGuestReply> {
     if body.is_empty() {
-        return Err(MalformedGuestReply { reason: "a listing came back with nothing in it" });
+        return Err(MalformedGuestReply {
+            reason: "a listing came back with nothing in it",
+        });
     }
     let at_root = path.as_str() == "/";
     let mut truncated = body[0] != 0;
@@ -266,12 +315,16 @@ pub fn decode_listing(body: &[u8], path: &GuestPath) -> Result<DirectoryListing,
     while offset < body.len() {
         let name_length_at = offset + DETAILS_BYTES;
         if name_length_at >= body.len() {
-            return Err(MalformedGuestReply { reason: "an entry was cut short" });
+            return Err(MalformedGuestReply {
+                reason: "an entry was cut short",
+            });
         }
         let name_length = body[name_length_at] as usize;
         let name_at = name_length_at + 1;
         if name_length == 0 || name_at + name_length > body.len() {
-            return Err(MalformedGuestReply { reason: "an entry names nothing readable" });
+            return Err(MalformedGuestReply {
+                reason: "an entry names nothing readable",
+            });
         }
         let name = String::from_utf8_lossy(&body[name_at..name_at + name_length]).into_owned();
         if entries.len() == DIRECTORY_ENTRY_LIMIT {
@@ -289,7 +342,11 @@ pub fn decode_listing(body: &[u8], path: &GuestPath) -> Result<DirectoryListing,
         }
         offset = name_at + name_length;
     }
-    Ok(DirectoryListing { path: path.clone(), entries, truncated })
+    Ok(DirectoryListing {
+        path: path.clone(),
+        entries,
+        truncated,
+    })
 }
 
 #[cfg(test)]
@@ -307,9 +364,24 @@ mod tests {
 
     #[test]
     fn a_list_request_is_the_magic_the_verb_a_length_and_a_length_prefixed_path() {
-        let frame = encode_request(&GuestFilesystemRequest::List { path: GuestPath::parse("/a b").unwrap() });
-        assert_eq!(frame, [b"NBF1".as_slice(), &[1], &8u32.to_be_bytes(), &4u32.to_be_bytes(), b"/a b"].concat());
-        assert_eq!(encode_request(&GuestFilesystemRequest::Usage), [b"NBF1".as_slice(), &[8], &0u32.to_be_bytes()].concat());
+        let frame = encode_request(&GuestFilesystemRequest::List {
+            path: GuestPath::parse("/a b").unwrap(),
+        });
+        assert_eq!(
+            frame,
+            [
+                b"NBF1".as_slice(),
+                &[1],
+                &8u32.to_be_bytes(),
+                &4u32.to_be_bytes(),
+                b"/a b"
+            ]
+            .concat()
+        );
+        assert_eq!(
+            encode_request(&GuestFilesystemRequest::Usage),
+            [b"NBF1".as_slice(), &[8], &0u32.to_be_bytes()].concat()
+        );
     }
 
     #[test]
@@ -317,7 +389,13 @@ mod tests {
         let mut header = b"NBF1".to_vec();
         header.push(0);
         header.extend_from_slice(&5u32.to_be_bytes());
-        assert_eq!(decode_header(&header).unwrap(), ReplyHeader { status: 0, body_length: 5 });
+        assert_eq!(
+            decode_header(&header).unwrap(),
+            ReplyHeader {
+                status: 0,
+                body_length: 5
+            }
+        );
         let mut oversized = header.clone();
         oversized[5..9].copy_from_slice(&(BODY_MAX_BYTES as u32 + 1).to_be_bytes());
         assert!(decode_header(&oversized).is_err());
@@ -353,14 +431,25 @@ mod tests {
     fn usage_and_compute_are_big_endian_u64s_in_order() {
         let mut usage = 8_455_712_768u64.to_be_bytes().to_vec();
         usage.extend_from_slice(&1_503_238_553u64.to_be_bytes());
-        assert_eq!(decode_usage(&usage).unwrap(), MeasuredBytes { total_bytes: 8_455_712_768, used_bytes: 1_503_238_553 });
+        assert_eq!(
+            decode_usage(&usage).unwrap(),
+            MeasuredBytes {
+                total_bytes: 8_455_712_768,
+                used_bytes: 1_503_238_553
+            }
+        );
         let mut compute = Vec::new();
         for value in [1_031_012_352u64, 412_401_664, 100_000, 18_000] {
             compute.extend_from_slice(&value.to_be_bytes());
         }
         assert_eq!(
             decode_compute(&compute).unwrap(),
-            MeasuredCompute { memory_total_bytes: 1_031_012_352, memory_used_bytes: 412_401_664, cpu_total_ticks: 100_000, cpu_busy_ticks: 18_000 }
+            MeasuredCompute {
+                memory_total_bytes: 1_031_012_352,
+                memory_used_bytes: 412_401_664,
+                cpu_total_ticks: 100_000,
+                cpu_busy_ticks: 18_000
+            }
         );
         assert!(decode_compute(&compute[..31]).is_err());
         assert_eq!(decode_written(&7u32.to_be_bytes()).unwrap(), 7);
@@ -368,9 +457,19 @@ mod tests {
 
     #[test]
     fn a_write_that_does_not_fit_one_frame_is_refused_before_it_is_sent() {
-        let small = GuestFilesystemRequest::Write { path: GuestPath::parse("/f").unwrap(), offset: 0, content: vec![0; GUEST_FILESYSTEM_CHUNK_BYTES], truncate: true };
+        let small = GuestFilesystemRequest::Write {
+            path: GuestPath::parse("/f").unwrap(),
+            offset: 0,
+            content: vec![0; GUEST_FILESYSTEM_CHUNK_BYTES],
+            truncate: true,
+        };
         assert!(fits_one_request(&small));
-        let large = GuestFilesystemRequest::Write { path: GuestPath::parse("/f").unwrap(), offset: 0, content: vec![0; BODY_MAX_BYTES], truncate: false };
+        let large = GuestFilesystemRequest::Write {
+            path: GuestPath::parse("/f").unwrap(),
+            offset: 0,
+            content: vec![0; BODY_MAX_BYTES],
+            truncate: false,
+        };
         assert!(!fits_one_request(&large));
     }
 }

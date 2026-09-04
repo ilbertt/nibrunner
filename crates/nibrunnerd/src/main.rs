@@ -106,6 +106,11 @@ fn install_logger() {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().json().with_writer(std::io::stderr).with_current_span(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(std::io::stderr)
+                .with_current_span(false),
+        )
         .init();
 }

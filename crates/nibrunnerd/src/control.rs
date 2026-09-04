@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use protocol::{
-    agent_routes, AgentSession, AgentSessionRequest, DesiredStateRequest, HostCapacity,
-    HostDesiredState, HostReportedState, HostVersions, PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER,
+    agent_routes, AgentSession, AgentSessionRequest, DesiredStateRequest, HostCapacity, HostDesiredState,
+    HostReportedState, HostVersions, PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -22,7 +22,11 @@ pub enum ControlPlaneError {
     #[error("{route} was not reached: {reason}")]
     Unreachable { route: String, reason: String },
     #[error("{route} answered {status}: {body}")]
-    Refused { route: String, status: u16, body: String },
+    Refused {
+        route: String,
+        status: u16,
+        body: String,
+    },
     #[error("{route} answered with a message that does not match the protocol: {reason}")]
     Mismatch { route: String, reason: String },
 }
@@ -78,10 +82,13 @@ impl ControlPlaneClient {
         if let Some(token) = session_token {
             request = request.header("authorization", format!("Bearer {}", token.expose()));
         }
-        let response = request.send().await.map_err(|error| ControlPlaneError::Unreachable {
-            route: route.to_string(),
-            reason: error.to_string(),
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| ControlPlaneError::Unreachable {
+                route: route.to_string(),
+                reason: error.to_string(),
+            })?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -110,7 +117,12 @@ impl ControlPlaneClient {
         &self,
         session_token: &protocol::SecretString,
     ) -> Result<HostDesiredState, ControlPlaneError> {
-        self.post(agent_routes::DESIRED_STATE, &DesiredStateRequest::default(), Some(session_token)).await
+        self.post(
+            agent_routes::DESIRED_STATE,
+            &DesiredStateRequest::default(),
+            Some(session_token),
+        )
+        .await
     }
 
     /// Nothing comes back. The desired-state poll is the only channel carrying state to a host, so
@@ -149,17 +161,19 @@ pub struct DesiredStatePoller {
 impl DesiredStatePoller {
     /// One poll. The write is what the daemon reacts to, so a poll that changed nothing costs a
     /// comparison and no reconcile.
-    pub async fn poll_once(
-        &self,
-        session_token: &protocol::SecretString,
-    ) -> Result<bool, ControlPlaneError> {
+    pub async fn poll_once(&self, session_token: &protocol::SecretString) -> Result<bool, ControlPlaneError> {
         let desired = self.client.fetch_desired_state(session_token).await?;
-        let held = crate::desired::read_desired_state(&self.desired_state_file).ok().flatten();
+        let held = crate::desired::read_desired_state(&self.desired_state_file)
+            .ok()
+            .flatten();
         if held.as_ref() == Some(&desired) {
             return Ok(false);
         }
         crate::desired::cache_desired_state(&self.desired_state_file, &desired).map_err(|error| {
-            ControlPlaneError::Unreachable { route: "the desired state file".into(), reason: error.message() }
+            ControlPlaneError::Unreachable {
+                route: "the desired state file".into(),
+                reason: error.message(),
+            }
         })?;
         Ok(true)
     }
@@ -173,16 +187,33 @@ mod tests {
     #[test]
     fn every_route_is_built_from_the_protocol_prefix_rather_than_spelled_out() {
         let client = ControlPlaneClient::new("https://api.example.com/");
-        assert_eq!(client.url(agent_routes::DESIRED_STATE), "https://api.example.com/internal/agent/desired-state");
-        assert_eq!(client.url(agent_routes::SESSION), "https://api.example.com/internal/agent/session");
-        assert_eq!(client.url(agent_routes::REPORTED_STATE), "https://api.example.com/internal/agent/reported-state");
+        assert_eq!(
+            client.url(agent_routes::DESIRED_STATE),
+            "https://api.example.com/internal/agent/desired-state"
+        );
+        assert_eq!(
+            client.url(agent_routes::SESSION),
+            "https://api.example.com/internal/agent/session"
+        );
+        assert_eq!(
+            client.url(agent_routes::REPORTED_STATE),
+            "https://api.example.com/internal/agent/reported-state"
+        );
     }
 
     #[test]
     fn a_session_that_expired_is_a_round_trip_rather_than_a_fault() {
-        let expired = ControlPlaneError::Refused { route: "/session".into(), status: 401, body: String::new() };
+        let expired = ControlPlaneError::Refused {
+            route: "/session".into(),
+            status: 401,
+            body: String::new(),
+        };
         assert!(expired.is_session_expired());
-        let refused = ControlPlaneError::Refused { route: "/session".into(), status: 500, body: String::new() };
+        let refused = ControlPlaneError::Refused {
+            route: "/session".into(),
+            status: 500,
+            body: String::new(),
+        };
         assert!(!refused.is_session_expired());
     }
 

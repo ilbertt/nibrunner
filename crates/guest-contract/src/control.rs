@@ -43,7 +43,10 @@ mod tests {
             last_guest_line(&console).as_deref(),
             Some("the tenant used its 5 restarts without staying up; shutting the guest down")
         );
-        assert_eq!(last_guest_line("[    0.000000] Linux version 6.1.180\nVmm is stopping.\n"), None);
+        assert_eq!(
+            last_guest_line("[    0.000000] Linux version 6.1.180\nVmm is stopping.\n"),
+            None
+        );
         assert_eq!(last_guest_line(""), None);
     }
 }

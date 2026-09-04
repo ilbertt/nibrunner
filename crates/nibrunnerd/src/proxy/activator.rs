@@ -39,7 +39,10 @@ fn app_is_down() -> Response<ProxyBody> {
 }
 
 fn app_would_not_start() -> Response<ProxyBody> {
-    say(StatusCode::SERVICE_UNAVAILABLE, "This app could not be started.\n")
+    say(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "This app could not be started.\n",
+    )
 }
 
 /// Its own sentence rather than the one above. An app that could not be woken because its host
@@ -47,7 +50,10 @@ fn app_would_not_start() -> Response<ProxyBody> {
 /// reading a binary that is fine — while the repair, moving the app, is not something either of
 /// them can bring about by asking again.
 fn host_is_full() -> Response<ProxyBody> {
-    say(StatusCode::SERVICE_UNAVAILABLE, "This app could not be started: its machine is out of memory.\n")
+    say(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "This app could not be started: its machine is out of memory.\n",
+    )
 }
 
 /// A connection the proxy wants to upgrade cannot be carried across: what comes back from the
@@ -55,8 +61,13 @@ fn host_is_full() -> Response<ProxyBody> {
 /// happens, so the client that reconnects finds the app up and reaches it through the forward
 /// rule rather than through this.
 fn come_back() -> Response<ProxyBody> {
-    let mut response = say(StatusCode::SERVICE_UNAVAILABLE, "This app is starting. Please reconnect.\n");
-    response.headers_mut().insert("retry-after", hyper::header::HeaderValue::from_static("2"));
+    let mut response = say(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "This app is starting. Please reconnect.\n",
+    );
+    response
+        .headers_mut()
+        .insert("retry-after", hyper::header::HeaderValue::from_static("2"));
     response
 }
 
@@ -206,7 +217,9 @@ async fn accept(listener: TcpListener, activator: Arc<AppActivator>, app_id: App
                 let app_id = app_id.clone();
                 async move { Ok::<_, std::convert::Infallible>(activator.handle(app_id, request).await) }
             });
-            let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
         });
     }
 }
@@ -230,11 +243,17 @@ mod tests {
 
     impl CountingWaker {
         fn allowing() -> Arc<Self> {
-            Arc::new(Self { woken: AtomicUsize::new(0), refusal: None })
+            Arc::new(Self {
+                woken: AtomicUsize::new(0),
+                refusal: None,
+            })
         }
 
         fn refusing(refusal: WakeRefusal) -> Arc<Self> {
-            Arc::new(Self { woken: AtomicUsize::new(0), refusal: Some(refusal) })
+            Arc::new(Self {
+                woken: AtomicUsize::new(0),
+                refusal: Some(refusal),
+            })
         }
 
         fn count(&self) -> usize {
@@ -258,7 +277,9 @@ mod tests {
     /// between letting a probe port go and binding it again is one another test can take.
     async fn serving(activator: &Arc<AppActivator>, app_id: &AppId) -> HostPort {
         for _ in 0..50 {
-            let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.unwrap();
+            let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
             let port = HostPort::new(probe.local_addr().unwrap().port()).unwrap();
             drop(probe);
             activator.serve(&[(app_id.clone(), port)]).await;
@@ -283,7 +304,9 @@ mod tests {
     /// A real listener on the address the record names, because the thing being checked is that a
     /// request came out of the far side.
     async fn guest(state: &SharedState, body: &'static str) -> HostPort {
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.unwrap();
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             loop {
@@ -294,7 +317,9 @@ mod tests {
                     let service = service_fn(move |_request: Request<Incoming>| async move {
                         Ok::<_, std::convert::Infallible>(say(StatusCode::OK, body))
                     });
-                    let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
                 });
             }
         });
@@ -312,7 +337,9 @@ mod tests {
     #[tokio::test]
     async fn a_request_the_microvm_is_not_there_to_take_is_answered_rather_than_refused() {
         let state = HostState::shared();
-        state.put_record(instance_record(|record| record.on_request = false)).await;
+        state
+            .put_record(instance_record(|record| record.on_request = false))
+            .await;
         let activator = AppActivator::new(state, CountingWaker::allowing());
         let host_port = serving(&activator, &app_id()).await;
         let response = get(host_port).await;
@@ -331,7 +358,13 @@ mod tests {
         let response = get(host_port).await;
         assert_eq!(response.status(), 200);
         // Not reusable, so the proxy takes the forward rule rather than asking this again.
-        assert_eq!(response.headers().get("connection").map(|value| value.to_str().unwrap()), Some("close"));
+        assert_eq!(
+            response
+                .headers()
+                .get("connection")
+                .map(|value| value.to_str().unwrap()),
+            Some("close")
+        );
         assert_eq!(response.text().await.unwrap(), "served by the tenant\n");
         assert_eq!(waker.count(), 1);
     }
@@ -345,9 +378,17 @@ mod tests {
                 record.state = InstanceState::Idle;
             }))
             .await;
-        let activator = AppActivator::new(state, CountingWaker::refusing(WakeRefusal::NoRoom { shortfall_mib: 256 }));
+        let activator = AppActivator::new(
+            state,
+            CountingWaker::refusing(WakeRefusal::NoRoom { shortfall_mib: 256 }),
+        );
         let host_port = serving(&activator, &app_id()).await;
-        assert!(get(host_port).await.text().await.unwrap().contains("out of memory"));
+        assert!(get(host_port)
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("out of memory"));
     }
 
     #[tokio::test]
@@ -359,10 +400,19 @@ mod tests {
                 record.state = InstanceState::Idle;
             }))
             .await;
-        let activator =
-            AppActivator::new(state, CountingWaker::refusing(WakeRefusal::Failed { reason: "no slots left".into() }));
+        let activator = AppActivator::new(
+            state,
+            CountingWaker::refusing(WakeRefusal::Failed {
+                reason: "no slots left".into(),
+            }),
+        );
         let host_port = serving(&activator, &app_id()).await;
-        assert!(get(host_port).await.text().await.unwrap().contains("could not be started"));
+        assert!(get(host_port)
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("could not be started"));
     }
 
     /// Suspending is an answer, not a question. A request is not the thing that reverses it.
@@ -398,6 +448,8 @@ mod tests {
         assert!(activator.listening_for().await.is_empty());
         // The listener is gone, so the port refuses rather than answering for an app that left.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(tokio::net::TcpStream::connect(("127.0.0.1", host_port.get())).await.is_err());
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", host_port.get()))
+            .await
+            .is_err());
     }
 }

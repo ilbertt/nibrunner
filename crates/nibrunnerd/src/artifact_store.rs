@@ -31,14 +31,20 @@ impl ObjectArtifactStore {
                 .with_bucket_name(bucket)
                 .build()
                 .map_err(|error| ArtifactError::Transfer(error.to_string()))?;
-            return Ok(Self { store: Arc::new(store), prefix: prefix.filter(|prefix| !prefix.is_empty()) });
+            return Ok(Self {
+                store: Arc::new(store),
+                prefix: prefix.filter(|prefix| !prefix.is_empty()),
+            });
         }
         let directory = std::path::PathBuf::from(url);
         crate::json_store::make_directory(&directory, 0o700)
             .map_err(|error| ArtifactError::Transfer(error.to_string()))?;
         let store = object_store::local::LocalFileSystem::new_with_prefix(&directory)
             .map_err(|error| ArtifactError::Transfer(error.to_string()))?;
-        Ok(Self { store: Arc::new(store), prefix: None })
+        Ok(Self {
+            store: Arc::new(store),
+            prefix: None,
+        })
     }
 
     fn path_for(&self, object_key: &ObjectKey) -> object_store::path::Path {
@@ -57,7 +63,10 @@ impl ArtifactStore for ObjectArtifactStore {
             .get(&self.path_for(object_key))
             .await
             .map_err(|error| ArtifactError::Transfer(error.to_string()))?;
-        let bytes = result.bytes().await.map_err(|error| ArtifactError::Transfer(error.to_string()))?;
+        let bytes = result
+            .bytes()
+            .await
+            .map_err(|error| ArtifactError::Transfer(error.to_string()))?;
         Ok(bytes.to_vec())
     }
 }
@@ -76,7 +85,10 @@ mod tests {
         assert_eq!(store.read(&key).await.unwrap(), b"a binary");
 
         let missing = ObjectKey::parse("artifacts/absent").unwrap();
-        assert!(matches!(store.read(&missing).await, Err(ArtifactError::Transfer(_))));
+        assert!(matches!(
+            store.read(&missing).await,
+            Err(ArtifactError::Transfer(_))
+        ));
     }
 
     /// The prefix a bucket URL names is prepended to every key, so what the control plane sends
@@ -84,7 +96,10 @@ mod tests {
     #[test]
     fn a_bucket_url_carries_its_prefix_into_every_key() {
         let key = ObjectKey::parse("artifacts/one").unwrap();
-        let bare = ObjectArtifactStore { store: Arc::new(object_store::memory::InMemory::new()), prefix: None };
+        let bare = ObjectArtifactStore {
+            store: Arc::new(object_store::memory::InMemory::new()),
+            prefix: None,
+        };
         assert_eq!(bare.path_for(&key).to_string(), "artifacts/one");
         let nested = ObjectArtifactStore {
             store: Arc::new(object_store::memory::InMemory::new()),

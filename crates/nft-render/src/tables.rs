@@ -46,7 +46,8 @@ pub fn parse_kernel_tables(json: &str) -> KernelTables {
 mod tests {
     use super::*;
 
-    const METAINFO: &str = r#"{"metainfo": {"version": "1.0.4", "release_name": "Lester Gooch #3", "json_schema_version": 1}}"#;
+    const METAINFO: &str =
+        r#"{"metainfo": {"version": "1.0.4", "release_name": "Lester Gooch #3", "json_schema_version": 1}}"#;
 
     fn listing(tables: &[String]) -> String {
         let mut entries = vec![METAINFO.to_string()];
@@ -64,22 +65,52 @@ mod tests {
 
     #[test]
     fn what_the_kernel_is_holding_reads_back_as_one_comparable_value() {
-        assert_eq!(parse_kernel_tables(&holding_both()), parse_kernel_tables(&holding_both()));
+        assert_eq!(
+            parse_kernel_tables(&holding_both()),
+            parse_kernel_tables(&holding_both())
+        );
         assert_ne!(parse_kernel_tables(&holding_both()), "");
-        assert_ne!(parse_kernel_tables(&listing(&[])), parse_kernel_tables(&holding_both()));
-        assert_ne!(parse_kernel_tables(&listing(&[nibrun("ip", 8), nibrun("ip6", 10)])), parse_kernel_tables(&holding_both()));
-        assert_ne!(parse_kernel_tables(&listing(&[nibrun("ip", 2)])), parse_kernel_tables(&holding_both()));
-        assert_eq!(parse_kernel_tables(&listing(&[nibrun("ip6", 4), nibrun("ip", 2)])), parse_kernel_tables(&holding_both()));
-        let alongside = listing(&[r#"{"table": {"family": "inet", "name": "filter", "handle": 1}}"#.to_string(), nibrun("ip", 2), nibrun("ip6", 4)]);
-        assert_eq!(parse_kernel_tables(&alongside), parse_kernel_tables(&holding_both()));
+        assert_ne!(
+            parse_kernel_tables(&listing(&[])),
+            parse_kernel_tables(&holding_both())
+        );
+        assert_ne!(
+            parse_kernel_tables(&listing(&[nibrun("ip", 8), nibrun("ip6", 10)])),
+            parse_kernel_tables(&holding_both())
+        );
+        assert_ne!(
+            parse_kernel_tables(&listing(&[nibrun("ip", 2)])),
+            parse_kernel_tables(&holding_both())
+        );
+        assert_eq!(
+            parse_kernel_tables(&listing(&[nibrun("ip6", 4), nibrun("ip", 2)])),
+            parse_kernel_tables(&holding_both())
+        );
+        let alongside = listing(&[
+            r#"{"table": {"family": "inet", "name": "filter", "handle": 1}}"#.to_string(),
+            nibrun("ip", 2),
+            nibrun("ip6", 4),
+        ]);
+        assert_eq!(
+            parse_kernel_tables(&alongside),
+            parse_kernel_tables(&holding_both())
+        );
         let bridged = listing(&[nibrun("ip", 2), nibrun("ip6", 4), nibrun("bridge", 6)]);
-        assert_eq!(parse_kernel_tables(&bridged), parse_kernel_tables(&holding_both()));
+        assert_eq!(
+            parse_kernel_tables(&bridged),
+            parse_kernel_tables(&holding_both())
+        );
     }
 
     #[test]
     fn output_that_cannot_be_read_is_a_host_holding_nothing() {
         assert_eq!(parse_kernel_tables("nft: command not found"), "");
         assert_eq!(parse_kernel_tables(r#"{"other": []}"#), "");
-        assert_eq!(parse_kernel_tables(&listing(&[r#"{"table": {"family": "ip", "name": "nibrun"}}"#.to_string()])), "");
+        assert_eq!(
+            parse_kernel_tables(&listing(&[
+                r#"{"table": {"family": "ip", "name": "nibrun"}}"#.to_string()
+            ])),
+            ""
+        );
     }
 }

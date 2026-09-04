@@ -13,7 +13,9 @@ use protocol::{HostCapacity, HostId, HostReportedState, HostState, HostVersions}
 use crate::clock::now_timestamp;
 use crate::host::Host;
 use crate::report::build_report::{build_reported_state, ReportInputs};
-use crate::report::capacity::{allocatable_capacity, committed_resources, read_filesystem_space, read_vcpu_count};
+use crate::report::capacity::{
+    allocatable_capacity, committed_resources, read_filesystem_space, read_vcpu_count,
+};
 
 /// A host that has never been given an id of its own is still a host: it reports under one it
 /// derives from where it keeps its state, so a report is readable before anything has registered
@@ -59,7 +61,11 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     build_reported_state(ReportInputs {
         host_id: host_id_of(host),
         reported_at: now_timestamp(),
-        state: if snapshot.converged { HostState::Ready } else { HostState::Registering },
+        state: if snapshot.converged {
+            HostState::Ready
+        } else {
+            HostState::Registering
+        },
         capacity,
         allocatable,
         versions,
@@ -131,8 +137,9 @@ mod tests {
         let report = build(&host, versions()).await;
         let path = reported_state_file(&host);
         write(&path, &report);
-        let read_back: HostReportedState =
-            crate::json_store::read_json(&path).unwrap().expect("the report is there");
+        let read_back: HostReportedState = crate::json_store::read_json(&path)
+            .unwrap()
+            .expect("the report is there");
         assert_eq!(read_back, report);
         // Before anything converges the host says so, rather than claiming to be ready.
         assert_eq!(read_back.state, HostState::Registering);

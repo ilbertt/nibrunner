@@ -124,7 +124,10 @@ impl HostConfig {
 }
 
 fn variable(name: &'static str) -> Option<String> {
-    std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn path_or(name: &'static str, fallback: &str) -> PathBuf {
@@ -133,17 +136,24 @@ fn path_or(name: &'static str, fallback: &str) -> PathBuf {
 
 fn list(name: &'static str) -> Vec<String> {
     variable(name)
-        .map(|value| value.split(',').map(str::trim).filter(|entry| !entry.is_empty()).map(str::to_string).collect())
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn port(name: &'static str) -> Result<Option<u16>, ConfigError> {
     match variable(name) {
         None => Ok(None),
-        Some(value) => value
-            .parse()
-            .map(Some)
-            .map_err(|_| ConfigError::Invalid { name, rule: "a port number" }),
+        Some(value) => value.parse().map(Some).map_err(|_| ConfigError::Invalid {
+            name,
+            rule: "a port number",
+        }),
     }
 }
 
@@ -155,10 +165,10 @@ impl HostConfig {
         let runtime_dir = path_or("NIBRUNNER_RUNTIME_DIR", DEFAULT_RUNTIME_DIR);
         let relay = match variable("NIBRUNNER_PORT_RELAY_PUBLIC_IPV4") {
             None => None,
-            Some(value) => Some(
-                Ipv4Address::parse(value)
-                    .map_err(|_| ConfigError::Invalid { name: "NIBRUNNER_PORT_RELAY_PUBLIC_IPV4", rule: "an IPv4 address" })?,
-            ),
+            Some(value) => Some(Ipv4Address::parse(value).map_err(|_| ConfigError::Invalid {
+                name: "NIBRUNNER_PORT_RELAY_PUBLIC_IPV4",
+                rule: "an IPv4 address",
+            })?),
         };
         Ok(Self {
             snapshot_dir: PathBuf::from(
@@ -171,10 +181,12 @@ impl HostConfig {
                     .unwrap_or_else(|| state_dir.join("desired.json").display().to_string()),
             ),
             api_socket: PathBuf::from(
-                variable("NIBRUNNER_API_SOCKET").unwrap_or_else(|| runtime_dir.join("nibrunner.sock").display().to_string()),
+                variable("NIBRUNNER_API_SOCKET")
+                    .unwrap_or_else(|| runtime_dir.join("nibrunner.sock").display().to_string()),
             ),
             versions_file: PathBuf::from(
-                variable("NIBRUNNER_VERSIONS_FILE").unwrap_or_else(|| state_dir.join("versions.json").display().to_string()),
+                variable("NIBRUNNER_VERSIONS_FILE")
+                    .unwrap_or_else(|| state_dir.join("versions.json").display().to_string()),
             ),
             artifact_store_url: variable("NIBRUNNER_ARTIFACT_STORE_URL")
                 .unwrap_or_else(|| state_dir.join("artifact-store").display().to_string()),

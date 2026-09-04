@@ -1,0 +1,7 @@
+# The version clippy checks API suggestions against. Pinned to the toolchain rather than left to
+# clippy's own default, so a lint cannot suggest something this crate's MSRV forbids.
+msrv = "1.90.0"
+
+# A comment that explains why is worth more than the line it sits above; this stops clippy
+# complaining about the long ones this codebase is deliberately full of.
+doc-valid-idents = ["ZeroFS", "SlateDB", "Firecracker", "microVM", "microVMs", "nftables", "nibrun", "IPv4", "IPv6", "TypeBox", "..."]

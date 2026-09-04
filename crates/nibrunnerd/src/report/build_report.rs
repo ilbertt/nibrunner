@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use protocol::{
-    AppId, ComputeUsage, FilesystemUsage, HostCapacity, HostId, HostReportedState, HostState,
-    HostVersions, ReportedCheckpoint, ReportedExport, ReportedInstance, ReportedVolume, Timestamp,
+    AppId, ComputeUsage, FilesystemUsage, HostCapacity, HostId, HostReportedState, HostState, HostVersions,
+    ReportedCheckpoint, ReportedExport, ReportedInstance, ReportedVolume, Timestamp,
 };
 
 use crate::report::InstanceRecord;
@@ -38,7 +38,10 @@ pub fn to_reported_instance(
 fn with_usage(volume: ReportedVolume, measured: Option<&FilesystemUsage>) -> ReportedVolume {
     match measured {
         None => volume,
-        Some(usage) => ReportedVolume { usage: Some(usage.clone()), ..volume },
+        Some(usage) => ReportedVolume {
+            usage: Some(usage.clone()),
+            ..volume
+        },
     }
 }
 
@@ -111,11 +114,19 @@ mod tests {
     }
 
     fn measured() -> FilesystemUsage {
-        FilesystemUsage { total_bytes: 8_455_712_768, used_bytes: 1_503_238_553, measured_at: observed_at() }
+        FilesystemUsage {
+            total_bytes: 8_455_712_768,
+            used_bytes: 1_503_238_553,
+            measured_at: observed_at(),
+        }
     }
 
     fn report_with(volume_usage: BTreeMap<AppId, FilesystemUsage>) -> HostReportedState {
-        let capacity = HostCapacity { vcpu_count: 4, memory_mib: 8192, cache_bytes: 1000 };
+        let capacity = HostCapacity {
+            vcpu_count: 4,
+            memory_mib: 8192,
+            cache_bytes: 1000,
+        };
         build_reported_state(ReportInputs {
             host_id: host_id(),
             reported_at: observed_at(),
@@ -143,10 +154,22 @@ mod tests {
         let instance = to_reported_instance(&instance_record(|_| {}), None, None);
         let written = serde_json::to_value(&instance).unwrap();
         assert_eq!(written["hostPort"], u32::from(instance.host_port.unwrap()));
-        for absent in ["startedAt", "lastHealthyAt", "lastExitCode", "message", "publicIpv4", "extraPublicPort", "compute"] {
+        for absent in [
+            "startedAt",
+            "lastHealthyAt",
+            "lastExitCode",
+            "message",
+            "publicIpv4",
+            "extraPublicPort",
+            "compute",
+        ] {
             assert!(written.get(absent).is_none(), "{absent} should be absent");
         }
-        let exited = to_reported_instance(&instance_record(|record| record.last_exit_code = Some(0)), None, None);
+        let exited = to_reported_instance(
+            &instance_record(|record| record.last_exit_code = Some(0)),
+            None,
+            None,
+        );
         assert_eq!(serde_json::to_value(&exited).unwrap()["lastExitCode"], 0);
     }
 
@@ -174,7 +197,10 @@ mod tests {
         assert_eq!(matched.volumes[0].usage, Some(measured()));
         assert_eq!(report_with(BTreeMap::new()).volumes[0].usage, None);
         let other = AppId::parse("app-somebody-else").unwrap();
-        assert_eq!(report_with([(other, measured())].into_iter().collect()).volumes[0].usage, None);
+        assert_eq!(
+            report_with([(other, measured())].into_iter().collect()).volumes[0].usage,
+            None
+        );
     }
 
     #[test]
@@ -187,7 +213,10 @@ mod tests {
         };
         let measured = to_reported_instance(&instance_record(|_| {}), None, Some(&spending));
         assert_eq!(measured.compute, Some(spending));
-        assert_eq!(to_reported_instance(&instance_record(|_| {}), None, None).compute, None);
+        assert_eq!(
+            to_reported_instance(&instance_record(|_| {}), None, None).compute,
+            None
+        );
     }
 
     #[test]

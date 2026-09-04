@@ -7,7 +7,11 @@ use protocol::{HealthCheck, HttpPort, Ipv4Address};
 
 /// Straight to the guest address rather than through the forwarded host port, so a failure means
 /// the tenant is down and never that a NAT rule is missing.
-pub async fn probe_instance(guest_ipv4: &Ipv4Address, http_port: HttpPort, health_check: &HealthCheck) -> bool {
+pub async fn probe_instance(
+    guest_ipv4: &Ipv4Address,
+    http_port: HttpPort,
+    health_check: &HealthCheck,
+) -> bool {
     let timeout = Duration::from_millis(health_check.timeout_ms);
     let address = SocketAddr::from((guest_ipv4.addr(), http_port.get()));
     match &health_check.path {
@@ -22,7 +26,10 @@ pub async fn probe_instance(guest_ipv4: &Ipv4Address, http_port: HttpPort, healt
 /// address nothing answers on is otherwise bounded by the kernel's connect timeout, and a guest
 /// whose tap has gone is exactly that address.
 async fn probe_tcp(address: SocketAddr, timeout: Duration) -> bool {
-    matches!(tokio::time::timeout(timeout, tokio::net::TcpStream::connect(address)).await, Ok(Ok(_)))
+    matches!(
+        tokio::time::timeout(timeout, tokio::net::TcpStream::connect(address)).await,
+        Ok(Ok(_))
+    )
 }
 
 /// A declared path upgrades the probe to an HTTP GET that must answer 2xx.
@@ -32,8 +39,9 @@ async fn probe_http(address: SocketAddr, path: &str, timeout: Duration) -> bool 
 
     let attempt = async {
         let stream = tokio::net::TcpStream::connect(address).await.ok()?;
-        let (mut sender, connection) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.ok()?;
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .ok()?;
         let pump = tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -61,7 +69,9 @@ mod tests {
 
     async fn listening(answer: hyper::StatusCode) -> HttpPort {
         use http_body_util::Full;
-        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             loop {
@@ -99,7 +109,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_declared_path_upgrades_the_probe_to_an_http_get() {
-        let with_path = HealthCheck { path: Some("/health".into()), ..DEFAULT_HEALTH_CHECK };
+        let with_path = HealthCheck {
+            path: Some("/health".into()),
+            ..DEFAULT_HEALTH_CHECK
+        };
         let healthy = listening(hyper::StatusCode::OK).await;
         assert!(probe_instance(&loopback(), healthy, &with_path).await);
         // A listening tenant answering 500 is up and not well, which is not healthy.

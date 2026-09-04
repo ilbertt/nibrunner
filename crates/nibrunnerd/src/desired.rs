@@ -45,7 +45,10 @@ pub fn read_desired_state(path: &Path) -> Result<Option<HostDesiredState>, Desir
     };
     serde_json::from_value(value)
         .map(Some)
-        .map_err(|error| DesiredStateError::Malformed { path: path.display().to_string(), reason: error.to_string() })
+        .map_err(|error| DesiredStateError::Malformed {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })
 }
 
 /// The last document this host was given, kept beside its own state so a restart during an outage
@@ -144,10 +147,9 @@ mod linux {
     /// tells the caller whether the backstop still has to be served.
     pub async fn wait(inotify: &OwnedFd, backstop: Duration) -> bool {
         let raw = inotify.as_raw_fd();
-        let Ok(async_fd) = tokio::io::unix::AsyncFd::with_interest(
-            RawDescriptor(raw),
-            tokio::io::Interest::READABLE,
-        ) else {
+        let Ok(async_fd) =
+            tokio::io::unix::AsyncFd::with_interest(RawDescriptor(raw), tokio::io::Interest::READABLE)
+        else {
             return false;
         };
         let Ok(Ok(mut ready)) = tokio::time::timeout(backstop, async_fd.readable()).await else {
@@ -179,7 +181,9 @@ mod tests {
     #[test]
     fn a_file_that_is_not_there_yet_is_the_ordinary_state_of_a_fresh_host() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(read_desired_state(&directory.path().join("desired.json")).unwrap().is_none());
+        assert!(read_desired_state(&directory.path().join("desired.json"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -190,7 +194,10 @@ mod tests {
         cache_desired_state(&path, &state).unwrap();
         assert_eq!(read_desired_state(&path).unwrap(), Some(state));
         std::fs::write(&path, r#"{"hostId":"host-1"}"#).unwrap();
-        assert!(read_desired_state(&path).unwrap_err().message().contains("cannot read"));
+        assert!(read_desired_state(&path)
+            .unwrap_err()
+            .message()
+            .contains("cannot read"));
     }
 
     #[test]
@@ -199,7 +206,9 @@ mod tests {
         let state = desired_state(|_| {});
         assert!(cache.accept(state.clone()));
         assert!(!cache.accept(state));
-        assert!(cache.accept(desired_state(|state| state.instances = vec![desired_instance(|_| {})])));
+        assert!(cache.accept(desired_state(
+            |state| state.instances = vec![desired_instance(|_| {})]
+        )));
         assert_eq!(cache.latest().map(|state| state.instances.len()), Some(1));
     }
 

@@ -36,7 +36,9 @@ fn wrapped(offset: i64) -> u32 {
 /// nothing holds, so a cursor that is stale, missing or nonsense costs a different free slot
 /// rather than a wrong one.
 pub fn read_slot_cursor(value: Option<serde_json::Value>) -> i64 {
-    value.and_then(|value| value.as_i64()).unwrap_or(i64::from(FIRST_SLOT))
+    value
+        .and_then(|value| value.as_i64())
+        .unwrap_or(i64::from(FIRST_SLOT))
 }
 
 /// A record file that cannot be read degrades to an empty allocator rather than throwing, and a
@@ -69,7 +71,10 @@ pub struct SlotAllocator {
 
 impl SlotAllocator {
     pub fn empty() -> Self {
-        Self { assignments: BTreeMap::new(), cursor: i64::from(FIRST_SLOT) }
+        Self {
+            assignments: BTreeMap::new(),
+            cursor: i64::from(FIRST_SLOT),
+        }
     }
 
     pub fn load(slots_file: &Path, cursor_file: &Path) -> Result<Self, StoreError> {
@@ -83,8 +88,11 @@ impl SlotAllocator {
     /// After the slots, and never in place of them: a cursor written without them would point
     /// past allocations the next boot has no record of.
     pub fn persist(&self, slots_file: &Path, cursor_file: &Path) -> Result<(), StoreError> {
-        let records: BTreeMap<String, u32> =
-            self.assignments.iter().map(|(app_id, slot)| (app_id.to_string(), *slot)).collect();
+        let records: BTreeMap<String, u32> = self
+            .assignments
+            .iter()
+            .map(|(app_id, slot)| (app_id.to_string(), *slot))
+            .collect();
         write_json(slots_file, &records)?;
         write_json(cursor_file, &self.cursor)
     }
@@ -114,7 +122,9 @@ impl SlotAllocator {
     }
 
     pub fn lookup(&self, app_id: &AppId) -> Option<AppSlot> {
-        self.assignments.get(app_id).map(|slot| describe_slot(*slot, app_id.clone()))
+        self.assignments
+            .get(app_id)
+            .map(|slot| describe_slot(*slot, app_id.clone()))
     }
 
     pub fn release(&mut self, app_id: &AppId) {
@@ -122,7 +132,10 @@ impl SlotAllocator {
     }
 
     pub fn slots(&self) -> Vec<AppSlot> {
-        self.assignments.iter().map(|(app_id, slot)| describe_slot(*slot, app_id.clone())).collect()
+        self.assignments
+            .iter()
+            .map(|(app_id, slot)| describe_slot(*slot, app_id.clone()))
+            .collect()
     }
 }
 
@@ -180,7 +193,10 @@ mod tests {
         allocator.allocate(&app("leaving")).unwrap();
         allocator.release(&app("leaving"));
         allocator.allocate(&app("staying")).unwrap();
-        assert_ne!(allocator.allocate(&app("arriving")).unwrap().slot, staying.slot + 1);
+        assert_ne!(
+            allocator.allocate(&app("arriving")).unwrap().slot,
+            staying.slot + 1
+        );
     }
 
     #[test]
@@ -189,7 +205,10 @@ mod tests {
         for index in 0..SLOT_COUNT {
             allocator.allocate(&app(index)).unwrap();
         }
-        assert_eq!(allocator.allocate(&app(1000)).unwrap_err(), SlotExhausted { limit: SLOT_COUNT });
+        assert_eq!(
+            allocator.allocate(&app(1000)).unwrap_err(),
+            SlotExhausted { limit: SLOT_COUNT }
+        );
     }
 
     /// The cursor is a hint and the scan is the authority: nothing a file holds can make this
@@ -197,11 +216,20 @@ mod tests {
     #[test]
     fn a_cursor_read_off_disk_cannot_hand_out_a_slot_somebody_holds() {
         assert_eq!(read_slot_cursor(None), i64::from(FIRST_SLOT));
-        assert_eq!(read_slot_cursor(Some(serde_json::json!("7"))), i64::from(FIRST_SLOT));
-        assert_eq!(read_slot_cursor(Some(serde_json::json!(1.5))), i64::from(FIRST_SLOT));
+        assert_eq!(
+            read_slot_cursor(Some(serde_json::json!("7"))),
+            i64::from(FIRST_SLOT)
+        );
+        assert_eq!(
+            read_slot_cursor(Some(serde_json::json!(1.5))),
+            i64::from(FIRST_SLOT)
+        );
         assert_eq!(read_slot_cursor(Some(serde_json::json!(3))), 3);
         for cursor in [1000i64, -1000] {
-            let mut allocator = SlotAllocator { assignments: BTreeMap::new(), cursor };
+            let mut allocator = SlotAllocator {
+                assignments: BTreeMap::new(),
+                cursor,
+            };
             let slot = allocator.allocate(&app(1)).unwrap().slot;
             assert!((FIRST_SLOT..SLOT_COUNT).contains(&slot));
         }

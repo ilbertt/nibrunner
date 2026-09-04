@@ -33,7 +33,9 @@ pub const HOST_BASELINE_MIB: u64 = 640;
 /// rather than by coincidence: a host that refused wakes by one measure while telling the control
 /// plane it had room by another would go on being placed onto for as long as it went on refusing.
 pub fn guest_memory_mib(host_memory_mib: u64, storage_cache_mib: u64) -> u64 {
-    host_memory_mib.saturating_sub(storage_cache_mib).saturating_sub(HOST_BASELINE_MIB)
+    host_memory_mib
+        .saturating_sub(storage_cache_mib)
+        .saturating_sub(HOST_BASELINE_MIB)
 }
 
 /// The states in which an app has no microVM, and so is holding nothing of the host.
@@ -67,7 +69,9 @@ pub fn allocatable_capacity(
     let used_vcpu: u32 = committed.iter().map(|entry| entry.vcpu_count).sum();
     HostCapacity {
         vcpu_count: capacity.vcpu_count.saturating_sub(used_vcpu),
-        memory_mib: capacity.memory_mib.saturating_sub(committed_memory_mib(committed)),
+        memory_mib: capacity
+            .memory_mib
+            .saturating_sub(committed_memory_mib(committed)),
         cache_bytes: available_cache_bytes.min(capacity.cache_bytes),
     }
 }
@@ -89,7 +93,8 @@ pub fn memory_shortfall_mib(
 
 /// Read rather than remembered: a host is resized by being replaced, but the daemon outlives less.
 pub fn read_host_memory_mib() -> u64 {
-    read_meminfo_kib("MemTotal:").map_or(0, |kib| kib * 1024 / BYTES_PER_MIB)
+    // Floored: a host reporting a mebibyte it does not have is a guest that does not fit.
+    read_meminfo_kib("MemTotal:").map_or(0, |kib| (kib * 1024) / BYTES_PER_MIB)
 }
 
 #[cfg(target_os = "linux")]
@@ -169,7 +174,10 @@ mod tests {
     fn a_host_has_room_for_one_more_microvm_until_it_does_not() {
         assert_eq!(shortfall(0, InstanceState::Running), 0);
         assert_eq!(shortfall(NEIGHBOURS_THAT_FIT, InstanceState::Running), 0);
-        assert_eq!(shortfall(NEIGHBOURS_THAT_FIT + 1, InstanceState::Running), APP_MEMORY_MIB);
+        assert_eq!(
+            shortfall(NEIGHBOURS_THAT_FIT + 1, InstanceState::Running),
+            APP_MEMORY_MIB
+        );
         // The saving and the failure mode are the same fact: a host packed with sleeping apps has
         // all its memory free, and every one of them can be woken until the memory runs out.
         assert_eq!(shortfall(NEIGHBOURS_THAT_FIT * 2, InstanceState::Idle), 0);
@@ -179,7 +187,10 @@ mod tests {
     fn memory_the_host_needs_is_not_memory_a_guest_may_be_given() {
         const HOST_MIB: u64 = 7779;
         const CACHE_MIB: u64 = 2048;
-        assert_eq!(guest_memory_mib(HOST_MIB, CACHE_MIB), HOST_MIB - CACHE_MIB - HOST_BASELINE_MIB);
+        assert_eq!(
+            guest_memory_mib(HOST_MIB, CACHE_MIB),
+            HOST_MIB - CACHE_MIB - HOST_BASELINE_MIB
+        );
         let roomier = guest_memory_mib(HOST_MIB, CACHE_MIB);
         let tighter = guest_memory_mib(HOST_MIB, CACHE_MIB + 1024);
         assert_eq!(roomier - tighter, 1024);
@@ -199,7 +210,11 @@ mod tests {
 
     #[test]
     fn allocatable_is_what_is_left_once_every_booted_app_is_taken_off() {
-        let capacity = HostCapacity { vcpu_count: 4, memory_mib: 8192, cache_bytes: 1000 };
+        let capacity = HostCapacity {
+            vcpu_count: 4,
+            memory_mib: 8192,
+            cache_bytes: 1000,
+        };
         let booted = vec![DEFAULT_INSTANCE_RESOURCES, DEFAULT_INSTANCE_RESOURCES];
         assert_eq!(
             allocatable_capacity(&capacity, &booted, 400),
@@ -210,10 +225,25 @@ mod tests {
             }
         );
         // An oversubscribed host reports zero rather than a negative.
-        let small = HostCapacity { vcpu_count: 1, memory_mib: APP_MEMORY_MIB, cache_bytes: 1000 };
+        let small = HostCapacity {
+            vcpu_count: 1,
+            memory_mib: APP_MEMORY_MIB,
+            cache_bytes: 1000,
+        };
         assert_eq!(
-            allocatable_capacity(&small, &[InstanceResources { vcpu_count: 4, memory_mib: 8192 }], 400),
-            HostCapacity { vcpu_count: 0, memory_mib: 0, cache_bytes: 400 }
+            allocatable_capacity(
+                &small,
+                &[InstanceResources {
+                    vcpu_count: 4,
+                    memory_mib: 8192
+                }],
+                400
+            ),
+            HostCapacity {
+                vcpu_count: 0,
+                memory_mib: 0,
+                cache_bytes: 400
+            }
         );
     }
 
@@ -228,8 +258,10 @@ mod tests {
             InstanceState::Stopped,
             InstanceState::Failed,
         ];
-        let records: Vec<InstanceRecord> =
-            states.iter().map(|state| instance_record(|record| record.state = *state)).collect();
+        let records: Vec<InstanceRecord> = states
+            .iter()
+            .map(|state| instance_record(|record| record.state = *state))
+            .collect();
         assert_eq!(committed_resources(&records).len(), 4);
         assert!(committed_resources(&[instance_record(|record| {
             record.state = InstanceState::Idle;

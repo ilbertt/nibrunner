@@ -8,9 +8,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use backhand::{
-    compression::Compressor, FilesystemCompressor, FilesystemWriter, NodeHeader,
-};
+use backhand::{compression::Compressor, FilesystemCompressor, FilesystemWriter, NodeHeader};
 use protocol::{DesiredArtifact, Sha256Digest};
 
 use crate::json_store::make_directory;
@@ -46,7 +44,12 @@ fn image_compressor() -> FilesystemCompressor {
 const FIXED_MTIME: u32 = 0;
 
 fn header(permissions: u16) -> NodeHeader {
-    NodeHeader { permissions, uid: 0, gid: 0, mtime: FIXED_MTIME }
+    NodeHeader {
+        permissions,
+        uid: 0,
+        gid: 0,
+        mtime: FIXED_MTIME,
+    }
 }
 
 fn pack(files: &[(&str, &[u8], u16)]) -> Result<Vec<u8>, ArtifactError> {
@@ -56,11 +59,17 @@ fn pack(files: &[(&str, &[u8], u16)]) -> Result<Vec<u8>, ArtifactError> {
     writer.set_root_mode(0o755);
     for (name, bytes, permissions) in files {
         writer
-            .push_file(Cursor::new(bytes.to_vec()), format!("/{name}"), header(*permissions))
+            .push_file(
+                Cursor::new(bytes.to_vec()),
+                format!("/{name}"),
+                header(*permissions),
+            )
             .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     }
     let mut image = Cursor::new(Vec::new());
-    writer.write(&mut image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+    writer
+        .write(&mut image)
+        .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     Ok(image.into_inner())
 }
 
@@ -89,22 +98,37 @@ pub async fn ensure_artifact_image(
         // the image was *built*, so the digest this host starts every day would be evicted ahead
         // of one fetched once last week. Ignored on failure: a cache entry that cannot be touched
         // is one that ages, not one that fails a deploy.
-        let _ = std::fs::File::open(&image_path).and_then(|file| file.set_times(std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now()).set_modified(std::time::SystemTime::now())));
+        let _ = std::fs::File::open(&image_path).and_then(|file| {
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(std::time::SystemTime::now())
+                    .set_modified(std::time::SystemTime::now()),
+            )
+        });
         return Ok(image_path);
     }
 
     let bytes = store.read(&artifact.object_key).await?;
     let actual = digest_of(&bytes);
     if actual != artifact.digest.as_str() {
-        return Err(ArtifactError::DigestMismatch { expected: artifact.digest.clone(), actual });
+        return Err(ArtifactError::DigestMismatch {
+            expected: artifact.digest.clone(),
+            actual,
+        });
     }
     if bytes.len() as u64 != artifact.size_bytes {
-        return Err(ArtifactError::SizeMismatch { expected: artifact.size_bytes, actual: bytes.len() as u64 });
+        return Err(ArtifactError::SizeMismatch {
+            expected: artifact.size_bytes,
+            actual: bytes.len() as u64,
+        });
     }
 
     let image = pack(&[(GUEST_BINARY_NAME, &bytes, BINARY_MODE)])?;
-    let directory = image_path.parent().expect("the image is one level inside the cache");
-    make_directory(directory, CACHE_DIR_MODE).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+    let directory = image_path
+        .parent()
+        .expect("the image is one level inside the cache");
+    make_directory(directory, CACHE_DIR_MODE)
+        .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     // Through a sibling and a rename, so a guest never opens an image that is half written.
     let staged = directory.join(format!("{ARTIFACT_IMAGE_FILENAME}.{}.tmp", std::process::id()));
     std::fs::write(&staged, &image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
@@ -116,7 +140,11 @@ pub async fn ensure_artifact_image(
 /// Rebuilt on every boot, because configuration changes without the artifact changing.
 pub fn build_instance_config_image(working_dir: &Path, rendered: &str) -> Result<PathBuf, ArtifactError> {
     make_directory(working_dir, VM_DIR_MODE).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    let image = pack(&[(guest_contract::instance_env::INSTANCE_ENV_FILENAME, rendered.as_bytes(), CONFIG_MODE)])?;
+    let image = pack(&[(
+        guest_contract::instance_env::INSTANCE_ENV_FILENAME,
+        rendered.as_bytes(),
+        CONFIG_MODE,
+    )])?;
     let image_path = working_dir.join(guest_contract::instance_env::INSTANCE_CONFIG_IMAGE);
     let staged = working_dir.join(format!("config.{}.tmp", std::process::id()));
     std::fs::write(&staged, &image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
@@ -171,7 +199,9 @@ mod tests {
     async fn an_image_is_built_once_per_digest_and_holds_the_binary_at_the_boot_path() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(artifact_bytes());
-        let image_path = ensure_artifact_image(&store, directory.path(), &artifact(|_| {})).await.unwrap();
+        let image_path = ensure_artifact_image(&store, directory.path(), &artifact(|_| {}))
+            .await
+            .unwrap();
         assert!(image_path.starts_with(directory.path().join(ARTIFACT_DIGEST)));
         let image = std::fs::read(&image_path).unwrap();
         // The squashfs superblock's own magic, so this is an image and not a copy of the binary.
@@ -180,7 +210,9 @@ mod tests {
         assert_eq!(read_back(&image, "/server"), artifact_bytes());
 
         let before = std::fs::metadata(&image_path).unwrap().len();
-        let again = ensure_artifact_image(&store, directory.path(), &artifact(|_| {})).await.unwrap();
+        let again = ensure_artifact_image(&store, directory.path(), &artifact(|_| {}))
+            .await
+            .unwrap();
         assert_eq!(again, image_path);
         assert_eq!(std::fs::metadata(&image_path).unwrap().len(), before);
         // Nothing is left beside it: a staged image that was never renamed would show up here.
@@ -192,7 +224,9 @@ mod tests {
     async fn bytes_that_are_not_what_they_claim_never_reach_a_guest() {
         let directory = tempfile::tempdir().unwrap();
         let wrong = store(b"something else entirely\n".to_vec());
-        let error = ensure_artifact_image(&wrong, directory.path(), &artifact(|_| {})).await.unwrap_err();
+        let error = ensure_artifact_image(&wrong, directory.path(), &artifact(|_| {}))
+            .await
+            .unwrap_err();
         assert!(matches!(error, ArtifactError::DigestMismatch { .. }));
         assert!(error.message().contains("not to the"));
         // Nothing was written, so the next deploy of the same digest is a fetch rather than a
@@ -201,7 +235,9 @@ mod tests {
 
         let store = store(artifact_bytes());
         let mismatched = artifact(|artifact| artifact.size_bytes = 1);
-        let error = ensure_artifact_image(&store, directory.path(), &mismatched).await.unwrap_err();
+        let error = ensure_artifact_image(&store, directory.path(), &mismatched)
+            .await
+            .unwrap_err();
         assert!(matches!(error, ArtifactError::SizeMismatch { .. }));
     }
 

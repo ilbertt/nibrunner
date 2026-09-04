@@ -13,9 +13,7 @@ use protocol::AppId;
 use crate::json_store::{make_directory, write_json};
 use crate::logs::receiver::{tenant_log_socket_path, TenantLogReceiver};
 use crate::net::tap::{HostNetwork, Neighbour, TapInterface};
-use crate::services::{
-    BootRequest, LogSink, SuspendRequest, VmError, Vmm,
-};
+use crate::services::{BootRequest, LogSink, SuspendRequest, VmError, Vmm};
 use crate::state::SharedState;
 use crate::vm::firecracker_api::FirecrackerApi;
 use crate::vm::process::{VmProcesses, FIRECRACKER_VERSION};
@@ -115,7 +113,10 @@ impl VmManager {
             .config
             .has_extra_public_port
             .then(|| {
-                self.public_ipv4.clone().map(|ipv4| PublicAddress { ipv4, port: slot.extra_public_port })
+                self.public_ipv4.clone().map(|ipv4| PublicAddress {
+                    ipv4,
+                    port: slot.extra_public_port,
+                })
             })
             .flatten();
         let rendered = render_instance_env(&InstanceEnvContent {
@@ -133,8 +134,16 @@ impl VmManager {
         let config = render_firecracker_config(
             request.desired.config.resources,
             &VmPaths {
-                kernel_path: self.guest_image_dir.join(GUEST_KERNEL_FILENAME).display().to_string(),
-                rootfs_path: self.guest_image_dir.join(GUEST_ROOTFS_FILENAME).display().to_string(),
+                kernel_path: self
+                    .guest_image_dir
+                    .join(GUEST_KERNEL_FILENAME)
+                    .display()
+                    .to_string(),
+                rootfs_path: self
+                    .guest_image_dir
+                    .join(GUEST_ROOTFS_FILENAME)
+                    .display()
+                    .to_string(),
                 artifact_image_path: request.artifact_image_path.display().to_string(),
                 instance_config_image_path: config_image.display().to_string(),
                 data_device_path: request.data_device_path.clone(),
@@ -276,7 +285,9 @@ impl Vmm for VmManager {
         self.processes.stop(&request.app_id).await;
 
         write_json(&paths.stamp_path, &stamp).map_err(|error| VmError::Host(error.message()))?;
-        let memory_bytes = std::fs::metadata(&paths.memory_path).map(|info| info.len()).unwrap_or(0);
+        let memory_bytes = std::fs::metadata(&paths.memory_path)
+            .map(|info| info.len())
+            .unwrap_or(0);
         tracing::info!(
             app_id = %request.app_id,
             slot = request.slot.slot,
@@ -370,7 +381,10 @@ impl Vmm for VmManager {
     }
 
     async fn statuses(&self, app_ids: &[AppId]) -> std::collections::BTreeMap<AppId, VmStatus> {
-        app_ids.iter().map(|app_id| (app_id.clone(), self.processes.status(app_id))).collect()
+        app_ids
+            .iter()
+            .map(|app_id| (app_id.clone(), self.processes.status(app_id)))
+            .collect()
     }
 
     async fn adopted_app_ids(&self) -> Vec<AppId> {
@@ -395,9 +409,16 @@ impl Vmm for VmManager {
 /// is enough to invalidate a snapshot but not enough to claim a version it cannot see.
 pub fn read_guest_image_version(guest_image_dir: &Path) -> String {
     let manifest: Option<serde_json::Value> =
-        crate::json_store::read_json(&guest_image_dir.join("manifest.json")).ok().flatten();
+        crate::json_store::read_json(&guest_image_dir.join("manifest.json"))
+            .ok()
+            .flatten();
     manifest
-        .and_then(|manifest| manifest.get("version").and_then(|value| value.as_str()).map(str::to_string))
+        .and_then(|manifest| {
+            manifest
+                .get("version")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -446,7 +467,12 @@ mod tests {
             sink: Arc::new(FileLogSink::new(root.join("logs"))),
             state: state.clone(),
         };
-        Fixture { _directory: directory, manager, network, state }
+        Fixture {
+            _directory: directory,
+            manager,
+            network,
+            state,
+        }
     }
 
     /// What the guest's init reads off `vdc`, read back out of the image the way it would.
@@ -480,19 +506,33 @@ mod tests {
     #[tokio::test]
     async fn staging_writes_the_machine_description_the_boot_contract_names() {
         let fixture = fixture();
-        let request = boot_request(desired_instance(|instance| instance.hostnames = vec![app_hostname()]));
+        let request = boot_request(desired_instance(|instance| {
+            instance.hostnames = vec![app_hostname()]
+        }));
         let config_file = fixture.manager.stage(&request).await.unwrap();
 
         let config: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
         let drives = config["drives"].as_array().unwrap();
         assert_eq!(drives.len(), 4);
-        assert!(drives[0]["path_on_host"].as_str().unwrap().ends_with("guest/rootfs.ext4"));
-        assert!(drives[1]["path_on_host"].as_str().unwrap().ends_with("artifact.squashfs"));
-        assert!(drives[2]["path_on_host"].as_str().unwrap().ends_with("config.squashfs"));
+        assert!(drives[0]["path_on_host"]
+            .as_str()
+            .unwrap()
+            .ends_with("guest/rootfs.ext4"));
+        assert!(drives[1]["path_on_host"]
+            .as_str()
+            .unwrap()
+            .ends_with("artifact.squashfs"));
+        assert!(drives[2]["path_on_host"]
+            .as_str()
+            .unwrap()
+            .ends_with("config.squashfs"));
         assert_eq!(drives[3]["path_on_host"], "/dev/loop0");
         assert_eq!(drives[3]["cache_type"], "Writeback");
-        assert!(config["boot-source"]["boot_args"].as_str().unwrap().contains("clocksource=kvm-clock"));
+        assert!(config["boot-source"]["boot_args"]
+            .as_str()
+            .unwrap()
+            .contains("clocksource=kvm-clock"));
         // Relative, so Firecracker resolves it inside this app's own directory.
         assert_eq!(config["vsock"]["uds_path"], "logs.vsock");
         assert_eq!(config["vsock"]["guest_cid"], 3);
@@ -510,7 +550,11 @@ mod tests {
     #[tokio::test]
     async fn an_app_that_asked_for_no_public_port_is_sent_neither_half_of_one() {
         let fixture = fixture();
-        fixture.manager.stage(&boot_request(desired_instance(|_| {}))).await.unwrap();
+        fixture
+            .manager
+            .stage(&boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap();
         let written = config_drive(&fixture.manager.working_dir_for(&app_id()));
         assert!(!written.contains("NIBRUN_PUBLIC_IPV4"));
         assert!(!written.contains("NIBRUN_EXTRA_PUBLIC_PORT"));
@@ -543,7 +587,10 @@ mod tests {
         let refused = fixture.manager.sleep(request.clone()).await.unwrap_err();
         assert!(refused.message().contains("holds no record"));
 
-        fixture.state.put_record(instance_record(|record| record.health.ever_healthy = false)).await;
+        fixture
+            .state
+            .put_record(instance_record(|record| record.health.ever_healthy = false))
+            .await;
         let never_answered = fixture.manager.sleep(request.clone()).await.unwrap_err();
         assert!(never_answered.message().contains("finished booting"));
 
@@ -585,24 +632,43 @@ mod tests {
         let error = fixture.manager.wake(request).await.unwrap_err();
         assert!(matches!(error, VmError::SnapshotUnusable { .. }));
         assert!(error.message().contains("guest image has changed"));
-        assert!(!paths.directory.exists(), "an unloadable snapshot is discarded, not left");
+        assert!(
+            !paths.directory.exists(),
+            "an unloadable snapshot is discarded, not left"
+        );
     }
 
     #[tokio::test]
     async fn discarding_takes_the_working_directory_the_record_and_the_log_attachment() {
         let fixture = fixture();
-        fixture.manager.stage(&boot_request(desired_instance(|_| {}))).await.unwrap();
+        fixture
+            .manager
+            .stage(&boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap();
         assert!(fixture.manager.working_dir_for(&app_id()).exists());
         fixture.manager.discard(&app_id()).await.unwrap();
         assert!(!fixture.manager.working_dir_for(&app_id()).exists());
         assert!(fixture.manager.logs.attached().await.is_empty());
-        assert_eq!(fixture.manager.statuses(&[app_id()]).await[&app_id()], VmStatus::default());
+        assert_eq!(
+            fixture.manager.statuses(&[app_id()]).await[&app_id()],
+            VmStatus::default()
+        );
     }
 
     #[tokio::test]
     async fn the_guest_verdict_is_the_last_thing_its_init_said() {
         let fixture = fixture();
-        make_directory(fixture.manager.processes.console_path(&app_id()).parent().unwrap(), 0o700).unwrap();
+        make_directory(
+            fixture
+                .manager
+                .processes
+                .console_path(&app_id())
+                .parent()
+                .unwrap(),
+            0o700,
+        )
+        .unwrap();
         std::fs::write(
             fixture.manager.processes.console_path(&app_id()),
             "[nibrun] starting the tenant\n[nibrun] the tenant has stopped; shutting the guest down\n[   15.7] reboot: Restarting system\n",
@@ -618,7 +684,11 @@ mod tests {
     fn the_guest_image_names_its_own_version_and_an_absent_one_is_not_invented() {
         let directory = tempfile::tempdir().unwrap();
         assert_eq!(read_guest_image_version(directory.path()), "unknown");
-        std::fs::write(directory.path().join("manifest.json"), r#"{"version":"6.1.180-98db6df338f0"}"#).unwrap();
+        std::fs::write(
+            directory.path().join("manifest.json"),
+            r#"{"version":"6.1.180-98db6df338f0"}"#,
+        )
+        .unwrap();
         assert_eq!(read_guest_image_version(directory.path()), "6.1.180-98db6df338f0");
     }
 }

@@ -15,7 +15,10 @@ pub enum StoreError {
     #[error("{path} could not be written: {source}")]
     Unwritable { path: PathBuf, source: std::io::Error },
     #[error("{path} does not hold the JSON this host wrote: {source}")]
-    Malformed { path: PathBuf, source: serde_json::Error },
+    Malformed {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
 }
 
 impl StoreError {
@@ -29,7 +32,10 @@ pub fn read_text(path: &Path) -> Result<Option<String>, StoreError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text.trim().to_string())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(StoreError::Unreadable { path: path.to_path_buf(), source }),
+        Err(source) => Err(StoreError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -42,13 +48,19 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StoreErr
     }
     serde_json::from_str(&text)
         .map(Some)
-        .map_err(|source| StoreError::Malformed { path: path.to_path_buf(), source })
+        .map_err(|source| StoreError::Malformed {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 /// Through a uniquely named sibling and a rename, which is atomic within a directory: a torn
 /// write cannot leave an unparsable state file, and two writes in flight cannot collide.
 pub fn write_text(path: &Path, value: &str, mode: u32) -> Result<(), StoreError> {
-    let unwritable = |source: std::io::Error| StoreError::Unwritable { path: path.to_path_buf(), source };
+    let unwritable = |source: std::io::Error| StoreError::Unwritable {
+        path: path.to_path_buf(),
+        source,
+    };
     if let Some(parent) = path.parent() {
         make_directory(parent, PRIVATE_DIR_MODE).map_err(unwritable)?;
     }
@@ -60,8 +72,10 @@ pub fn write_text(path: &Path, value: &str, mode: u32) -> Result<(), StoreError>
 }
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), StoreError> {
-    let rendered = serde_json::to_string_pretty(value)
-        .map_err(|source| StoreError::Malformed { path: path.to_path_buf(), source })?;
+    let rendered = serde_json::to_string_pretty(value).map_err(|source| StoreError::Malformed {
+        path: path.to_path_buf(),
+        source,
+    })?;
     write_text(path, &format!("{rendered}\n"), PRIVATE_FILE_MODE)
 }
 
@@ -91,7 +105,10 @@ mod tests {
         let path = directory.path().join("nested").join("state.json");
         assert_eq!(read_json::<serde_json::Value>(&path).unwrap(), None);
         write_json(&path, &serde_json::json!({ "a": 1 })).unwrap();
-        assert_eq!(read_json::<serde_json::Value>(&path).unwrap(), Some(serde_json::json!({ "a": 1 })));
+        assert_eq!(
+            read_json::<serde_json::Value>(&path).unwrap(),
+            Some(serde_json::json!({ "a": 1 }))
+        );
         // Nothing is left beside it: a torn write would show up as a stray temporary.
         let siblings: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
         assert_eq!(siblings.len(), 1);

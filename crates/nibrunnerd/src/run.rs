@@ -53,8 +53,9 @@ pub enum StartupError {
 /// only place a host is allowed to refuse to be one.
 pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     for directory in [&config.state_dir, &config.runtime_dir, &config.snapshot_dir] {
-        crate::json_store::make_directory(directory, 0o700)
-            .map_err(|error| StartupError::Config(format!("{} could not be made: {error}", directory.display())))?;
+        crate::json_store::make_directory(directory, 0o700).map_err(|error| {
+            StartupError::Config(format!("{} could not be made: {error}", directory.display()))
+        })?;
     }
 
     let firecracker = extract_firecracker(&config.firecracker_dir)
@@ -66,7 +67,11 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
 
     let storage_prefix = ObjectKey::parse(&config.storage_prefix)
         .map_err(|_| StartupError::Config("NIBRUNNER_STORAGE_PREFIX is not a key".into()))?;
-    let volumes = Arc::new(LocalFileVolumes::new(config.volumes_dir(), storage_prefix, commands.clone()));
+    let volumes = Arc::new(LocalFileVolumes::new(
+        config.volumes_dir(),
+        storage_prefix,
+        commands.clone(),
+    ));
     let artifacts = Arc::new(
         ObjectArtifactStore::open(&config.artifact_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
@@ -93,7 +98,12 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     // Built in two steps because the waker needs the host and the host needs the activator the
     // waker is behind: the activator is given a waker that holds the host once the host exists.
     let waker_slot: Arc<tokio::sync::OnceCell<Arc<AppWaker>>> = Arc::new(tokio::sync::OnceCell::new());
-    let activator = AppActivator::new(state.clone(), Arc::new(DeferredWaker { waker: waker_slot.clone() }));
+    let activator = AppActivator::new(
+        state.clone(),
+        Arc::new(DeferredWaker {
+            waker: waker_slot.clone(),
+        }),
+    );
 
     let host = Arc::new(Host {
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), 0),
@@ -143,7 +153,9 @@ fn open_network() -> Result<Arc<dyn HostNetwork>, StartupError> {
 /// first deploy.
 #[cfg(not(target_os = "linux"))]
 fn open_network() -> Result<Arc<dyn HostNetwork>, StartupError> {
-    Err(StartupError::Unusable("a microVM needs a Linux kernel with /dev/kvm".into()))
+    Err(StartupError::Unusable(
+        "a microVM needs a Linux kernel with /dev/kvm".into(),
+    ))
 }
 
 pub fn host_versions(host: &Host) -> HostVersions {
@@ -172,7 +184,10 @@ pub async fn converge_loop(host: Arc<Host>) {
             Ok(Some(desired)) => {
                 let news = host.cache.lock().await.accept(desired.clone());
                 if news {
-                    let _ = crate::desired::cache_desired_state(&host.config.cached_desired_state_file(), &desired);
+                    let _ = crate::desired::cache_desired_state(
+                        &host.config.cached_desired_state_file(),
+                        &desired,
+                    );
                     crate::reconcile::reconcile(&host, &desired).await;
                 } else if host.state.snapshot().await.deferred_work {
                     // Only a document moving runs a pass, and work the last one deferred does not
@@ -204,9 +219,12 @@ pub async fn status_loop(host: Arc<Host>) {
         // Exactly the condition the fast probe grid runs on, rather than the states it tends to
         // appear in: a tick taken for something no longer being probed that fast is one taken for
         // as long as that instance is up.
-        let settling = host.state.records().await.iter().any(|record| {
-            crate::health::is_on_startup_grid(&record.health, &record.grace_inputs(now))
-        });
+        let settling = host
+            .state
+            .records()
+            .await
+            .iter()
+            .any(|record| crate::health::is_on_startup_grid(&record.health, &record.grace_inputs(now)));
         let tick = if settling { SETTLING_TICK } else { STATUS_TICK };
         tokio::select! {
             _ = tokio::time::sleep(tick) => {}

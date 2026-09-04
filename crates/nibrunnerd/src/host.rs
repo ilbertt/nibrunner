@@ -37,7 +37,10 @@ pub struct Host {
 impl Host {
     /// The slot an app holds, allocated if it has none. Every per-app resource comes from it, so
     /// a failure here is a host with no room rather than an app with a problem.
-    pub async fn slot_for(&self, app_id: &AppId) -> Result<nft_render::AppSlot, crate::net::allocator::SlotExhausted> {
+    pub async fn slot_for(
+        &self,
+        app_id: &AppId,
+    ) -> Result<nft_render::AppSlot, crate::net::allocator::SlotExhausted> {
         self.allocator.lock().await.allocate(app_id)
     }
 
@@ -57,8 +60,11 @@ impl Host {
         if let Err(error) = crate::json_store::write_json(&self.config.instances_file(), &records) {
             tracing::warn!(error = %error.message(), "this host could not write down what it is running");
         }
-        if let Err(error) =
-            self.allocator.lock().await.persist(&self.config.slots_file(), &self.config.slot_cursor_file())
+        if let Err(error) = self
+            .allocator
+            .lock()
+            .await
+            .persist(&self.config.slots_file(), &self.config.slot_cursor_file())
         {
             tracing::warn!(error = %error.message(), "this host could not write down its slots");
         }
@@ -79,16 +85,26 @@ impl Host {
     /// a baseline carried across would be one the kernel has already contradicted.
     pub async fn load(&self) {
         let records = crate::report::instance_record::read_instance_records(
-            crate::json_store::read_json(&self.config.instances_file()).ok().flatten(),
+            crate::json_store::read_json(&self.config.instances_file())
+                .ok()
+                .flatten(),
         );
-        let activity: Vec<serde_json::Value> =
-            crate::json_store::read_json(&self.config.activity_file()).ok().flatten().unwrap_or_default();
+        let activity: Vec<serde_json::Value> = crate::json_store::read_json(&self.config.activity_file())
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let deleted: Vec<protocol::ReportedVolume> =
-            crate::json_store::read_json(&self.config.deleted_volumes_file()).ok().flatten().unwrap_or_default();
+            crate::json_store::read_json(&self.config.deleted_volumes_file())
+                .ok()
+                .flatten()
+                .unwrap_or_default();
         let held = records.len();
         self.state
             .modify(|snapshot| {
-                snapshot.records = records.into_iter().map(|record| (record.app_id.clone(), record)).collect();
+                snapshot.records = records
+                    .into_iter()
+                    .map(|record| (record.app_id.clone(), record))
+                    .collect();
                 snapshot.last_active_at_ms = activity
                     .iter()
                     .filter_map(|entry| {
@@ -96,16 +112,24 @@ impl Host {
                         Some((app_id, entry.get("atMs")?.as_i64()?))
                     })
                     .collect();
-                snapshot.deleted_volumes =
-                    deleted.into_iter().map(|report| (report.volume_id.clone(), report)).collect();
+                snapshot.deleted_volumes = deleted
+                    .into_iter()
+                    .map(|report| (report.volume_id.clone(), report))
+                    .collect();
             })
             .await;
-        tracing::info!(instances = held, slots = self.slots().await.len(), "host state loaded");
+        tracing::info!(
+            instances = held,
+            slots = self.slots().await.len(),
+            "host state loaded"
+        );
     }
 
     /// The last document this host was given, so a restart during an outage of whatever writes
     /// the file converges on it rather than on nothing.
     pub async fn cached_desired_state(&self) -> Option<HostDesiredState> {
-        crate::desired::read_desired_state(&self.config.cached_desired_state_file()).ok().flatten()
+        crate::desired::read_desired_state(&self.config.cached_desired_state_file())
+            .ok()
+            .flatten()
     }
 }

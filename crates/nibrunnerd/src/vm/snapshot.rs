@@ -134,7 +134,9 @@ pub fn snapshot_bytes_for(memory_mib: u32) -> u64 {
 
 /// All the disk snapshots may ever hold together, floored at none for a host with no room at all.
 pub fn snapshot_budget(disk: &SnapshotDisk) -> u64 {
-    disk.total_bytes.saturating_sub(disk.cache_bytes).saturating_sub(DISK_RESERVE_BYTES)
+    disk.total_bytes
+        .saturating_sub(disk.cache_bytes)
+        .saturating_sub(DISK_RESERVE_BYTES)
 }
 
 fn gibibytes(bytes: u64) -> String {
@@ -212,8 +214,10 @@ pub fn read_snapshot_bytes(snapshot_dir: &Path) -> u64 {
 
 pub fn measure_snapshot_disk(snapshot_dir: &Path, cache_bytes: u64) -> std::io::Result<SnapshotDisk> {
     crate::json_store::make_directory(snapshot_dir, 0o700)?;
-    let FilesystemSpace { total_bytes, available_bytes } =
-        crate::report::capacity::read_filesystem_space(snapshot_dir)?;
+    let FilesystemSpace {
+        total_bytes,
+        available_bytes,
+    } = crate::report::capacity::read_filesystem_space(snapshot_dir)?;
     Ok(SnapshotDisk {
         total_bytes,
         available_bytes,
@@ -228,7 +232,9 @@ pub fn measure_snapshot_disk(snapshot_dir: &Path, cache_bytes: u64) -> std::io::
 pub fn ensure_loadable(stamp_path: &Path, expected: &SnapshotStamp) -> Result<(), VmError> {
     let stored: Option<SnapshotStamp> = read_json(stamp_path).ok().flatten();
     let Some(stored) = stored else {
-        return Err(VmError::SnapshotUnusable { reason: "this host kept none".into() });
+        return Err(VmError::SnapshotUnusable {
+            reason: "this host kept none".into(),
+        });
     };
     match drift_from(&stored, expected) {
         None => Ok(()),
@@ -265,11 +271,24 @@ mod tests {
     #[test]
     fn every_way_a_snapshot_stops_being_loadable_is_named() {
         assert_eq!(drift_from(&stamp(), &stamp()), None);
-        let redeployed = SnapshotStamp { deployment_id: DeploymentId::parse("dep-2").unwrap(), ..stamp() };
-        assert!(drift_from(&redeployed, &stamp()).unwrap().contains("deployed again"));
-        let newer_image = SnapshotStamp { guest_image_version: "6.1.181-x".into(), ..stamp() };
-        assert!(drift_from(&newer_image, &stamp()).unwrap().contains("guest image"));
-        let rebooted = SnapshotStamp { host_boot_id: "another".into(), ..stamp() };
+        let redeployed = SnapshotStamp {
+            deployment_id: DeploymentId::parse("dep-2").unwrap(),
+            ..stamp()
+        };
+        assert!(drift_from(&redeployed, &stamp())
+            .unwrap()
+            .contains("deployed again"));
+        let newer_image = SnapshotStamp {
+            guest_image_version: "6.1.181-x".into(),
+            ..stamp()
+        };
+        assert!(drift_from(&newer_image, &stamp())
+            .unwrap()
+            .contains("guest image"));
+        let rebooted = SnapshotStamp {
+            host_boot_id: "another".into(),
+            ..stamp()
+        };
         assert!(drift_from(&rebooted, &stamp()).unwrap().contains("rebooted"));
         let moved = SnapshotStamp { slot: 8, ..stamp() };
         assert!(drift_from(&moved, &stamp()).unwrap().contains("another slot"));
@@ -278,17 +297,30 @@ mod tests {
     /// Both refusals are about surviving the wake, not about whether sleeping is a good idea.
     #[test]
     fn the_moments_a_microvm_must_not_be_snapshotted() {
-        let sleepable = SleepSubject { stop_requested: false, desired_running: true, ever_healthy: true };
+        let sleepable = SleepSubject {
+            stop_requested: false,
+            desired_running: true,
+            ever_healthy: true,
+        };
         assert_eq!(refusal_to_sleep(Some(sleepable)), None);
-        assert!(refusal_to_sleep(Some(SleepSubject { stop_requested: true, ..sleepable }))
-            .unwrap()
-            .contains("asked to stop"));
-        assert!(refusal_to_sleep(Some(SleepSubject { desired_running: false, ..sleepable }))
-            .unwrap()
-            .contains("asked to stop"));
-        assert!(refusal_to_sleep(Some(SleepSubject { ever_healthy: false, ..sleepable }))
-            .unwrap()
-            .contains("finished booting"));
+        assert!(refusal_to_sleep(Some(SleepSubject {
+            stop_requested: true,
+            ..sleepable
+        }))
+        .unwrap()
+        .contains("asked to stop"));
+        assert!(refusal_to_sleep(Some(SleepSubject {
+            desired_running: false,
+            ..sleepable
+        }))
+        .unwrap()
+        .contains("asked to stop"));
+        assert!(refusal_to_sleep(Some(SleepSubject {
+            ever_healthy: false,
+            ..sleepable
+        }))
+        .unwrap()
+        .contains("finished booting"));
         assert!(refusal_to_sleep(None).is_some());
     }
 
@@ -309,21 +341,49 @@ mod tests {
         let asleep = u64::from(nft_render::SLOT_COUNT) * snapshot_bytes_for(256);
         assert!(asleep < snapshot_budget(&host_disk()));
         assert_eq!(
-            refusal_for_disk(&SnapshotDisk { snapshot_bytes: asleep, ..host_disk() }, snapshot_bytes_for(256)),
+            refusal_for_disk(
+                &SnapshotDisk {
+                    snapshot_bytes: asleep,
+                    ..host_disk()
+                },
+                snapshot_bytes_for(256)
+            ),
             None
         );
         // A snapshot is the size of the app's configured memory, which is what makes a bound
         // necessary at all: a few of these are the disk.
-        assert!(refusal_for_disk(&SnapshotDisk { snapshot_bytes: 30 * GIB, ..host_disk() }, snapshot_bytes_for(4096))
-            .unwrap()
-            .contains("already hold"));
+        assert!(refusal_for_disk(
+            &SnapshotDisk {
+                snapshot_bytes: 30 * GIB,
+                ..host_disk()
+            },
+            snapshot_bytes_for(4096)
+        )
+        .unwrap()
+        .contains("already hold"));
         // The budget is against the size of the disk, not what is free on it today.
-        let cold_cache = SnapshotDisk { available_bytes: 105 * GIB, snapshot_bytes: 30 * GIB, ..host_disk() };
+        let cold_cache = SnapshotDisk {
+            available_bytes: 105 * GIB,
+            snapshot_bytes: 30 * GIB,
+            ..host_disk()
+        };
         assert!(refusal_for_disk(&cold_cache, snapshot_bytes_for(4096)).is_some());
         // And the other way: the budget is untouched and the disk is gone anyway.
-        let crowded = SnapshotDisk { available_bytes: 8 * GIB, snapshot_bytes: GIB, ..host_disk() };
-        assert!(refusal_for_disk(&crowded, snapshot_bytes_for(256)).unwrap().contains("every app"));
-        assert_eq!(snapshot_budget(&SnapshotDisk { total_bytes: 0, ..host_disk() }), 0);
+        let crowded = SnapshotDisk {
+            available_bytes: 8 * GIB,
+            snapshot_bytes: GIB,
+            ..host_disk()
+        };
+        assert!(refusal_for_disk(&crowded, snapshot_bytes_for(256))
+            .unwrap()
+            .contains("every app"));
+        assert_eq!(
+            snapshot_budget(&SnapshotDisk {
+                total_bytes: 0,
+                ..host_disk()
+            }),
+            0
+        );
     }
 
     #[test]
@@ -349,7 +409,10 @@ mod tests {
         ));
         write_json(&paths.stamp_path, &stamp()).unwrap();
         ensure_loadable(&paths.stamp_path, &stamp()).unwrap();
-        let rebooted = SnapshotStamp { host_boot_id: "after-a-reboot".into(), ..stamp() };
+        let rebooted = SnapshotStamp {
+            host_boot_id: "after-a-reboot".into(),
+            ..stamp()
+        };
         let refused = ensure_loadable(&paths.stamp_path, &rebooted).unwrap_err();
         assert!(refused.message().contains("rebooted"));
     }

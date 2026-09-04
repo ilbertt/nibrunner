@@ -174,8 +174,9 @@ fn traffic_chains_v4(state: &FirewallState) -> Vec<String> {
             app_counter_name(&instance.app_id)
         )
     }));
-    let mut forward_rules =
-        vec![format!("type filter hook forward priority {TRAFFIC_CHAIN_PRIORITY}; policy accept;")];
+    let mut forward_rules = vec![format!(
+        "type filter hook forward priority {TRAFFIC_CHAIN_PRIORITY}; policy accept;"
+    )];
     forward_rules.extend(state.instances.iter().map(|instance| {
         format!(
             "iifname != {tap} oifname {tap} ip daddr {} counter name {}",
@@ -282,7 +283,9 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
         }
     }
 
-    let mut output = vec![format!("type nat hook output priority {OUTPUT_NAT_PRIORITY}; policy accept;")];
+    let mut output = vec![format!(
+        "type nat hook output priority {OUTPUT_NAT_PRIORITY}; policy accept;"
+    )];
     output.extend(state.instances.iter().map(|instance| {
         format!(
             "ip daddr 127.0.0.1 tcp dport {} dnat to {}:{}",
@@ -298,7 +301,9 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
             instance.guest_ipv4, instance.host_ipv4
         )
     }));
-    postrouting.push(format!("ip saddr {GUEST_NETWORK_CIDR} oifname != {tap} masquerade"));
+    postrouting.push(format!(
+        "ip saddr {GUEST_NETWORK_CIDR} oifname != {tap} masquerade"
+    ));
 
     let mut lines = chain("prerouting {", &prerouting);
     lines.push(String::new());
@@ -324,7 +329,10 @@ mod tests {
     }
 
     fn asked_for_a_port() -> ForwardedInstance {
-        ForwardedInstance { extra_public_port: HostPort::new(22_000).ok(), ..instance() }
+        ForwardedInstance {
+            extra_public_port: HostPort::new(22_000).ok(),
+            ..instance()
+        }
     }
 
     fn state(instances: Vec<ForwardedInstance>, v4: &[&str], v6: &[&str]) -> FirewallState {
@@ -336,25 +344,40 @@ mod tests {
     }
 
     fn refusals(ruleset: &str) -> Vec<String> {
-        ruleset.lines().map(str::trim).filter(|line| line.contains(" reject")).map(str::to_string).collect()
+        ruleset
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(" reject"))
+            .map(str::to_string)
+            .collect()
     }
 
     fn v6_half(ruleset: &str) -> String {
-        ruleset.split(&format!("table ip6 {NFTABLES_TABLE} {{")).nth(1).unwrap_or("").to_string()
+        ruleset
+            .split(&format!("table ip6 {NFTABLES_TABLE} {{"))
+            .nth(1)
+            .unwrap_or("")
+            .to_string()
     }
 
     #[test]
     fn the_isolation_rules_are_never_optional() {
         let empty = render_ruleset(&state(vec![], &[], &[]));
-        assert!(refusals(&empty).iter().any(|l| l.contains(INSTANCE_METADATA_ADDRESS_V4)));
+        assert!(refusals(&empty)
+            .iter()
+            .any(|l| l.contains(INSTANCE_METADATA_ADDRESS_V4)));
         assert!(refusals(&empty).iter().any(|l| l.contains("guest to host")));
         let joined = refusals(&empty).join("\n");
         for cidr in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"] {
             assert!(joined.contains(cidr));
         }
         let with_instance = render_ruleset(&state(vec![instance()], &[], &[]));
-        assert!(refusals(&with_instance).iter().any(|l| l.contains("guest to guest")));
-        assert!(refusals(&with_instance).iter().any(|l| l.contains("10.201.0.0/16")));
+        assert!(refusals(&with_instance)
+            .iter()
+            .any(|l| l.contains("guest to guest")));
+        assert!(refusals(&with_instance)
+            .iter()
+            .any(|l| l.contains("10.201.0.0/16")));
         let control = render_ruleset(&state(vec![], &["203.0.113.10/32"], &[]));
         assert!(refusals(&control).iter().any(|l| l.contains("203.0.113.10/32")));
     }
@@ -364,14 +387,21 @@ mod tests {
         let vpc = "10.43.0.0/16";
         let ruleset = render_ruleset(&state(vec![], &[vpc], &[]));
         let lines: Vec<&str> = ruleset.lines().collect();
-        let denied = lines.iter().position(|l| l.contains(vpc) && l.contains("reject")).unwrap();
+        let denied = lines
+            .iter()
+            .position(|l| l.contains(vpc) && l.contains("reject"))
+            .unwrap();
         let allowed_out = lines.iter().position(|l| l.contains("masquerade")).unwrap();
         assert!(allowed_out > denied);
     }
 
     #[test]
     fn nothing_is_denied_silently_in_either_family() {
-        let ruleset = render_ruleset(&state(vec![instance()], &["10.43.0.0/16"], &["2600:1f18:abcd::/56"]));
+        let ruleset = render_ruleset(&state(
+            vec![instance()],
+            &["10.43.0.0/16"],
+            &["2600:1f18:abcd::/56"],
+        ));
         assert!(!ruleset.contains("drop"));
     }
 
@@ -386,7 +416,9 @@ mod tests {
         assert!(v6.contains("::1/128"));
         assert!(v6.contains("fc00::/7"));
         assert!(!v6.contains("::/0"));
-        assert!(ruleset.contains(&format!("table ip6 {NFTABLES_TABLE}\ndelete table ip6 {NFTABLES_TABLE}\n")));
+        assert!(ruleset.contains(&format!(
+            "table ip6 {NFTABLES_TABLE}\ndelete table ip6 {NFTABLES_TABLE}\n"
+        )));
     }
 
     #[test]
@@ -396,15 +428,22 @@ mod tests {
         assert!(v6.contains(&format!("ip6 daddr {vpc} reject")));
         let lines: Vec<&str> = v6.lines().map(str::trim).collect();
         let denied = lines.iter().position(|l| l.contains(vpc)).unwrap();
-        let blanket = lines.iter().position(|l| l.contains("private destinations")).unwrap();
+        let blanket = lines
+            .iter()
+            .position(|l| l.contains("private destinations"))
+            .unwrap();
         assert!(blanket > denied);
-        assert!(!["::1", "fe80:", "fc", "fd"].iter().any(|range| vpc.starts_with(range)));
+        assert!(!["::1", "fe80:", "fc", "fd"]
+            .iter()
+            .any(|range| vpc.starts_with(range)));
     }
 
     #[test]
     fn forwarding_reaches_the_http_port_and_only_when_something_runs() {
         let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
-        assert!(ruleset.lines().any(|l| l.contains("tcp dport 21000") && l.contains("dnat to 10.201.0.2:3000")));
+        assert!(ruleset
+            .lines()
+            .any(|l| l.contains("tcp dport 21000") && l.contains("dnat to 10.201.0.2:3000")));
         assert!(!render_ruleset(&state(vec![], &[], &[])).contains("dnat to"));
         assert!(ruleset.contains("ip saddr 10.201.0.0/16 oifname != \"nbr*\" masquerade"));
         let output = ruleset.lines().find(|l| l.contains("hook output")).unwrap();
@@ -416,8 +455,12 @@ mod tests {
     #[test]
     fn the_port_an_app_asked_for_arrives_as_the_port_it_was_sent_to() {
         let ruleset = render_ruleset(&state(vec![asked_for_a_port()], &[], &[]));
-        assert!(ruleset.lines().any(|l| l.contains("tcp dport 22000") && l.contains("dnat to 10.201.0.2:22000")));
-        assert!(ruleset.lines().any(|l| l.contains("udp dport 22000") && l.contains("dnat to 10.201.0.2:22000")));
+        assert!(ruleset
+            .lines()
+            .any(|l| l.contains("tcp dport 22000") && l.contains("dnat to 10.201.0.2:22000")));
+        assert!(ruleset
+            .lines()
+            .any(|l| l.contains("udp dport 22000") && l.contains("dnat to 10.201.0.2:22000")));
         let rules: Vec<&str> = ruleset.lines().filter(|l| l.contains("dport 22000")).collect();
         assert_eq!(rules.len(), 2);
         assert!(rules.iter().all(|l| l.trim().starts_with("iifname != \"nbr*\"")));
@@ -430,7 +473,9 @@ mod tests {
     fn the_ruleset_is_a_function_of_state_not_a_history_of_edits() {
         let input = state(vec![instance()], &["203.0.113.0/24"], &[]);
         let ruleset = render_ruleset(&input);
-        assert!(ruleset.starts_with(&format!("table ip {NFTABLES_TABLE}\ndelete table ip {NFTABLES_TABLE}\n")));
+        assert!(ruleset.starts_with(&format!(
+            "table ip {NFTABLES_TABLE}\ndelete table ip {NFTABLES_TABLE}\n"
+        )));
         assert_eq!(ruleset, render_ruleset(&input));
     }
 
@@ -461,7 +506,10 @@ mod tests {
         let counted: Vec<&str> = ruleset.lines().filter(|l| l.contains("counter name")).collect();
         assert_eq!(counted.len(), 2);
         let with_port = render_ruleset(&state(vec![asked_for_a_port()], &[], &[]));
-        assert_eq!(with_port.lines().filter(|l| l.contains("counter name")).count(), 2);
+        assert_eq!(
+            with_port.lines().filter(|l| l.contains("counter name")).count(),
+            2
+        );
         assert!(ruleset.contains("type filter hook forward priority filter + 10;"));
         let empty = render_ruleset(&state(vec![], &[], &[]));
         assert!(!empty.contains("counter "));
