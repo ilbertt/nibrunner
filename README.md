@@ -187,9 +187,10 @@ the cache will take back kills tenants.
 | Crate | What is in it |
 | --- | --- |
 | `crates/protocol` | The wire documents, field for field from nibrun's `packages/protocol` |
-| `crates/guest-contract` | Drive order, kernel args, vsock ports, `instance.env`, the frame codecs |
+| `crates/guest-contract` | Drive order, kernel args, vsock ports, boot paths, `instance.env`, the frame codecs — **both halves of each**, so the host and the guest share one definition rather than agreeing by review |
 | `crates/nft-render` | Slot arithmetic, the ruleset rendered whole, the parsers for what `nft` answers |
 | `crates/nibrunnerd` | The daemon |
+| `crates/init` | The guest's PID 1: mounts, config, supervision, and the three vsock channels |
 | `guest/` | `vmlinux` and `rootfs.ext4`, copied from nibrun with their manifest |
 
 ## Testing
@@ -250,14 +251,15 @@ by the same pass that starts it and the activator that owns its port had already
 the count of requests coalesced onto one wake was read before the wake rather than after it, so a
 burst that entirely waited on one restore reported that none had. Both now have tests.
 
-**The guest side of that run is not reproducible from this repository.** The image in `guest/` is
-nibrun's stub build, whose manifest says `"init_is_stub": true`: it carries a throwaway `/init`
-rather than the runtime that boots a tenant. That stub was replaced, for the run above, by a
-stand-in `/init` that mounts the drives in the order this daemon writes them, exports the
-`NIBRUN_*` environment and execs the artifact — and that stand-in's source was not kept. So what
-phase 2 proves is this daemon's half of the guest contract, exercised by something that satisfies
-the other half. Rebuilding a published image with a real init is what would make the lane
-repeatable, and it is the first thing to do before trusting any of these numbers twice.
+**The guest side of that run is not what `crates/init` now holds.** The image in `guest/` is
+nibrun's stub build, whose manifest says `"init_is_stub": true`. That stub was replaced, for the
+run above, by a throwaway `/init` whose source was not kept — so what phase 2 proves is this
+daemon's half of the guest contract, exercised by something that satisfied the other half.
+
+`crates/init` is that other half, written properly: it cross-compiles for musl and is covered by
+the round-trip tests in `guest-contract`, but **no microVM has booted it**. Building a rootfs image
+around it and running the phase-2 lane again is what would close this, and it is the first thing to
+do before trusting any of those numbers twice.
 
 **What is otherwise still unknown.** Nothing here ran for longer than an hour, so nothing is known
 about a host that has been up for a week. The vsock log and filesystem paths, the checkpoint and
