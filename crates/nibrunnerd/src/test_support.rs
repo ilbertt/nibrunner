@@ -1,7 +1,11 @@
 //! The fixtures every test in this crate builds from, ported from `apps/agent/tests/support`.
 //! Each takes a closure so a test names only the field it is about.
 
+use std::ops::Deref;
+use std::sync::Arc;
+
 use protocol::*;
+use tokio::sync::Mutex;
 
 use crate::backoff::NO_START_ATTEMPTS;
 use crate::health::initial_tracker;
@@ -203,4 +207,74 @@ pub fn instance_record(edit: impl FnOnce(&mut InstanceRecord)) -> InstanceRecord
     value.start_attempts = NO_START_ATTEMPTS;
     edit(&mut value);
     value
+}
+
+/// A whole host built out of recording services, under a directory that goes away with the test.
+/// What it substitutes is everything that would need a hypervisor or a kernel; what it does not
+/// substitute is the daemon's own logic, which is the thing being tested.
+pub struct TestHost {
+    _directory: tempfile::TempDir,
+    pub host: Arc<crate::host::Host>,
+    pub vms: Arc<crate::services::RecordingVmm>,
+    pub commands: Arc<crate::services::RecordingCommandRunner>,
+}
+
+impl Deref for TestHost {
+    type Target = crate::host::Host;
+
+    fn deref(&self) -> &Self::Target {
+        &self.host
+    }
+}
+
+impl TestHost {
+    pub fn arc(&self) -> &Arc<crate::host::Host> {
+        &self.host
+    }
+}
+
+pub async fn test_host() -> TestHost {
+    use crate::config::HostConfig;
+    use crate::desired::DesiredStateCache;
+    use crate::host::Host;
+    use crate::net::allocator::SlotAllocator;
+    use crate::net::firewall::HostFirewall;
+    use crate::proxy::activator::{AppActivator, WakeRefusal, Waker};
+    use crate::proxy::Router;
+    use crate::services::{RecordingCommandRunner, RecordingVmm, StubArtifactStore};
+    use crate::state::HostState;
+    use crate::volumes::local_file::LocalFileVolumes;
+
+    /// Nothing here has a microVM to be woken, so a waker that would boot one is not the subject.
+    struct NeverWoken;
+
+    #[async_trait::async_trait]
+    impl Waker for NeverWoken {
+        async fn wake(&self, _app_id: &AppId) -> Result<(), WakeRefusal> {
+            Ok(())
+        }
+    }
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config = HostConfig::under(directory.path());
+    let state = HostState::shared();
+    let commands = RecordingCommandRunner::succeeding();
+    let vms = RecordingVmm::new();
+    let host = Arc::new(Host {
+        state: state.clone(),
+        allocator: Mutex::new(SlotAllocator::empty()),
+        cache: Mutex::new(DesiredStateCache::new()),
+        vms: vms.clone(),
+        volumes: Arc::new(LocalFileVolumes::new(
+            config.volumes_dir(),
+            ObjectKey::parse(&config.storage_prefix).expect("a storage prefix"),
+            commands.clone(),
+        )),
+        artifacts: StubArtifactStore::holding(ARTIFACT_BYTES.to_vec()),
+        firewall: Arc::new(HostFirewall::new(commands.clone())),
+        router: Router::new(),
+        activator: AppActivator::new(state, Arc::new(NeverWoken)),
+        config,
+    });
+    TestHost { _directory: directory, host, vms, commands }
 }

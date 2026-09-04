@@ -15,6 +15,7 @@ pub mod config;
 pub mod control;
 pub mod desired;
 pub mod health;
+pub mod host;
 pub mod json_store;
 pub mod logs;
 pub mod net;

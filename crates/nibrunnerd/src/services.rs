@@ -297,6 +297,115 @@ impl CommandRunner for RecordingCommandRunner {
     }
 }
 
+/// Every way the daemon can act on a microVM, recorded rather than performed. Which of them a
+/// wake reached is the whole assertion: a restore and a cold boot leave the same app serving, and
+/// the only thing that tells them apart from the outside is how long the visitor waited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmCall {
+    Boot,
+    Sleep,
+    Wake,
+    Stop,
+    Discard,
+}
+
+pub struct RecordingVmm {
+    calls: Mutex<Vec<VmCall>>,
+    status: Mutex<VmStatus>,
+    on_sleep: Mutex<Option<VmError>>,
+    on_wake: Mutex<Option<VmError>>,
+    verdict: Mutex<Option<String>>,
+    working_dir: PathBuf,
+}
+
+impl RecordingVmm {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            status: Mutex::new(VmStatus::default()),
+            on_sleep: Mutex::new(None),
+            on_wake: Mutex::new(None),
+            verdict: Mutex::new(None),
+            working_dir: PathBuf::from("/nowhere/vm"),
+        })
+    }
+
+    pub fn calls(&self) -> Vec<VmCall> {
+        self.calls.lock().expect("no panic holds this lock").clone()
+    }
+
+    pub fn set_status(&self, status: VmStatus) {
+        *self.status.lock().expect("no panic holds this lock") = status;
+    }
+
+    pub fn refuse_sleep(&self, error: VmError) {
+        *self.on_sleep.lock().expect("no panic holds this lock") = Some(error);
+    }
+
+    pub fn refuse_wake(&self, error: VmError) {
+        *self.on_wake.lock().expect("no panic holds this lock") = Some(error);
+    }
+
+    pub fn set_verdict(&self, verdict: impl Into<String>) {
+        *self.verdict.lock().expect("no panic holds this lock") = Some(verdict.into());
+    }
+
+    fn record(&self, call: VmCall) {
+        self.calls.lock().expect("no panic holds this lock").push(call);
+    }
+}
+
+#[async_trait]
+impl Vmm for RecordingVmm {
+    async fn boot(&self, _request: BootRequest) -> Result<(), VmError> {
+        self.record(VmCall::Boot);
+        Ok(())
+    }
+
+    async fn sleep(&self, _request: SuspendRequest) -> Result<(), VmError> {
+        self.record(VmCall::Sleep);
+        match self.on_sleep.lock().expect("no panic holds this lock").clone() {
+            None => Ok(()),
+            Some(error) => Err(error),
+        }
+    }
+
+    async fn wake(&self, _request: SuspendRequest) -> Result<(), VmError> {
+        self.record(VmCall::Wake);
+        match self.on_wake.lock().expect("no panic holds this lock").clone() {
+            None => Ok(()),
+            Some(error) => Err(error),
+        }
+    }
+
+    async fn stop(&self, _app_id: &AppId) -> Result<(), VmError> {
+        self.record(VmCall::Stop);
+        Ok(())
+    }
+
+    async fn discard(&self, _app_id: &AppId) -> Result<(), VmError> {
+        self.record(VmCall::Discard);
+        Ok(())
+    }
+
+    async fn statuses(&self, app_ids: &[AppId]) -> BTreeMap<AppId, VmStatus> {
+        let status = *self.status.lock().expect("no panic holds this lock");
+        app_ids.iter().map(|app_id| (app_id.clone(), status)).collect()
+    }
+
+    async fn adopted_app_ids(&self) -> Vec<AppId> {
+        Vec::new()
+    }
+
+    async fn guest_verdict(&self, _app_id: &AppId) -> Option<String> {
+        self.verdict.lock().expect("no panic holds this lock").clone()
+    }
+
+    fn working_dir(&self, app_id: &AppId) -> PathBuf {
+        self.working_dir.join(app_id.as_str())
+    }
+}
+
 /// The artifact bucket as the bytes a transfer is meant to see.
 pub struct StubArtifactStore {
     bytes: Vec<u8>,
