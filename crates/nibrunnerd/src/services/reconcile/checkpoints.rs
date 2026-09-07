@@ -94,7 +94,7 @@ mod tests {
     use super::*;
     use crate::services::reconcile::plan::plan_reconcile;
     use crate::test_support::*;
-    use protocol::{DesiredPresence, VolumeId};
+    use protocol::{CheckpointId, DesiredPresence, VolumeId};
 
     fn wanted(state: DesiredPresence) -> DesiredCheckpoint {
         DesiredCheckpoint {
@@ -129,5 +129,130 @@ mod tests {
         let host = test_host().await;
         let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Present)]);
         assert!(observe_checkpoints(host.arc(), &desired).await.is_empty());
+    }
+
+    async fn host_over(volumes: crate::adapters::volumes::MockVolumeBackend) -> TestHost {
+        let mut host = test_host().await;
+        std::sync::Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .volumes = std::sync::Arc::new(volumes);
+        host
+    }
+
+    fn holding(checkpoints: Vec<CheckpointId>) -> crate::adapters::volumes::MockVolumeBackend {
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        volumes
+            .expect_observe_checkpoints()
+            .returning(move || checkpoints.clone());
+        volumes
+    }
+
+    async fn planned(host: &crate::host::Host, desired: &protocol::HostDesiredState) -> ReconcilePlan {
+        host.cache.lock().await.accept(desired.clone());
+        let observed = observe_checkpoints(host, desired).await;
+        plan_reconcile(desired, &observed_state(|state| state.checkpoints = observed))
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_the_document_asks_for_is_cut_and_reported_ready() {
+        let mut volumes = holding(vec![]);
+        volumes
+            .expect_create_checkpoint()
+            .times(1)
+            .withf(|held| held.as_str() == "chk-1")
+            .returning(|_| Ok(()));
+        let host = host_over(volumes).await;
+        let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Present)]);
+        let plan = planned(host.arc(), &desired).await;
+
+        apply_checkpoints(host.arc(), &plan).await;
+
+        let reports = host.state.snapshot().await.checkpoint_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, CheckpointState::Ready);
+        assert_eq!(reports[0].volume_id, volume_id());
+        assert!(reports[0].ready_at.is_some());
+        assert_eq!(reports[0].reference.as_ref().unwrap().as_str(), "chk-1");
+    }
+
+    #[tokio::test]
+    async fn one_this_host_already_cut_is_reported_from_the_document_rather_than_cut_again() {
+        let mut volumes = holding(vec![checkpoint_id()]);
+        volumes.expect_create_checkpoint().never();
+        let host = host_over(volumes).await;
+        let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Present)]);
+        let plan = planned(host.arc(), &desired).await;
+
+        apply_checkpoints(host.arc(), &plan).await;
+
+        let reports = host.state.snapshot().await.checkpoint_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, CheckpointState::Ready);
+        assert_eq!(reports[0].ready_at, None);
+    }
+
+    #[tokio::test]
+    async fn one_the_document_no_longer_wants_is_released_and_stops_being_reported() {
+        let mut volumes = holding(vec![checkpoint_id()]);
+        volumes
+            .expect_delete_checkpoint()
+            .times(1)
+            .withf(|held| held.as_str() == "chk-1")
+            .returning(|_| Ok(()));
+        let host = host_over(volumes).await;
+        let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Absent)]);
+        let plan = planned(host.arc(), &desired).await;
+
+        apply_checkpoints(host.arc(), &plan).await;
+
+        assert!(host.state.snapshot().await.checkpoint_reports.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_release_the_backend_refused_leaves_the_pass_running_rather_than_raising() {
+        let mut volumes = holding(vec![checkpoint_id()]);
+        volumes.expect_delete_checkpoint().returning(|_| {
+            Err(crate::adapters::volumes::VolumeError::NoCheckpoints {
+                what: "a volume kept as a file on this host's own disk",
+            })
+        });
+        let host = host_over(volumes).await;
+        let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Absent)]);
+        let plan = planned(host.arc(), &desired).await;
+
+        apply_checkpoints(host.arc(), &plan).await;
+
+        assert!(host.state.snapshot().await.checkpoint_reports.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_this_host_was_never_handed_a_document_for_is_reported_on_by_nobody() {
+        let host = test_host().await;
+        let plan = ReconcilePlan {
+            checkpoints: vec![CheckpointPlan::None {
+                checkpoint_id: checkpoint_id(),
+            }],
+            ..Default::default()
+        };
+
+        apply_checkpoints(host.arc(), &plan).await;
+
+        assert!(host.state.snapshot().await.checkpoint_reports.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_the_host_holds_that_the_document_does_not_name_is_not_observed() {
+        let host = host_over(holding(vec![
+            checkpoint_id(),
+            CheckpointId::parse("chk-9").unwrap(),
+        ]))
+        .await;
+        let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Present)]);
+
+        let observed = observe_checkpoints(host.arc(), &desired).await;
+
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].checkpoint_id, checkpoint_id());
+        assert_eq!(observed[0].volume_id, volume_id());
     }
 }

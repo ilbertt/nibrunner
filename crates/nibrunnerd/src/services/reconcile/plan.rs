@@ -659,6 +659,48 @@ mod tests {
         }
 
         #[test]
+        fn a_volume_the_document_wants_gone_that_is_already_gone_is_nothing_to_do() {
+            let result = plan(
+                desired_state(|state| state.volumes = vec![absent()]),
+                ObservedState::default(),
+            );
+            assert_eq!(
+                result.volumes,
+                vec![VolumePlan::None {
+                    volume_id: volume_id()
+                }]
+            );
+            assert!(!result.has_deferred_work());
+        }
+
+        #[test]
+        fn a_microvm_that_is_no_longer_there_does_not_hold_the_volume_it_used_to() {
+            let result = plan(
+                desired_state(|state| state.volumes = vec![absent()]),
+                observed_state(|state| {
+                    state.volumes = vec![observed_volume(|_| {})];
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.present = false;
+                        instance.running = false;
+                    })];
+                }),
+            );
+            assert!(matches!(result.volumes[0], VolumePlan::Teardown { .. }));
+        }
+
+        #[test]
+        fn an_instance_with_no_volume_of_its_own_holds_nobody_elses() {
+            let result = plan(
+                desired_state(|state| state.volumes = vec![absent()]),
+                observed_state(|state| {
+                    state.volumes = vec![observed_volume(|_| {})];
+                    state.instances = vec![observed_instance(|instance| instance.volume_id = None)];
+                }),
+            );
+            assert!(matches!(result.volumes[0], VolumePlan::Teardown { .. }));
+        }
+
+        #[test]
         fn an_unattached_volume_is_provisioned_and_a_grown_one_re_provisioned() {
             let missing = plan(
                 desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
@@ -793,5 +835,43 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn every_reason_an_instance_is_stopped_is_one_the_logs_can_name() {
+        assert_eq!(InstanceStopReason::DesiredStopped.as_str(), "desired-stopped");
+        assert_eq!(InstanceStopReason::NotDesired.as_str(), "not-desired");
+        assert_eq!(InstanceStopReason::Superseded.as_str(), "superseded");
+        assert_eq!(InstanceStopReason::Idle.as_str(), "idle");
+    }
+
+    #[test]
+    fn a_plan_with_nothing_in_it_has_nothing_left_for_the_next_pass() {
+        assert!(!ReconcilePlan::default().has_deferred_work());
+        assert!(!plan(desired_state(|_| {}), ObservedState::default()).has_deferred_work());
+    }
+
+    #[test]
+    fn a_host_serving_several_apps_gets_one_action_for_each_of_them() {
+        let other = AppId::parse("app-2").unwrap();
+        let result = plan(
+            desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
+            observed_state(|state| {
+                state.instances = vec![
+                    observed_instance(|_| {}),
+                    observed_instance(|instance| instance.app_id = AppId::parse("app-2").unwrap()),
+                ]
+            }),
+        );
+        assert_eq!(
+            result.instances,
+            vec![
+                InstancePlan::None { app_id: app_id() },
+                InstancePlan::Stop {
+                    app_id: other,
+                    reason: InstanceStopReason::NotDesired
+                },
+            ]
+        );
     }
 }

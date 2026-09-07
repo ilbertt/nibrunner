@@ -375,4 +375,172 @@ mod activity_tests {
         assert!(snapshot.last_active_at_ms.contains_key(&app_id()));
         assert!(!snapshot.last_active_at_ms.contains_key(&other()));
     }
+
+    #[tokio::test]
+    async fn a_counter_table_that_could_not_be_read_leaves_what_the_host_already_knew_alone() {
+        let mut host = test_host().await;
+        let (commands, _log) = mocks::commands_answering(|_| {
+            Err(crate::ports::CommandError::Unstartable {
+                executable: "nft".to_string(),
+                reason: "it is not installed".to_string(),
+            })
+        });
+        std::sync::Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .firewall = std::sync::Arc::new(crate::adapters::net::firewall::HostFirewall::new(commands));
+        host.slot_for(&app_id()).await.unwrap();
+        host.state
+            .modify(|snapshot| {
+                snapshot.last_active_at_ms.insert(app_id(), EARLIER);
+            })
+            .await;
+
+        record_activity(&host).await;
+
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.last_active_at_ms.get(&app_id()), Some(&EARLIER));
+        assert!(snapshot.app_traffic.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_service_measures_the_host_it_was_built_on() {
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state
+            .modify(|snapshot| {
+                snapshot.last_active_at_ms.insert(other(), EARLIER);
+            })
+            .await;
+
+        HostIdle::new(host.arc().clone()).record_activity().await;
+
+        assert!(!host
+            .state
+            .snapshot()
+            .await
+            .last_active_at_ms
+            .contains_key(&other()));
+    }
+}
+
+#[cfg(test)]
+mod sleep_tests {
+    use super::*;
+    use crate::ports::VmCall;
+    use crate::test_support::*;
+    use protocol::{DesiredInstanceState, IdleTimeoutMs, InstanceState};
+
+    fn quiet_record() -> crate::services::report::InstanceRecord {
+        instance_record(|record| {
+            record.on_request = true;
+            record.desired_running = true;
+            record.state = InstanceState::Running;
+        })
+    }
+
+    async fn on_request_host(idle_timeout_ms: Option<IdleTimeoutMs>) -> TestHost {
+        let host = test_host().await;
+        host.cache.lock().await.accept(desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.desired_state = DesiredInstanceState::OnRequest;
+                instance.idle_timeout_ms = idle_timeout_ms;
+            })]
+        }));
+        host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(quiet_record()).await;
+        host
+    }
+
+    async fn last_reached(host: &TestHost, ms_ago: i64) {
+        let moment = crate::clock::now_ms() - ms_ago;
+        host.state
+            .modify(|snapshot| {
+                snapshot.last_active_at_ms.insert(app_id(), moment);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_app_nobody_has_asked_for_since_its_timeout_is_put_to_sleep() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Idle);
+        assert!(record.stop_requested);
+    }
+
+    #[tokio::test]
+    async fn one_asked_for_a_moment_ago_is_left_up() {
+        let host = on_request_host(None).await;
+        last_reached(&host, 0).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn the_timeout_the_document_names_is_the_one_that_is_waited_out() {
+        let longer = IdleTimeoutMs::try_from(DEFAULT_IDLE_TIMEOUT_MS * 2).unwrap();
+        let host = on_request_host(Some(longer)).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_app_the_document_keeps_up_is_never_let_go_however_quiet_it_is() {
+        let host = test_host().await;
+        host.cache.lock().await.accept(desired_state(|state| {
+            state.instances = vec![desired_instance(|_| {})]
+        }));
+        host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(quiet_record()).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_host_that_has_been_given_no_document_lets_nothing_go() {
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(quiet_record()).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_app_nothing_has_been_measured_about_is_left_up_rather_than_read_as_quiet() {
+        let host = on_request_host(None).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_service_lets_the_quiet_apps_go_on_the_host_it_was_built_on() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+
+        HostIdle::new(host.arc().clone()).apply_sleep().await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
+    }
 }

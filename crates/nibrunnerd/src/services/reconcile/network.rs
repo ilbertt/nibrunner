@@ -114,4 +114,70 @@ mod tests {
         .await;
         assert_eq!(older[0].extra_public_port, None);
     }
+
+    #[tokio::test]
+    async fn an_app_with_no_slot_is_not_forwarded_however_healthy_its_record_looks() {
+        let host = test_host().await;
+        host.state.put_record(instance_record(|_| {})).await;
+        assert!(forwarded_instances(&host).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_ruleset_that_loaded_is_what_lets_this_host_start_anything() {
+        let host = test_host().await;
+        apply_network(&host).await;
+        assert!(host.state.snapshot().await.isolated);
+    }
+
+    #[tokio::test]
+    async fn one_that_would_not_load_leaves_the_host_saying_it_is_not_isolated() {
+        let mut host = test_host().await;
+        let (commands, _log) = crate::test_support::mocks::commands_answering(|_| {
+            Err(crate::ports::CommandError::Unstartable {
+                executable: "nft".to_string(),
+                reason: "it is not installed".to_string(),
+            })
+        });
+        Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .firewall = Arc::new(crate::adapters::net::firewall::HostFirewall::new(commands));
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+
+        apply_network(&host).await;
+
+        assert!(!host.state.snapshot().await.isolated);
+    }
+
+    #[tokio::test]
+    async fn the_apps_this_host_holds_slots_for_are_the_ones_it_answers_the_door_for() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+
+        apply_activators(host.arc()).await;
+        assert_eq!(host.activator.listening_for().await, vec![app_id()]);
+
+        host.allocator.lock().await.release(&app_id());
+        apply_activators(host.arc()).await;
+        assert!(host.activator.listening_for().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_routes_a_pass_publishes_are_the_hostnames_of_the_records_it_holds() {
+        let host = test_host().await;
+        host.state.put_record(instance_record(|_| {})).await;
+
+        apply_routes(&host).await;
+        assert_eq!(
+            host.router
+                .routes()
+                .await
+                .port_for(app_hostname().hostname.as_str()),
+            Some(instance_record(|_| {}).host_port)
+        );
+
+        host.state.drop_record(&app_id()).await;
+        apply_routes(&host).await;
+        assert!(host.router.routes().await.is_empty());
+    }
 }
