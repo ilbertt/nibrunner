@@ -104,4 +104,49 @@ mod tests {
         let unwell = listening(hyper::StatusCode::INTERNAL_SERVER_ERROR).await;
         assert!(!probe_instance(&loopback(), unwell, &with_path).await);
     }
+
+    #[tokio::test]
+    async fn a_tenant_that_answers_a_path_with_anything_but_success_is_not_healthy() {
+        let with_path = HealthCheck {
+            path: Some("/health".into()),
+            ..DEFAULT_HEALTH_CHECK
+        };
+        for answer in [
+            hyper::StatusCode::NOT_FOUND,
+            hyper::StatusCode::UNAUTHORIZED,
+            hyper::StatusCode::BAD_GATEWAY,
+            hyper::StatusCode::MOVED_PERMANENTLY,
+        ] {
+            let port = listening(answer).await;
+            assert!(
+                !probe_instance(&loopback(), port, &with_path).await,
+                "{answer} was read as a healthy tenant"
+            );
+        }
+        let accepted = listening(hyper::StatusCode::NO_CONTENT).await;
+        assert!(probe_instance(&loopback(), accepted, &with_path).await);
+    }
+
+    #[tokio::test]
+    async fn a_tenant_that_takes_the_connection_and_says_nothing_runs_out_of_time() {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let port = HttpPort::new(listener.local_addr().unwrap().port()).unwrap();
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                open.push(stream);
+            }
+        });
+
+        let silent = HealthCheck {
+            path: Some("/health".into()),
+            timeout_ms: 100,
+            ..DEFAULT_HEALTH_CHECK
+        };
+        assert!(!probe_instance(&loopback(), port, &silent).await);
+        assert!(probe_instance(&loopback(), port, &DEFAULT_HEALTH_CHECK).await);
+        held.abort();
+    }
 }

@@ -128,7 +128,28 @@ pub fn read_instance_records(value: Option<serde_json::Value>) -> Vec<InstanceRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::instance_record;
+    use crate::test_support::{instance_record, record_fields};
+
+    const REDEPLOYED_AT_MS: i64 = 1_760_000_000_000;
+
+    fn redeployed() -> RecordFields {
+        let mut fields = record_fields();
+        fields.deployment_id = DeploymentId::parse("dep-2").unwrap();
+        fields.volume_id = VolumeId::parse("vol-2").unwrap();
+        fields.hostnames = vec![];
+        fields.host_port = HostPort::new(23_456).unwrap();
+        fields.http_port = HttpPort::new(9_001).unwrap();
+        fields.has_extra_public_port = Some(true);
+        fields.guest_ipv4 = Ipv4Address::parse("10.9.9.9").unwrap();
+        fields.artifact_digest = Sha256Digest::parse("a".repeat(64)).unwrap();
+        fields.resources = InstanceResources {
+            vcpu_count: 4,
+            memory_mib: 4_096,
+        };
+        fields.desired_running = false;
+        fields.on_request = true;
+        fields
+    }
 
     #[test]
     fn a_record_round_trips_through_the_notes_this_daemon_writes() {
@@ -159,5 +180,98 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert!(!records[0].wants_extra_public_port());
         assert_eq!(records[0].start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_record_this_host_has_just_made_has_nothing_to_say_about_the_app_yet() {
+        let record = InstanceRecord::new(
+            record_fields(),
+            InstanceState::Pending,
+            crate::services::health::initial_tracker(),
+        );
+        assert_eq!(record.state, InstanceState::Pending);
+        assert_eq!(record.start_attempts, NO_START_ATTEMPTS);
+        assert_eq!(record.restart_count, 0);
+        assert!(!record.stop_requested);
+        assert_eq!(record.started_at, None);
+        assert_eq!(record.last_exit_code, None);
+        assert_eq!(record.message, None);
+    }
+
+    #[test]
+    fn a_new_deployment_is_taken_on_by_the_record_that_was_already_there() {
+        let mut record = instance_record(|_| {});
+        record.adopt(redeployed());
+
+        let wanted = redeployed();
+        assert_eq!(record.deployment_id, wanted.deployment_id);
+        assert_eq!(record.volume_id, wanted.volume_id);
+        assert_eq!(record.hostnames, wanted.hostnames);
+        assert_eq!(record.host_port, wanted.host_port);
+        assert_eq!(record.http_port, wanted.http_port);
+        assert_eq!(record.has_extra_public_port, wanted.has_extra_public_port);
+        assert!(record.wants_extra_public_port());
+        assert_eq!(record.guest_ipv4, wanted.guest_ipv4);
+        assert_eq!(record.artifact_digest, wanted.artifact_digest);
+        assert_eq!(record.resources, wanted.resources);
+        assert!(!record.desired_running);
+        assert!(record.on_request);
+    }
+
+    #[test]
+    fn adopting_a_deployment_does_not_wipe_what_the_host_learned_about_the_app() {
+        let mut record = instance_record(|record| {
+            record.state = InstanceState::Unhealthy;
+            record.restart_count = 4;
+            record.stop_requested = true;
+            record.started_at = Some(Timestamp::from_epoch_ms(REDEPLOYED_AT_MS));
+            record.last_exit_code = Some(137);
+            record.message = Some(StateMessage::new("it stopped on its own".to_string()));
+            record.health.ever_healthy = true;
+            record.start_attempts = crate::services::backoff::AttemptWindow {
+                attempts: 2,
+                last_attempt_at_ms: Some(REDEPLOYED_AT_MS),
+            };
+        });
+        let before = record.clone();
+        record.adopt(redeployed());
+
+        assert_eq!(record.state, before.state);
+        assert_eq!(record.health, before.health);
+        assert_eq!(record.start_attempts, before.start_attempts);
+        assert_eq!(record.restart_count, before.restart_count);
+        assert_eq!(record.stop_requested, before.stop_requested);
+        assert_eq!(record.started_at, before.started_at);
+        assert_eq!(record.last_exit_code, before.last_exit_code);
+        assert_eq!(record.message, before.message);
+        assert_eq!(record.app_id, before.app_id);
+    }
+
+    #[test]
+    fn only_an_idle_record_reads_as_idle() {
+        for state in protocol::INSTANCE_STATES {
+            let record = instance_record(|record| record.state = state);
+            assert_eq!(record.is_idle(), state == InstanceState::Idle, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn an_app_that_never_started_is_still_inside_its_grace_period() {
+        let never_started = instance_record(|_| {});
+        assert_eq!(never_started.grace_inputs(REDEPLOYED_AT_MS).started_at_ms, None);
+        assert!(crate::services::health::is_within_grace_period(
+            &never_started.grace_inputs(REDEPLOYED_AT_MS)
+        ));
+
+        let started =
+            instance_record(|record| record.started_at = Some(Timestamp::from_epoch_ms(REDEPLOYED_AT_MS)));
+        let grace = started.grace_inputs(REDEPLOYED_AT_MS);
+        assert_eq!(grace.started_at_ms, Some(REDEPLOYED_AT_MS));
+        assert_eq!(grace.now_ms, REDEPLOYED_AT_MS);
+        assert_eq!(grace.health_check, &started.health_check);
+        assert!(crate::services::health::is_within_grace_period(&grace));
+        assert!(!crate::services::health::is_within_grace_period(
+            &started.grace_inputs(REDEPLOYED_AT_MS + started.health_check.grace_period_ms as i64 + 1)
+        ));
     }
 }

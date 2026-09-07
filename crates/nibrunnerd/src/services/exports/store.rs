@@ -127,4 +127,59 @@ mod tests {
             .await
             .is_err());
     }
+
+    #[test]
+    fn a_destination_that_cannot_be_made_is_refused_when_it_is_named_not_when_it_is_used() {
+        let root = tempfile::tempdir().unwrap();
+        let occupied = root.path().join("not-a-directory");
+        std::fs::write(&occupied, b"something else is here").unwrap();
+        let Err(error) = ObjectExportStore::open(&occupied.join("exports").display().to_string()) else {
+            panic!("a destination that cannot be made was opened anyway");
+        };
+        assert!(error.message().contains("could not be handed over"), "{error}");
+    }
+
+    #[test]
+    fn a_bucket_named_with_a_prefix_puts_the_bundle_under_it_and_one_without_puts_it_at_the_root() {
+        crate::install_crypto_provider();
+        let nested = ObjectExportStore::open("s3://tenant-exports/hosts/host-1").unwrap();
+        let flat = ObjectExportStore::open("s3://tenant-exports").unwrap();
+        let trailing = ObjectExportStore::open("s3://tenant-exports/").unwrap();
+        let object_key = ObjectKey::parse("exports/app-1/exp-1.tar.gz").unwrap();
+
+        assert_eq!(
+            nested.path_for(&object_key).as_ref(),
+            "hosts/host-1/exports/app-1/exp-1.tar.gz"
+        );
+        assert_eq!(flat.path_for(&object_key).as_ref(), "exports/app-1/exp-1.tar.gz");
+        assert_eq!(
+            trailing.path_for(&object_key).as_ref(),
+            "exports/app-1/exp-1.tar.gz"
+        );
+    }
+
+    #[test]
+    fn a_directory_destination_keeps_no_prefix_of_its_own_beyond_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("exports");
+        let store = ObjectExportStore::open(&destination.display().to_string()).unwrap();
+        let object_key = ObjectKey::parse("exports/app-1/exp-1.tar.gz").unwrap();
+        assert_eq!(store.path_for(&object_key).as_ref(), "exports/app-1/exp-1.tar.gz");
+        assert!(destination.is_dir());
+    }
+
+    #[tokio::test]
+    async fn an_empty_bundle_still_reaches_the_store_rather_than_being_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("bundle.tar.gz");
+        std::fs::write(&bundle, b"").unwrap();
+
+        let destination = root.path().join("exports");
+        let store = ObjectExportStore::open(&destination.display().to_string()).unwrap();
+        let object_key = ObjectKey::parse("exports/exp-1/bundle.tar.gz").unwrap();
+        store.upload(&bundle, &object_key).await.unwrap();
+
+        let written = destination.join("exports/exp-1/bundle.tar.gz");
+        assert_eq!(std::fs::metadata(&written).unwrap().len(), 0);
+    }
 }

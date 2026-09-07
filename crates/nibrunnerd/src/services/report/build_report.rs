@@ -116,6 +116,39 @@ mod tests {
         }
     }
 
+    fn assembled(
+        records: &[InstanceRecord],
+        reached_at: &BTreeMap<AppId, PublicAddress>,
+        checkpoints: Vec<ReportedCheckpoint>,
+        exports: Vec<ReportedExport>,
+    ) -> HostReportedState {
+        let capacity = HostCapacity {
+            vcpu_count: 4,
+            memory_mib: 8192,
+            cache_bytes: 1000,
+        };
+        build_reported_state(ReportInputs {
+            host_id: host_id(),
+            reported_at: observed_at(),
+            state: HostState::Ready,
+            capacity,
+            allocatable: capacity,
+            versions: HostVersions {
+                agent: "sha".into(),
+                guest_image: "6.1".into(),
+                zerofs: "none".into(),
+                firecracker: "v1.16.1".into(),
+            },
+            records,
+            reached_at,
+            volumes: vec![],
+            volume_usage: &BTreeMap::new(),
+            compute_usage: &BTreeMap::new(),
+            checkpoints,
+            exports,
+        })
+    }
+
     fn report_with(volume_usage: BTreeMap<AppId, FilesystemUsage>) -> HostReportedState {
         let capacity = HostCapacity {
             vcpu_count: 4,
@@ -209,6 +242,80 @@ mod tests {
             to_reported_instance(&instance_record(|_| {}), None, None).compute,
             None
         );
+    }
+
+    #[test]
+    fn an_address_that_belongs_to_a_neighbour_is_never_reported_against_this_app() {
+        let reached = PublicAddress {
+            ipv4: Ipv4Address::parse("203.0.113.7").unwrap(),
+            port: HostPort::new(22_000).unwrap(),
+        };
+        let neighbour = AppId::parse("app-somebody-else").unwrap();
+        let records = [instance_record(|record| {
+            record.has_extra_public_port = Some(true)
+        })];
+        let report = assembled(
+            &records,
+            &[(neighbour, reached)].into_iter().collect(),
+            vec![],
+            vec![],
+        );
+        assert_eq!(report.instances[0].public_ipv4, None);
+        assert_eq!(report.instances[0].extra_public_port, None);
+    }
+
+    #[test]
+    fn every_record_the_host_holds_reaches_the_report_in_the_order_it_was_given() {
+        let records: Vec<InstanceRecord> = ["app-one", "app-two", "app-three"]
+            .iter()
+            .map(|name| instance_record(|record| record.app_id = AppId::parse(*name).unwrap()))
+            .collect();
+        let report = assembled(&records, &BTreeMap::new(), vec![], vec![]);
+        assert_eq!(
+            report
+                .instances
+                .iter()
+                .map(|instance| instance.app_id.as_str().to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "app-one".to_string(),
+                "app-two".to_string(),
+                "app-three".to_string()
+            ]
+        );
+        assert!(assembled(&[], &BTreeMap::new(), vec![], vec![])
+            .instances
+            .is_empty());
+    }
+
+    #[test]
+    fn what_the_host_observed_of_its_checkpoints_and_exports_is_passed_on_untouched() {
+        let checkpoint = ReportedCheckpoint {
+            checkpoint_id: checkpoint_id(),
+            volume_id: volume_id(),
+            state: protocol::CheckpointState::Ready,
+            reference: None,
+            ready_at: Some(observed_at()),
+            message: None,
+        };
+        let export = ReportedExport {
+            export_id: export_id(),
+            checkpoint_id: Some(checkpoint_id()),
+            state: protocol::ExportState::Failed,
+            size_bytes: None,
+            ready_at: None,
+            message: Some(protocol::StateMessage::new(
+                "the volume would not freeze".to_string(),
+            )),
+        };
+        let report = assembled(
+            &[],
+            &BTreeMap::new(),
+            vec![checkpoint.clone()],
+            vec![export.clone()],
+        );
+        assert_eq!(report.checkpoints, vec![checkpoint]);
+        assert_eq!(report.exports, vec![export]);
     }
 
     #[test]

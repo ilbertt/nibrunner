@@ -318,6 +318,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tenant_refused_for_want_of_memory_is_told_how_much_was_missing() {
+        let host = test_host().await;
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        host.state.put_record(instance_record(|_| {})).await;
+        for index in 0..4 {
+            host.state
+                .put_record(instance_record(|record| {
+                    record.app_id = AppId::parse(format!("neighbour-{index}")).unwrap();
+                }))
+                .await;
+        }
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
+
+        let refusal = AppWaker::new(host.arc().clone())
+            .wake(&app_id())
+            .await
+            .unwrap_err();
+        assert!(matches!(refusal, WakeRefusal::NoRoom { .. }), "{refusal:?}");
+        let message = host
+            .state
+            .record(&app_id())
+            .await
+            .and_then(|record| record.message)
+            .expect("a refused tenant is told why");
+        assert!(
+            message.as_str().contains("MiB short of the memory it needs"),
+            "{message:?}"
+        );
+        assert!(message.as_str().contains(app_id().as_str()), "{message:?}");
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_never_answers_is_refused_rather_than_reported_as_woken() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+                record.guest_ipv4 = crate::services::health::probe::loopback();
+                record.http_port = protocol::HttpPort::new(1).unwrap();
+                record.health_check.grace_period_ms = 20;
+                record.health_check.timeout_ms = 50;
+            }))
+            .await;
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
+
+        let Err(WakeRefusal::Failed { reason }) = AppWaker::new(host.arc().clone()).wake(&app_id()).await
+        else {
+            panic!("a guest that never answered was reported as woken");
+        };
+        assert!(reason.contains("nothing answered on port 1"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_wake_is_refused_for_an_app_this_host_has_no_record_of_starting() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
+
+        let refusal = AppWaker::new(host.arc().clone())
+            .wake(&app_id())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refusal,
+            WakeRefusal::Failed {
+                reason: "the microVM would not start".into()
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn a_wake_is_refused_for_an_app_the_document_no_longer_names() {
         let host = test_host().await;
         host.state.modify(|snapshot| snapshot.isolated = true).await;

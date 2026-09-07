@@ -176,4 +176,33 @@ mod tests {
         assert!(matches!(error, FreezeError::Refused { .. }), "{error}");
         assert!(error.message().contains("BUSY"));
     }
+
+    #[tokio::test]
+    async fn a_guest_that_hung_up_before_answering_is_not_read_from_either() {
+        let (_directory, path) = guest_that(&[], true).await;
+        let Err(error) = frozen(&app_id(), &path).await else {
+            panic!("a guest that never answered was treated as frozen");
+        };
+        assert!(matches!(error, FreezeError::Silent { .. }), "{error}");
+        assert!(error.message().contains("never answered"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_guest_with_nothing_listening_on_the_control_port_is_not_read_from() {
+        let (_directory, path) = guest_that(&["FAILED"], false).await;
+        let Err(error) = frozen(&app_id(), &path).await else {
+            panic!("a guest with no control port was treated as frozen");
+        };
+        assert!(matches!(error, FreezeError::Refused { .. }), "{error}");
+        assert!(error.message().contains("would not freeze"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_lease_names_the_app_whose_freeze_it_could_not_vouch_for() {
+        let lost = FreezeError::Lost { app_id: app_id() };
+        assert!(lost.message().contains(app_id().as_str()));
+        assert!(lost
+            .message()
+            .contains("thawed before the checkpoint was recorded"));
+    }
 }
