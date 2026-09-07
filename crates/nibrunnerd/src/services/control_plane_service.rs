@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
-use protocol::FilesystemQuery;
+use protocol::{FilesystemQuery, FilesystemQueryResult};
 
 use crate::adapters::control_plane::ControlPlaneError;
-use crate::domain::control_plane::{answer_one_query, poll_desired_state, SessionHolder};
+use crate::domain::control_plane::{fetch_query, poll_desired_state, send_result, SessionHolder};
 use crate::host::Host;
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait ControlPlaneService: Send + Sync {
     async fn poll_desired_state(&self) -> Result<bool, ControlPlaneError>;
-    async fn answer_one_query(&self) -> Result<Option<FilesystemQuery>, ControlPlaneError>;
+    async fn fetch_query(&self) -> Result<Option<FilesystemQuery>, ControlPlaneError>;
+    async fn send_result(&self, result: &FilesystemQueryResult) -> Result<(), ControlPlaneError>;
     async fn note(&self, error: &ControlPlaneError);
 }
 
@@ -31,8 +32,12 @@ impl ControlPlaneService for RemoteControlPlane {
         poll_desired_state(&self.host, &self.sessions).await
     }
 
-    async fn answer_one_query(&self) -> Result<Option<FilesystemQuery>, ControlPlaneError> {
-        answer_one_query(&self.host, &self.sessions).await
+    async fn fetch_query(&self) -> Result<Option<FilesystemQuery>, ControlPlaneError> {
+        fetch_query(&self.host, &self.sessions).await
+    }
+
+    async fn send_result(&self, result: &FilesystemQueryResult) -> Result<(), ControlPlaneError> {
+        send_result(&self.host, &self.sessions, result).await
     }
 
     async fn note(&self, error: &ControlPlaneError) {
@@ -88,6 +93,6 @@ mod tests {
         let remote: Arc<dyn ControlPlaneService> =
             RemoteControlPlane::new(host.arc().clone(), unreachable_sessions());
         assert!(remote.poll_desired_state().await.is_err());
-        assert!(remote.answer_one_query().await.is_err());
+        assert!(remote.fetch_query().await.is_err());
     }
 }

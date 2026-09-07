@@ -66,7 +66,7 @@ pub async fn served_app_ids(host: &Host) -> Vec<protocol::AppId> {
     crate::domain::filesystem::reader::served_app_ids(host).await
 }
 
-pub async fn answer_one_query(
+pub async fn fetch_query(
     host: &Host,
     sessions: &Arc<SessionHolder>,
 ) -> Result<Option<FilesystemQuery>, ControlPlaneError> {
@@ -78,12 +78,19 @@ pub async fn answer_one_query(
     let FilesystemQueryResponse::Query { query } = response else {
         return Ok(None);
     };
-    let result: FilesystemQueryResult = crate::domain::filesystem::reader::answer(host, &query).await;
+    Ok(Some(query))
+}
+
+pub async fn send_result(
+    host: &Host,
+    sessions: &Arc<SessionHolder>,
+    result: &FilesystemQueryResult,
+) -> Result<(), ControlPlaneError> {
+    let token = sessions.current(host).await?;
     sessions
         .client()
-        .send_filesystem_query_result(&token, &result)
-        .await?;
-    Ok(Some(query))
+        .send_filesystem_query_result(&token, result)
+        .await
 }
 
 pub async fn poll_desired_state(
@@ -135,7 +142,7 @@ mod tests {
     async fn a_control_plane_that_cannot_be_reached_is_an_error_and_not_a_panic() {
         let host = test_host().await;
         let sessions = Arc::new(SessionHolder::new(ControlPlaneClient::new("http://127.0.0.1:1")));
-        assert!(answer_one_query(host.arc(), &sessions).await.is_err());
+        assert!(fetch_query(host.arc(), &sessions).await.is_err());
     }
 
     #[tokio::test]

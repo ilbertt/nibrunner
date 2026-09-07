@@ -49,7 +49,7 @@ impl LifecycleController {
             StatusController::new(self.host.clone(), reconciler, reports),
             MeasurementController::new(
                 HostIdle::new(self.host.clone()),
-                HostUsage::new(self.host.clone(), filesystems),
+                HostUsage::new(self.host.clone(), filesystems.clone()),
             ),
         ];
         if let Some(url) = self.host.config.control_plane_url.clone() {
@@ -57,7 +57,7 @@ impl LifecycleController {
             let sessions = Arc::new(SessionHolder::new(ControlPlaneClient::new(url)));
             let remote = RemoteControlPlane::new(self.host.clone(), sessions);
             held.push(ControlPlaneController::new(remote.clone()));
-            held.push(FilesystemController::new(remote));
+            held.push(FilesystemController::new(remote, filesystems));
         }
         held
     }
