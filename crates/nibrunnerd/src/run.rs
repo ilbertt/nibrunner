@@ -111,6 +111,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             .map_err(|error| StartupError::Config(error.message()))?,
     );
     let checkpoint_servers = config.zerofs.as_ref().map(|settings| CheckpointServers {
+        ready_timeout: crate::services::exports::reader::DEFAULT_READY_TIMEOUT,
         binary: settings.binary.clone(),
         config_file: settings.checkpoint_config_file.clone(),
         runtime_dir: settings.checkpoint_runtime_dir.clone(),

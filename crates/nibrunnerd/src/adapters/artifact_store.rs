@@ -14,6 +14,7 @@ pub struct ObjectArtifactStore {
 impl ObjectArtifactStore {
     pub fn open(url: &str) -> Result<Self, ArtifactError> {
         if let Some(rest) = url.strip_prefix("s3://") {
+            crate::install_crypto_provider();
             let (bucket, prefix) = match rest.split_once('/') {
                 Some((bucket, prefix)) => (bucket, Some(prefix.trim_end_matches('/').to_string())),
                 None => (rest, None),

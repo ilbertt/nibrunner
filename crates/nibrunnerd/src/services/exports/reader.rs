@@ -11,7 +11,7 @@ const NBD_SOCKET_FILENAME: &str = "nbd.sock";
 
 const CHECKPOINT_VARIABLE: &str = "NIBRUN_CHECKPOINT";
 
-const READY_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_POLL: Duration = Duration::from_millis(100);
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,6 +21,7 @@ pub struct CheckpointServers {
     pub config_file: PathBuf,
     pub runtime_dir: PathBuf,
     pub cache_dir: PathBuf,
+    pub ready_timeout: Duration,
 }
 
 impl CheckpointServers {
@@ -62,6 +63,7 @@ impl CheckpointServers {
             socket_path: self.socket_path_for(checkpoint_id),
             cache_dir: cache,
             child,
+            ready_timeout: self.ready_timeout,
         };
         server.wait_until_answering().await?;
         Ok(server)
@@ -73,11 +75,12 @@ pub struct CheckpointServer {
     socket_path: PathBuf,
     cache_dir: PathBuf,
     child: tokio::process::Child,
+    ready_timeout: Duration,
 }
 
 impl CheckpointServer {
     async fn wait_until_answering(&self) -> Result<(), VolumeError> {
-        let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + self.ready_timeout;
         while tokio::time::Instant::now() < deadline {
             if self.socket_path.exists() {
                 return Ok(());
@@ -140,11 +143,16 @@ mod tests {
     use crate::test_support::mocks;
 
     fn servers(root: &Path) -> CheckpointServers {
+        servers_waiting(root, Duration::from_secs(5))
+    }
+
+    fn servers_waiting(root: &Path, ready_timeout: Duration) -> CheckpointServers {
         CheckpointServers {
             binary: PathBuf::from("/usr/bin/true"),
             config_file: root.join("checkpoint.toml"),
             runtime_dir: root.join("run"),
             cache_dir: root.join("cache"),
+            ready_timeout,
         }
     }
 
@@ -162,7 +170,10 @@ mod tests {
     async fn a_server_whose_socket_never_appears_is_given_up_on() {
         let root = tempfile::tempdir().unwrap();
         let checkpoint_id = CheckpointId::parse("export-one").unwrap();
-        let Err(error) = servers(root.path()).start(&checkpoint_id).await else {
+        let Err(error) = servers_waiting(root.path(), Duration::from_millis(200))
+            .start(&checkpoint_id)
+            .await
+        else {
             panic!("a server whose socket never appeared was treated as ready");
         };
         assert!(error.message().contains("did not answer"), "{error}");

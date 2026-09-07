@@ -34,6 +34,7 @@ pub struct ObjectExportStore {
 impl ObjectExportStore {
     pub fn open(url: &str) -> Result<Self, ExportStoreError> {
         if let Some(rest) = url.strip_prefix("s3://") {
+            crate::install_crypto_provider();
             let (bucket, prefix) = match rest.split_once('/') {
                 Some((bucket, prefix)) => (bucket, Some(prefix.trim_end_matches('/').to_string())),
                 None => (rest, None),
@@ -141,7 +142,6 @@ mod tests {
 
     #[test]
     fn a_bucket_named_with_a_prefix_puts_the_bundle_under_it_and_one_without_puts_it_at_the_root() {
-        crate::install_crypto_provider();
         let nested = ObjectExportStore::open("s3://tenant-exports/hosts/host-1").unwrap();
         let flat = ObjectExportStore::open("s3://tenant-exports").unwrap();
         let trailing = ObjectExportStore::open("s3://tenant-exports/").unwrap();
