@@ -317,4 +317,143 @@ mod tests {
         );
         assert!(matches!(plan.exports[0], ExportPlan::None { .. }));
     }
+
+    async fn host_over(volumes: crate::adapters::volumes::MockVolumeBackend) -> TestHost {
+        let mut host = test_host().await;
+        std::sync::Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .volumes = std::sync::Arc::new(volumes);
+        host
+    }
+
+    fn note(state: ExportState) -> ReportedExport {
+        ReportedExport {
+            export_id: ExportId::parse("exp-1").unwrap(),
+            checkpoint_id: None,
+            state,
+            size_bytes: Some(10),
+            ready_at: None,
+            message: None,
+        }
+    }
+
+    async fn holding(host: &crate::host::Host, reports: Vec<ReportedExport>) {
+        host.state
+            .modify(|snapshot| snapshot.export_reports = reports)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_export_id_that_cannot_name_a_checkpoint_is_refused_before_the_tenant_is_frozen() {
+        let unusable = ExportId::parse("e".repeat(63)).unwrap();
+        assert!(export_checkpoint_id(&unusable).is_none());
+
+        let host = test_host().await;
+        let plan = ReconcilePlan {
+            exports: vec![ExportPlan::Write {
+                desired: DesiredExport {
+                    export_id: unusable,
+                    ..wanted(DesiredPresence::Present)
+                },
+            }],
+            ..Default::default()
+        };
+
+        apply_exports(host.arc(), &plan).await;
+
+        let reports = host.state.snapshot().await.export_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, ExportState::Failed);
+        assert_eq!(reports[0].checkpoint_id, None);
+        assert!(reports[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("does not make a checkpoint name"));
+        assert!(host.exports_written().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bundle_the_document_still_wants_leaves_one_note_rather_than_two() {
+        let host = test_host().await;
+        holding(host.arc(), vec![note(ExportState::Failed)]).await;
+        let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
+
+        apply_exports(host.arc(), &plan).await;
+
+        let reports = host.state.snapshot().await.export_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, ExportState::Failed);
+    }
+
+    #[tokio::test]
+    async fn an_export_already_written_keeps_the_note_that_says_so() {
+        let host = test_host().await;
+        holding(host.arc(), vec![note(ExportState::Ready)]).await;
+        let plan = ReconcilePlan {
+            exports: vec![ExportPlan::None {
+                export_id: ExportId::parse("exp-1").unwrap(),
+            }],
+            ..Default::default()
+        };
+
+        apply_exports(host.arc(), &plan).await;
+
+        let reports = host.state.snapshot().await.export_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, ExportState::Ready);
+        assert!(host.exports_written().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bundle_that_failed_is_not_a_bundle_this_host_has_written() {
+        let host = test_host().await;
+        holding(host.arc(), vec![note(ExportState::Failed)]).await;
+        let desired = desired_state(|state| state.exports = vec![wanted(DesiredPresence::Present)]);
+
+        assert!(observe_exports(host.arc(), &desired).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_export_checkpoint_nothing_is_writing_any_more_is_reaped() {
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        volumes.expect_observe_checkpoints().returning(|| {
+            vec![
+                CheckpointId::parse("export-exp-9").unwrap(),
+                CheckpointId::parse("nightly-1").unwrap(),
+            ]
+        });
+        volumes
+            .expect_delete_checkpoint()
+            .times(1)
+            .withf(|held| held.as_str() == "export-exp-9")
+            .returning(|_| Ok(()));
+        let host = host_over(volumes).await;
+
+        apply_exports(host.arc(), &ReconcilePlan::default()).await;
+    }
+
+    #[tokio::test]
+    async fn the_checkpoint_for_an_export_this_pass_is_writing_is_left_where_it_is() {
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        volumes
+            .expect_observe_checkpoints()
+            .returning(|| vec![CheckpointId::parse("export-exp-1").unwrap()]);
+        volumes.expect_create_checkpoint().returning(|_| {
+            Err(crate::adapters::volumes::VolumeError::NoCheckpoints {
+                what: "a volume kept as a file on this host's own disk",
+            })
+        });
+        volumes.expect_delete_checkpoint().never();
+        let host = host_over(volumes).await;
+        let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
+
+        apply_exports(host.arc(), &plan).await;
+
+        assert_eq!(
+            host.state.snapshot().await.export_reports[0].state,
+            ExportState::Failed
+        );
+    }
 }

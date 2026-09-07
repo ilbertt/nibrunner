@@ -506,4 +506,280 @@ mod tests {
             .stop_requested =
             true))));
     }
+
+    fn spent_window() -> crate::services::backoff::AttemptWindow {
+        crate::services::backoff::AttemptWindow {
+            attempts: 3,
+            last_attempt_at_ms: Some(now_ms()),
+        }
+    }
+
+    fn cached_image(host: &crate::host::Host) -> std::path::PathBuf {
+        crate::adapters::vm::artifacts::artifact_image_path(
+            &host.config.artifact_cache_dir(),
+            &artifact(|_| {}).digest,
+        )
+    }
+
+    fn on_request() -> DesiredInstance {
+        desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest)
+    }
+
+    #[tokio::test]
+    async fn an_app_this_host_has_never_served_is_left_a_record_waiting_to_be_asked_for() {
+        let host = test_host().await;
+
+        sleep_instance(&host, &on_request()).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Idle);
+        assert!(record.on_request);
+        assert!(record.desired_running);
+        assert!(host.slot_of(&app_id()).await.is_some());
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_this_host_already_holds_takes_the_new_release_without_leaving_the_state_it_is_in() {
+        let host = test_host().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Stopped;
+                record.restart_count = 3;
+            }))
+            .await;
+        let newer = desired_instance(|instance| {
+            instance.desired_state = DesiredInstanceState::OnRequest;
+            instance.deployment_id = protocol::DeploymentId::parse("dep-2").unwrap();
+        });
+
+        sleep_instance(&host, &newer).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Stopped);
+        assert_eq!(record.deployment_id.as_str(), "dep-2");
+        assert_eq!(record.restart_count, 3);
+        assert!(record.on_request);
+    }
+
+    #[tokio::test]
+    async fn a_stop_leaves_the_record_stopped_with_the_attempts_it_spent_given_back() {
+        let host = test_host().await;
+        host.state
+            .put_record(instance_record(|record| record.start_attempts = spent_window()))
+            .await;
+
+        stop_instance(&host, &app_id(), "not-desired").await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Stopped);
+        assert!(record.stop_requested);
+        assert_eq!(record.start_attempts, NO_START_ATTEMPTS);
+        assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Stop]);
+    }
+
+    #[tokio::test]
+    async fn a_stop_for_an_app_this_host_has_no_record_for_still_takes_the_microvm_down() {
+        let host = test_host().await;
+
+        stop_instance(&host, &app_id(), "not-desired").await;
+
+        assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Stop]);
+        assert!(host.state.record(&app_id()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_app_this_host_has_no_record_for_is_not_put_to_sleep() {
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+
+        suspend_instance(&host, &app_id(), "idle").await;
+
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_start_inside_the_backoff_it_earned_does_not_touch_the_microvm() {
+        let host = test_host().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Failed;
+                record.start_attempts = spent_window();
+            }))
+            .await;
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        assert!(host.vms.calls().is_empty());
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Failed
+        );
+        assert!(host.slot_of(&app_id()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_image_this_host_cannot_fetch_fails_the_instance_rather_than_booting_something_else() {
+        let mut host = test_host().await;
+        Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .artifacts = mocks::artifacts_refusing(crate::ports::ArtifactError::Transfer(
+            "the object store is down".to_string(),
+        ));
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert!(record
+            .message
+            .unwrap()
+            .as_str()
+            .contains("the object store is down"));
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_boot_over_a_microvm_nobody_asked_to_stop_counts_as_a_restart() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state
+            .put_record(instance_record(|record| {
+                record.restart_count = 1;
+                record.stop_requested = false;
+            }))
+            .await;
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Starting);
+        assert_eq!(record.restart_count, 2);
+        assert!(record.started_at.is_some());
+        assert!(!record.stop_requested);
+        assert_eq!(record.start_attempts.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn a_boot_after_a_stop_that_was_asked_for_does_not() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state
+            .put_record(instance_record(|record| {
+                record.restart_count = 1;
+                record.stop_requested = true;
+            }))
+            .await;
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        assert_eq!(host.state.record(&app_id()).await.unwrap().restart_count, 1);
+    }
+
+    #[tokio::test]
+    async fn a_wake_that_failed_for_its_own_reason_says_so_rather_than_booting_the_app_cold() {
+        let host = test_host().await;
+        host.vms
+            .refuse_wake(VmError::Host("the snapshot file is unreadable".to_string()));
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+            }))
+            .await;
+
+        let refusal = resume_instance(&host, &on_request()).await.unwrap_err();
+
+        assert!(refusal.contains("the snapshot file is unreadable"));
+        assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Wake]);
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Idle);
+        assert!(record
+            .message
+            .unwrap()
+            .as_str()
+            .contains("the snapshot file is unreadable"));
+    }
+
+    #[tokio::test]
+    async fn the_image_of_everything_the_plan_starts_is_in_the_cache_before_any_of_it_boots() {
+        let host = test_host().await;
+
+        prefetch_artifacts(
+            &host,
+            &ReconcilePlan {
+                instances: vec![InstancePlan::Start {
+                    desired: desired_instance(|_| {}),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(cached_image(&host).exists());
+    }
+
+    #[tokio::test]
+    async fn an_image_that_could_not_be_fetched_leaves_the_pass_running() {
+        let mut host = test_host().await;
+        Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .artifacts = mocks::artifacts_refusing(crate::ports::ArtifactError::Transfer(
+            "the object store is down".to_string(),
+        ));
+
+        prefetch_artifacts(
+            &host,
+            &ReconcilePlan {
+                instances: vec![InstancePlan::Start {
+                    desired: desired_instance(|_| {}),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(!cached_image(&host).exists());
+    }
+
+    #[tokio::test]
+    async fn a_microvm_that_went_away_leaves_the_code_it_exited_with_on_the_record() {
+        let host = test_host().await;
+        host.vms.set_status(VmStatus {
+            loaded: true,
+            active: false,
+            failed: false,
+            started_this_boot: true,
+            exit_code: Some(137),
+        });
+        host.state
+            .put_record(instance_record(|record| record.started_at = Some(observed_at())))
+            .await;
+
+        refresh_states(host.arc()).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.last_exit_code, Some(137));
+        assert!(record.message.unwrap().as_str().contains("exit code 137"));
+    }
+
+    #[tokio::test]
+    async fn a_state_that_has_not_moved_keeps_the_message_that_explained_it() {
+        let host = test_host().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Pending;
+                record.message = Some(StateMessage::new("waiting for its volume"));
+            }))
+            .await;
+
+        refresh_states(host.arc()).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Pending);
+        assert_eq!(record.message.unwrap().as_str(), "waiting for its volume");
+        assert_eq!(record.last_exit_code, None);
+    }
 }
