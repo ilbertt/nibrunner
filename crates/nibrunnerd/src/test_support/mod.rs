@@ -259,12 +259,13 @@ pub async fn test_host() -> TestHost {
 pub async fn test_host_with(repositories: crate::repositories::Repositories) -> TestHost {
     use crate::adapters::net::allocator::SlotAllocator;
     use crate::adapters::net::firewall::HostFirewall;
-    use crate::adapters::proxy::activator::{AppActivator, WakeRefusal, Waker};
+    use crate::adapters::proxy::activator::AppActivator;
     use crate::adapters::proxy::Router;
     use crate::adapters::volumes::local_file::LocalFileVolumes;
     use crate::config::HostConfig;
     use crate::desired::DesiredStateCache;
     use crate::host::Host;
+    use crate::ports::{WakeRefusal, Waker};
     use crate::state::HostState;
 
     struct NeverWoken;

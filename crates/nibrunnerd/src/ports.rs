@@ -228,6 +228,18 @@ pub enum TenantLogBody {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WakeRefusal {
+    NoRoom { shortfall_mib: u64 },
+    Failed { reason: String },
+}
+
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
+#[async_trait]
+pub trait Waker: Send + Sync {
+    async fn wake(&self, app_id: &AppId) -> Result<(), WakeRefusal>;
+}
+
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait LogSink: Send + Sync {

@@ -21,8 +21,8 @@ use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
 use crate::domain::exports::reader::CheckpointServers;
 use crate::domain::report::capacity::{guest_memory_mib, read_host_memory_mib};
+use crate::domain::waker::AppWaker;
 use crate::host::Host;
-use crate::services::waker_service::AppWaker;
 use crate::state::HostState;
 
 #[derive(Debug, thiserror::Error)]
@@ -145,14 +145,11 @@ struct DeferredWaker {
 }
 
 #[async_trait::async_trait]
-impl crate::adapters::proxy::activator::Waker for DeferredWaker {
-    async fn wake(
-        &self,
-        app_id: &protocol::AppId,
-    ) -> Result<(), crate::adapters::proxy::activator::WakeRefusal> {
+impl crate::ports::Waker for DeferredWaker {
+    async fn wake(&self, app_id: &protocol::AppId) -> Result<(), crate::ports::WakeRefusal> {
         match self.waker.get() {
             Some(waker) => waker.wake(app_id).await,
-            None => Err(crate::adapters::proxy::activator::WakeRefusal::Failed {
+            None => Err(crate::ports::WakeRefusal::Failed {
                 reason: "this host is still starting".into(),
             }),
         }

@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use crate::adapters::proxy::forward::{forward, say, ProxyBody};
+use crate::ports::{WakeRefusal, Waker};
 use crate::state::SharedState;
 
 const LOOPBACK: &str = "127.0.0.1";
@@ -45,18 +46,6 @@ fn come_back() -> Response<ProxyBody> {
         .headers_mut()
         .insert("retry-after", hyper::header::HeaderValue::from_static("2"));
     response
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WakeRefusal {
-    NoRoom { shortfall_mib: u64 },
-    Failed { reason: String },
-}
-
-#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
-#[async_trait::async_trait]
-pub trait Waker: Send + Sync {
-    async fn wake(&self, app_id: &AppId) -> Result<(), WakeRefusal>;
 }
 
 struct Listener {

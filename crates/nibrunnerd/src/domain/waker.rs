@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use protocol::{AppId, DesiredInstanceState};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::adapters::proxy::activator::{WakeRefusal, Waker};
 use crate::domain::health::probe::probe_instance;
 use crate::domain::report::capacity::{committed_resources, memory_shortfall_mib};
 use crate::host::Host;
+use crate::ports::{WakeRefusal, Waker};
 
 const PROBE_INTERVAL: Duration = Duration::from_millis(5);
 
