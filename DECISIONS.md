@@ -177,6 +177,18 @@ malformed `select` while this was being written. SQLite's C is compiled into the
 linked from the host, which is the arrangement Bun ships and means nothing to install beside the
 daemon. Offline query data is committed under `.sqlx/`, so a build needs no database.
 
+**Each repository is its own trait, so the five-table commit is now four.** The paragraph above is
+what the database was for, and this weakens it on purpose: the owner asked for a repository per
+table so each is mockable on its own, and a trait that owns the pool cannot join a transaction
+opened by its neighbour. Two things hold the guarantee up in its place. `SlotRepository::replace_all`
+takes the assignments *and* the cursor and writes both in one transaction, because a cursor pointing
+past slots nothing recorded hands the next app a port a client is still dialling somebody else on.
+And `persist` writes the slots before the records: a crash between them then leaves a slot with no
+record, which the next pass re-derives from the pidfiles, rather than a record with no slot, which
+is the one that made the next pass allocate a second slot for the same app. The remaining exposure
+is activity and deleted-volume rows lagging a crash by one pass, and both are advisory —
+`last_active_at_ms` only delays a sleep, and a deleted volume stops being reported one pass late.
+
 `desired.json` and `reported.json` stay files. One is written by whoever deploys and the other is
 what anything reads to see status: both are the interface, and moving either behind SQL would mean
 shipping the tool to read it back that this project deliberately does not have.

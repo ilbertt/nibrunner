@@ -218,8 +218,33 @@ just integration   # everything that does: root, Linux, nft, mke2fs, /dev/net/tu
 
 The first lane is the planner, the health state machine, the backoff, the ruleset asserted as
 text, the codecs against byte fixtures taken from the C headers, and the reconcile pass driven
-against recording services. The second is the only place a ruleset load, a real `mke2fs` or a tap
+against mocked collaborators. The second is the only place a ruleset load, a real `mke2fs` or a tap
 is ever considered proven.
+
+### How the doubles work
+
+Every seam in this daemon is a trait, and every trait is mocked by `mockall`:
+
+| Layer | Traits |
+| --- | --- |
+| `ports` | `CommandRunner`, `Vmm`, `ArtifactStore`, `LogSink` |
+| `adapters` | `VolumeBackend`, `HostNetwork`, `Waker` |
+| `repositories` | `InstanceRepository`, `SlotRepository`, `ActivityRepository`, `DeletedVolumeRepository`, `HostIdentityRepository` |
+| `services` | `ReconcileService`, `ReportService`, `IdleService`, `UsageService`, `FilesystemService`, `ControlPlaneService`, `ExportStore` |
+
+The mocks are generated under `#[cfg_attr(any(test, feature = "testing"), mockall::automock)]`, so
+they exist for this crate's own tests and for the integration lane — which depends on the crate
+with `features = ["testing"]` and therefore builds its fixtures from the same place rather than
+keeping doubles of its own.
+
+`crates/nibrunnerd/src/test_support/` is that place. `mod.rs` holds the domain fixtures, each
+taking a closure so a test names only the field it is about; `mocks.rs` holds the pre-programmed
+mocks and the spies that read back what they were asked. A test that only needs a working host
+calls `test_host()`; one that wants to assert on what a repository was handed calls
+`test_host_with(...)` with mocks of its own.
+
+Each loop is split into a `*_once` that does one pass and a `*_loop` that owns the timing, so what
+a loop decides is a unit test and the `loop {}` around it carries no logic.
 
 ### What phase 1 proved, and what it did not
 
