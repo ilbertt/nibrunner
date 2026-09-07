@@ -134,6 +134,21 @@ pub fn desired_export(edit: impl FnOnce(&mut DesiredExport)) -> DesiredExport {
     value
 }
 
+pub fn reported_volume(edit: impl FnOnce(&mut ReportedVolume)) -> ReportedVolume {
+    let mut value = ReportedVolume {
+        volume_id: volume_id(),
+        app_id: app_id(),
+        state: VolumeState::Ready,
+        size_bytes: VOLUME_SIZE_BYTES,
+        storage_prefix: None,
+        device_path: None,
+        usage: None,
+        message: None,
+    };
+    edit(&mut value);
+    value
+}
+
 pub fn desired_state(edit: impl FnOnce(&mut HostDesiredState)) -> HostDesiredState {
     let mut value = HostDesiredState {
         host_id: host_id(),
@@ -235,6 +250,13 @@ impl TestHost {
 }
 
 pub async fn test_host() -> TestHost {
+    test_host_with(crate::repositories::Repositories::sqlite(
+        crate::repositories::in_memory().await,
+    ))
+    .await
+}
+
+pub async fn test_host_with(repositories: crate::repositories::Repositories) -> TestHost {
     use crate::adapters::net::allocator::SlotAllocator;
     use crate::adapters::net::firewall::HostFirewall;
     use crate::adapters::proxy::activator::{AppActivator, WakeRefusal, Waker};
@@ -272,7 +294,7 @@ pub async fn test_host() -> TestHost {
             commands.clone(),
         )),
         artifacts: mocks::artifacts_holding(ARTIFACT_BYTES.to_vec()),
-        store: crate::repositories::in_memory().await,
+        repositories,
         exports,
         checkpoint_servers: None,
         nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),

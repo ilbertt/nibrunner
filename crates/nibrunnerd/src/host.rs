@@ -25,7 +25,7 @@ pub struct Host {
     pub vms: Arc<dyn Vmm>,
     pub volumes: Arc<dyn VolumeBackend>,
     pub artifacts: Arc<dyn ArtifactStore>,
-    pub store: sqlx::SqlitePool,
+    pub repositories: crate::repositories::Repositories,
     pub exports: Arc<dyn ExportStore>,
     pub checkpoint_servers: Option<CheckpointServers>,
     pub nbd: NbdDevices,
@@ -52,18 +52,12 @@ impl Host {
     }
 
     pub async fn known_host_id(&self) -> Option<protocol::HostId> {
-        let mut connection = self.store.acquire().await.ok()?;
-        let held = crate::repositories::host_identity::read(&mut connection)
-            .await
-            .ok()??;
+        let held = self.repositories.identity.read().await.ok()??;
         protocol::HostId::parse(held).ok()
     }
 
     pub async fn remember_host_id(&self, host_id: &str) {
-        let Ok(mut connection) = self.store.acquire().await else {
-            return;
-        };
-        if let Err(error) = crate::repositories::host_identity::remember(&mut connection, host_id).await {
+        if let Err(error) = self.repositories.identity.remember(host_id).await {
             tracing::warn!(error = %error.message(), "this host could not write down the id it registered under");
         }
     }
@@ -75,45 +69,31 @@ impl Host {
     }
 
     async fn write_down(&self) -> Result<(), crate::repositories::StoreError> {
-        use crate::repositories::{activity, deleted_volumes, instances, slots};
-
         let snapshot = self.state.snapshot().await;
         let records: Vec<_> = snapshot.records.values().cloned().collect();
-        let deleted = snapshot.deleted_volumes.clone();
         let (assignments, cursor) = {
             let allocator = self.allocator.lock().await;
             (allocator.assignments().clone(), allocator.cursor())
         };
 
-        let mut tx = self
-            .store
-            .begin()
+        self.repositories.slots.replace_all(&assignments, cursor).await?;
+        self.repositories.instances.replace_all(&records).await?;
+        self.repositories
+            .activity
+            .replace_all(&snapshot.last_active_at_ms)
+            .await?;
+        self.repositories
+            .deleted_volumes
+            .replace_all(&snapshot.deleted_volumes)
             .await
-            .map_err(crate::repositories::StoreError::write)?;
-        instances::replace_all(&mut tx, &records).await?;
-        slots::replace_all(&mut tx, &assignments).await?;
-        slots::set_cursor(&mut tx, cursor).await?;
-        activity::replace_all(&mut tx, &snapshot.last_active_at_ms).await?;
-        deleted_volumes::replace_all(&mut tx, &deleted).await?;
-        tx.commit().await.map_err(crate::repositories::StoreError::write)
     }
 
     pub async fn load(&self) {
-        use crate::repositories::{activity, deleted_volumes, instances, slots};
-
-        let mut connection = match self.store.acquire().await {
-            Ok(connection) => connection,
-            Err(error) => {
-                tracing::warn!(%error, "this host could not read its own notes");
-                return;
-            }
-        };
-        let records = instances::all(&mut connection).await.unwrap_or_default();
-        let last_active = activity::all(&mut connection).await.unwrap_or_default();
-        let deleted = deleted_volumes::all(&mut connection).await.unwrap_or_default();
-        let assignments = slots::all(&mut connection).await.unwrap_or_default();
-        let cursor = slots::cursor(&mut connection).await.unwrap_or_default();
-        drop(connection);
+        let records = self.repositories.instances.all().await.unwrap_or_default();
+        let last_active = self.repositories.activity.all().await.unwrap_or_default();
+        let deleted = self.repositories.deleted_volumes.all().await.unwrap_or_default();
+        let assignments = self.repositories.slots.all().await.unwrap_or_default();
+        let cursor = self.repositories.slots.cursor().await.unwrap_or_default();
 
         let held = records.len();
         self.allocator.lock().await.restore(assignments, cursor);
@@ -138,5 +118,215 @@ impl Host {
         crate::desired::read_desired_state(&self.config.cached_desired_state_file())
             .ok()
             .flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::repositories::activity::MockActivityRepository;
+    use crate::repositories::deleted_volumes::MockDeletedVolumeRepository;
+    use crate::repositories::host_identity::MockHostIdentityRepository;
+    use crate::repositories::instances::MockInstanceRepository;
+    use crate::repositories::slots::MockSlotRepository;
+    use crate::repositories::{Repositories, StoreError};
+    use crate::test_support::*;
+
+    fn mocked() -> (
+        MockInstanceRepository,
+        MockSlotRepository,
+        MockActivityRepository,
+        MockDeletedVolumeRepository,
+        MockHostIdentityRepository,
+    ) {
+        (
+            MockInstanceRepository::new(),
+            MockSlotRepository::new(),
+            MockActivityRepository::new(),
+            MockDeletedVolumeRepository::new(),
+            MockHostIdentityRepository::new(),
+        )
+    }
+
+    fn bundle(
+        instances: MockInstanceRepository,
+        slots: MockSlotRepository,
+        activity: MockActivityRepository,
+        deleted_volumes: MockDeletedVolumeRepository,
+        identity: MockHostIdentityRepository,
+    ) -> Repositories {
+        Repositories {
+            instances: Arc::new(instances),
+            slots: Arc::new(slots),
+            activity: Arc::new(activity),
+            deleted_volumes: Arc::new(deleted_volumes),
+            identity: Arc::new(identity),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pass_writes_the_slots_before_the_records_that_depend_on_them() {
+        let order = Arc::new(AtomicUsize::new(0));
+        let (mut instances, mut slots, mut activity, mut deleted, identity) = mocked();
+
+        let at = order.clone();
+        let slots_written = Arc::new(AtomicUsize::new(usize::MAX));
+        let recorded = slots_written.clone();
+        slots.expect_replace_all().returning(move |_, _| {
+            recorded.store(at.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+            Ok(())
+        });
+        let at = order.clone();
+        let instances_written = Arc::new(AtomicUsize::new(usize::MAX));
+        let recorded = instances_written.clone();
+        instances.expect_replace_all().returning(move |_| {
+            recorded.store(at.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+            Ok(())
+        });
+        activity.expect_replace_all().returning(|_| Ok(()));
+        deleted.expect_replace_all().returning(|_| Ok(()));
+
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        host.persist().await;
+
+        assert!(
+            slots_written.load(Ordering::SeqCst) < instances_written.load(Ordering::SeqCst),
+            "a record written before its slot is one the next pass allocates a second slot for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_hands_every_repository_what_the_host_is_holding() {
+        let (mut instances, mut slots, mut activity, mut deleted, identity) = mocked();
+        instances
+            .expect_replace_all()
+            .times(1)
+            .withf(|records| records.len() == 1 && records[0].app_id == app_id())
+            .returning(|_| Ok(()));
+        slots
+            .expect_replace_all()
+            .times(1)
+            .withf(|assignments, cursor| assignments.get(&app_id()) == Some(&0) && *cursor == 1)
+            .returning(|_, _| Ok(()));
+        activity
+            .expect_replace_all()
+            .times(1)
+            .withf(|held| held.get(&app_id()) == Some(&77))
+            .returning(|_| Ok(()));
+        deleted
+            .expect_replace_all()
+            .times(1)
+            .withf(|held| held.contains_key(&volume_id()))
+            .returning(|_| Ok(()));
+
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state
+            .modify(|snapshot| {
+                snapshot.records = BTreeMap::from([(app_id(), instance_record(|_| {}))]);
+                snapshot.last_active_at_ms = BTreeMap::from([(app_id(), 77)]);
+                snapshot.deleted_volumes = BTreeMap::from([(volume_id(), reported_volume(|_| {}))]);
+            })
+            .await;
+        host.persist().await;
+    }
+
+    #[tokio::test]
+    async fn a_write_that_failed_leaves_the_host_running_rather_than_taking_it_down() {
+        let (mut instances, mut slots, activity, deleted, identity) = mocked();
+        slots
+            .expect_replace_all()
+            .returning(|_, _| Err(StoreError::Unwritable("the disk is full".into())));
+        instances.expect_replace_all().never();
+
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        host.persist().await;
+    }
+
+    #[tokio::test]
+    async fn what_was_written_down_is_what_the_host_comes_back_holding() {
+        let (mut instances, mut slots, mut activity, mut deleted, identity) = mocked();
+        instances
+            .expect_all()
+            .returning(|| Ok(vec![instance_record(|_| {})]));
+        slots
+            .expect_all()
+            .returning(|| Ok(BTreeMap::from([(app_id(), 4)])));
+        slots.expect_cursor().returning(|| Ok(5));
+        activity
+            .expect_all()
+            .returning(|| Ok(BTreeMap::from([(app_id(), 77)])));
+        deleted
+            .expect_all()
+            .returning(|| Ok(BTreeMap::from([(volume_id(), reported_volume(|_| {}))])));
+
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        host.load().await;
+
+        assert!(host.state.record(&app_id()).await.is_some());
+        assert_eq!(host.slot_of(&app_id()).await.map(|slot| slot.slot), Some(4));
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.last_active_at_ms.get(&app_id()), Some(&77));
+        assert!(snapshot.deleted_volumes.contains_key(&volume_id()));
+    }
+
+    #[tokio::test]
+    async fn a_host_whose_notes_will_not_be_read_comes_up_knowing_nothing_rather_than_not_at_all() {
+        let (mut instances, mut slots, mut activity, mut deleted, identity) = mocked();
+        let unreadable = || StoreError::Unreadable("the file is not a database".into());
+        instances.expect_all().returning(move || Err(unreadable()));
+        slots.expect_all().returning(move || Err(unreadable()));
+        slots.expect_cursor().returning(move || Err(unreadable()));
+        activity.expect_all().returning(move || Err(unreadable()));
+        deleted.expect_all().returning(move || Err(unreadable()));
+
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        host.load().await;
+        assert!(host.state.records().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_id_the_control_plane_assigned_is_written_once_and_read_back() {
+        let (instances, slots, activity, deleted, mut identity) = mocked();
+        identity
+            .expect_remember()
+            .times(1)
+            .withf(|host_id| host_id == "host-7")
+            .returning(|_| Ok(()));
+        identity
+            .expect_read()
+            .returning(|| Ok(Some("host-7".to_string())));
+
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        host.remember_host_id("host-7").await;
+        assert_eq!(
+            host.known_host_id().await.map(|held| held.as_str().to_string()),
+            Some("host-7".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_id_the_notes_cannot_hold_is_absent_rather_than_wrong() {
+        let (instances, slots, activity, deleted, mut identity) = mocked();
+        identity
+            .expect_read()
+            .returning(|| Ok(Some("not a host id".to_string())));
+
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        assert_eq!(host.known_host_id().await, None);
+    }
+
+    #[tokio::test]
+    async fn an_id_that_could_not_be_written_is_logged_rather_than_raised() {
+        let (instances, slots, activity, deleted, mut identity) = mocked();
+        identity
+            .expect_remember()
+            .returning(|_| Err(StoreError::Unwritable("read-only".into())));
+
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        host.remember_host_id("host-7").await;
     }
 }

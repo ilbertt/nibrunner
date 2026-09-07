@@ -44,10 +44,12 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         .map_err(|error| StartupError::Unusable(error.to_string()))?;
     let commands: Arc<dyn crate::ports::CommandRunner> = Arc::new(HostCommands);
     let state = HostState::shared();
-    let store = crate::repositories::open(&config.state_db_file())
-        .await
-        .map_err(|error| StartupError::Unusable(error.message()))?;
-    if let Err(error) = crate::repositories::import_documents(&store, &config).await {
+    let repositories = crate::repositories::Repositories::sqlite(
+        crate::repositories::open(&config.state_db_file())
+            .await
+            .map_err(|error| StartupError::Unusable(error.message()))?,
+    );
+    if let Err(error) = crate::repositories::import_documents(&repositories, &config).await {
         tracing::warn!(error = %error.message(), "what an earlier daemon wrote could not be carried over");
     }
     let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
@@ -119,7 +121,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
         state,
         allocator: allocator.clone(),
-        store,
+        repositories,
         exports,
         checkpoint_servers,
         nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),

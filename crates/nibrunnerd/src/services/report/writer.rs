@@ -11,15 +11,8 @@ use crate::services::report::capacity::{
 };
 
 pub async fn host_id_of(host: &Host) -> HostId {
-    let named = match host.store.acquire().await {
-        Ok(mut connection) => crate::repositories::host_identity::read(&mut connection)
-            .await
-            .ok()
-            .flatten(),
-        Err(_) => None,
-    };
-    named
-        .and_then(|value| HostId::parse(value).ok())
+    host.known_host_id()
+        .await
         .unwrap_or_else(|| HostId::parse("host-local").expect("a constant identifier"))
 }
 
@@ -112,16 +105,10 @@ mod tests {
     async fn a_host_with_no_id_of_its_own_still_has_one_to_report_under() {
         let host = test_host().await;
         assert_eq!(host_id_of(&host).await.as_str(), "host-local");
-        let mut connection = host.store.acquire().await.unwrap();
-        crate::repositories::host_identity::remember(&mut connection, "host-7")
-            .await
-            .unwrap();
+        host.remember_host_id("host-7").await;
         assert_eq!(host_id_of(&host).await.as_str(), "host-7");
 
-        crate::repositories::host_identity::remember(&mut connection, "host-9")
-            .await
-            .unwrap();
-        drop(connection);
+        host.remember_host_id("host-9").await;
         assert_eq!(host_id_of(&host).await.as_str(), "host-7");
     }
 

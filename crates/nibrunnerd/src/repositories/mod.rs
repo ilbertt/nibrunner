@@ -5,9 +5,16 @@ pub mod instances;
 pub mod slots;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
+
+use crate::repositories::activity::{ActivityRepository, SqliteActivity};
+use crate::repositories::deleted_volumes::{DeletedVolumeRepository, SqliteDeletedVolumes};
+use crate::repositories::host_identity::{HostIdentityRepository, SqliteHostIdentity};
+use crate::repositories::instances::{InstanceRepository, SqliteInstances};
+use crate::repositories::slots::{SlotRepository, SqliteSlots};
 
 const MAX_CONNECTIONS: u32 = 4;
 
@@ -32,6 +39,37 @@ impl StoreError {
 
     pub fn write(error: sqlx::Error) -> Self {
         Self::Unwritable(error.to_string())
+    }
+}
+
+pub struct Repositories {
+    pub instances: Arc<dyn InstanceRepository>,
+    pub slots: Arc<dyn SlotRepository>,
+    pub activity: Arc<dyn ActivityRepository>,
+    pub deleted_volumes: Arc<dyn DeletedVolumeRepository>,
+    pub identity: Arc<dyn HostIdentityRepository>,
+}
+
+impl Repositories {
+    pub fn sqlite(pool: SqlitePool) -> Self {
+        Self {
+            instances: Arc::new(SqliteInstances::new(pool.clone())),
+            slots: Arc::new(SqliteSlots::new(pool.clone())),
+            activity: Arc::new(SqliteActivity::new(pool.clone())),
+            deleted_volumes: Arc::new(SqliteDeletedVolumes::new(pool.clone())),
+            identity: Arc::new(SqliteHostIdentity::new(pool)),
+        }
+    }
+
+    pub async fn holds_nothing(&self) -> bool {
+        let slots = self.slots.all().await.map(|held| held.len()).unwrap_or_default();
+        let instances = self
+            .instances
+            .all()
+            .await
+            .map(|held| held.len())
+            .unwrap_or_default();
+        slots + instances == 0
     }
 }
 
@@ -94,17 +132,10 @@ pub async fn in_memory() -> SqlitePool {
 }
 
 pub async fn import_documents(
-    pool: &SqlitePool,
+    repositories: &Repositories,
     config: &crate::config::HostConfig,
 ) -> Result<(), StoreError> {
-    let mut connection = pool.acquire().await.map_err(StoreError::read)?;
-    let held: i64 = sqlx::query_scalar!(
-        "select (select count(*) from slots) + (select count(*) from instances) as \"held!: i64\""
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(StoreError::read)?;
-    if held > 0 {
+    if !repositories.holds_nothing().await {
         return Ok(());
     }
 
@@ -147,13 +178,10 @@ pub async fn import_documents(
         .map(|report| (report.volume_id.clone(), report))
         .collect();
 
-    let mut tx = pool.begin().await.map_err(StoreError::write)?;
-    instances::replace_all(&mut tx, &records).await?;
-    slots::replace_all(&mut tx, &assignments).await?;
-    slots::set_cursor(&mut tx, cursor).await?;
-    activity::replace_all(&mut tx, &last_active).await?;
-    deleted_volumes::replace_all(&mut tx, &deleted).await?;
-    tx.commit().await.map_err(StoreError::write)?;
+    repositories.slots.replace_all(&assignments, cursor).await?;
+    repositories.instances.replace_all(&records).await?;
+    repositories.activity.replace_all(&last_active).await?;
+    repositories.deleted_volumes.replace_all(&deleted).await?;
     tracing::info!(
         instances = records.len(),
         slots = assignments.len(),
@@ -194,25 +222,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pass_that_did_not_finish_leaves_nothing_behind() {
-        let pool = in_memory().await;
-        let app_id = protocol::AppId::parse("app-1").unwrap();
-
-        let mut tx = pool.begin().await.unwrap();
-        instances::replace_all(&mut tx, &[crate::test_support::instance_record(|_| {})])
-            .await
-            .unwrap();
-        slots::replace_all(&mut tx, &std::collections::BTreeMap::from([(app_id, 0)]))
-            .await
-            .unwrap();
-        drop(tx);
-
-        let mut connection = pool.acquire().await.unwrap();
-        assert!(instances::all(&mut connection).await.unwrap().is_empty());
-        assert!(slots::all(&mut connection).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
     async fn opening_a_database_that_already_exists_is_a_restart_and_not_an_error() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.db");
@@ -223,11 +232,76 @@ mod tests {
             .unwrap();
         first.close().await;
 
-        let second = open(&path).await.unwrap();
-        let held: i64 = sqlx::query_scalar("select count(*) from slots")
-            .fetch_one(&second)
+        let second = Repositories::sqlite(open(&path).await.unwrap());
+        assert_eq!(second.slots.all().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_host_that_has_written_nothing_holds_nothing() {
+        let repositories = Repositories::sqlite(in_memory().await);
+        assert!(repositories.holds_nothing().await);
+        repositories
+            .instances
+            .replace_all(&[crate::test_support::instance_record(|_| {})])
             .await
             .unwrap();
-        assert_eq!(held, 1, "what the first daemon wrote is what the second finds");
+        assert!(!repositories.holds_nothing().await);
+    }
+
+    #[tokio::test]
+    async fn a_slot_an_older_daemon_allocated_is_carried_over_rather_than_reissued() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::config::HostConfig::under(directory.path());
+        crate::json_store::write_json(&config.slots_file(), &serde_json::json!({ "app-1": 3 })).unwrap();
+        crate::json_store::write_json(&config.slot_cursor_file(), &serde_json::json!(4)).unwrap();
+
+        let repositories = Repositories::sqlite(in_memory().await);
+        import_documents(&repositories, &config).await.unwrap();
+        assert_eq!(
+            repositories
+                .slots
+                .all()
+                .await
+                .unwrap()
+                .get(&crate::test_support::app_id()),
+            Some(&3)
+        );
+        assert_eq!(repositories.slots.cursor().await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_database_that_already_holds_something_is_never_written_over_by_an_import() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::config::HostConfig::under(directory.path());
+        crate::json_store::write_json(&config.slots_file(), &serde_json::json!({ "app-1": 3 })).unwrap();
+
+        let repositories = Repositories::sqlite(in_memory().await);
+        repositories
+            .slots
+            .replace_all(
+                &std::collections::BTreeMap::from([(crate::test_support::app_id(), 7)]),
+                8,
+            )
+            .await
+            .unwrap();
+        import_documents(&repositories, &config).await.unwrap();
+        assert_eq!(
+            repositories
+                .slots
+                .all()
+                .await
+                .unwrap()
+                .get(&crate::test_support::app_id()),
+            Some(&7)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_with_no_documents_to_carry_over_imports_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::config::HostConfig::under(directory.path());
+        let repositories = Repositories::sqlite(in_memory().await);
+        import_documents(&repositories, &config).await.unwrap();
+        assert!(repositories.holds_nothing().await);
     }
 }

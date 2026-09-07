@@ -371,21 +371,8 @@ mod tests {
                 .port_for(app_hostname().hostname.as_str()),
             Some(record.host_port)
         );
-        let mut connection = host.store.acquire().await.unwrap();
-        assert_eq!(
-            crate::repositories::instances::all(&mut connection)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            crate::repositories::slots::all(&mut connection)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(host.repositories.instances.all().await.unwrap().len(), 1);
+        assert_eq!(host.repositories.slots.all().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
