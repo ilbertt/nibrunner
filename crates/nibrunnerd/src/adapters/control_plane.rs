@@ -9,7 +9,6 @@
 //! not here is a session that renews and a report that goes back — the seams are named so that
 //! adding them is this file and nothing else.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use protocol::{
@@ -187,32 +186,31 @@ pub struct HostIdentity {
     pub capacity: HostCapacity,
 }
 
-/// The addon: poll, and write what came back into the file the daemon watches. Deliberately not
-/// wired into the daemon's own loop — a host runs this beside it or not at all.
-pub struct DesiredStatePoller {
-    pub client: ControlPlaneClient,
-    pub desired_state_file: PathBuf,
-}
-
-impl DesiredStatePoller {
-    /// One poll. The write is what the daemon reacts to, so a poll that changed nothing costs a
-    /// comparison and no reconcile.
-    pub async fn poll_once(&self, session_token: &protocol::SecretString) -> Result<bool, ControlPlaneError> {
-        let desired = self.client.fetch_desired_state(session_token).await?;
-        let held = crate::desired::read_desired_state(&self.desired_state_file)
-            .ok()
-            .flatten();
-        if held.as_ref() == Some(&desired) {
-            return Ok(false);
-        }
-        crate::desired::cache_desired_state(&self.desired_state_file, &desired).map_err(|error| {
-            ControlPlaneError::Unreachable {
-                route: "the desired state file".into(),
-                reason: error.message(),
-            }
-        })?;
-        Ok(true)
+/// One poll, and the write is what the daemon reacts to — so a poll that changed nothing costs a
+/// comparison and no reconcile.
+///
+/// Writing the file rather than handing the document straight to the reconciler is what keeps the
+/// addon an addon: the reconciler has one source, and a host that loses its control plane goes on
+/// converging on the last document it was given rather than on nothing.
+pub async fn poll_once(
+    client: &ControlPlaneClient,
+    desired_state_file: &std::path::Path,
+    session_token: &protocol::SecretString,
+) -> Result<bool, ControlPlaneError> {
+    let desired = client.fetch_desired_state(session_token).await?;
+    let held = crate::desired::read_desired_state(desired_state_file)
+        .ok()
+        .flatten();
+    if held.as_ref() == Some(&desired) {
+        return Ok(false);
     }
+    crate::desired::cache_desired_state(desired_state_file, &desired).map_err(|error| {
+        ControlPlaneError::Unreachable {
+            route: "the desired state file".into(),
+            reason: error.message(),
+        }
+    })?;
+    Ok(true)
 }
 
 #[cfg(test)]

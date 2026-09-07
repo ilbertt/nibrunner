@@ -54,11 +54,28 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
     nibrunnerd::services::reconcile::network::apply_activators(&host).await;
     run::serve_proxy(&host);
 
-    let loops = vec![
+    let mut loops = vec![
         tokio::spawn(nibrunnerd::controllers::converge_loop(host.clone())),
         tokio::spawn(nibrunnerd::controllers::status_loop(host.clone())),
         tokio::spawn(nibrunnerd::controllers::measurement_loop(host.clone())),
     ];
+    // Only where this host was given one to talk to. A host that was not runs on the file alone,
+    // which is the ordinary single-machine case — and the reconciler has exactly one source either
+    // way, because what these write is that same file.
+    if let Some(url) = host.config.control_plane_url.clone() {
+        let sessions = std::sync::Arc::new(nibrunnerd::services::control_plane::SessionHolder::new(
+            nibrunnerd::adapters::control_plane::ControlPlaneClient::new(url.clone()),
+        ));
+        tracing::info!(control_plane = %url, "this host will register and poll");
+        loops.push(tokio::spawn(nibrunnerd::controllers::control_plane_loop(
+            host.clone(),
+            sessions.clone(),
+        )));
+        loops.push(tokio::spawn(nibrunnerd::controllers::filesystem_loop(
+            host.clone(),
+            sessions,
+        )));
+    }
 
     shutdown().await;
     tracing::info!("nibrunnerd stopping; every microVM on this host keeps running");

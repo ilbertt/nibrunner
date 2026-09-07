@@ -58,6 +58,24 @@ pub async fn answer(host: &Host, query: &FilesystemQuery) -> FilesystemQueryResu
     }
 }
 
+/// Everything one guest can be asked about itself, on one connection.
+///
+/// One connection per app per sweep rather than one per question: each costs the guest a forked
+/// worker, and that is a cost the tenant pays. Either half may be missing while the other arrived
+/// — they are two exchanges, and a guest whose image predates one of the verbs refuses that one
+/// and answers the other.
+pub async fn measure(host: &Host, app_id: &AppId) -> crate::services::usage::GuestReading {
+    let Ok(mut guest) = GuestFilesystem::dial(app_id, &guest_vsock_path(host, app_id)).await else {
+        // Not an error worth a line at info: an app that is asleep or stopped has no guest to ask,
+        // and on a host of `on-request` apps that is most of them most of the time.
+        return crate::services::usage::GuestReading::default();
+    };
+    crate::services::usage::GuestReading {
+        filesystem: guest.usage().await.ok(),
+        compute: guest.compute().await.ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

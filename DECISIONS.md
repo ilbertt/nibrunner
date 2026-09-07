@@ -188,6 +188,10 @@ shipping the tool to read it back that this project deliberately does not have.
   Exports are a checkpoint server started per checkpoint, an NBD attach against it and a read of
   the filesystem it pins — the attach half is written (`NbdDevices::attach_checkpoint`), the
   server and the reader are not.
+- **Usage history.** Each reading replaces the last, so the report says what a tenant is holding
+  now and nothing about what it held yesterday. The raw CPU counters are kept only long enough to
+  turn the next pair into a share. A table would be the place for history, and `state.db` is now
+  the place for a table.
 - **Writing through the filesystem browse.** The client carries every verb the guest speaks —
   `stat`, `read`, `write`, `mkdir`, `remove`, `move`, `usage`, `compute` — and the control plane
   only ever asks for a listing, so the rest are reachable and untested against a real guest.

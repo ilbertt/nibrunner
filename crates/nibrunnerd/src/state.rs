@@ -38,6 +38,9 @@ pub struct HostSnapshot {
     pub last_active_at_ms: BTreeMap<AppId, i64>,
     pub volume_usage: BTreeMap<AppId, FilesystemUsage>,
     pub compute_usage: BTreeMap<AppId, ComputeUsage>,
+    /// The raw counters behind the share above, kept only so the next reading has an interval to
+    /// divide by. Never reported: cumulative ticks mean nothing to whoever reads them.
+    pub compute_ticks: BTreeMap<AppId, guest_contract::filesystem::MeasuredCompute>,
     pub converged: bool,
     /// Whether the last reconcile deferred something, and so whether re-running it would do
     /// anything.

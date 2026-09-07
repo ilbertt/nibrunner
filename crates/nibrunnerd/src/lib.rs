@@ -31,7 +31,6 @@
 pub mod adapters;
 pub mod clock;
 pub mod config;
-pub mod control;
 pub mod controllers;
 pub mod desired;
 pub mod host;

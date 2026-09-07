@@ -6,6 +6,7 @@
 //! door, which is why swapping any of these for a recording double leaves the reasoning intact.
 
 pub mod artifact_store;
+pub mod control_plane;
 pub mod exec;
 pub mod logs;
 pub mod net;

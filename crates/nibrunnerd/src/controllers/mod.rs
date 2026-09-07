@@ -14,6 +14,7 @@ use std::time::Duration;
 use crate::desired::DesiredStateWatch;
 use crate::host::Host;
 use crate::run::host_versions;
+use crate::services::control_plane::SessionHolder;
 
 /// One tick of the status loop on a host where nothing is settling. A probe cannot land sooner
 /// than the tick that runs it, so the two share one cadence.
@@ -107,5 +108,68 @@ pub async fn measurement_loop(host: Arc<Host>) {
         tokio::time::sleep(MEASUREMENT_INTERVAL).await;
         crate::services::reconcile::idle::record_activity(&host).await;
         crate::services::reconcile::idle::apply_sleep(&host).await;
+        // After the sleep and not before it, so an app that has just been let go is measured as
+        // the asleep app it now is rather than reported spending what it spent on the way down.
+        crate::services::usage::measure(&host).await;
+    }
+}
+
+/// A floor under one poll rather than a pause between two.
+///
+/// On the path that matters nothing is left to wait out: the control plane holds an idle request
+/// open until a read arrives, so a poll that came back with nothing has already spent longer than
+/// this and asks again at once. What the floor is for is a control plane that answers "none" the
+/// instant it is asked — which is what one deployed before the hold does, and one of those stands
+/// in front of this daemon for the length of every rollout. Without it the two would spin against
+/// each other as fast as the link allows.
+///
+/// Reading back to back still cannot run away: a query exists only while its caller waits, so
+/// demand bounds the rate and demand stops when people stop asking.
+const IDLE_POLL_FLOOR: Duration = Duration::from_secs(5);
+
+/// How long this host waits before asking a control plane that would not answer at all.
+const CONTROL_PLANE_BACKOFF: Duration = Duration::from_secs(15);
+
+/// Polls the control plane and writes what comes back into the file the converge loop watches.
+///
+/// Started only where a host was given a control plane to talk to. One that was not runs on the
+/// file alone, which is the ordinary single-machine case and the reason the reconciler has exactly
+/// one source either way.
+pub async fn control_plane_loop(host: Arc<Host>, sessions: Arc<SessionHolder>) {
+    loop {
+        match crate::services::control_plane::poll_desired_state(&host, &sessions).await {
+            Ok(true) => tracing::info!("the control plane gave this host a new document"),
+            Ok(false) => {}
+            Err(error) => {
+                sessions.note(&error).await;
+                tracing::warn!(error = %error.message(), "the control plane could not be polled");
+                tokio::time::sleep(CONTROL_PLANE_BACKOFF).await;
+            }
+        }
+        tokio::time::sleep(IDLE_POLL_FLOOR).await;
+    }
+}
+
+/// Collects one read of a tenant's files at a time and answers it.
+///
+/// Deliberately not part of the reconcile. A read observes the host without changing it, so a slow
+/// device delays the person waiting on it and nothing else — where a backlog of reads inside the
+/// pass could hold up a stop. Nor may the request this loop spends most of its life parked on.
+pub async fn filesystem_loop(host: Arc<Host>, sessions: Arc<SessionHolder>) {
+    loop {
+        let started = tokio::time::Instant::now();
+        match crate::services::control_plane::answer_one_query(&host, &sessions).await {
+            Ok(Some(query)) => {
+                tracing::info!(query_id = %query.query_id, app_id = %query.app_id, "a read was answered")
+            }
+            // Nothing was waiting. The control plane held the request open for as long as it had
+            // nothing to give, so what is left of the floor is usually nothing at all.
+            Ok(None) => tokio::time::sleep(IDLE_POLL_FLOOR.saturating_sub(started.elapsed())).await,
+            Err(error) => {
+                sessions.note(&error).await;
+                tracing::warn!(error = %error.message(), "a read could not be collected");
+                tokio::time::sleep(CONTROL_PLANE_BACKOFF).await;
+            }
+        }
     }
 }

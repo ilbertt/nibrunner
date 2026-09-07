@@ -121,6 +121,22 @@ while an operator is still watching rather than on the pass that first needed th
 | `exports.store_url` | `<state>/export-store` | Where a finished bundle goes |
 | `exports.staging_dir` | `<state>/exports` | Where one is assembled, and removed after |
 
+### The loops
+
+Three on every host, and two more where one is given a control plane:
+
+| Loop | What it does |
+| --- | --- |
+| converge | Watches the document and runs a reconcile pass when it moves |
+| status | Probes health, applies the ruleset and the routes, writes `reported.json` |
+| measurement | Records activity, lets quiet apps sleep, then measures every guest |
+| control plane | Polls for a document and writes it into the file the converge loop watches |
+| filesystem | Collects one read of a tenant's files at a time and answers it |
+
+The last two start only when `control_plane.url` is set. A host without one runs on the file
+alone, and the reconciler has exactly one source either way — because what the control-plane loop
+writes *is* that file.
+
 `NIBRUNNER_LOG` is still an environment variable, and the only one besides `NIBRUNNER_CONFIG`: it
 is a `tracing` filter an operator changes to debug one restart, not a property of the host.
 

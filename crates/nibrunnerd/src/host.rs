@@ -79,6 +79,26 @@ impl Host {
     /// as running with no slot recorded for it, and the next pass made that worse by allocating a
     /// second slot for the same app — a tenant's port moving because the power went out at the
     /// wrong moment.
+    /// The id the control plane assigned, if it ever has. Absent on a host's very first
+    /// registration, which is what tells the control plane to assign one.
+    pub async fn known_host_id(&self) -> Option<protocol::HostId> {
+        let mut connection = self.store.acquire().await.ok()?;
+        let held = crate::repositories::host_identity::read(&mut connection)
+            .await
+            .ok()??;
+        protocol::HostId::parse(held).ok()
+    }
+
+    /// Written once and never overwritten, so a reinstalled host rejoins as the same host.
+    pub async fn remember_host_id(&self, host_id: &str) {
+        let Ok(mut connection) = self.store.acquire().await else {
+            return;
+        };
+        if let Err(error) = crate::repositories::host_identity::remember(&mut connection, host_id).await {
+            tracing::warn!(error = %error.message(), "this host could not write down the id it registered under");
+        }
+    }
+
     pub async fn persist(&self) {
         if let Err(error) = self.write_down().await {
             tracing::warn!(error = %error.message(), "this host could not write down what it is running");
