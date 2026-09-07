@@ -66,7 +66,6 @@ flate2 = "1"
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "process", "sync", "time", "signal"] }
-tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 bytes = "1"
 tracing = "0.1"
@@ -85,7 +84,6 @@ object_store = { version = "0.14", default-features = false, features = ["fs", "
 # backend is chosen here. `rustls-no-provider` keeps aws-lc-rs out; `main` installs ring's
 # provider before anything dials, because rustls refuses to pick one for itself.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "http2", "json"] }
-slatedb = { version = "0.16", default-features = false, features = ["moka"] }
 backhand = { version = "0.25", default-features = false, features = ["gzip"] }
 sha2 = "0.10"
 hex = "0.4"
@@ -93,8 +91,6 @@ libc = "0.2"
 nix = { version = "0.30", features = ["inotify", "ioctl", "signal", "process", "fs", "socket", "net"] }
 rtnetlink = { version = "0.23", default-features = false, features = ["tokio_socket"] }
 netlink-packet-route = "0.33"
-nbd-netlink = "0.3"
-clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 
