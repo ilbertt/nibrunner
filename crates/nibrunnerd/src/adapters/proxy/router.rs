@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use crate::adapters::proxy::forward::{forward, hostname_of, say, ProxyBody};
-use crate::services::report::routes::RouteTarget;
+use crate::domain::report::routes::RouteTarget;
 
 const LOOPBACK: &str = "127.0.0.1";
 
@@ -158,7 +158,7 @@ pub fn tls_acceptor(certificate: &Path, key: &Path) -> std::io::Result<tokio_rus
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::report::routes::renderable_routes;
+    use crate::domain::report::routes::renderable_routes;
     use crate::test_support::{app_hostname, instance_record};
     use protocol::{AppHostname, AppHostnameKind, Hostname};
 

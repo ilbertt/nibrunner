@@ -6,10 +6,10 @@ use std::sync::Arc;
 use protocol::*;
 use tokio::sync::Mutex;
 
-use crate::services::backoff::NO_START_ATTEMPTS;
-use crate::services::health::initial_tracker;
-use crate::services::reconcile::plan::{ObservedInstance, ObservedState, ObservedVolume};
-use crate::services::report::instance_record::{InstanceRecord, RecordFields};
+use crate::domain::backoff::NO_START_ATTEMPTS;
+use crate::domain::health::initial_tracker;
+use crate::domain::reconcile::plan::{ObservedInstance, ObservedState, ObservedVolume};
+use crate::domain::report::instance_record::{InstanceRecord, RecordFields};
 
 pub const VOLUME_SIZE_BYTES: u64 = 4_096;
 pub const OBSERVED_AT: &str = "2026-08-03T10:00:00.000Z";
@@ -251,7 +251,7 @@ impl TestHost {
 
 pub async fn test_host() -> TestHost {
     test_host_with(crate::repositories::Repositories::sqlite(
-        crate::repositories::in_memory().await,
+        crate::domain::store::in_memory().await,
     ))
     .await
 }

@@ -1,9 +1,7 @@
-pub mod backoff;
-pub mod control_plane;
-pub mod exports;
-pub mod filesystem;
-pub mod health;
-pub mod reconcile;
-pub mod report;
-pub mod usage;
-pub mod waker;
+pub mod control_plane_service;
+pub mod filesystem_service;
+pub mod idle_service;
+pub mod reconcile_service;
+pub mod report_service;
+pub mod usage_service;
+pub mod waker_service;

@@ -1,6 +1,5 @@
-use std::sync::Arc;
-
 use nibrunnerd::config::HostConfig;
+use nibrunnerd::controllers::lifecycle_controller::LifecycleController;
 use nibrunnerd::run;
 
 fn main() -> std::process::ExitCode {
@@ -41,48 +40,24 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
         "nibrunnerd starting"
     );
 
-    host.load().await;
-    let adopted = host.vms.adopted_app_ids().await;
-    if !adopted.is_empty() {
-        tracing::info!(adopted = adopted.len(), "microVMs from an earlier daemon adopted");
-    }
-    nibrunnerd::services::reconcile::network::apply_activators(&host).await;
-    run::serve_proxy(&host);
-
-    let host_loops = nibrunnerd::controllers::HostLoops::on(&host, run::host_versions(&host));
-    let mut loops = vec![
-        tokio::spawn(host_loops.clone().converge_loop()),
-        tokio::spawn(host_loops.clone().status_loop()),
-        tokio::spawn(host_loops.measurement_loop()),
-    ];
-    if let Some(url) = host.config.control_plane_url.clone() {
-        let sessions = Arc::new(nibrunnerd::services::control_plane::SessionHolder::new(
-            nibrunnerd::adapters::control_plane::ControlPlaneClient::new(url.clone()),
-        ));
-        tracing::info!(control_plane = %url, "this host will register and poll");
-        let control_plane = nibrunnerd::controllers::ControlPlaneLoops::on(
-            nibrunnerd::services::control_plane::RemoteControlPlane::new(host.clone(), sessions),
-        );
-        loops.push(tokio::spawn(control_plane.clone().poll_loop()));
-        loops.push(tokio::spawn(control_plane.answer_loop()));
-    }
+    let lifecycle = LifecycleController::new(host.clone(), run::host_versions(&host));
+    lifecycle.start().await;
+    let running: Vec<_> = lifecycle
+        .controllers()
+        .into_iter()
+        .map(|controller| {
+            tracing::info!(controller = controller.name(), "controller started");
+            tokio::spawn(async move { controller.run().await })
+        })
+        .collect();
 
     shutdown().await;
     tracing::info!("nibrunnerd stopping; every microVM on this host keeps running");
-    for task in loops {
+    for task in running {
         task.abort();
     }
-    persist_on_the_way_out(&host).await;
+    lifecycle.stop().await;
     std::process::ExitCode::SUCCESS
-}
-
-async fn persist_on_the_way_out(host: &Arc<nibrunnerd::host::Host>) {
-    host.persist().await;
-    let report = nibrunnerd::services::report::writer::build(host, run::host_versions(host)).await;
-    nibrunnerd::services::report::writer::write(
-        &nibrunnerd::services::report::writer::reported_state_file(host),
-        &report,
-    );
 }
 
 #[cfg(unix)]

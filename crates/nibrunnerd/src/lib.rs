@@ -8,6 +8,7 @@ pub mod clock;
 pub mod config;
 pub mod controllers;
 pub mod desired;
+pub mod domain;
 pub mod host;
 pub mod json_store;
 pub mod ports;

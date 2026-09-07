@@ -209,6 +209,23 @@ the cache will take back kills tenants.
 | `crates/init` | The guest's PID 1: mounts, config, supervision, and the three vsock channels |
 | `guest/` | `vmlinux` and `rootfs.ext4`, copied from nibrun with their manifest |
 
+### Inside `crates/nibrunnerd`
+
+| Folder | What may live there |
+| --- | --- |
+| `controllers/` | `*_controller.rs` only. One per loop, plus `lifecycle_controller.rs` for start and stop. Each is a trait, its implementation and its tests. |
+| `services/` | `*_service.rs` only. Same rule: trait, implementation, tests. |
+| `repositories/` | `*_repository.rs` only. Same rule. One per table. |
+| `domain/` | Everything the three layers above reason with: the planner, the health machine, the backoff, the report builder, the export and browse code, the SQLite pool. |
+| `adapters/` | What fills the ports on a real machine. |
+| `ports.rs` | The outbound traits. |
+
+`main.rs` is a composition of controllers and nothing else: build the host, `lifecycle.start()`, spawn every controller `lifecycle.controllers()` hands back, wait for a signal, `lifecycle.stop()`. Anything it used to do itself — loading the host, adopting microVMs, binding the activators, serving the proxy, writing the last report — is in `lifecycle_controller.rs`.
+
+The folder is `domain/` rather than `lib/` because rustc refuses a module named `lib` beside a crate root called `lib.rs` (E0761, plus a `special_module_name` warning).
+
+Each loop splits into a `*_once` that does one pass and a `run` that owns the timing, so what a loop decides is a unit test and the `loop {}` around it carries no logic.
+
 ## Testing
 
 ```bash

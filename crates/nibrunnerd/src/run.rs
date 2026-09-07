@@ -19,10 +19,10 @@ use crate::adapters::volumes::local_file::LocalFileVolumes;
 use crate::adapters::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
 use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
+use crate::domain::exports::reader::CheckpointServers;
+use crate::domain::report::capacity::{guest_memory_mib, read_host_memory_mib};
 use crate::host::Host;
-use crate::services::exports::reader::CheckpointServers;
-use crate::services::report::capacity::{guest_memory_mib, read_host_memory_mib};
-use crate::services::waker::AppWaker;
+use crate::services::waker_service::AppWaker;
 use crate::state::HostState;
 
 #[derive(Debug, thiserror::Error)]
@@ -45,11 +45,11 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     let commands: Arc<dyn crate::ports::CommandRunner> = Arc::new(HostCommands);
     let state = HostState::shared();
     let repositories = crate::repositories::Repositories::sqlite(
-        crate::repositories::open(&config.state_db_file())
+        crate::domain::store::open(&config.state_db_file())
             .await
             .map_err(|error| StartupError::Unusable(error.message()))?,
     );
-    if let Err(error) = crate::repositories::import_documents(&repositories, &config).await {
+    if let Err(error) = crate::domain::store::import::import_documents(&repositories, &config).await {
         tracing::warn!(error = %error.message(), "what an earlier daemon wrote could not be carried over");
     }
     let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
@@ -106,12 +106,12 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         }),
     );
 
-    let exports: Arc<dyn crate::services::exports::store::ExportStore> = Arc::new(
-        crate::services::exports::store::ObjectExportStore::open(&config.export_store_url)
+    let exports: Arc<dyn crate::domain::exports::store::ExportStore> = Arc::new(
+        crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
     );
     let checkpoint_servers = config.zerofs.as_ref().map(|settings| CheckpointServers {
-        ready_timeout: crate::services::exports::reader::DEFAULT_READY_TIMEOUT,
+        ready_timeout: crate::domain::exports::reader::DEFAULT_READY_TIMEOUT,
         binary: settings.binary.clone(),
         config_file: settings.checkpoint_config_file.clone(),
         runtime_dir: settings.checkpoint_runtime_dir.clone(),
@@ -174,8 +174,8 @@ fn open_network() -> Result<Arc<dyn HostNetwork>, StartupError> {
 }
 
 pub fn host_versions(host: &Host) -> HostVersions {
-    crate::services::report::versions::read_host_versions(&host.config.versions_file).unwrap_or_else(|_| {
-        crate::services::report::versions::compiled_versions(
+    crate::domain::report::versions::read_host_versions(&host.config.versions_file).unwrap_or_else(|_| {
+        crate::domain::report::versions::compiled_versions(
             FIRECRACKER_VERSION,
             &read_guest_image_version(&host.config.guest_image_dir),
         )
@@ -210,7 +210,9 @@ pub fn serve_proxy(host: &Arc<Host>) {
 
 #[cfg(test)]
 mod tests {
-    use super::host_versions;
+    use crate::controllers::converge_controller::ConvergeController;
+    use crate::controllers::Controller;
+    use crate::services::reconcile_service::HostReconciler;
     use crate::test_support::*;
     use std::time::Duration;
 
@@ -223,8 +225,8 @@ mod tests {
         });
         crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
 
-        let converging =
-            tokio::spawn(crate::controllers::HostLoops::on(host.arc(), host_versions(&host)).converge_loop());
+        let controller = ConvergeController::new(host.arc().clone(), HostReconciler::new(host.arc().clone()));
+        let converging = tokio::spawn(async move { controller.run().await });
         for _ in 0..200 {
             if host.state.record(&app_id()).await.is_some() {
                 break;
@@ -241,8 +243,8 @@ mod tests {
     #[tokio::test]
     async fn a_missing_document_is_the_ordinary_state_of_a_fresh_host() {
         let host = test_host().await;
-        let converging =
-            tokio::spawn(crate::controllers::HostLoops::on(host.arc(), host_versions(&host)).converge_loop());
+        let controller = ConvergeController::new(host.arc().clone(), HostReconciler::new(host.arc().clone()));
+        let converging = tokio::spawn(async move { controller.run().await });
         tokio::time::sleep(Duration::from_millis(100)).await;
         converging.abort();
         assert!(host.state.records().await.is_empty());

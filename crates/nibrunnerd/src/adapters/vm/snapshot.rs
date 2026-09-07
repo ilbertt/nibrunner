@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use protocol::{AppId, DeploymentId};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::report::capacity::FilesystemSpace;
 use crate::json_store::read_json;
 use crate::ports::VmError;
-use crate::services::report::capacity::FilesystemSpace;
 
 pub const SNAPSHOT_STATE_FILENAME: &str = "vmstate";
 pub const SNAPSHOT_MEMORY_FILENAME: &str = "memory";
@@ -148,7 +148,7 @@ pub fn measure_snapshot_disk(snapshot_dir: &Path, cache_bytes: u64) -> std::io::
     let FilesystemSpace {
         total_bytes,
         available_bytes,
-    } = crate::services::report::capacity::read_filesystem_space(snapshot_dir)?;
+    } = crate::domain::report::capacity::read_filesystem_space(snapshot_dir)?;
     Ok(SnapshotDisk {
         total_bytes,
         available_bytes,

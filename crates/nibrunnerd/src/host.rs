@@ -11,9 +11,9 @@ use crate::adapters::volumes::nbd::NbdDevices;
 use crate::adapters::volumes::VolumeBackend;
 use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
+use crate::domain::exports::reader::CheckpointServers;
+use crate::domain::exports::store::ExportStore;
 use crate::ports::{ArtifactStore, CommandRunner, Vmm};
-use crate::services::exports::reader::CheckpointServers;
-use crate::services::exports::store::ExportStore;
 use crate::state::SharedState;
 
 pub struct Host {
@@ -68,7 +68,7 @@ impl Host {
         }
     }
 
-    async fn write_down(&self) -> Result<(), crate::repositories::StoreError> {
+    async fn write_down(&self) -> Result<(), crate::domain::store::StoreError> {
         let snapshot = self.state.snapshot().await;
         let records: Vec<_> = snapshot.records.values().cloned().collect();
         let (assignments, cursor) = {
@@ -127,12 +127,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use crate::repositories::activity::MockActivityRepository;
-    use crate::repositories::deleted_volumes::MockDeletedVolumeRepository;
-    use crate::repositories::host_identity::MockHostIdentityRepository;
-    use crate::repositories::instances::MockInstanceRepository;
-    use crate::repositories::slots::MockSlotRepository;
-    use crate::repositories::{Repositories, StoreError};
+    use crate::domain::store::StoreError;
+    use crate::repositories::activity_repository::MockActivityRepository;
+    use crate::repositories::deleted_volumes_repository::MockDeletedVolumeRepository;
+    use crate::repositories::host_identity_repository::MockHostIdentityRepository;
+    use crate::repositories::instances_repository::MockInstanceRepository;
+    use crate::repositories::slots_repository::MockSlotRepository;
+    use crate::repositories::Repositories;
     use crate::test_support::*;
 
     fn mocked() -> (

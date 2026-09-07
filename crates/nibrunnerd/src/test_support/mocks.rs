@@ -6,11 +6,11 @@ use protocol::{AppId, ObjectKey};
 
 use crate::adapters::net::tap::{MockHostNetwork, Neighbour, NetworkError, TapInterface};
 use crate::adapters::vm::VmStatus;
+use crate::domain::exports::store::{ExportStoreError, MockExportStore};
 use crate::ports::{
     ArtifactError, CommandError, CommandRequest, CommandResult, MockArtifactStore, MockCommandRunner,
     MockLogSink, MockVmm, TenantLogEvent, VmCall, VmError,
 };
-use crate::services::exports::store::{ExportStoreError, MockExportStore};
 
 fn shared<T>(value: T) -> Arc<Mutex<T>> {
     Arc::new(Mutex::new(value))
