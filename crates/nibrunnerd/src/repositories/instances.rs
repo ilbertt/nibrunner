@@ -85,7 +85,10 @@ mod tests {
     async fn what_was_written_is_what_comes_back() {
         let instances = repository().await;
         let record = instance_record(|_| {});
-        instances.replace_all(&[record.clone()]).await.unwrap();
+        instances
+            .replace_all(std::slice::from_ref(&record))
+            .await
+            .unwrap();
         assert_eq!(instances.all().await.unwrap(), vec![record]);
     }
 
@@ -105,7 +108,10 @@ mod tests {
             .replace_all(&[first.clone(), second.clone()])
             .await
             .unwrap();
-        instances.replace_all(&[second.clone()]).await.unwrap();
+        instances
+            .replace_all(std::slice::from_ref(&second))
+            .await
+            .unwrap();
         assert_eq!(instances.all().await.unwrap(), vec![second]);
     }
 

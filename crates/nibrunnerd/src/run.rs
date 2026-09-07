@@ -209,6 +209,7 @@ pub fn serve_proxy(host: &Arc<Host>) {
 
 #[cfg(test)]
 mod tests {
+    use super::host_versions;
     use crate::test_support::*;
     use std::time::Duration;
 
@@ -221,7 +222,8 @@ mod tests {
         });
         crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
 
-        let converging = tokio::spawn(crate::controllers::converge_loop(host.arc().clone()));
+        let converging =
+            tokio::spawn(crate::controllers::HostLoops::on(host.arc(), host_versions(&host)).converge_loop());
         for _ in 0..200 {
             if host.state.record(&app_id()).await.is_some() {
                 break;
@@ -238,7 +240,8 @@ mod tests {
     #[tokio::test]
     async fn a_missing_document_is_the_ordinary_state_of_a_fresh_host() {
         let host = test_host().await;
-        let converging = tokio::spawn(crate::controllers::converge_loop(host.arc().clone()));
+        let converging =
+            tokio::spawn(crate::controllers::HostLoops::on(host.arc(), host_versions(&host)).converge_loop());
         tokio::time::sleep(Duration::from_millis(100)).await;
         converging.abort();
         assert!(host.state.records().await.is_empty());

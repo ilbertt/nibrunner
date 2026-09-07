@@ -49,24 +49,22 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
     nibrunnerd::services::reconcile::network::apply_activators(&host).await;
     run::serve_proxy(&host);
 
+    let host_loops = nibrunnerd::controllers::HostLoops::on(&host, run::host_versions(&host));
     let mut loops = vec![
-        tokio::spawn(nibrunnerd::controllers::converge_loop(host.clone())),
-        tokio::spawn(nibrunnerd::controllers::status_loop(host.clone())),
-        tokio::spawn(nibrunnerd::controllers::measurement_loop(host.clone())),
+        tokio::spawn(host_loops.clone().converge_loop()),
+        tokio::spawn(host_loops.clone().status_loop()),
+        tokio::spawn(host_loops.measurement_loop()),
     ];
     if let Some(url) = host.config.control_plane_url.clone() {
-        let sessions = std::sync::Arc::new(nibrunnerd::services::control_plane::SessionHolder::new(
+        let sessions = Arc::new(nibrunnerd::services::control_plane::SessionHolder::new(
             nibrunnerd::adapters::control_plane::ControlPlaneClient::new(url.clone()),
         ));
         tracing::info!(control_plane = %url, "this host will register and poll");
-        loops.push(tokio::spawn(nibrunnerd::controllers::control_plane_loop(
-            host.clone(),
-            sessions.clone(),
-        )));
-        loops.push(tokio::spawn(nibrunnerd::controllers::filesystem_loop(
-            host.clone(),
-            sessions,
-        )));
+        let control_plane = nibrunnerd::controllers::ControlPlaneLoops::on(
+            nibrunnerd::services::control_plane::RemoteControlPlane::new(host.clone(), sessions),
+        );
+        loops.push(tokio::spawn(control_plane.clone().poll_loop()));
+        loops.push(tokio::spawn(control_plane.answer_loop()));
     }
 
     shutdown().await;

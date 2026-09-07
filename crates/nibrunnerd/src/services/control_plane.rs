@@ -10,6 +10,40 @@ use crate::adapters::control_plane::{ControlPlaneClient, ControlPlaneError};
 use crate::host::Host;
 use crate::services::report::capacity::{read_filesystem_space, read_vcpu_count};
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
+#[async_trait::async_trait]
+pub trait ControlPlaneService: Send + Sync {
+    async fn poll_desired_state(&self) -> Result<bool, ControlPlaneError>;
+    async fn answer_one_query(&self) -> Result<Option<FilesystemQuery>, ControlPlaneError>;
+    async fn note(&self, error: &ControlPlaneError);
+}
+
+pub struct RemoteControlPlane {
+    host: Arc<Host>,
+    sessions: Arc<SessionHolder>,
+}
+
+impl RemoteControlPlane {
+    pub fn new(host: Arc<Host>, sessions: Arc<SessionHolder>) -> Arc<Self> {
+        Arc::new(Self { host, sessions })
+    }
+}
+
+#[async_trait::async_trait]
+impl ControlPlaneService for RemoteControlPlane {
+    async fn poll_desired_state(&self) -> Result<bool, ControlPlaneError> {
+        poll_desired_state(&self.host, &self.sessions).await
+    }
+
+    async fn answer_one_query(&self) -> Result<Option<FilesystemQuery>, ControlPlaneError> {
+        answer_one_query(&self.host, &self.sessions).await
+    }
+
+    async fn note(&self, error: &ControlPlaneError) {
+        self.sessions.note(error).await;
+    }
+}
+
 pub struct SessionHolder {
     client: ControlPlaneClient,
     held: Mutex<Option<SecretString>>,

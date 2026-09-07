@@ -156,6 +156,34 @@ pub fn activity_after(
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
+#[async_trait::async_trait]
+pub trait IdleService: Send + Sync {
+    async fn record_activity(&self);
+    async fn apply_sleep(&self);
+}
+
+pub struct HostIdle {
+    host: std::sync::Arc<Host>,
+}
+
+impl HostIdle {
+    pub fn new(host: std::sync::Arc<Host>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self { host })
+    }
+}
+
+#[async_trait::async_trait]
+impl IdleService for HostIdle {
+    async fn record_activity(&self) {
+        record_activity(&self.host).await;
+    }
+
+    async fn apply_sleep(&self) {
+        apply_sleep(&self.host).await;
+    }
+}
+
 pub async fn record_activity(host: &Host) {
     let now = crate::clock::now_ms();
     let snapshot = host.state.snapshot().await;

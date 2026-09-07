@@ -11,10 +11,39 @@ pub use plan::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use protocol::{DesiredInstanceState, HostDesiredState};
 
 use crate::adapters::vm::UNKNOWN_VM;
 use crate::host::Host;
+
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
+#[async_trait]
+pub trait ReconcileService: Send + Sync {
+    async fn reconcile(&self, desired: &HostDesiredState);
+    async fn refresh(&self);
+}
+
+pub struct HostReconciler {
+    host: Arc<Host>,
+}
+
+impl HostReconciler {
+    pub fn new(host: Arc<Host>) -> Arc<Self> {
+        Arc::new(Self { host })
+    }
+}
+
+#[async_trait]
+impl ReconcileService for HostReconciler {
+    async fn reconcile(&self, desired: &HostDesiredState) {
+        reconcile(&self.host, desired).await;
+    }
+
+    async fn refresh(&self) {
+        refresh(&self.host).await;
+    }
+}
 
 pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
     let snapshot = host.state.snapshot().await;
