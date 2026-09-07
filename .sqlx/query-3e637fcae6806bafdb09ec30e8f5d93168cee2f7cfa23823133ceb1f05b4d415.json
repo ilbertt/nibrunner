@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into activity (app_id, last_active_at_ms) values (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3e637fcae6806bafdb09ec30e8f5d93168cee2f7cfa23823133ceb1f05b4d415"
+}

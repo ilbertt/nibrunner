@@ -168,6 +168,19 @@ is a real objection but not this port's to make. nibrun allows it, an app that w
 work here, and adding the flag would break one silently. What I would change is the contract, not
 one end of it.
 
+**This host's own notes are one SQLite database, not five documents.** The agent keeps JSON files
+and so did this, and as files a crash between two writes left an app recorded as running with no
+slot recorded for it — which the next pass made worse by allocating a second slot for the same app,
+moving a tenant's port because the power went out at the wrong moment. A commit is all of it or
+none. `sqlx` because the schema is then checked against the queries at build time; it caught a
+malformed `select` while this was being written. SQLite's C is compiled into the binary rather than
+linked from the host, which is the arrangement Bun ships and means nothing to install beside the
+daemon. Offline query data is committed under `.sqlx/`, so a build needs no database.
+
+`desired.json` and `reported.json` stay files. One is written by whoever deploys and the other is
+what anything reads to see status: both are the interface, and moving either behind SQL would mean
+shipping the tool to read it back that this project deliberately does not have.
+
 ## Not done, and named as such
 
 - **Exports and the vsock filesystem browse.** The codecs for the filesystem channel are written

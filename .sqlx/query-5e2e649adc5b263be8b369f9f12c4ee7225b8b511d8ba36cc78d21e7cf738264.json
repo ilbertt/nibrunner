@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into deleted_volumes (volume_id, report) values (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "5e2e649adc5b263be8b369f9f12c4ee7225b8b511d8ba36cc78d21e7cf738264"
+}

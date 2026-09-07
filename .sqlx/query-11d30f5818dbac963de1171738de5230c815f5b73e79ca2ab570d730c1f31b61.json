@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "select cursor from slot_cursor where only_row = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "cursor",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "11d30f5818dbac963de1171738de5230c815f5b73e79ca2ab570d730c1f31b61"
+}

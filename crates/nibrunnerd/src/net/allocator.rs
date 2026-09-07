@@ -3,12 +3,9 @@
 //! into another.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use nft_render::{describe_slot, AppSlot, FIRST_SLOT, SLOT_COUNT};
 use protocol::AppId;
-
-use crate::json_store::{read_json, write_json, StoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("all {limit} host slots are allocated")]
@@ -70,31 +67,27 @@ pub struct SlotAllocator {
 }
 
 impl SlotAllocator {
+    /// What a daemon that has just read its own notes hands back. Replaced whole rather than
+    /// merged: the table on disk is the whole of what this host allocated, and a slot in memory
+    /// that is not in it is one a crash lost.
+    pub fn restore(&mut self, assignments: BTreeMap<AppId, u32>, cursor: i64) {
+        self.assignments = assignments;
+        self.cursor = cursor;
+    }
+
+    pub fn assignments(&self) -> &BTreeMap<AppId, u32> {
+        &self.assignments
+    }
+
+    pub fn cursor(&self) -> i64 {
+        self.cursor
+    }
+
     pub fn empty() -> Self {
         Self {
             assignments: BTreeMap::new(),
             cursor: i64::from(FIRST_SLOT),
         }
-    }
-
-    pub fn load(slots_file: &Path, cursor_file: &Path) -> Result<Self, StoreError> {
-        let records: Option<BTreeMap<String, serde_json::Value>> = read_json(slots_file)?;
-        Ok(Self {
-            assignments: assignments_from(records.unwrap_or_default()),
-            cursor: read_slot_cursor(read_json(cursor_file)?),
-        })
-    }
-
-    /// After the slots, and never in place of them: a cursor written without them would point
-    /// past allocations the next boot has no record of.
-    pub fn persist(&self, slots_file: &Path, cursor_file: &Path) -> Result<(), StoreError> {
-        let records: BTreeMap<String, u32> = self
-            .assignments
-            .iter()
-            .map(|(app_id, slot)| (app_id.to_string(), *slot))
-            .collect();
-        write_json(slots_file, &records)?;
-        write_json(cursor_file, &self.cursor)
     }
 
     /// The next free slot at or after the cursor rather than the lowest free one, wrapping once
@@ -247,15 +240,19 @@ mod tests {
         assert_eq!(assignments.len(), 1);
     }
 
+    /// What a daemon reading its own notes hands back, replacing whatever it had: a slot in
+    /// memory that is not on disk is one a crash lost, and keeping it would be this host holding a
+    /// port nothing recorded it holding.
     #[test]
-    fn what_was_persisted_is_what_comes_back() {
-        let directory = tempfile::tempdir().unwrap();
-        let slots = directory.path().join("slots.json");
-        let cursor = directory.path().join("cursor.json");
+    fn restoring_replaces_what_was_held_rather_than_merging_with_it() {
         let mut allocator = SlotAllocator::empty();
-        let held = allocator.allocate(&app(1)).unwrap();
-        allocator.persist(&slots, &cursor).unwrap();
-        let reloaded = SlotAllocator::load(&slots, &cursor).unwrap();
-        assert_eq!(reloaded.lookup(&app(1)).map(|slot| slot.slot), Some(held.slot));
+        let stale = allocator.allocate(&app(1)).unwrap();
+        assert_eq!(allocator.lookup(&app(1)).map(|slot| slot.slot), Some(stale.slot));
+
+        allocator.restore(BTreeMap::from([(app(2), 7)]), 8);
+        assert_eq!(allocator.lookup(&app(1)), None);
+        assert_eq!(allocator.lookup(&app(2)).map(|slot| slot.slot), Some(7));
+        assert_eq!(allocator.cursor(), 8);
+        assert_eq!(allocator.assignments().len(), 1);
     }
 }

@@ -288,6 +288,7 @@ pub async fn test_host() -> TestHost {
             commands.clone(),
         )),
         artifacts: StubArtifactStore::holding(ARTIFACT_BYTES.to_vec()),
+        store: crate::repositories::in_memory().await,
         exports: exports.clone(),
         // A test host keeps its volumes as local files, which is not something a checkpoint can be
         // cut from — so an export against one fails saying so rather than half-running.

@@ -157,6 +157,14 @@ impl HostConfig {
         self.state_dir.join(name)
     }
 
+    /// Everything this host knows about itself. One database rather than the documents it used to
+    /// be, because a pass writes all of it and a crash must not leave half.
+    pub fn state_db_file(&self) -> PathBuf {
+        self.in_state_dir("state.db")
+    }
+
+    /// The documents an older daemon on this host wrote. Read once, on the first start after the
+    /// upgrade, and never written again.
     pub fn instances_file(&self) -> PathBuf {
         self.in_state_dir("instances.json")
     }

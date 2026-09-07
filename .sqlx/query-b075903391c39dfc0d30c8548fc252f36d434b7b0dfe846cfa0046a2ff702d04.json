@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "select report from deleted_volumes order by volume_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "report",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b075903391c39dfc0d30c8548fc252f36d434b7b0dfe846cfa0046a2ff702d04"
+}

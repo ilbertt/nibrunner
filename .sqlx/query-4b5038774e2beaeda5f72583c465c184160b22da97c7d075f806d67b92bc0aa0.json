@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into slot_cursor (only_row, cursor) values (0, ?)\n         on conflict (only_row) do update set cursor = excluded.cursor",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4b5038774e2beaeda5f72583c465c184160b22da97c7d075f806d67b92bc0aa0"
+}

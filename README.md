@@ -102,7 +102,7 @@ while an operator is still watching rather than on the pass that first needed th
 
 | Key | Default | What it is |
 | --- | --- | --- |
-| `paths.state_dir` | `/var/lib/nibrunner` | Where everything this host keeps lives |
+| `paths.state_dir` | `/var/lib/nibrunner` | Where everything this host keeps lives, `state.db` included |
 | `paths.runtime_dir` | `/run/nibrunner` | Sockets and pidfiles that outlive the daemon |
 | `paths.desired_state_file` | `<state>/desired.json` | The document it watches |
 | `paths.guest_image_dir` | `<state>/guest` | `vmlinux`, `rootfs.ext4`, `manifest.json` |

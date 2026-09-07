@@ -36,6 +36,10 @@ pub struct Host {
     pub vms: Arc<dyn Vmm>,
     pub volumes: Arc<dyn VolumeBackend>,
     pub artifacts: Arc<dyn ArtifactStore>,
+    /// This host's own notes. Held open for the life of the daemon rather than opened per write:
+    /// the schema is applied on the way up, and a pass that had to wait for a connection would be
+    /// a pass whose timing depended on how busy the disk was.
+    pub store: sqlx::SqlitePool,
     /// Where a finished bundle goes. Its own store because a bundle is a tenant's whole dataset in
     /// the clear, and it wants different permissions from the artifacts one.
     pub exports: Arc<dyn ExportStore>,
@@ -69,68 +73,80 @@ impl Host {
 
     /// After the records, and never in place of them: what a request has to arrive to is the slot
     /// and the record together.
+    /// Everything this host knows about itself, in one commit.
+    ///
+    /// All of it or none of it. As five documents a crash between two of them left an app recorded
+    /// as running with no slot recorded for it, and the next pass made that worse by allocating a
+    /// second slot for the same app — a tenant's port moving because the power went out at the
+    /// wrong moment.
     pub async fn persist(&self) {
-        let snapshot = self.state.snapshot().await;
-        let records: Vec<_> = snapshot.records.values().cloned().collect();
-        if let Err(error) = crate::json_store::write_json(&self.config.instances_file(), &records) {
+        if let Err(error) = self.write_down().await {
             tracing::warn!(error = %error.message(), "this host could not write down what it is running");
         }
-        if let Err(error) = self
-            .allocator
-            .lock()
-            .await
-            .persist(&self.config.slots_file(), &self.config.slot_cursor_file())
-        {
-            tracing::warn!(error = %error.message(), "this host could not write down its slots");
-        }
-        // Only the moment, never the counts it was derived from: the kernel's counters do not
-        // outlive the daemon either, because the first apply after a restart rewrites the table.
-        let activity: Vec<_> = snapshot
-            .last_active_at_ms
-            .iter()
-            .map(|(app_id, at_ms)| serde_json::json!({ "appId": app_id, "atMs": at_ms }))
-            .collect();
-        let _ = crate::json_store::write_json(&self.config.activity_file(), &activity);
-        let deleted: Vec<_> = snapshot.deleted_volumes.values().cloned().collect();
-        let _ = crate::json_store::write_json(&self.config.deleted_volumes_file(), &deleted);
     }
 
-    /// What survived the last daemon. The counts are not kept with it: the first firewall apply
-    /// after a restart rewrites the table, so every counter is zero by the time this is read and
-    /// a baseline carried across would be one the kernel has already contradicted.
+    async fn write_down(&self) -> Result<(), crate::repositories::StoreError> {
+        use crate::repositories::{activity, deleted_volumes, instances, slots};
+
+        let snapshot = self.state.snapshot().await;
+        let records: Vec<_> = snapshot.records.values().cloned().collect();
+        let deleted = snapshot.deleted_volumes.clone();
+        let (assignments, cursor) = {
+            let allocator = self.allocator.lock().await;
+            (allocator.assignments().clone(), allocator.cursor())
+        };
+
+        let mut tx = self
+            .store
+            .begin()
+            .await
+            .map_err(crate::repositories::StoreError::write)?;
+        instances::replace_all(&mut tx, &records).await?;
+        // The cursor goes with the slots rather than after them. Written on its own it would point
+        // past allocations the next boot has no record of, and the next app would be handed a slot
+        // a client is still dialling somebody else on.
+        slots::replace_all(&mut tx, &assignments).await?;
+        slots::set_cursor(&mut tx, cursor).await?;
+        // Only the moment, never the counts it was derived from: the kernel's counters do not
+        // outlive the daemon either, because the first apply after a restart rewrites the table.
+        activity::replace_all(&mut tx, &snapshot.last_active_at_ms).await?;
+        deleted_volumes::replace_all(&mut tx, &deleted).await?;
+        tx.commit().await.map_err(crate::repositories::StoreError::write)
+    }
+
+    /// What this host was doing when it last wrote anything down.
+    ///
+    /// A failure here is a host that comes up knowing nothing rather than one that will not come
+    /// up: the microVMs are adopted from their pidfiles either way, and everything else is
+    /// re-derived by observing. Refusing to start would be the one outcome from which nothing on
+    /// this machine recovers.
     pub async fn load(&self) {
-        let records = crate::report::instance_record::read_instance_records(
-            crate::json_store::read_json(&self.config.instances_file())
-                .ok()
-                .flatten(),
-        );
-        let activity: Vec<serde_json::Value> = crate::json_store::read_json(&self.config.activity_file())
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let deleted: Vec<protocol::ReportedVolume> =
-            crate::json_store::read_json(&self.config.deleted_volumes_file())
-                .ok()
-                .flatten()
-                .unwrap_or_default();
+        use crate::repositories::{activity, deleted_volumes, instances, slots};
+
+        let mut connection = match self.store.acquire().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!(%error, "this host could not read its own notes");
+                return;
+            }
+        };
+        let records = instances::all(&mut connection).await.unwrap_or_default();
+        let last_active = activity::all(&mut connection).await.unwrap_or_default();
+        let deleted = deleted_volumes::all(&mut connection).await.unwrap_or_default();
+        let assignments = slots::all(&mut connection).await.unwrap_or_default();
+        let cursor = slots::cursor(&mut connection).await.unwrap_or_default();
+        drop(connection);
+
         let held = records.len();
+        self.allocator.lock().await.restore(assignments, cursor);
         self.state
             .modify(|snapshot| {
                 snapshot.records = records
                     .into_iter()
                     .map(|record| (record.app_id.clone(), record))
                     .collect();
-                snapshot.last_active_at_ms = activity
-                    .iter()
-                    .filter_map(|entry| {
-                        let app_id = AppId::parse(entry.get("appId")?.as_str()?).ok()?;
-                        Some((app_id, entry.get("atMs")?.as_i64()?))
-                    })
-                    .collect();
-                snapshot.deleted_volumes = deleted
-                    .into_iter()
-                    .map(|report| (report.volume_id.clone(), report))
-                    .collect();
+                snapshot.last_active_at_ms = last_active;
+                snapshot.deleted_volumes = deleted;
             })
             .await;
         tracing::info!(

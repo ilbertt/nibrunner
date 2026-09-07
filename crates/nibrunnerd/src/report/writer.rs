@@ -17,13 +17,18 @@ use crate::report::capacity::{
     allocatable_capacity, committed_resources, read_filesystem_space, read_vcpu_count,
 };
 
-/// A host that has never been given an id of its own is still a host: it reports under one it
-/// derives from where it keeps its state, so a report is readable before anything has registered
-/// it. A control plane that assigns one writes it here and this reads it back.
-pub fn host_id_of(host: &Host) -> HostId {
-    crate::json_store::read_text(&host.config.host_id_file())
-        .ok()
-        .flatten()
+/// A host that has never been given an id of its own is still a host: it reports under a constant
+/// one, so a report is readable before anything has registered it. A control plane that assigns
+/// one writes it into the store and this reads it back.
+pub async fn host_id_of(host: &Host) -> HostId {
+    let named = match host.store.acquire().await {
+        Ok(mut connection) => crate::repositories::host_identity::read(&mut connection)
+            .await
+            .ok()
+            .flatten(),
+        Err(_) => None,
+    };
+    named
         .and_then(|value| HostId::parse(value).ok())
         .unwrap_or_else(|| HostId::parse("host-local").expect("a constant identifier"))
 }
@@ -59,7 +64,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     }
 
     build_reported_state(ReportInputs {
-        host_id: host_id_of(host),
+        host_id: host_id_of(host).await,
         reported_at: now_timestamp(),
         state: if snapshot.converged {
             HostState::Ready
@@ -125,9 +130,20 @@ mod tests {
     #[tokio::test]
     async fn a_host_with_no_id_of_its_own_still_has_one_to_report_under() {
         let host = test_host().await;
-        assert_eq!(host_id_of(&host).as_str(), "host-local");
-        crate::json_store::write_text(&host.config.host_id_file(), "host-7\n", 0o600).unwrap();
-        assert_eq!(host_id_of(&host).as_str(), "host-7");
+        assert_eq!(host_id_of(&host).await.as_str(), "host-local");
+        let mut connection = host.store.acquire().await.unwrap();
+        crate::repositories::host_identity::remember(&mut connection, "host-7")
+            .await
+            .unwrap();
+        assert_eq!(host_id_of(&host).await.as_str(), "host-7");
+
+        // Written once and never again: a host that renamed itself on a restart would look like a
+        // second host to whatever is counting them.
+        crate::repositories::host_identity::remember(&mut connection, "host-9")
+            .await
+            .unwrap();
+        drop(connection);
+        assert_eq!(host_id_of(&host).await.as_str(), "host-7");
     }
 
     #[tokio::test]

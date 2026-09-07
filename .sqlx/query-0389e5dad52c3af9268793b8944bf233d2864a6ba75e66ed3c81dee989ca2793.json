@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "delete from slots",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "0389e5dad52c3af9268793b8944bf233d2864a6ba75e66ed3c81dee989ca2793"
+}

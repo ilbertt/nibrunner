@@ -28,6 +28,7 @@ pub mod net;
 pub mod proxy;
 pub mod reconcile;
 pub mod report;
+pub mod repositories;
 pub mod run;
 pub mod services;
 pub mod state;

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "select app_id, state from instances order by app_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "app_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "state",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "77343038ef384650d917b751d415eb7441af815b594b81779c40d5d0c3621cf1"
+}

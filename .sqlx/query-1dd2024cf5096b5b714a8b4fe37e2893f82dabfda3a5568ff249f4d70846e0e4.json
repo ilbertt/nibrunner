@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into instances (app_id, record) values (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1dd2024cf5096b5b714a8b4fe37e2893f82dabfda3a5568ff249f4d70846e0e4"
+}

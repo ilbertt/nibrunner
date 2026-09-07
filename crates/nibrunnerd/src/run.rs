@@ -64,10 +64,18 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         .map_err(|error| StartupError::Unusable(error.to_string()))?;
     let commands: Arc<dyn crate::services::CommandRunner> = Arc::new(HostCommands);
     let state = HostState::shared();
-    let allocator = Arc::new(Mutex::new(
-        SlotAllocator::load(&config.slots_file(), &config.slot_cursor_file())
-            .map_err(|error| StartupError::Config(error.message()))?,
-    ));
+    // Opened before anything reads it, and migrated on the way: a host that has just been given
+    // the binary has no database, and one given a newer binary has an older schema.
+    let store = crate::repositories::open(&config.state_db_file())
+        .await
+        .map_err(|error| StartupError::Unusable(error.message()))?;
+    // Whatever an older daemon on this host left in documents, once. A host upgraded with apps on
+    // it must not re-allocate their slots — that would move a tenant's port under a live client.
+    if let Err(error) = crate::repositories::import_documents(&store, &config).await {
+        tracing::warn!(error = %error.message(), "what an earlier daemon wrote could not be carried over");
+    }
+    // Empty here and filled by `host.load()`, which is the one place that reads the notes.
+    let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
 
     let storage_prefix = ObjectKey::parse(&config.storage_prefix)
         .map_err(|_| StartupError::Config("volumes.storage_prefix is not a key".into()))?;
@@ -142,6 +150,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
         state,
         allocator: allocator.clone(),
+        store,
         exports,
         checkpoint_servers,
         nbd: crate::volumes::nbd::NbdDevices::new(commands.clone()),

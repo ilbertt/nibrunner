@@ -412,8 +412,23 @@ mod tests {
                 .port_for(app_hostname().hostname.as_str()),
             Some(record.host_port)
         );
-        assert!(host.config.instances_file().exists());
-        assert!(host.config.slots_file().exists());
+        // Written down, so a daemon that restarts finds what this pass did rather than starting
+        // the app a second time.
+        let mut connection = host.store.acquire().await.unwrap();
+        assert_eq!(
+            crate::repositories::instances::all(&mut connection)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            crate::repositories::slots::all(&mut connection)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// The port an app is reached on has to answer from the pass that created it. A slot that

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "select app_id, slot from slots order by slot",
+  "describe": {
+    "columns": [
+      {
+        "name": "app_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "slot",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "13b7c789e22ba214862199480f8e5f3062bec39591b7b1009f0dcc5680566ea8"
+}

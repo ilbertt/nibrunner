@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "select host_id from host_identity where only_row = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "host_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "480ea7e52dba6d61fbe7accda308e5d02981280d8fb51fc6dbb31117f76dcdd8"
+}

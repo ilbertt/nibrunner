@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into host_identity (only_row, host_id) values (0, ?) on conflict do nothing",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a61148cd2ed0dc64cd4c462537f0af6b71ad5fc4ead52bf5ba95652a9a824675"
+}

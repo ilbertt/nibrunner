@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into slots (app_id, slot) values (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ebd0081c7e4f1c4d43a0103991e6a876d1c0cddb5893534ab381ee4a73d0740d"
+}

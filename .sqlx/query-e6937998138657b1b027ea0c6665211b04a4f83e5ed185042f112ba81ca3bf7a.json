@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "select app_id, last_active_at_ms from activity",
+  "describe": {
+    "columns": [
+      {
+        "name": "app_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_active_at_ms",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e6937998138657b1b027ea0c6665211b04a4f83e5ed185042f112ba81ca3bf7a"
+}
