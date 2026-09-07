@@ -369,6 +369,146 @@ mod tests {
         processes.forget(&app_id());
         assert!(processes.read_record(&app_id()).is_none());
         assert!(!processes.console_path(&app_id()).exists());
+        processes.forget(&app_id());
+    }
+
+    #[test]
+    fn everything_one_microvm_owns_is_named_after_it_and_shared_with_no_other() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        let neighbour = AppId::parse("app-2").unwrap();
+        assert_eq!(
+            processes.api_socket(&app_id()),
+            directory.path().join("vm-app-1.sock")
+        );
+        assert_eq!(
+            processes.record_path(&app_id()),
+            directory.path().join("vm-app-1.json")
+        );
+        assert_eq!(
+            processes.console_path(&app_id()),
+            directory.path().join("vm-app-1.console")
+        );
+        assert_ne!(processes.api_socket(&app_id()), processes.api_socket(&neighbour));
+        assert_eq!(processes.boot_id(), "boot-1");
+    }
+
+    #[test]
+    fn a_record_that_lost_its_shape_is_read_as_no_record_rather_than_a_half_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        std::fs::write(processes.record_path(&app_id()), "{ not json").unwrap();
+        assert!(processes.read_record(&app_id()).is_none());
+        assert_eq!(processes.status(&app_id()), VmStatus::default());
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_record_is_not_read_as_a_microvm_this_host_adopted() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        for name in ["vm-app-1.sock", "vm-app-1.console", "notes.json", "vm-.json"] {
+            std::fs::write(directory.path().join(name), b"").unwrap();
+        }
+        assert!(processes.adopted_app_ids().is_empty());
+        assert!(VmProcesses::new(directory.path().join("nowhere"))
+            .adopted_app_ids()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_pid_no_process_could_have_is_not_alive() {
+        assert!(!is_alive(0));
+        assert!(!is_alive(-1));
+        assert!(is_alive(std::process::id() as i32));
+        signal(0, libc::SIGTERM);
+        signal(-1, libc::SIGTERM);
+    }
+
+    #[test]
+    fn a_host_with_no_boot_id_to_read_still_tells_one_run_of_this_daemon_from_the_next() {
+        let named = host_boot_id_or_session();
+        assert!(!named.is_empty());
+        if cfg!(not(target_os = "linux")) {
+            assert_eq!(named, format!("session-{}", std::process::id()));
+            assert!(read_host_boot_id().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hypervisor_that_exits_has_its_code_written_back_onto_the_record_it_left() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        let working_dir = directory.path().join("vm");
+        make_directory(&working_dir, 0o700).unwrap();
+
+        let record = processes
+            .spawn(&app_id(), Path::new("/bin/echo"), &working_dir, None)
+            .await
+            .unwrap();
+        assert_eq!(record.app_id, app_id());
+        assert_eq!(record.host_boot_id, "boot-1");
+        assert_eq!(record.exit_code, None);
+        assert!(!record.stop_requested);
+        assert_eq!(processes.adopted_app_ids(), vec![app_id()]);
+
+        for _ in 0..200 {
+            if processes.read_record(&app_id()).and_then(|held| held.exit_code) == Some(0) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let settled = processes.status(&app_id());
+        assert_eq!(settled.exit_code, Some(0));
+        assert!(settled.loaded);
+        assert!(!settled.active);
+        assert!(!settled.failed, "an exit of 0 is not a failure");
+        assert!(std::fs::read_to_string(processes.console_path(&app_id()))
+            .unwrap()
+            .contains("--api-sock"));
+    }
+
+    #[tokio::test]
+    async fn a_hypervisor_that_would_not_start_is_a_failure_rather_than_a_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        let working_dir = directory.path().join("vm");
+        make_directory(&working_dir, 0o700).unwrap();
+        assert!(processes
+            .spawn(
+                &app_id(),
+                Path::new("/nowhere/nibrunner-no-such-hypervisor"),
+                &working_dir,
+                None
+            )
+            .await
+            .is_err());
+        assert!(processes.read_record(&app_id()).is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_microvm_this_host_holds_no_record_of_asks_nothing_of_the_kernel() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        processes.stop(&app_id()).await;
+        assert!(processes.read_record(&app_id()).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stop_is_written_down_before_the_signal_so_the_exit_is_not_read_as_a_crash() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        processes
+            .write_record(&VmRecord {
+                app_id: app_id(),
+                pid: -1,
+                host_boot_id: "boot-1".into(),
+                started_at_ms: 0,
+                exit_code: None,
+                stop_requested: false,
+            })
+            .unwrap();
+        processes.stop(&app_id()).await;
+        assert!(processes.read_record(&app_id()).unwrap().stop_requested);
     }
 }
 

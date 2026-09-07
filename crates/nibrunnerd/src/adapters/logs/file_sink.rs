@@ -131,4 +131,66 @@ mod tests {
             4
         );
     }
+
+    #[tokio::test]
+    async fn a_publish_with_nothing_in_it_does_not_make_a_place_to_put_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("logs");
+        FileLogSink::new(logs.clone()).publish(vec![]).await;
+        assert!(!logs.exists());
+    }
+
+    #[tokio::test]
+    async fn no_tenant_ever_reads_a_line_another_tenant_wrote() {
+        let directory = tempfile::tempdir().unwrap();
+        let sink = FileLogSink::new(directory.path().join("logs"));
+        let neighbour = protocol::AppId::parse("app-2").unwrap();
+        sink.publish(vec![
+            event(
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stdout,
+                    text: "mine\n".into(),
+                },
+                0,
+            ),
+            TenantLogEvent {
+                app_id: neighbour.clone(),
+                ..event(
+                    TenantLogBody::Data {
+                        stream: TenantLogStream::Stdout,
+                        text: "theirs\n".into(),
+                    },
+                    1,
+                )
+            },
+        ])
+        .await;
+        assert_ne!(sink.path_for(&app_id()), sink.path_for(&neighbour));
+        let mine = std::fs::read_to_string(sink.path_for(&app_id())).unwrap();
+        assert!(mine.contains("mine"));
+        assert!(!mine.contains("theirs"));
+        assert!(std::fs::read_to_string(sink.path_for(&neighbour))
+            .unwrap()
+            .contains("theirs"));
+    }
+
+    #[test]
+    fn a_gap_is_rendered_on_stderr_so_it_is_read_where_a_failure_would_be() {
+        let rendered = FileLogSink::render(&event(TenantLogBody::Gap { dropped_bytes: 0 }, 9));
+        assert!(rendered.starts_with(observed_at().as_str()), "{rendered}");
+        assert!(rendered.contains("stderr source-1/9"), "{rendered}");
+        assert!(rendered.ends_with('\n'), "{rendered}");
+    }
+
+    #[test]
+    fn what_a_tenant_wrote_is_passed_through_rather_than_reshaped() {
+        let rendered = FileLogSink::render(&event(
+            TenantLogBody::Data {
+                stream: TenantLogStream::Stdout,
+                text: "no trailing newline".into(),
+            },
+            0,
+        ));
+        assert!(rendered.ends_with("no trailing newline"), "{rendered}");
+    }
 }

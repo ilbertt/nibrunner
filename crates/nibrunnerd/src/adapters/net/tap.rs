@@ -237,4 +237,51 @@ mod tests {
         assert_eq!(network.tap_names().await, vec!["nbr0".to_string()]);
         assert_eq!(spy.neighbours()[0].guest_mac, "02:00:0a:c9:00:02");
     }
+
+    #[tokio::test]
+    async fn a_kernel_that_will_not_give_this_host_a_tap_says_which_device_and_why() {
+        let refusal = NetworkError {
+            what: "a tap device",
+            device: "nbr0".into(),
+            reason: "operation not permitted".into(),
+        };
+        let network = mocks::network_refusing(refusal.clone());
+        let slot = nft_render::describe_slot(0, protocol::AppId::parse("app-1").unwrap());
+        let refused = network
+            .ensure_tap(&TapInterface {
+                tap_name: slot.tap_name.clone(),
+                host_ipv4: slot.host_ipv4.clone(),
+                subnet_prefix_length: slot.subnet_prefix_length,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(refused, refusal);
+        assert_eq!(
+            refused.message(),
+            "a tap device could not be done to nbr0: operation not permitted"
+        );
+        assert!(network
+            .refresh_neighbour(&Neighbour {
+                guest_ipv4: slot.guest_ipv4.clone(),
+                guest_mac: slot.guest_mac.clone(),
+                tap_name: slot.tap_name.clone(),
+            })
+            .await
+            .is_err());
+        assert!(network.tap_names().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tap_asked_for_twice_is_the_same_device_asked_for_twice() {
+        let (network, spy) = mocks::network();
+        let slot = nft_render::describe_slot(0, protocol::AppId::parse("app-1").unwrap());
+        let tap = TapInterface {
+            tap_name: slot.tap_name.clone(),
+            host_ipv4: slot.host_ipv4.clone(),
+            subnet_prefix_length: slot.subnet_prefix_length,
+        };
+        network.ensure_tap(&tap).await.unwrap();
+        network.ensure_tap(&tap).await.unwrap();
+        assert_eq!(spy.taps(), vec![tap.clone(), tap]);
+    }
 }

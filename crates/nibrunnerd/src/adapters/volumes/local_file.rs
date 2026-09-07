@@ -313,4 +313,92 @@ mod tests {
         assert!(volumes.observe_checkpoints().await.is_empty());
         volumes.flush().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn neither_half_of_a_checkpoint_is_pretended_to_have_worked() {
+        let directory = tempfile::tempdir().unwrap();
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
+        for refused in [
+            volumes.create_checkpoint(&checkpoint_id()).await,
+            volumes.delete_checkpoint(&checkpoint_id()).await,
+        ] {
+            let error = refused.unwrap_err();
+            assert!(matches!(error, VolumeError::NoCheckpoints { .. }), "{error}");
+            assert!(error.message().contains("own disk"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_volume_this_host_holds_is_attached_where_the_guest_will_look_for_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
+        volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let attached = volumes.attach(&volume_id(), &app_id()).await.unwrap();
+        assert_eq!(attached.volume_id, volume_id());
+        assert_eq!(attached.size_bytes, VOLUME_SIZE_BYTES);
+        assert_eq!(
+            attached.device_path,
+            volumes.path_for(&volume_id()).display().to_string()
+        );
+        assert_eq!(attached.storage_prefix, ObjectKey::parse("volumes").unwrap());
+        volumes.detach(&volume_id(), &app_id()).await.unwrap();
+        assert!(volumes.path_for(&volume_id()).exists());
+    }
+
+    #[tokio::test]
+    async fn a_format_tool_that_would_not_run_leaves_the_volume_unusable_rather_than_ready() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_answering(|request| {
+            Err(crate::ports::CommandError::Unstartable {
+                executable: request.executable().to_string(),
+                reason: "no such file".into(),
+            })
+        });
+        let volumes = backend(directory.path(), commands);
+        let error = volumes.provision(&desired_volume(|_| {})).await.unwrap_err();
+        assert!(matches!(error, VolumeError::Unusable(_)), "{error}");
+        assert!(error.message().contains("mke2fs"), "{error}");
+        assert_eq!(log.executables(), vec!["mke2fs"]);
+    }
+
+    #[tokio::test]
+    async fn a_directory_a_volume_cannot_be_kept_in_is_named_rather_than_written_around() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = directory.path().join("volumes");
+        std::fs::write(&occupied, b"a file, not a directory").unwrap();
+        let volumes = backend(&occupied, mocks::commands_succeeding().0);
+        let error = volumes.provision(&desired_volume(|_| {})).await.unwrap_err();
+        assert!(matches!(error, VolumeError::Unusable(_)), "{error}");
+        assert!(volumes.observe(&Default::default()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_too_short_to_hold_a_superblock_is_not_read_as_formatted() {
+        let directory = tempfile::tempdir().unwrap();
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        std::fs::write(volumes.path_for(&volume_id()), b"tiny").unwrap();
+        assert!(!volumes.is_formatted(&volume_id()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_volume_with_no_file_behind_it_cannot_have_its_superblock_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
+        let error = volumes.is_formatted(&volume_id()).unwrap_err();
+        assert!(
+            matches!(error, VolumeError::SuperblockUnreadable { .. }),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_file_backend_holds_none_of_the_host_back_for_a_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
+        assert_eq!(
+            volumes.reserved_cache(),
+            crate::adapters::volumes::CacheReservation::default()
+        );
+    }
 }

@@ -115,4 +115,79 @@ mod tests {
         assert!(!has_ext_magic(&0u16.to_le_bytes()));
         assert!(!has_ext_magic(&[0x53]));
     }
+
+    #[test]
+    fn the_magic_is_read_little_endian_so_the_bytes_the_other_way_round_are_not_it() {
+        assert!(!has_ext_magic(&0xef53u16.to_be_bytes()));
+        assert!(!has_ext_magic(&[]));
+        assert!(has_ext_magic(&[0x53, 0xef, 0x00, 0x01]));
+    }
+
+    #[test]
+    fn a_cache_is_held_back_in_whole_mebibytes_so_none_of_it_is_handed_out_twice() {
+        assert_eq!(CacheReservation::default().memory_mib(), 0);
+        assert_eq!(
+            CacheReservation {
+                memory_bytes: 1,
+                disk_bytes: 0
+            }
+            .memory_mib(),
+            1
+        );
+        assert_eq!(
+            CacheReservation {
+                memory_bytes: 2 * 1_048_576,
+                disk_bytes: 0
+            }
+            .memory_mib(),
+            2
+        );
+        assert_eq!(
+            CacheReservation {
+                memory_bytes: 2 * 1_048_576 + 1,
+                disk_bytes: 0
+            }
+            .memory_mib(),
+            3
+        );
+    }
+
+    #[test]
+    fn every_way_a_volume_can_refuse_reads_as_a_sentence_naming_what_went_wrong() {
+        assert_eq!(
+            VolumeError::ShrinkRefused {
+                current: 2048,
+                requested: 1024
+            }
+            .message(),
+            "a volume of 2048 bytes cannot be resized down to 1024"
+        );
+        assert_eq!(
+            VolumeError::SuperblockUnreadable {
+                device_path: "/dev/nbd0".into()
+            }
+            .message(),
+            "/dev/nbd0 did not answer a read of its superblock"
+        );
+        assert_eq!(
+            VolumeError::NotHere {
+                volume_id: VolumeId::parse("vol-1").unwrap()
+            }
+            .message(),
+            "this host does not serve vol-1"
+        );
+        assert_eq!(
+            VolumeError::NoCheckpoints { what: "a local file" }.message(),
+            "a local file cannot be checkpointed"
+        );
+        assert_eq!(
+            VolumeError::Unusable("the device would not open".into()).message(),
+            "the volume could not be made ready: the device would not open"
+        );
+    }
+
+    #[test]
+    fn a_size_that_would_overflow_a_sector_count_is_not_rounded_into_nothing() {
+        assert_eq!(align_to_sector(u64::MAX - SECTOR_SIZE_BYTES), u64::MAX - 511);
+    }
 }

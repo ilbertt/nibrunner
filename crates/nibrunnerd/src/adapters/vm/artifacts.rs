@@ -230,4 +230,102 @@ mod tests {
         let twice = pack(&[("server", &artifact_bytes(), BINARY_MODE)]).unwrap();
         assert_eq!(once, twice);
     }
+
+    #[tokio::test]
+    async fn a_store_that_will_not_hand_over_the_bytes_is_not_read_as_an_empty_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let refusing = mocks::artifacts_refusing(ArtifactError::Transfer("no such key".into()))
+            as Arc<dyn ArtifactStore>;
+        let error = ensure_artifact_image(&refusing, directory.path(), &artifact(|_| {}))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ArtifactError::Transfer(_)), "{error}");
+        assert!(!artifact_image_path(directory.path(), &artifact(|_| {}).digest).exists());
+    }
+
+    #[tokio::test]
+    async fn bytes_that_match_are_handed_back_whole_before_anything_is_built_from_them() {
+        let store = store(artifact_bytes());
+        assert_eq!(
+            fetch_verified(&store, &artifact(|_| {})).await.unwrap(),
+            artifact_bytes()
+        );
+    }
+
+    #[test]
+    fn every_digest_gets_its_own_place_in_the_cache_so_a_redeploy_never_reads_the_old_binary() {
+        let cache = Path::new("/var/lib/nibrunner/artifacts");
+        let one = artifact_image_path(cache, &artifact(|_| {}).digest);
+        let other = artifact_image_path(
+            cache,
+            &Sha256Digest::parse("0000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+        );
+        assert_ne!(one, other);
+        assert!(one.starts_with(cache));
+        assert!(one.ends_with(ARTIFACT_IMAGE_FILENAME));
+    }
+
+    #[test]
+    fn an_image_that_has_nowhere_to_be_written_is_named_rather_than_left_half_built() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = directory.path().join("vm");
+        std::fs::write(&occupied, b"a file, not a directory").unwrap();
+        let error = build_instance_config_image(&occupied, "NIBRUN_HTTP_PORT=3000\n").unwrap_err();
+        assert!(matches!(error, ArtifactError::Unpackable(_)), "{error}");
+    }
+
+    #[test]
+    fn the_binary_a_guest_runs_is_packed_executable_and_the_config_it_reads_is_not() {
+        let image = pack(&[
+            ("server", &artifact_bytes(), BINARY_MODE),
+            ("instance.env", b"NIBRUN_HTTP_PORT=3000\n", CONFIG_MODE),
+        ])
+        .unwrap();
+        let filesystem = backhand::FilesystemReader::from_reader(Cursor::new(image)).unwrap();
+        let mode = |path: &str| {
+            filesystem
+                .files()
+                .find(|node| node.fullpath.to_string_lossy() == path)
+                .map(|node| node.header.permissions)
+                .unwrap_or_else(|| panic!("the image holds nothing at {path}"))
+        };
+        assert_eq!(mode("/server"), BINARY_MODE);
+        assert_eq!(mode("/instance.env"), CONFIG_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_image_on_disk_is_readable_only_by_the_user_this_daemon_runs_as() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let image = build_instance_config_image(directory.path(), "NIBRUN_HTTP_PORT=3000\n").unwrap();
+        assert_eq!(
+            std::fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let siblings = std::fs::read_dir(directory.path()).unwrap().count();
+        assert_eq!(siblings, 1, "nothing staged is left beside the image");
+    }
+
+    #[tokio::test]
+    async fn an_image_already_in_the_cache_is_touched_so_a_reap_takes_the_cold_ones_first() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(artifact_bytes());
+        let image_path = ensure_artifact_image(&store, directory.path(), &artifact(|_| {}))
+            .await
+            .unwrap();
+        let backdated = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&image_path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(backdated))
+            .unwrap();
+
+        ensure_artifact_image(&store, directory.path(), &artifact(|_| {}))
+            .await
+            .unwrap();
+        let touched = std::fs::metadata(&image_path).unwrap().modified().unwrap();
+        assert!(touched > backdated, "the image was not touched on a cache hit");
+    }
 }

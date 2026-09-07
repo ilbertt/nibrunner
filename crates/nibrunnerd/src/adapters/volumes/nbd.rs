@@ -285,4 +285,78 @@ mod tests {
             vec!["nbd-client".to_string(), "-d".into(), "/dev/nbd0".into()]
         );
     }
+
+    fn refusing() -> Arc<crate::ports::MockCommandRunner> {
+        mocks::commands_answering(|request| {
+            Err(crate::ports::CommandError::Unstartable {
+                executable: request.executable().to_string(),
+                reason: "no such file".into(),
+            })
+        })
+        .0
+    }
+
+    #[tokio::test]
+    async fn a_client_that_will_not_run_leaves_the_volume_unusable_rather_than_thought_attached() {
+        let sysfs = tempfile::tempdir().unwrap();
+        let devices = NbdDevices::with_sysfs(sysfs.path().to_path_buf(), refusing());
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+        let target = NbdTarget {
+            socket_path: "/run/zerofs/nbd.sock",
+            device_path: "/dev/nbd0",
+            volume_id: &volume_id,
+        };
+        let error = devices.attach(&target).await.unwrap_err();
+        assert!(matches!(error, VolumeError::Unusable(_)), "{error}");
+        assert!(error.message().contains("nbd-client"), "{error}");
+        assert!(devices.attach_checkpoint(&target).await.is_err());
+        assert!(devices.reattach(&target).await.is_err());
+        assert!(devices.detach("/dev/nbd0").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_client_that_exits_nonzero_is_still_a_failed_detach() {
+        let sysfs = tempfile::tempdir().unwrap();
+        let (commands, _) = mocks::commands_answering(|_| {
+            Ok(crate::ports::CommandResult {
+                code: 1,
+                stdout: String::new(),
+                stderr: "not connected".into(),
+            })
+        });
+        let devices = NbdDevices::with_sysfs(sysfs.path().to_path_buf(), commands);
+        assert!(devices.detach("/dev/nbd0").await.is_ok());
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+        assert!(devices
+            .attach(&NbdTarget {
+                socket_path: "/run/zerofs/nbd.sock",
+                device_path: "/dev/nbd0",
+                volume_id: &volume_id,
+            })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_device_is_read_by_its_name_rather_than_by_the_path_it_was_given_under() {
+        let sysfs = tempfile::tempdir().unwrap();
+        let (devices, _) = devices(sysfs.path());
+        attribute(sysfs.path(), "nbd0", "size", "8\n");
+        assert_eq!(devices.attached_size_bytes("/dev/nbd0"), 8 * 512);
+        assert_eq!(devices.attached_size_bytes("/some/other/nbd0"), 8 * 512);
+        assert_eq!(devices.attached_size_bytes(""), 0);
+        assert!(!devices.is_attached(""));
+    }
+
+    #[tokio::test]
+    async fn a_device_with_a_size_this_host_cannot_read_a_block_from_is_not_usable() {
+        let sysfs = tempfile::tempdir().unwrap();
+        let (devices, _) = devices(sysfs.path());
+        attribute(sysfs.path(), "nbd-not-a-device", "size", "524288\n");
+        assert_eq!(
+            devices.attached_size_bytes("/dev/nbd-not-a-device"),
+            524_288 * 512
+        );
+        assert!(!devices.is_usable("/dev/nbd-not-a-device").await);
+    }
 }

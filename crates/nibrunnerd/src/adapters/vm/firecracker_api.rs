@@ -293,4 +293,83 @@ mod tests {
         let api = FirecrackerApi::at(directory.path().join("absent.sock"));
         assert!(matches!(api.pause().await, Err(VmError::Unreachable { .. })));
     }
+
+    #[tokio::test]
+    async fn anything_but_no_content_is_read_as_a_refusal_rather_than_as_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let (socket_path, _) =
+            FakeVmm::listening(directory.path(), hyper::StatusCode::OK, "not what was asked").await;
+        let error = FirecrackerApi::at(&socket_path).resume().await.unwrap_err();
+        assert!(matches!(error, VmError::Rejected { status: 200, .. }), "{error}");
+    }
+
+    const A_LONG_FAULT: &str = concat!(
+        "the hypervisor described its own state at length ",
+        "the hypervisor described its own state at length ",
+        "the hypervisor described its own state at length ",
+        "the hypervisor described its own state at length ",
+        "the hypervisor described its own state at length "
+    );
+
+    #[tokio::test]
+    async fn a_vmm_that_says_a_great_deal_about_itself_is_cut_down_before_it_reaches_a_report() {
+        assert!(A_LONG_FAULT.len() > MAX_DETAIL_LENGTH);
+        let directory = tempfile::tempdir().unwrap();
+        let (socket_path, _) =
+            FakeVmm::listening(directory.path(), hyper::StatusCode::BAD_REQUEST, A_LONG_FAULT).await;
+        let error = FirecrackerApi::at(&socket_path).pause().await.unwrap_err();
+        match error {
+            VmError::Rejected { detail, .. } => {
+                assert_eq!(detail.chars().count(), MAX_DETAIL_LENGTH);
+                assert!(A_LONG_FAULT.starts_with(&detail));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_load_waits_for_the_hypervisor_to_bind_rather_than_racing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("firecracker.sock");
+        let binding = tokio::spawn({
+            let directory = directory.path().to_path_buf();
+            async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                FakeVmm::listening(&directory, hyper::StatusCode::NO_CONTENT, "").await
+            }
+        });
+        FirecrackerApi::at(&socket_path)
+            .load_snapshot(Path::new("/snap/vmstate"), Path::new("/snap/memory"))
+            .await
+            .unwrap();
+        let (_, seen) = binding.await.unwrap();
+        assert_eq!(seen.lock().unwrap()[0].1, "/snapshot/load");
+    }
+
+    #[tokio::test]
+    async fn a_load_a_bound_hypervisor_refuses_is_handed_up_rather_than_retried_until_it_times_out() {
+        let directory = tempfile::tempdir().unwrap();
+        let (socket_path, seen) = FakeVmm::listening(
+            directory.path(),
+            hyper::StatusCode::BAD_REQUEST,
+            r#"{"fault_message":"Cannot restore"}"#,
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let error = FirecrackerApi::at(&socket_path)
+            .load_snapshot(Path::new("/snap/vmstate"), Path::new("/snap/memory"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VmError::Rejected { .. }), "{error}");
+        assert!(started.elapsed() < BIND_TIMEOUT);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_socket_this_host_names_is_the_one_it_says_it_could_not_reach() {
+        let directory = tempfile::tempdir().unwrap();
+        let absent = directory.path().join("absent.sock");
+        let error = FirecrackerApi::at(&absent).pause().await.unwrap_err();
+        assert!(error.message().contains(&absent.display().to_string()), "{error}");
+    }
 }

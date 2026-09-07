@@ -116,4 +116,81 @@ mod tests {
         let error = read_json::<serde_json::Value>(&path).unwrap_err();
         assert!(error.message().contains("does not hold the JSON"));
     }
+
+    #[test]
+    fn a_file_holding_only_whitespace_is_read_as_nothing_rather_than_as_broken() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(&path, "  \n\t ").unwrap();
+        assert_eq!(read_text(&path).unwrap().as_deref(), Some(""));
+        assert_eq!(read_json::<serde_json::Value>(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn what_a_host_wrote_is_read_back_without_the_newline_it_was_written_with() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("host-id");
+        write_text(&path, "host-1\n", PRIVATE_FILE_MODE).unwrap();
+        assert_eq!(read_text(&path).unwrap().as_deref(), Some("host-1"));
+        assert_eq!(read_text(&directory.path().join("absent")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_read_is_named_rather_than_treated_as_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = read_text(directory.path()).unwrap_err();
+        assert!(matches!(error, StoreError::Unreadable { .. }), "{error}");
+        assert!(error.message().contains("could not be read"));
+    }
+
+    #[test]
+    fn a_document_that_has_nowhere_to_go_is_named_rather_than_dropped() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = directory.path().join("state");
+        std::fs::write(&occupied, b"a file, not a directory").unwrap();
+        let error = write_json(&occupied.join("nested.json"), &serde_json::json!({})).unwrap_err();
+        assert!(matches!(error, StoreError::Unwritable { .. }), "{error}");
+        assert!(error.message().contains("could not be written"));
+    }
+
+    #[test]
+    fn a_value_no_json_can_hold_is_refused_before_anything_is_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let unrenderable = std::collections::BTreeMap::from([(vec![1u8, 2], 3)]);
+        let error = write_json(&path, &unrenderable).unwrap_err();
+        assert!(matches!(error, StoreError::Malformed { .. }), "{error}");
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_this_host_keeps_is_readable_only_by_the_user_that_runs_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("private");
+        let path = nested.join("state.json");
+        write_json(&path, &serde_json::json!({ "a": 1 })).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), PRIVATE_FILE_MODE);
+        assert_eq!(mode(&nested), PRIVATE_DIR_MODE);
+
+        let socket = directory.path().join("readable");
+        write_text(&socket, "anyone", 0o644).unwrap();
+        assert_eq!(mode(&socket), 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_is_already_there_is_still_brought_to_the_mode_asked_for() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("one").join("two");
+        make_directory(&nested, 0o755).unwrap();
+        make_directory(&nested, 0o700).unwrap();
+        assert_eq!(
+            std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 }
