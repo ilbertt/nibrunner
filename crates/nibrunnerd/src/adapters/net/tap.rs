@@ -1,8 +1,3 @@
-//! The tap a slot names, and the host's own view of the guest behind it.
-//!
-//! Done in this process rather than by spawning `ip`: a tap is one ioctl on `/dev/net/tun` and
-//! the rest is netlink, which is a smaller thing to depend on than iproute2 being installed.
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -38,21 +33,13 @@ impl NetworkError {
 
 #[async_trait]
 pub trait HostNetwork: Send + Sync {
-    /// The tap, its address and its link state, brought to what a slot says they should be.
-    /// Idempotent, so a converged host re-runs this to no effect.
     async fn ensure_tap(&self, tap: &TapInterface) -> Result<(), NetworkError>;
 
-    /// The host's neighbour entry for a guest goes stale while its microVM is down, and the first
-    /// connection after a wake then pays ARP re-resolution: 1.1s against the 112ms a refreshed
-    /// entry costs, which is most of what makes waking cheaper than a cold boot. A guest keeps its
-    /// address and its MAC across a sleep, so this writes back the pairing that was already there
-    /// rather than announcing a new one.
     async fn refresh_neighbour(&self, neighbour: &Neighbour) -> Result<(), NetworkError>;
 
     async fn tap_names(&self) -> Vec<String>;
 }
 
-/// Records what it was asked for, so the order a boot does things in is a test rather than a host.
 #[derive(Default)]
 pub struct RecordingNetwork {
     taps: Mutex<Vec<TapInterface>>,
@@ -116,8 +103,6 @@ mod linux {
     }
 
     impl KernelNetwork {
-        /// The connection is a task of its own for as long as the daemon runs: every request goes
-        /// through it, and dropping it would leave every later call answering nothing.
         pub fn open() -> Result<Self, NetworkError> {
             let (connection, handle, _) = rtnetlink::new_connection().map_err(|error| NetworkError {
                 what: "a netlink socket",
@@ -150,20 +135,12 @@ mod linux {
         }
     }
 
-    /// Created persistent through `/dev/net/tun` rather than by netlink, because a tap opened by
-    /// a process and not made persistent goes away with the descriptor — and the process that
-    /// should own it is the Firecracker this daemon is about to start, not this daemon.
-    ///
-    /// The only unsafe in this daemon. `TUNSETIFF` and `TUNSETPERSIST` have no safe wrapper in
-    /// either `nix` or `rtnetlink`, and writing one would be this same call with a type around it.
     #[allow(unsafe_code)]
     fn create_persistent_tap(tap_name: &str) -> Result<(), NetworkError> {
         use std::os::fd::AsRawFd;
 
         const IFF_TAP: libc::c_short = 0x0002;
         const IFF_NO_PI: libc::c_short = 0x1000;
-        // `libc::Ioctl` rather than a fixed width: the request argument is `c_ulong` against
-        // glibc and `c_int` against musl, and this daemon is built against both.
         const TUNSETIFF: libc::Ioctl = 0x400454ca;
         const TUNSETPERSIST: libc::Ioctl = 0x400454cb;
 
@@ -187,12 +164,10 @@ mod linux {
         for (index, byte) in tap_name.as_bytes().iter().take(libc::IFNAMSIZ - 1).enumerate() {
             request.name[index] = *byte as libc::c_char;
         }
-        // Safety: the request is the kernel's own `ifreq`, and the descriptor is the tun device.
         let created = unsafe { libc::ioctl(device.as_raw_fd(), TUNSETIFF, &mut request) };
         if created < 0 {
             return Err(failed("a tap device", tap_name, std::io::Error::last_os_error()));
         }
-        // Safety: same descriptor, and this request takes an int rather than a pointer.
         let persisted = unsafe { libc::ioctl(device.as_raw_fd(), TUNSETPERSIST, 1) };
         if persisted < 0 {
             return Err(failed(
@@ -204,8 +179,6 @@ mod linux {
         Ok(())
     }
 
-    /// Without this the kernel drops replies to the forwarded 127.0.0.1 port as martian, before
-    /// the nftables SNAT can rewrite them — and the local proxy reaches every app that way.
     fn allow_route_localnet(tap_name: &str) -> Result<(), NetworkError> {
         let path = format!("/proc/sys/net/ipv4/conf/{tap_name}/route_localnet");
         std::fs::write(&path, b"1").map_err(|error| failed("route_localnet", tap_name, error))
@@ -221,7 +194,6 @@ mod linux {
                 .index_of(&tap.tap_name)
                 .await
                 .ok_or_else(|| failed("a tap device", &tap.tap_name, "it did not appear"))?;
-            // `replace` rather than `add`, so a converged host re-runs this to no effect.
             self.handle
                 .address()
                 .add(index, IpAddr::V4(tap.host_ipv4.addr()), tap.subnet_prefix_length)
@@ -275,8 +247,6 @@ mod linux {
         }
     }
 
-    /// Only ever built where a tap can be made, so a daemon on any other kernel says so at
-    /// startup rather than at the first boot.
     pub(super) fn _assert_send_sync() {
         fn is_send_sync<T: Send + Sync>() {}
         is_send_sync::<KernelNetwork>();

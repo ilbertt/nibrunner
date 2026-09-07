@@ -1,17 +1,3 @@
-//! The other end of an app's loopback port.
-//!
-//! The output-hook DNAT rewrites that port to the guest before local delivery, so while the
-//! microVM is up nothing here is reached — and while it is down this is what the proxy finds
-//! instead of a refused connection.
-//!
-//! Bound for the life of the slot rather than the life of the microVM: the rule is what switches
-//! between the two, so there is no bind to race the reconciler and no window the port is nobody's.
-//!
-//! For an app that runs on request this is the front door: the request that finds no microVM is
-//! what starts one, and it is held here and answered from the guest once that guest is up. For
-//! every other app a stopped microVM is somebody's decision or somebody's bug, and a request is
-//! not the thing that resolves either — so it is told so.
-
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -32,8 +18,6 @@ use crate::state::SharedState;
 
 const LOOPBACK: &str = "127.0.0.1";
 
-/// It says the app is down rather than unknown: the router's 404 is the answer for a hostname
-/// this host serves nothing on, and a suspended app is not that.
 fn app_is_down() -> Response<ProxyBody> {
     say(StatusCode::SERVICE_UNAVAILABLE, "This app is not running.\n")
 }
@@ -45,10 +29,6 @@ fn app_would_not_start() -> Response<ProxyBody> {
     )
 }
 
-/// Its own sentence rather than the one above. An app that could not be woken because its host
-/// had no memory left is not a broken app, and telling its visitor otherwise would have its owner
-/// reading a binary that is fine — while the repair, moving the app, is not something either of
-/// them can bring about by asking again.
 fn host_is_full() -> Response<ProxyBody> {
     say(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -56,10 +36,6 @@ fn host_is_full() -> Response<ProxyBody> {
     )
 }
 
-/// A connection the proxy wants to upgrade cannot be carried across: what comes back from the
-/// guest here is one HTTP message, and a websocket is the opposite of that. The wake still
-/// happens, so the client that reconnects finds the app up and reaches it through the forward
-/// rule rather than through this.
 fn come_back() -> Response<ProxyBody> {
     let mut response = say(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -71,16 +47,12 @@ fn come_back() -> Response<ProxyBody> {
     response
 }
 
-/// What a wake ended as, so the activator can say the right sentence without knowing how waking
-/// works.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakeRefusal {
     NoRoom { shortfall_mib: u64 },
     Failed { reason: String },
 }
 
-/// Waking is a reflex rather than a verb: nothing calls it, a request causes it. Behind a trait
-/// so the activator can be tested against a host with no hypervisor on it.
 #[async_trait::async_trait]
 pub trait Waker: Send + Sync {
     async fn wake(&self, app_id: &AppId) -> Result<(), WakeRefusal>;
@@ -108,7 +80,6 @@ impl AppActivator {
         })
     }
 
-    /// A listener on every port this host holds a slot for, so one with no forward still answers.
     pub async fn serve(self: &Arc<Self>, slots: &[(AppId, HostPort)]) {
         let wanted: BTreeMap<AppId, HostPort> = slots.iter().cloned().collect();
         let mut listeners = self.listeners.lock().await;
@@ -141,13 +112,6 @@ impl AppActivator {
         self.listeners.lock().await.keys().cloned().collect()
     }
 
-    /// A request that finds no microVM. For an app that runs on request it is the thing that
-    /// brings one back, and it waits here until the guest answers — which is a snapshot restore
-    /// where there is one to restore and a cold boot where there is not, and the second is the
-    /// reason the request is held rather than refused.
-    ///
-    /// The record is read again after the wake because the wake is what wrote it: the port and
-    /// address to forward to are the ones the microVM that just came up is on.
     async fn handle(self: Arc<Self>, app_id: AppId, request: Request<Incoming>) -> Response<ProxyBody> {
         let Some(record) = self.state.record(&app_id).await else {
             return app_is_down();
@@ -184,16 +148,9 @@ impl AppActivator {
             request,
             woken.guest_ipv4.as_str(),
             woken.http_port.get(),
-            // `connection: close` is what keeps a resume immediate. The proxy pools its upstream
-            // connections, and one opened while the microVM was down was accepted *here* rather
-            // than forwarded to a guest — so the forward rule appearing later cannot redirect it.
             false,
         )
         .await;
-        // Both halves, because a wake ends at the guest's first TCP accept and a guest accepts
-        // long before it answers: `woke_ms` alone reads as the whole cost and is the smaller part
-        // of it. Which half moved is the only way to tell a slower host from a tenant that takes
-        // longer to come back.
         tracing::info!(
             %app_id,
             woke_ms,
@@ -224,8 +181,6 @@ async fn accept(listener: TcpListener, activator: Arc<AppActivator>, app_id: App
     }
 }
 
-/// Where a request the activator answers is sent when the app is up: the guest itself, not the
-/// loopback port it arrived on.
 pub const GUEST_HOST: &str = LOOPBACK;
 
 #[cfg(test)]
@@ -272,9 +227,6 @@ mod tests {
         }
     }
 
-    /// A port the activator is actually listening on, rather than one that was free a moment
-    /// ago: a test must not need 21000 to be free on whatever machine runs it, and the window
-    /// between letting a probe port go and binding it again is one another test can take.
     async fn serving(activator: &Arc<AppActivator>, app_id: &AppId) -> HostPort {
         for _ in 0..50 {
             let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -301,8 +253,6 @@ mod tests {
             .expect("the activator answers")
     }
 
-    /// A real listener on the address the record names, because the thing being checked is that a
-    /// request came out of the far side.
     async fn guest(state: &SharedState, body: &'static str) -> HostPort {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -357,7 +307,6 @@ mod tests {
 
         let response = get(host_port).await;
         assert_eq!(response.status(), 200);
-        // Not reusable, so the proxy takes the forward rule rather than asking this again.
         assert_eq!(
             response
                 .headers()
@@ -415,7 +364,6 @@ mod tests {
             .contains("could not be started"));
     }
 
-    /// Suspending is an answer, not a question. A request is not the thing that reverses it.
     #[tokio::test]
     async fn a_suspended_app_is_not_woken_by_somebody_finding_its_hostname() {
         let state = HostState::shared();
@@ -439,14 +387,12 @@ mod tests {
         state.put_record(instance_record(|_| {})).await;
         let activator = AppActivator::new(state, CountingWaker::allowing());
         let host_port = serving(&activator, &app_id()).await;
-        // A sync that changes nothing keeps the port, so nothing goes out under it.
         activator.serve(&[(app_id(), host_port)]).await;
         assert_eq!(activator.listening_for().await, vec![app_id()]);
         assert_eq!(get(host_port).await.status(), 503);
 
         activator.serve(&[]).await;
         assert!(activator.listening_for().await.is_empty());
-        // The listener is gone, so the port refuses rather than answering for an app that left.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(tokio::net::TcpStream::connect(("127.0.0.1", host_port.get()))
             .await

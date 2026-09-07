@@ -1,10 +1,3 @@
-//! What this host says about itself, written where anything can read it.
-//!
-//! A file rather than an endpoint, for the reason the input is one: what wants to know what a
-//! host is doing reads it, and what wants to send it onwards reads it and posts it. Neither has
-//! to hold a connection to this daemon, and a daemon that is not running still leaves the last
-//! thing it observed behind.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -17,9 +10,6 @@ use crate::services::report::capacity::{
     allocatable_capacity, committed_resources, read_filesystem_space, read_vcpu_count,
 };
 
-/// A host that has never been given an id of its own is still a host: it reports under a constant
-/// one, so a report is readable before anything has registered it. A control plane that assigns
-/// one writes it into the store and this reads it back.
 pub async fn host_id_of(host: &Host) -> HostId {
     let named = match host.store.acquire().await {
         Ok(mut connection) => crate::repositories::host_identity::read(&mut connection)
@@ -44,10 +34,6 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     };
     let allocatable = allocatable_capacity(&capacity, &committed_resources(&records), space.available_bytes);
 
-    // Where each app that asked for a public port answers, resolved here rather than kept on the
-    // record: the port belongs to the slot the app holds and the address to whatever relay this
-    // host was configured with, so reading both now is what makes giving a port up show up in the
-    // next report rather than at the next boot.
     let mut reached_at = BTreeMap::new();
     if let Some(ipv4) = &host.config.port_relay_public_ipv4 {
         for record in records.iter().filter(|record| record.wants_extra_public_port()) {
@@ -84,8 +70,6 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     })
 }
 
-/// Written the way every other note this daemon keeps is: through a sibling and a rename, so a
-/// reader never sees half a document.
 pub fn write(path: &Path, report: &HostReportedState) {
     if let Err(error) = crate::json_store::write_json(path, report) {
         tracing::warn!(error = %error.message(), "this host could not write down what it observed");
@@ -117,7 +101,6 @@ mod tests {
         assert_eq!(report.instances.len(), 1);
         assert_eq!(report.instances[0].app_id, app_id());
         assert_eq!(report.instances[0].state, InstanceState::Running);
-        // One running app of the default size, out of the four this host has room for.
         assert_eq!(report.capacity.memory_mib, host.guest_memory_mib);
         assert_eq!(
             report.allocatable.memory_mib,
@@ -125,8 +108,6 @@ mod tests {
         );
     }
 
-    /// A host nobody has registered still reports, because a report nobody can read is a host
-    /// nobody can see.
     #[tokio::test]
     async fn a_host_with_no_id_of_its_own_still_has_one_to_report_under() {
         let host = test_host().await;
@@ -137,8 +118,6 @@ mod tests {
             .unwrap();
         assert_eq!(host_id_of(&host).await.as_str(), "host-7");
 
-        // Written once and never again: a host that renamed itself on a restart would look like a
-        // second host to whatever is counting them.
         crate::repositories::host_identity::remember(&mut connection, "host-9")
             .await
             .unwrap();
@@ -157,7 +136,6 @@ mod tests {
             .unwrap()
             .expect("the report is there");
         assert_eq!(read_back, report);
-        // Before anything converges the host says so, rather than claiming to be ready.
         assert_eq!(read_back.state, HostState::Registering);
     }
 }

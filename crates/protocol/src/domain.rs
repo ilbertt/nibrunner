@@ -1,18 +1,11 @@
-//! The domain records both ends read: what an app, an instance, a volume and a host are.
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::wire::*;
 
-// app.ts
-
 const ENVIRONMENT_RESERVED_NAME: &str = "__proto__";
 
-/// `^(?!__proto__$)[A-Za-z_][A-Za-z0-9_]*$`. One name is carved out of what is otherwise the
-/// shell's own rule, because a JavaScript object is how an environment travels from the control
-/// plane to a host: `environment.__proto__ = value` sets a prototype rather than a property.
 pub fn is_environment_name(name: &str) -> bool {
     let mut chars = name.chars();
     name != ENVIRONMENT_RESERVED_NAME
@@ -22,9 +15,6 @@ pub fn is_environment_name(name: &str) -> bool {
 
 const RUNTIME_VALUE_PREFIX: &str = "NIBRUN_";
 
-/// Every runtime value the guest sets, spelled as it is written. What every other end reads
-/// rather than restates: `reference_value` in `apps/runtime/src/config.c` is the one place that
-/// cannot import it.
 pub const RUNTIME_VALUE_NAMES: [&str; 5] = [
     "NIBRUN_DATA_DIR",
     "NIBRUN_EXTRA_PUBLIC_PORT",
@@ -33,16 +23,12 @@ pub const RUNTIME_VALUE_NAMES: [&str; 5] = [
     "NIBRUN_PUBLIC_IPV4",
 ];
 
-/// The two the guest is only given when the app asked for a public port besides HTTP.
 pub const EXTRA_PUBLIC_PORT_VALUES: [&str; 2] = ["NIBRUN_EXTRA_PUBLIC_PORT", "NIBRUN_PUBLIC_IPV4"];
 
 fn is_name_character(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// The references a value holds: each is `(name, allowed)` where `allowed` says the guest offers
-/// it. A `$` that opens no `NIBRUN_` reference is left alone, which is what leaves a bcrypt hash
-/// and a literal `$HOME` alone.
 fn runtime_references(value: &str) -> Vec<(String, bool)> {
     let mut found = Vec::new();
     let bytes = value.as_bytes();
@@ -95,8 +81,6 @@ pub fn interpolable_runtime_value(name: &str) -> String {
     format!("${{{name}}}")
 }
 
-/// A tenant value as the guest reads it. Refused here rather than in the guest, while whoever
-/// typed it is still listening.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "SecretString", into = "SecretString")]
 pub struct TenantValue(SecretString);
@@ -136,8 +120,6 @@ impl std::fmt::Debug for TenantValue {
     }
 }
 
-/// Closed, because a name the pattern does not match is otherwise neither validated nor
-/// rejected. Ordered, so what is rendered from it is rendered the same way twice.
 #[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(
     try_from = "BTreeMap<String, TenantValue>",
@@ -191,13 +173,9 @@ impl FromIterator<(String, TenantValue)> for TenantEnvironment {
     }
 }
 
-/// Mirrored by CONFIG_MAX_ARGUMENTS in apps/runtime, which refuses a file exceeding it.
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_ARGUMENT_LENGTH: usize = 4096;
 
-/// argv[1..] for the tenant binary; argv[0] is always the binary itself. A list rather than one
-/// string: splitting a command line means quoting rules, and the value the user typed reaching
-/// exec unchanged is worth more than the convenience.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(try_from = "Vec<String>", into = "Vec<String>")]
 pub struct TenantArguments(Vec<String>);
@@ -233,7 +211,6 @@ impl From<TenantArguments> for Vec<String> {
 
 pub const MIN_HOSTNAMES: usize = 1;
 
-/// `platform` is the subdomain nibrun issues; `custom` is a domain the user brought.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppHostnameKind {
@@ -241,8 +218,6 @@ pub enum AppHostnameKind {
     Custom,
 }
 
-/// No state: a host is sent the hostnames it should be answering for, and one it should not
-/// answer for yet is left out rather than sent with a flag saying so.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppHostname {
     pub hostname: Hostname,
@@ -253,9 +228,6 @@ pub struct AppHostname {
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub http_port: HttpPort,
-    /// Whether the app is reached on a public TCP and UDP port besides HTTP. A yes or no rather
-    /// than a number, because the port has to be the same on every hop for a binary that
-    /// announces the one it bound to be announcing a reachable one.
     pub has_extra_public_port: bool,
     pub args: TenantArguments,
     pub environment: TenantEnvironment,
@@ -264,7 +236,6 @@ pub struct AppConfig {
     pub restart_policy: RestartPolicy,
 }
 
-/// Whether the app's microVM is kept up or is brought up by a request for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppActivation {
@@ -272,10 +243,7 @@ pub enum AppActivation {
     OnRequest,
 }
 
-/// The floor is the cadence the sleep decision is made on, so a shorter timeout would be one the
-/// host accepts and cannot keep.
 pub const MIN_IDLE_TIMEOUT_MS: u64 = 60_000;
-/// A day: generous enough that it can only ever refuse a slipped zero.
 pub const MAX_IDLE_TIMEOUT_MS: u64 = 86_400_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,8 +282,6 @@ pub enum AppState {
     Deleted,
 }
 
-// instance.ts
-
 pub const MIN_VCPU_COUNT: u32 = 1;
 pub const MAX_VCPU_COUNT: u32 = 32;
 pub const MIN_MEMORY_MIB: u32 = 128;
@@ -328,16 +294,11 @@ pub struct InstanceResources {
     pub memory_mib: u32,
 }
 
-/// 256 leaves a Bun server several times its resident baseline while doubling density against
-/// the 512 it replaces.
 pub const DEFAULT_INSTANCE_RESOURCES: InstanceResources = InstanceResources {
     vcpu_count: 1,
     memory_mib: 256,
 };
 
-/// Run by the host against the HTTP port the user declared. A bare TCP connect is the default
-/// because that is precisely the question being asked; a path upgrades the probe to an HTTP GET
-/// that must answer 2xx.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthCheck {
@@ -359,9 +320,6 @@ pub const DEFAULT_HEALTH_CHECK: HealthCheck = HealthCheck {
     unhealthy_threshold: 3,
 };
 
-/// Applied by the guest's init to the tenant process, not by the host to the microVM. When the
-/// budget is exhausted the guest powers itself off and the host reports the instance `failed`
-/// rather than booting it again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestartPolicy {
@@ -369,7 +327,6 @@ pub struct RestartPolicy {
     pub initial_backoff_ms: u64,
     pub max_backoff_ms: u64,
     pub backoff_factor: f64,
-    /// A process that stayed up this long is treated as healthy and its restart count resets.
     pub reset_after_ms: u64,
 }
 
@@ -381,10 +338,6 @@ pub const DEFAULT_RESTART_POLICY: RestartPolicy = RestartPolicy {
     reset_after_ms: 60_000,
 };
 
-/// `starting` is a booted microVM whose tenant process has not yet accepted a connection, and
-/// `running` is one that has. `idle` is an on-request app with no microVM because nothing has
-/// asked for one: not `stopped`, because an idle instance is serving and the next request is
-/// what it is waiting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstanceState {
@@ -424,12 +377,8 @@ impl InstanceState {
     }
 }
 
-// volume.ts, checkpoint.ts, export.ts, host.ts
-
 pub const DEFAULT_VOLUME_SIZE_BYTES: u64 = 8_589_934_592;
 
-/// `deleted` is reported once the filesystem is actually gone, which is what lets the control
-/// plane finish deleting an app rather than leave it saying `deleting` forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VolumeState {
@@ -458,8 +407,6 @@ pub enum ExportState {
     Expired,
 }
 
-/// Answering "what is this host running" from the host itself, so it can be compared against
-/// what git says it should be running.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostVersions {
@@ -486,11 +433,6 @@ pub enum HostState {
     Unreachable,
 }
 
-// compute.ts, filesystem.ts
-
-/// What a running app is spending on the machine it was given, as the guest kernel accounts for
-/// it. `cpuShare` is a rate and everything else here is a level, which is why it can be missing
-/// while the rest is not: a rate needs two readings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeUsage {
@@ -501,8 +443,6 @@ pub struct ComputeUsage {
     pub measured_at: Timestamp,
 }
 
-/// `other` is every symlink, socket, fifo and device node: a browser's only question is whether
-/// descending is meaningful, and for all of these the answer is the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilesystemEntryKind {
@@ -513,17 +453,12 @@ pub enum FilesystemEntryKind {
 
 pub const MAX_ENTRY_NAME_LENGTH: usize = 255;
 
-/// Deliberately permissive: a name is reported, a path is accepted. The tenant's own binary
-/// created these, so anything ext4 allows has to survive being described.
 pub fn is_entry_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= MAX_ENTRY_NAME_LENGTH && !name.contains(['/', '\0'])
 }
 
 pub const MAX_GUEST_PATH_LENGTH: usize = 4096;
 
-/// An absolute path inside one tenant's filesystem. `.` and `..` are excluded outright rather
-/// than resolved, and quotes and backslashes are excluded because the value once ended up in a
-/// command string.
 pub fn is_guest_path(path: &str) -> bool {
     if path.len() > MAX_GUEST_PATH_LENGTH || !path.starts_with('/') {
         return false;
@@ -558,7 +493,6 @@ pub struct FilesystemEntry {
     pub modified_at: Timestamp,
 }
 
-/// `truncated` rather than a cursor, while the answer is a single read of a single directory.
 pub const DIRECTORY_ENTRY_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -569,8 +503,6 @@ pub struct DirectoryListing {
     pub truncated: bool,
 }
 
-/// How full a volume is, as the kernel that has it mounted accounts for it. `usedBytes` is what
-/// `df` calls used, so it counts the journal and the metadata ext4 wrote before a tenant existed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilesystemUsage {
@@ -578,8 +510,6 @@ pub struct FilesystemUsage {
     pub used_bytes: u64,
     pub measured_at: Timestamp,
 }
-
-// log.ts
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -597,17 +527,12 @@ impl TenantLogStream {
     }
 }
 
-/// Which component wrote a record. Uppercase, alone among the fields, because it is the only one
-/// two very different writers have to agree on: journald requires field names to be uppercase.
 pub const LOG_SOURCES: [&str; 5] = ["tenant", "agent", "firecracker", "zerofs", "caddy"];
 
-/// The fields that identify a record's stream, and the only ones that may.
 pub const LOG_STREAM_FIELDS: [&str; 3] = ["hostId", "SOURCE", "appId"];
 
 pub const MAX_LOG_CHUNK_LENGTH: usize = 65_536;
 
-/// `_msg` and `_time` are the store's own names for a record's message and timestamp. Everything
-/// else stays camelCase, like the rest of the protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantLogRecord {
     #[serde(rename = "_time")]
@@ -623,8 +548,6 @@ pub struct TenantLogRecord {
     #[serde(rename = "deploymentId")]
     pub deployment_id: DeploymentId,
     pub stream: TenantLogStream,
-    /// Recreated with the host receiver. A gap in `sequence` within one `sourceId` means bounded
-    /// buffering dropped records; a new `sourceId` means the receiver itself restarted.
     #[serde(rename = "sourceId")]
     pub source_id: String,
     pub sequence: u64,

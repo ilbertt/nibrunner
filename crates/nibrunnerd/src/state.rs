@@ -1,9 +1,3 @@
-//! Everything this daemon knows about the host it is on, in one place with one writer.
-//!
-//! A cache and never an authority: the microVM processes are what is running, the disk is what a
-//! volume is, and this is what the last pass observed of them. A restarted daemon re-derives it
-//! rather than trusting it.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -16,36 +10,19 @@ use crate::services::report::InstanceRecord;
 #[derive(Debug, Default, Clone)]
 pub struct HostSnapshot {
     pub records: BTreeMap<AppId, InstanceRecord>,
-    /// Volumes this host removed, held until desired state stops naming them. A removal leaves
-    /// nothing behind to observe, so this is the only thing that keeps saying it happened.
     pub deleted_volumes: BTreeMap<VolumeId, ReportedVolume>,
     pub volume_reports: Vec<ReportedVolume>,
     pub checkpoint_reports: Vec<protocol::ReportedCheckpoint>,
-    /// Remembered rather than observed: this host holds write-only credentials on the export store,
-    /// so re-writing on doubt would re-upload a tenant's whole dataset on every restart.
     pub export_reports: Vec<protocol::ReportedExport>,
     pub next_probe_at_ms: BTreeMap<AppId, i64>,
-    /// The apps a snapshot is being taken of right now. Here rather than on the record because it
-    /// may not outlive the daemon that set it: one that died mid-capture comes back with this
-    /// empty, and the microVM it left behind reads as the crash it is rather than as a sleep
-    /// nobody finished.
     pub snapshotting: BTreeSet<AppId>,
-    /// The counters the last activity reading was taken from: the next reading is only meaningful
-    /// against the one before it.
     pub app_traffic: BTreeMap<AppId, AppTraffic>,
-    /// When each app was last reached by something that was not this host, which is what decides
-    /// whether an `on-request` app may sleep.
     pub last_active_at_ms: BTreeMap<AppId, i64>,
     pub volume_usage: BTreeMap<AppId, FilesystemUsage>,
     pub compute_usage: BTreeMap<AppId, ComputeUsage>,
-    /// The raw counters behind the share above, kept only so the next reading has an interval to
-    /// divide by. Never reported: cumulative ticks mean nothing to whoever reads them.
     pub compute_ticks: BTreeMap<AppId, guest_contract::filesystem::MeasuredCompute>,
     pub converged: bool,
-    /// Whether the last reconcile deferred something, and so whether re-running it would do
-    /// anything.
     pub deferred_work: bool,
-    /// Whether this host's isolation ruleset is in the kernel. A tenant is not started without it.
     pub isolated: bool,
 }
 
@@ -53,12 +30,7 @@ pub type SharedState = Arc<HostState>;
 
 pub struct HostState {
     snapshot: RwLock<HostSnapshot>,
-    /// Says the host's own picture of what is running has moved, before the tick is up. The
-    /// status loop chooses how long to sleep from the state as it stood when it last refreshed,
-    /// so a microVM that comes up mid-sleep would otherwise wait out a second measured for a host
-    /// where nothing was happening.
     refresh: Notify,
-    /// Says a report is worth writing before the interval is up.
     report: Notify,
 }
 
@@ -95,12 +67,6 @@ impl HostState {
             .insert(record.app_id.clone(), record);
     }
 
-    /// Merged into the record as it stands, never written over it. A probe is the longest thing a
-    /// pass does, and a reconcile landing a start while one runs has already cleared the
-    /// `stop_requested` the pass read: writing the whole record back would put that flag on again,
-    /// and an instance carrying it is `stopping` for as long as its microVM is up — a state
-    /// nothing forwards to and no later pass leaves. Merging is also what keeps an instance
-    /// dropped mid-pass dropped.
     pub async fn update_record(&self, app_id: &AppId, change: impl FnOnce(&mut InstanceRecord)) {
         let mut snapshot = self.snapshot.write().await;
         if let Some(record) = snapshot.records.get_mut(app_id) {
@@ -112,10 +78,6 @@ impl HostState {
         self.snapshot.write().await.records.remove(app_id);
     }
 
-    /// A request is evidence of use before any counter has seen it. The counters are read on
-    /// their own cadence and a woken app's is new, which the activity reading treats as no
-    /// evidence rather than as use — so without this a wake would leave the moment that had it
-    /// sleeping.
     pub async fn mark_active(&self, app_id: &AppId, now_ms: i64) {
         self.snapshot
             .write()
@@ -124,9 +86,6 @@ impl HostState {
             .insert(app_id.clone(), now_ms);
     }
 
-    /// Taking a snapshot ends with the VMM gone, so while one is in flight a microVM that is not
-    /// there is expected rather than lost. `stop_requested` cannot carry this: the refusal to
-    /// sleep reads it as a stop already asked for and would refuse the very sleep it was marking.
     pub async fn mark_snapshotting(&self, app_id: &AppId, active: bool) {
         let mut snapshot = self.snapshot.write().await;
         if active {
@@ -136,8 +95,6 @@ impl HostState {
         }
     }
 
-    /// A microVM that has just come up is not left waiting on a delay measured for the one before
-    /// it.
     pub async fn probe_at_once(&self, app_id: &AppId) {
         self.snapshot.write().await.next_probe_at_ms.remove(app_id);
     }
@@ -150,7 +107,6 @@ impl HostState {
             .insert(report.volume_id.clone(), report);
     }
 
-    /// Once desired state stops naming it, the control plane has taken the removal in.
     pub async fn forget_deleted_volumes(&self, keep: &BTreeSet<VolumeId>) {
         self.snapshot
             .write()
@@ -176,8 +132,6 @@ impl HostState {
     }
 }
 
-/// Rebuilt from what a reconcile found rather than added to, so what just happened to a volume
-/// wins.
 pub fn merge_volume_reports(
     existing: Vec<ReportedVolume>,
     updates: Vec<ReportedVolume>,

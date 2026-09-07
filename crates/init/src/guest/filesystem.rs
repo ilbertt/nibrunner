@@ -1,9 +1,3 @@
-//! Answering the host about the tenant's own files.
-//!
-//! Ported from `apps/runtime/src/guest-filesystem.c`, and much shorter than it: the frame codec is
-//! `guest_contract::filesystem`, which is the same module the host decodes with. What is left here
-//! is the part that touches the filesystem.
-
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
@@ -36,8 +30,6 @@ pub(crate) fn serve() -> ! {
     };
     loop {
         match vsock::accept_one(&listener) {
-            // One connection at a time, and as many requests on it as the host makes: browsing is
-            // many small reads, and nothing is held between them.
             Ok(connection) => answer_all(connection),
             Err(_) => std::thread::sleep(Duration::from_millis(100)),
         }
@@ -52,8 +44,6 @@ fn answer_all(connection: OwnedFd) {
             return;
         }
         let Ok(header) = decode_request_header(&header) else {
-            // The host reads this as "the guest could not read the request", and the connection
-            // ends: a stream whose framing is wrong cannot be resynchronised by guessing.
             let _ = wire.write_all(&encode_refusal(STATUS_MALFORMED_REQUEST));
             return;
         };
@@ -74,9 +64,6 @@ fn answer_all(connection: OwnedFd) {
     }
 }
 
-/// The tenant's own root, and nothing above it. A `GuestPath` has already been refused if it
-/// carries a `.` or a `..`, so joining is all this does — but the check below is kept anyway,
-/// because a path that escaped would be the one bug in this file nobody could recover from.
 fn resolve(path: &GuestPath) -> Option<PathBuf> {
     let root = Path::new(paths::DATA_DIR);
     let relative = path.as_str().trim_start_matches('/');
@@ -122,8 +109,6 @@ fn with_path(path: &GuestPath, answer: impl FnOnce(&Path) -> Vec<u8>) -> Vec<u8>
     }
 }
 
-/// Read as a code the host renders as a sentence. Nothing here travels but the number: what a
-/// tenant keeps in their own filesystem is theirs to know and not an operator's.
 fn status_for(error: &std::io::Error) -> u8 {
     match error.kind() {
         std::io::ErrorKind::NotFound => STATUS_NOT_FOUND,
@@ -149,8 +134,6 @@ fn details_of(metadata: &std::fs::Metadata) -> EntryDetails {
     }
 }
 
-/// `.` and `..` never travel: the filesystem's own bookkeeping is not a tenant's data, and
-/// navigating upwards belongs to whoever is browsing rather than to what they are browsing.
 fn list(path: &Path) -> Vec<u8> {
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
@@ -159,8 +142,6 @@ fn list(path: &Path) -> Vec<u8> {
     let mut described = Vec::new();
     for entry in entries.flatten() {
         let Ok(metadata) = entry.metadata() else {
-            // An entry that vanished between the readdir and the stat is one nobody can be told
-            // about, and a listing that failed because of it would be a directory nobody can read.
             continue;
         };
         described.push((
@@ -168,8 +149,6 @@ fn list(path: &Path) -> Vec<u8> {
             details_of(&metadata),
         ));
     }
-    // Sorted, because `readdir` is in whatever order the filesystem holds and a listing that came
-    // back differently ordered on every read is one nobody can page through by eye.
     described.sort_by(|left, right| left.0.cmp(&right.0));
     encode_listing(&described)
 }
@@ -244,17 +223,12 @@ fn usage() -> Vec<u8> {
     let Ok(mount) = std::ffi::CString::new(paths::DATA_DIR) else {
         return encode_refusal(STATUS_FAILED);
     };
-    // Safety: a NUL-terminated path this process owns, and a struct the call fills.
     if unsafe { libc::statvfs(mount.as_ptr(), stats.as_mut_ptr()) } < 0 {
         return encode_refusal(STATUS_FAILED);
     }
-    // Safety: `statvfs` returned success, so it wrote the struct.
     let stats = unsafe { stats.assume_init() };
     let block = stats.f_frsize as u64;
     let total = stats.f_blocks as u64 * block;
-    // What is *used*, which is the total less what is free to anybody — not less what is free to
-    // the tenant. The reserve ext4 keeps for root is neither, and counting it as used would show a
-    // tenant a disk fuller than the one they were given.
     let used = total - (stats.f_bfree as u64 * block);
     encode_usage(&MeasuredBytes {
         total_bytes: total,
@@ -285,9 +259,6 @@ fn meminfo_kb(meminfo: &str, field: &str) -> u64 {
         .unwrap_or_default()
 }
 
-/// The aggregate line, and idle plus iowait as what the guest was not spending. Both are needed:
-/// a guest blocked on its own disk is not a guest doing work, and counting iowait as busy would
-/// bill a tenant for waiting on the host's storage.
 fn cpu_ticks(stat: &str) -> (u64, u64) {
     let Some(line) = stat.lines().find(|line| line.starts_with("cpu ")) else {
         return (0, 0);

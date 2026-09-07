@@ -1,5 +1,3 @@
-//! When each app was last busy.
-
 use std::collections::BTreeMap;
 
 use protocol::AppId;

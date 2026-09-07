@@ -3,11 +3,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapters::vm::VmStatus;
 
-/// How often a tenant that has never answered is asked again.
-///
-/// `interval_ms` is a liveness cadence for something already serving, and spending it on a boot
-/// means the gap between a binary starting to listen and a deploy being called done is most of
-/// that interval. This is the grid a first answer lands on instead.
 pub const STARTUP_PROBE_INTERVAL_MS: u64 = 250;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,8 +19,6 @@ pub fn initial_tracker() -> HealthTracker {
     HealthTracker::default()
 }
 
-/// `ever_healthy` flips at the threshold, not at the first accepted connection: it is what later
-/// decides whether a failure run reads as `unhealthy` or as an app that never served at all.
 pub fn apply_probe(
     tracker: &HealthTracker,
     healthy: bool,
@@ -55,7 +48,6 @@ pub struct GraceInputs<'a> {
     pub now_ms: i64,
 }
 
-/// An instance with no start time has not been booted by this daemon, so nothing has run out yet.
 pub fn is_within_grace_period(grace: &GraceInputs<'_>) -> bool {
     match grace.started_at_ms {
         None => true,
@@ -63,15 +55,10 @@ pub fn is_within_grace_period(grace: &GraceInputs<'_>) -> bool {
     }
 }
 
-/// Whether this tenant is still being given its first chance to answer. Bounded by the grace
-/// period rather than by the state alone, which is what keeps it — and the loop that ticks for
-/// it — from running for as long as an app that never settles is up.
 pub fn is_on_startup_grid(tracker: &HealthTracker, grace: &GraceInputs<'_>) -> bool {
     !tracker.ever_healthy && is_within_grace_period(grace)
 }
 
-/// The fast grid applies only while a tenant is still owed its grace period, so a slow starter is
-/// failed on exactly the schedule it was before.
 pub fn next_probe_delay_ms(tracker: &HealthTracker, grace: &GraceInputs<'_>) -> u64 {
     if is_on_startup_grid(tracker, grace) {
         STARTUP_PROBE_INTERVAL_MS.min(grace.health_check.interval_ms)
@@ -80,13 +67,6 @@ pub fn next_probe_delay_ms(tracker: &HealthTracker, grace: &GraceInputs<'_>) -> 
     }
 }
 
-/// Why a `failed` verdict was reached, for the owner who only ever sees the verdict.
-///
-/// There are two ways to reach it and one fact tells them apart: an instance either stopped when
-/// nothing had asked it to, or was still up and never answered. A guest that stopped has usually
-/// said why on its console, and that account wins: the exit code beside it is the one *Firecracker*
-/// ended with, which is 0 whenever the guest powered itself off deliberately — so on the failure
-/// the owner is most likely to hit, it reads as success.
 pub fn describe_instance_failure(
     unit: &VmStatus,
     tracker: &HealthTracker,
@@ -120,25 +100,9 @@ pub struct LifecycleInputs<'a> {
     pub snapshotting: bool,
     pub started_at_ms: Option<i64>,
     pub now_ms: i64,
-    /// What the record already says, which is the only thing that tells a start in flight from an
-    /// app waiting to be asked for: both are `on-request` instances with no microVM behind them
-    /// yet, and the planner has already decided which by writing `pending` or `idle`.
     pub current: InstanceState,
 }
 
-/// What a microVM that is not up means, which is four different things.
-///
-/// `stopped` and `idle` are the same absence read against who is waiting: one is the end of the
-/// release, the other is the release between requests. `pending` is a start still in flight, and
-/// only a start this daemon saw through records a time.
-///
-/// A boot that did happen rules out `idle` whatever the activation policy says: a microVM a
-/// request brought up and that then went down unasked is a crash, and calling that idle would
-/// wait for another request to find out.
-///
-/// Unasked is the whole of it, and a snapshot in flight is the one absence that is asked for
-/// without `stop_requested` saying so: the capture ends with the VMM gone and the flag is only
-/// written once it has finished.
 fn evaluate_stopped_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
     let down = if inputs.on_request && inputs.desired_running {
         InstanceState::Idle
@@ -151,11 +115,6 @@ fn evaluate_stopped_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
     if inputs.started_at_ms.is_some() {
         return InstanceState::Failed;
     }
-    // A start this daemon asked for and has not seen through is not an app waiting to be asked
-    // for. Reading a release that is coming up as `idle` tells the control plane it is as up as
-    // it will ever get: the startup deadline stops, the deployment turns `running` before a probe
-    // has run, and the memory the boot is about to take is left out of what this host counts as
-    // committed.
     if inputs.on_request && inputs.current != InstanceState::Pending {
         down
     } else {
@@ -163,11 +122,6 @@ fn evaluate_stopped_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
     }
 }
 
-/// A booted microVM is not a running app: `starting` has not accepted a connection and `running`
-/// has, and collapsing the two would let a deploy swap traffic onto a booted-but-dead VM.
-///
-/// A VM that exited unasked is `failed` and never restarted here — the guest owns the tenant's
-/// restart budget, and whether to try elsewhere is the reconciler's call.
 pub fn evaluate_instance_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
     if inputs.unit.failed {
         return InstanceState::Failed;
@@ -449,7 +403,6 @@ mod tests {
             }),
             InstanceState::Stopping
         );
-        // A start still being staged is pending, though the replaced VM is still on record.
         assert_eq!(
             evaluate(Evaluate {
                 unit: exited(),
@@ -495,7 +448,6 @@ mod tests {
             }),
             InstanceState::Idle
         );
-        // The two look identical from the unit alone; the record is what tells them apart.
         assert_eq!(
             evaluate(Evaluate {
                 unit: absent(),
@@ -610,7 +562,6 @@ mod tests {
             "nothing answered on port {DEFAULT_HTTP_PORT} inside the guest: {} health probes failed after the {}ms grace period",
             DEFAULT_HEALTH_CHECK.unhealthy_threshold, DEFAULT_HEALTH_CHECK.grace_period_ms
         );
-        // A VM still up never stopped, so there is no console verdict to prefer.
         assert_eq!(
             failure(
                 &active(),

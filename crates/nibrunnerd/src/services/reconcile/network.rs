@@ -1,5 +1,3 @@
-//! What the host's networking is a function of: which apps are up, and which slots it holds.
-
 use std::sync::Arc;
 
 use nft_render::{FirewallState, ForwardedInstance};
@@ -9,9 +7,6 @@ use crate::adapters::proxy::RouteTable;
 use crate::host::Host;
 use crate::services::report::routes::renderable_routes;
 
-/// Only a tenant that has answered is forwarded: a booted-but-dead VM must never take traffic.
-/// The rule is the switch on the loopback port an app is reached by — with it the request is
-/// rewritten to the guest before local delivery, and without it the daemon answers it instead.
 pub async fn forwarded_instances(host: &Host) -> Vec<ForwardedInstance> {
     let mut forwarded = Vec::new();
     for record in host.state.records().await {
@@ -33,9 +28,6 @@ pub async fn forwarded_instances(host: &Host) -> Vec<ForwardedInstance> {
     forwarded
 }
 
-/// A failed apply leaves whatever was already in the kernel, because `nft -f` replaces the table
-/// in one transaction. Tearing down running tenants over a transient failure would be the bigger
-/// outage — refusing to add new ones is the part that has to hold.
 pub async fn apply_network(host: &Host) {
     let state = FirewallState {
         instances: forwarded_instances(host).await,
@@ -107,8 +99,6 @@ mod tests {
         assert_eq!(forwarded.len(), 1);
     }
 
-    /// Absent rather than present-and-ignored: what renders the rules reads the field's presence,
-    /// so an app that did not ask has to be indistinguishable from one that could not have.
     #[tokio::test]
     async fn an_app_is_forwarded_the_port_it_asked_for_and_no_other() {
         let asked = forwards_for(vec![instance_record(|record| {
@@ -118,7 +108,6 @@ mod tests {
         assert_eq!(asked[0].extra_public_port.map(|port| port.get()), Some(22_000));
         let did_not = forwards_for(vec![instance_record(|_| {})]).await;
         assert_eq!(did_not[0].extra_public_port, None);
-        // A record written before an app could ask for one says nothing, and reads as the no it meant.
         let older = forwards_for(vec![instance_record(|record| {
             record.has_extra_public_port = None
         })])

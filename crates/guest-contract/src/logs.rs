@@ -1,7 +1,3 @@
-//! Tenant stdout and stderr, as `apps/runtime/src/guest-logs.c` frames them: `NBL1`, a kind byte,
-//! a big-endian u32 payload length, then the payload. Kind 3 is a gap carrying the bytes the guest
-//! could not deliver as a big-endian u64.
-
 use protocol::TenantLogStream;
 
 pub const FRAME_MAGIC: &[u8; 4] = b"NBL1";
@@ -27,8 +23,6 @@ pub struct InvalidGuestLogFrame {
     pub reason: &'static str,
 }
 
-/// Frames survive arbitrary transport chunking: whatever is left over is returned as the buffer
-/// to carry into the next call.
 pub fn decode_frames(
     buffered: &[u8],
     chunk: &[u8],
@@ -99,17 +93,10 @@ pub fn kind_of(stream: TenantLogStream) -> u8 {
     }
 }
 
-/// What the guest sends when it had to drop a tenant's output: a count rather than the bytes,
-/// because the bytes are gone and a buffer would have been guest memory the tenant was not given.
 pub fn encode_gap(dropped_bytes: u64) -> Vec<u8> {
     encode_frame(KIND_GAP, &dropped_bytes.to_be_bytes())
 }
 
-/// The wire format restated rather than derived from the decoder, so the tests check the codec
-/// against the bytes on the wire and not against themselves.
-///
-/// `kind` rather than a `TenantLogStream`, because a gap is a frame too and is not a stream: it is
-/// the guest saying how much of a tenant's output it had to drop.
 pub fn encode_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
     frame.extend_from_slice(FRAME_MAGIC);
@@ -127,7 +114,6 @@ pub const ENCODE_KIND_GAP: u8 = KIND_GAP;
 mod tests {
     use super::*;
 
-    /// Exactly the bytes `send_frame` in guest-logs.c produces for a four-byte stdout payload.
     const STDOUT_FIXTURE: [u8; 13] = [b'N', b'B', b'L', b'1', 1, 0, 0, 0, 4, b'o', b'n', b'e', b'\n'];
 
     #[test]

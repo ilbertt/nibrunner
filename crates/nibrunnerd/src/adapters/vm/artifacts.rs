@@ -1,9 +1,3 @@
-//! The two read-only images a guest boots with: the tenant's binary at `/server`, and the
-//! instance config at `/instance.env`.
-//!
-//! Packed in this process rather than by spawning `mksquashfs`, which is one fewer host tool to
-//! install and one fewer subprocess whose argument list nothing checks.
-
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,31 +10,17 @@ use crate::ports::{ArtifactError, ArtifactStore};
 
 pub const ARTIFACT_IMAGE_FILENAME: &str = "artifact.squashfs";
 
-/// The path the guest's init execs, fixed by the boot contract.
 const GUEST_BINARY_NAME: &str = "server";
 
-/// What a binary has to be to be one, wherever it lands.
 pub const BINARY_MODE: u16 = 0o755;
-/// The config drive carries the tenant's environment variables, which are secrets. It is mounted
-/// `noexec` and read by init as root, so nothing but root ever needs to open it.
 const CONFIG_MODE: u16 = 0o600;
 const CACHE_DIR_MODE: u32 = 0o755;
 const VM_DIR_MODE: u32 = 0o700;
 
-/// gzip, because it is the one decompressor the guest kernel is guaranteed to have: the image
-/// declares it in its superblock and the kernel registers it at mount.
-///
-/// nibrun's agent packs these with `-noI -noD -noF -noX`, storing everything uncompressed to save
-/// a deploy the compressor's seconds. There is no equivalent here, and squashfs already stores a
-/// block whose compressed form is no smaller — which covers the artifact, where the bytes are a
-/// binary. What is left is the config drive, a few hundred bytes of text compressed once per
-/// boot, and that is not a cost worth a fork of the writer.
 fn image_compressor() -> FilesystemCompressor {
     FilesystemCompressor::new(Compressor::Gzip, None).expect("gzip needs no options")
 }
 
-/// Reproducible: the same bytes twice produce the same image, so a redeploy of a digest this host
-/// already holds is a cache hit rather than a rebuild that happens to work.
 const FIXED_MTIME: u32 = 0;
 
 fn header(permissions: u16) -> NodeHeader {
@@ -78,20 +58,10 @@ fn digest_of(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
-/// Content-addressed, so a redeploy of a known digest costs nothing and two apps share one image.
 pub fn artifact_image_path(cache_dir: &Path, digest: &Sha256Digest) -> PathBuf {
     cache_dir.join(digest.as_str()).join(ARTIFACT_IMAGE_FILENAME)
 }
 
-/// The read-only squashfs the guest attaches as `vdb`, built if this host has not seen the digest.
-///
-/// The bytes are hashed before anything is packed, and the image is only moved into the
-/// content-addressed cache once it is proven to be what it claims.
-/// The artifact's bytes, proven against what the document said they would be.
-///
-/// Separate from the image build because an export wants the same guarantee and none of the
-/// packing: it hands the binary over as a file rather than as a drive, and the download is what
-/// proves the digest either way.
 pub async fn fetch_verified(
     store: &Arc<dyn ArtifactStore>,
     artifact: &DesiredArtifact,
@@ -120,10 +90,6 @@ pub async fn ensure_artifact_image(
 ) -> Result<PathBuf, ArtifactError> {
     let image_path = artifact_image_path(cache_dir, &artifact.digest);
     if image_path.exists() {
-        // Marks it used, which is what a sweep would order by. Left alone the timestamp says when
-        // the image was *built*, so the digest this host starts every day would be evicted ahead
-        // of one fetched once last week. Ignored on failure: a cache entry that cannot be touched
-        // is one that ages, not one that fails a deploy.
         let _ = std::fs::File::open(&image_path).and_then(|file| {
             file.set_times(
                 std::fs::FileTimes::new()
@@ -142,7 +108,6 @@ pub async fn ensure_artifact_image(
         .expect("the image is one level inside the cache");
     make_directory(directory, CACHE_DIR_MODE)
         .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    // Through a sibling and a rename, so a guest never opens an image that is half written.
     let staged = directory.join(format!("{ARTIFACT_IMAGE_FILENAME}.{}.tmp", std::process::id()));
     std::fs::write(&staged, &image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     std::fs::rename(&staged, &image_path).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
@@ -150,7 +115,6 @@ pub async fn ensure_artifact_image(
     Ok(image_path)
 }
 
-/// Rebuilt on every boot, because configuration changes without the artifact changing.
 pub fn build_instance_config_image(working_dir: &Path, rendered: &str) -> Result<PathBuf, ArtifactError> {
     make_directory(working_dir, VM_DIR_MODE).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     let image = pack(&[(
@@ -184,15 +148,11 @@ mod tests {
         StubArtifactStore::holding(bytes)
     }
 
-    /// The digest the fixtures name is the digest of the bytes they stand for: a test that
-    /// asserted against a hash it computed itself would agree with whatever it wrote.
     #[test]
     fn the_fixture_digest_is_the_digest_of_the_fixture_bytes() {
         assert_eq!(digest_of(&artifact_bytes()), ARTIFACT_DIGEST);
     }
 
-    /// Reads one file out of an image the way the guest's kernel would, so a test asserts on
-    /// what a guest would find rather than on bytes that happen to be in the file.
     fn read_back(image: &[u8], path: &str) -> Vec<u8> {
         use std::io::Read;
         let filesystem = backhand::FilesystemReader::from_reader(Cursor::new(image.to_vec())).unwrap();
@@ -217,9 +177,7 @@ mod tests {
             .unwrap();
         assert!(image_path.starts_with(directory.path().join(ARTIFACT_DIGEST)));
         let image = std::fs::read(&image_path).unwrap();
-        // The squashfs superblock's own magic, so this is an image and not a copy of the binary.
         assert_eq!(&image[..4], b"hsqs");
-        // Read back the way a guest reads it: the tenant's binary, whole, at the path init execs.
         assert_eq!(read_back(&image, "/server"), artifact_bytes());
 
         let before = std::fs::metadata(&image_path).unwrap().len();
@@ -228,7 +186,6 @@ mod tests {
             .unwrap();
         assert_eq!(again, image_path);
         assert_eq!(std::fs::metadata(&image_path).unwrap().len(), before);
-        // Nothing is left beside it: a staged image that was never renamed would show up here.
         let siblings = std::fs::read_dir(image_path.parent().unwrap()).unwrap().count();
         assert_eq!(siblings, 1);
     }
@@ -242,8 +199,6 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ArtifactError::DigestMismatch { .. }));
         assert!(error.message().contains("not to the"));
-        // Nothing was written, so the next deploy of the same digest is a fetch rather than a
-        // cache hit on a lie.
         assert!(!artifact_image_path(directory.path(), &artifact(|_| {}).digest).exists());
 
         let store = store(artifact_bytes());
@@ -269,8 +224,6 @@ mod tests {
         assert_eq!(read_back(&rebuilt, "/instance.env"), b"NIBRUN_HTTP_PORT=8080\n");
     }
 
-    /// Two builds of the same bytes are the same image, which is what makes a digest a cache key
-    /// rather than a coincidence.
     #[test]
     fn packing_the_same_bytes_twice_is_byte_identical() {
         let once = pack(&[("server", &artifact_bytes(), BINARY_MODE)]).unwrap();

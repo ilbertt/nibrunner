@@ -1,23 +1,8 @@
-//! The machine description Firecracker boots, and the kernel command line inside it.
-
 use protocol::{InstanceResources, Ipv4Address};
 use serde::{Deserialize, Serialize};
 
-/// Firecracker assigns virtio-blk devices in declaration order, so this order is the boot
-/// contract: `/dev/vda` is the rootfs, `vdb` the artifact, `vdc` the instance config, `vdd` the
-/// tenant data.
 pub const DRIVE_IDS: [&str; 4] = ["rootfs", "artifact", "config", "data"];
 
-/// `i8042.nopnp` is deliberately absent: it breaks SendCtrlAltDel on an ACPI-enabled guest, so a
-/// graceful stop would silently become a kill. The static `ip=` form is why the guest ships no
-/// DHCP client, and `quiet` only raises the printk threshold.
-///
-/// `clocksource=kvm-clock` is what makes waking from a snapshot safe, and it is not a preference.
-/// Firecracker's `clock_realtime` on `/snapshot/load` advances kvmclock by the wall time a guest
-/// slept through, and advances nothing else, so a guest that selected any other clocksource
-/// resumes at the instant it was paused and reads a wall clock hours behind. Measured on a host:
-/// without this, a 60s sleep left the guest 64s in the past; with it, 1s. The call still returns
-/// 204 either way, which is what makes the default worth naming here rather than trusting.
 const BASE_KERNEL_ARGS: &str = "console=ttyS0 quiet reboot=k panic=1 pci=off i8042.noaux i8042.nomux i8042.dumbkbd clocksource=kvm-clock root=/dev/vda ro init=/init";
 
 pub fn netmask_for(prefix_length: u8) -> String {
@@ -95,8 +80,6 @@ pub struct VsockDevice {
     pub uds_path: String,
 }
 
-/// Firecracker validates this with `deny_unknown_fields`, so a typo is a hard error at boot and
-/// nowhere earlier. The field names are Firecracker's own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirecrackerConfig {
     #[serde(rename = "boot-source")]
@@ -126,8 +109,6 @@ pub struct VmVsock {
 
 const NETWORK_INTERFACE_ID: &str = "eth0";
 
-/// io_uring is an upstream developer preview, adds device-creation latency to every cold start,
-/// and its workers escape the cgroup the VM is confined to.
 fn read_only_drive(drive_id: &str, path_on_host: &str, is_root_device: bool) -> FirecrackerDrive {
     FirecrackerDrive {
         drive_id: drive_id.to_string(),
@@ -139,9 +120,6 @@ fn read_only_drive(drive_id: &str, path_on_host: &str, is_root_device: bool) -> 
     }
 }
 
-/// `cache_type` on the data drive is the one setting here that fails silently: Firecracker
-/// defaults to `Unsafe`, which discards flushes, so the guest's fsync returns success, the storage
-/// backend is never asked to flush, and the loss window becomes unbounded until a host dies.
 pub fn render_firecracker_config(
     resources: InstanceResources,
     paths: &VmPaths,

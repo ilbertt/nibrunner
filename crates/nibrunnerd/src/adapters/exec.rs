@@ -1,21 +1,3 @@
-//! Running the host tools this daemon spawns.
-//!
-//! `nft` and `mke2fs` on any host. Everything else it needs — the tap, the netlink, the squashfs,
-//! the hypervisor — it does itself or carries, so a host's dependency list is two packages rather
-//! than a paragraph.
-//!
-//! A host whose volumes live in an object store adds three more, all of them only for a host that
-//! asked for it in `volumes.backend`:
-//!
-//! - `nbd-client`, because attaching an export is a fork that holds `NBD_DO_IT` for the life of
-//!   the device and not a call this daemon could make and return from.
-//! - `zerofs`, whose admin CLI is the only interface a service this daemon does not own exposes,
-//!   and which is also the read-only server an export's checkpoint is read through.
-//! - `debugfs`, which walks a tenant's filesystem in userspace. This one is not a convenience: an
-//!   export is built from a filesystem the host must never ask its kernel to interpret, and
-//!   mounting it — even read-only — would give that up. It ships in `e2fsprogs` beside `mke2fs`,
-//!   so it costs a host no package it did not already have.
-
 use std::process::Stdio;
 
 use async_trait::async_trait;
@@ -54,14 +36,10 @@ impl CommandRunner for HostCommands {
             pipe.write_all(stdin.as_bytes())
                 .await
                 .map_err(|error| unstartable(error.to_string()))?;
-            // Dropped rather than left open: a tool reading a ruleset off stdin waits for the end
-            // of it, so a pipe nobody closed is a process nobody ever hears from.
             drop(pipe);
         }
 
         let finished = tokio::time::timeout(request.timeout, child.wait_with_output()).await;
-        // The process is signalled by the drop above on the way out, so what outlives being given
-        // up on is only what could not have been killed by waiting either.
         let output = finished
             .map_err(|_| CommandError::TimedOut {
                 executable: executable.clone(),

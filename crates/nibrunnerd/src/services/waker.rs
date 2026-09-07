@@ -1,13 +1,3 @@
-//! Bringing an `on-request` app's microVM back because something asked for it.
-//!
-//! A restore where there is a snapshot to restore and a cold boot where there is not, which is
-//! the difference between tens of milliseconds and a second or so. Which one happened is the
-//! reconcile's to decide; what is decided here is whether it may happen at all.
-//!
-//! One wake per app at a time. A cold page load is a burst of requests, and every one of them
-//! arrives to find no microVM: without this the first would bring it up and the rest would each
-//! spend the app's restart budget racing it.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,20 +10,12 @@ use crate::host::Host;
 use crate::services::health::probe::probe_instance;
 use crate::services::report::capacity::{committed_resources, memory_shortfall_mib};
 
-/// Tighter than the startup grid the status loop probes on, because somebody is holding a browser
-/// tab open on this one — and tighter than it needs to be to find out, because on average half an
-/// interval is added to every wake purely by asking on a grid. A restore reaches its first accept
-/// in ~90ms, so 25ms spent a measured ~12ms of that on nothing; the probe is one loopback connect
-/// to a guest that either has the port open or does not.
 const PROBE_INTERVAL: Duration = Duration::from_millis(5);
 
 type Outcome = Result<(), WakeRefusal>;
 
 pub struct AppWaker {
     host: Arc<Host>,
-    /// The joiners are counted beside the sender rather than derived afterwards: a cold page load
-    /// is one wake and a burst of requests, and without the count every reading of how often apps
-    /// wake is really a reading of how many requests arrived while one was waking.
     in_flight: Mutex<BTreeMap<AppId, (broadcast::Sender<Outcome>, u64)>>,
 }
 
@@ -45,9 +27,6 @@ impl AppWaker {
         })
     }
 
-    /// Whether this host can find the memory for one more microVM, asked of everything *else* it
-    /// is holding: the app being woken is idle, so it commits nothing until it is up, and one
-    /// that is somehow already running would otherwise be counted twice and refused its own room.
     async fn refusal_for_room(
         &self,
         app_id: &AppId,
@@ -98,8 +77,6 @@ impl AppWaker {
             });
         }
         if let Some(refusal) = self.refusal_for_room(app_id, &wanted.config.resources).await {
-            // The record is the only account of this its owner will ever see, and left to say
-            // nothing it reads as an app asleep between requests — which is the one thing it is not.
             if let WakeRefusal::NoRoom { shortfall_mib } = &refusal {
                 let message = format!(
                     "{app_id} could not be woken: its host is {shortfall_mib} MiB short of the memory it needs"
@@ -124,9 +101,6 @@ impl AppWaker {
             });
         };
         if record.started_at.is_none() {
-            // Neither half wrote a time, so neither reached the VMM: the artifact would not
-            // fetch, the restore was refused, or the restart budget was spent on boots that
-            // already failed.
             let reason = record.message.as_ref().map_or_else(
                 || "the microVM would not start".to_string(),
                 |message| message.as_str().to_string(),
@@ -134,8 +108,6 @@ impl AppWaker {
             return Err(WakeRefusal::Failed { reason });
         }
 
-        // The grace period is the deadline: past it the health loop would call the instance
-        // failed anyway, so holding the request longer only delays telling whoever sent it.
         let deadline = Instant::now() + Duration::from_millis(record.health_check.grace_period_ms);
         loop {
             if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check).await {
@@ -149,15 +121,7 @@ impl AppWaker {
             tokio::time::sleep(PROBE_INTERVAL).await;
         }
 
-        // The guest is answering, which is the one thing the forward rule waits on — so the loop
-        // is told now rather than on its next tick. Until it refreshes, the record still says this
-        // app is coming up and every request behind this one is answered by the activator.
         self.host.state.signal_refresh();
-        // Counted here rather than when the wake started, because when it started is before any
-        // of them had arrived: a burst reaches a sleeping app over the same tens of milliseconds
-        // this wake spends, so reading the count first reports nothing waited on a wake that the
-        // whole burst waited on. The requests that join between this line and the removal below
-        // go uncounted, which is a window measured against a boot rather than against a burst.
         let joined = self
             .in_flight
             .lock()
@@ -195,8 +159,6 @@ impl Waker for AppWaker {
         if let Some(mut waiting) = joined {
             return match waiting.recv().await {
                 Ok(outcome) => outcome,
-                // The wake that was leading ended without saying so, which is the daemon shutting
-                // down: the request is told the app did not start rather than left holding.
                 Err(_) => Err(WakeRefusal::Failed {
                     reason: "the wake was abandoned".into(),
                 }),
@@ -227,8 +189,6 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
-                // Nothing is listening for these to reach, so the wake gives up at its own
-                // deadline rather than holding the test for the grace period a real app gets.
                 record.health_check.grace_period_ms = 50;
             }))
             .await;
@@ -266,8 +226,6 @@ mod tests {
         let counted = CountsCoalesced::default();
         let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(counted.clone()));
 
-        // The wake only reaches its log once something answers inside the guest, so the probe is
-        // pointed at a socket on this machine that accepts and says nothing.
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
@@ -301,11 +259,9 @@ mod tests {
         .await;
 
         assert!(outcomes.iter().all(Result::is_ok));
-        // One wake, and the nine behind the one that led it.
         assert_eq!(counted.taken(), vec![9]);
     }
 
-    /// A count that is only ever logged is only testable through the log.
     #[derive(Clone, Default)]
     struct CountsCoalesced(Arc<std::sync::Mutex<Vec<u64>>>);
 
@@ -334,16 +290,10 @@ mod tests {
         }
     }
 
-    /// Refusing converges: the app stays down, its owner is told why, and the repair is to move
-    /// it — which is placement's to make and not something a request can bring about. Evicting a
-    /// neighbour would make one tenant's traffic a reason to take another tenant's app offline,
-    /// and on a host already over its memory every wake would evict somebody whose next visitor
-    /// evicts somebody else.
     #[tokio::test]
     async fn a_host_with_no_memory_left_refuses_rather_than_evicting_a_neighbour() {
         let host = test_host().await;
         host.state.modify(|snapshot| snapshot.isolated = true).await;
-        // Every app the host can hold, running, so the one being woken does not fit.
         for index in 0..4 {
             host.state
                 .put_record(instance_record(|record| {
@@ -381,8 +331,6 @@ mod tests {
         );
     }
 
-    /// A tenant boots onto a host whose isolation ruleset is in the kernel, and a request is not
-    /// a reason to make an exception.
     #[tokio::test]
     async fn a_wake_is_refused_while_the_isolation_ruleset_is_not_applied() {
         let host = test_host().await;
@@ -402,7 +350,6 @@ mod tests {
         );
     }
 
-    /// Suspending is an answer, not a question: a request is not the thing that reverses it.
     #[tokio::test]
     async fn a_wake_is_refused_for_an_app_the_document_says_is_stopped() {
         let host = test_host().await;

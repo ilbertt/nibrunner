@@ -1,7 +1,3 @@
-//! Where a tenant's binary comes from: a local directory for a single machine, an S3 bucket for a
-//! fleet. One trait over `object_store`, so which of the two a host uses is a URL and not a code
-//! path.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,15 +8,10 @@ use crate::ports::{ArtifactError, ArtifactStore};
 
 pub struct ObjectArtifactStore {
     store: Arc<dyn ObjectStore>,
-    /// What the URL named beneath the bucket, prepended to every key. Absent for a directory,
-    /// which is already a prefix.
     prefix: Option<String>,
 }
 
 impl ObjectArtifactStore {
-    /// A URL, or a path. `s3://bucket/prefix` reaches AWS through the ordinary credential chain;
-    /// anything else is a directory on this host, which is what a single machine wants and what
-    /// makes `run-dev` need no account.
     pub fn open(url: &str) -> Result<Self, ArtifactError> {
         if let Some(rest) = url.strip_prefix("s3://") {
             let (bucket, prefix) = match rest.split_once('/') {
@@ -91,8 +82,6 @@ mod tests {
         ));
     }
 
-    /// The prefix a bucket URL names is prepended to every key, so what the control plane sends
-    /// stays the key it assigned rather than one this host has to rewrite.
     #[test]
     fn a_bucket_url_carries_its_prefix_into_every_key() {
         let key = ObjectKey::parse("artifacts/one").unwrap();

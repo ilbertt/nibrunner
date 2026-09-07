@@ -1,9 +1,3 @@
-//! A volume as a sparse file on this host's own disk, formatted once with `mke2fs`.
-//!
-//! The backend that needs nothing of the machine but a filesystem, which is what makes every
-//! other part of this daemon testable on any Linux box. What it does not give is the thing the
-//! object-store backend exists for: a volume that outlives the host it was written on.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -46,8 +40,6 @@ impl LocalFileVolumes {
             .map(|info| info.len())
     }
 
-    /// Sparse: the file is as long as the volume and holds only what has been written to it, so a
-    /// host carrying ten eight-gigabyte volumes has not spent eighty gigabytes.
     fn ensure_file(&self, volume_id: &VolumeId, size_bytes: u64) -> Result<u64, VolumeError> {
         let path = self.path_for(volume_id);
         let target = align_to_sector(size_bytes);
@@ -97,8 +89,6 @@ impl LocalFileVolumes {
         let mut magic = [0u8; 2];
         match file.read_exact(&mut magic) {
             Ok(()) => Ok(has_ext_magic(&magic)),
-            // A file shorter than a superblock is a volume nothing has formatted, not one that
-            // refused to answer.
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
             Err(_) => Err(VolumeError::SuperblockUnreadable {
                 device_path: path.display().to_string(),
@@ -106,8 +96,6 @@ impl LocalFileVolumes {
         }
     }
 
-    /// Deliberately the defaults. `mke2fs` rather than `mkfs.ext4`: it is the binary the
-    /// filesystem type is an argument to, so a host needs one tool rather than a symlink farm.
     async fn format_once(&self, volume_id: &VolumeId) -> Result<bool, VolumeError> {
         if self.is_formatted(volume_id)? {
             return Ok(false);
@@ -149,11 +137,6 @@ impl VolumeBackend for LocalFileVolumes {
         Ok(self.attached(&desired.volume_id, size_bytes))
     }
 
-    /// Nothing to attach: the guest is handed the file itself, and Firecracker opens it. What
-    /// this checks is that the file is still there, because a volume this host has lost is not
-    /// one it may report as ready.
-    /// The app is not consulted: a sparse file is named for the volume and lives where this
-    /// backend put it, so the slot an app holds has nothing to do with reaching one.
     async fn attach(
         &self,
         volume_id: &VolumeId,
@@ -181,9 +164,6 @@ impl VolumeBackend for LocalFileVolumes {
         }
     }
 
-    /// The host's own page cache is the only thing between a write and the disk, and the guest's
-    /// own fsync reaches it through a `Writeback` drive — so a flush here is the kernel's, not a
-    /// service's.
     async fn flush(&self) -> Result<(), VolumeError> {
         Ok(())
     }
@@ -218,8 +198,6 @@ impl VolumeBackend for LocalFileVolumes {
                 let size_bytes = Self::size_of(&entry.path())?;
                 Some(ObservedBacking {
                     device_path: Some(entry.path().display().to_string()),
-                    // A file that is there is a device a guest can be pointed at: there is no
-                    // server between the two that could be up while the volume is unreadable.
                     attached: true,
                     size_bytes,
                     storage_prefix: self.storage_prefix.clone(),
@@ -244,13 +222,10 @@ mod tests {
         )
     }
 
-    /// The formatter is spawned against the file, and only where the file has no superblock: a
-    /// second provision of a volume a tenant has written to must never reformat it.
     #[tokio::test]
     async fn a_volume_is_formatted_once_and_never_again() {
         let directory = tempfile::tempdir().unwrap();
         let commands = RecordingCommandRunner::answering(|request| {
-            // Standing in for mke2fs: what a formatted volume looks like from the outside.
             let path = request.command.last().expect("a path to format");
             let mut image = std::fs::read(path).unwrap_or_default();
             image.resize(4096, 0);
@@ -315,7 +290,6 @@ mod tests {
         let volumes = backend(directory.path(), RecordingCommandRunner::succeeding());
         assert!(volumes.observe(&Default::default()).await.is_empty());
         volumes.provision(&desired_volume(|_| {})).await.unwrap();
-        // A file whose name is not a volume id belongs to something else and is left out.
         std::fs::write(directory.path().join("not a volume"), b"").unwrap();
         let observed = volumes.observe(&Default::default()).await;
         assert_eq!(observed.len(), 1);
@@ -325,7 +299,6 @@ mod tests {
 
         volumes.teardown(&volume_id(), &app_id()).await.unwrap();
         assert!(volumes.observe(&Default::default()).await.is_empty());
-        // Tearing down what is already gone is what a second pass does, and it is not a failure.
         volumes.teardown(&volume_id(), &app_id()).await.unwrap();
         assert!(matches!(
             volumes.attach(&volume_id(), &app_id()).await,

@@ -1,10 +1,3 @@
-//! What each guest on this host is holding and spending.
-//!
-//! Ported from `apps/agent/src/lib/agent/usage.ts`. Measured on the sweep that already decides
-//! what sleeps rather than on the report it feeds: measuring is a round trip into every guest on
-//! the host, and a report that waited for those would be a report a hung tenant could stop —
-//! while what the report carries otherwise is what a deploy converges on.
-
 use std::collections::BTreeMap;
 
 use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
@@ -13,29 +6,16 @@ use protocol::{AppId, ComputeUsage, FilesystemUsage, Timestamp};
 use crate::host::Host;
 use crate::services::report::instance_record::InstanceRecord;
 
-/// Enough that one guest which has stopped answering does not hold up the rest, and low enough
-/// that a packed host is not opening a connection into every tenant it runs at once.
 const MEASUREMENT_CONCURRENCY: usize = 4;
 
-/// Every vCPU the app was given, busy. Two saturated vCPUs is this, not twice it.
 const FULLY_BUSY: f64 = 1.0;
 
-/// What one guest answered, and either half may be missing while the other arrived: they are two
-/// exchanges, and a guest whose image predates one of the verbs refuses that one and answers the
-/// other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GuestReading {
     pub filesystem: Option<MeasuredBytes>,
     pub compute: Option<MeasuredCompute>,
 }
 
-/// The share of the vCPUs spent computing between two readings.
-///
-/// Missing rather than zero where there is nothing to compare against. The counters are cumulative
-/// since the guest booted, so the first reading after this daemon starts has no interval behind
-/// it, and one standing *behind* the reading before it is a guest that has rebooted since. Both
-/// would divide by a difference that is not an interval, and a made-up nought is the reading an
-/// owner would act on.
 pub fn share_between(before: Option<MeasuredCompute>, after: MeasuredCompute) -> Option<f64> {
     let before = before?;
     let total = after.cpu_total_ticks.checked_sub(before.cpu_total_ticks)?;
@@ -59,12 +39,6 @@ fn as_compute_usage(
     }
 }
 
-/// What every app with a slot keeps after a sweep, given what each one answered.
-///
-/// A slot outlives the microVM, so this is also what a *suspended* app keeps: it stopped, its
-/// guest went with it, and the honest answer about it is what was true when it was last running
-/// rather than nothing at all. Each reading carries the moment it was taken, which is what lets
-/// whoever reads it tell the two apart.
 pub fn volume_usage_after(
     taken: &[(AppId, GuestReading)],
     previous: &BTreeMap<AppId, FilesystemUsage>,
@@ -88,18 +62,9 @@ pub fn volume_usage_after(
 
 pub struct ComputeAfter {
     pub usage: BTreeMap<AppId, ComputeUsage>,
-    /// The raw counters, kept only so the next sweep has something to subtract.
     pub ticks: BTreeMap<AppId, MeasuredCompute>,
 }
 
-/// An app asleep between requests forgets, where a suspended one remembers.
-///
-/// What a suspended app last spent answers a question its owner asked by taking it offline; an
-/// `on-request` app sleeps and wakes on its own all day, and a figure carried across every sleep
-/// would have an app that is holding nothing go on reporting what it held when it last ran. Not
-/// costing anything while asleep is the whole of the policy, so the reading goes with the microVM
-/// — and so do the counters, because a wake is a cold boot and the next reading has nothing
-/// behind it to subtract.
 pub fn compute_usage_after(
     taken: &[(AppId, GuestReading)],
     records: &BTreeMap<AppId, InstanceRecord>,
@@ -119,8 +84,6 @@ pub fn compute_usage_after(
                 usage.insert(app_id.clone(), as_compute_usage(measured, before, at.clone()));
                 ticks.insert(app_id.clone(), measured);
             }
-            // A guest that could not be asked is not a guest that answered nothing: what it last
-            // said stands, and the counters behind it stay so the next answer has an interval.
             None => {
                 if let Some(kept) = previous_usage.get(app_id) {
                     usage.insert(app_id.clone(), kept.clone());
@@ -134,7 +97,6 @@ pub fn compute_usage_after(
     ComputeAfter { usage, ticks }
 }
 
-/// Asks every guest with a slot, and writes what came back into the host's own picture.
 pub async fn measure(host: &Host) {
     let slots = host.slots().await;
     let mut taken: Vec<(AppId, GuestReading)> = Vec::with_capacity(slots.len());
@@ -192,15 +154,11 @@ mod tests {
         assert_eq!(share, Some(0.3), "300 busy of 1000 elapsed");
     }
 
-    /// The first reading after this daemon starts has no interval behind it, and a made-up nought
-    /// is the reading an owner would act on.
     #[test]
     fn a_first_reading_has_no_share_rather_than_a_share_of_nothing() {
         assert_eq!(share_between(None, compute(1_000, 100)), None);
     }
 
-    /// A counter standing behind the one before it is a guest that rebooted since, and the
-    /// difference is not an interval.
     #[test]
     fn a_guest_that_restarted_its_counters_has_no_share_until_it_has_two_readings() {
         assert_eq!(share_between(Some(compute(5_000, 900)), compute(100, 10)), None);
@@ -210,15 +168,12 @@ mod tests {
         );
     }
 
-    /// Every vCPU the app was given, busy. Two saturated vCPUs is one, not two.
     #[test]
     fn a_fully_busy_guest_reads_as_one_however_many_vcpus_it_has() {
         let share = share_between(Some(compute(1_000, 100)), compute(2_000, 3_100));
         assert_eq!(share, Some(1.0));
     }
 
-    /// It stopped, its guest went with it, and what was true when it was last running is a better
-    /// answer than nothing at all.
     #[test]
     fn a_suspended_app_keeps_what_its_volume_last_measured() {
         let previous = BTreeMap::from([(
@@ -234,8 +189,6 @@ mod tests {
         assert_eq!(after.get(&app_id()).map(|usage| usage.used_bytes), Some(400));
     }
 
-    /// Not costing anything while asleep is the whole of the policy, so the reading goes with the
-    /// microVM rather than being carried across every wake.
     #[test]
     fn an_app_asleep_between_requests_forgets_what_it_last_spent() {
         let records = BTreeMap::from([(
@@ -264,7 +217,6 @@ mod tests {
         );
     }
 
-    /// A guest that could not be asked is not a guest that answered nothing.
     #[test]
     fn a_running_app_that_would_not_answer_keeps_what_it_last_said() {
         let records = BTreeMap::from([(app_id(), instance_record(|_| {}))]);

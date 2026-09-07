@@ -1,5 +1,3 @@
-//! The planner. Ported function for function from `apps/agent/src/lib/reconcile/plan.ts`.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use protocol::{
@@ -10,12 +8,10 @@ use protocol::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedInstance {
     pub app_id: AppId,
-    /// Absent for a microVM this daemon has no record of — a host that lost its state file.
     pub volume_id: Option<VolumeId>,
     pub deployment_id: Option<DeploymentId>,
     pub present: bool,
     pub running: bool,
-    /// Stopped without being asked to: left alone, because rebooting would hide a broken deploy.
     pub exited: bool,
 }
 
@@ -35,8 +31,6 @@ pub struct ObservedCheckpoint {
     pub volume_id: VolumeId,
 }
 
-/// Remembered rather than observed: the host holds write-only credentials on the export bucket,
-/// so re-writing on doubt would re-upload a tenant's whole dataset on every daemon restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedExport {
     pub export_id: ExportId,
@@ -70,9 +64,6 @@ impl InstanceStopReason {
     }
 }
 
-/// `Sleep` is not `Stop`: it says this app should be here, holding its port and its hostnames,
-/// with no microVM until something asks for one. What it produces is the record and the slot a
-/// request needs to find, which is why an app nobody has ever visited still has to be planned.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstancePlan {
     Start {
@@ -120,8 +111,6 @@ pub enum CheckpointPlan {
     None { checkpoint_id: CheckpointId },
 }
 
-/// `Forget`, not `Delete`: expiry is the bucket's lifecycle rule, which is what makes it
-/// unforgettable.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExportPlan {
     Write { desired: DesiredExport },
@@ -138,8 +127,6 @@ pub struct ReconcilePlan {
 }
 
 impl ReconcilePlan {
-    /// A blocked teardown converges on a later pass, and nothing else would run one: only desired
-    /// state moving triggers a reconcile, and deferred work does not move it.
     pub fn has_deferred_work(&self) -> bool {
         self.volumes
             .iter()
@@ -147,9 +134,6 @@ impl ReconcilePlan {
     }
 }
 
-/// The asymmetry is the point. `instances` is authoritative, so a microVM the control plane does
-/// not mention is stopped. `volumes` is not: removal is only ever an explicit `absent`, because a
-/// truncated response must not be able to destroy a tenant's filesystem.
 pub fn plan_reconcile(desired: &HostDesiredState, observed: &ObservedState) -> ReconcilePlan {
     ReconcilePlan {
         instances: plan_instances(desired, observed),
@@ -172,11 +156,6 @@ fn plan_instance(wanted: &DesiredInstance, current: Option<&ObservedInstance>) -
             }
         };
     }
-    // An app that runs on request is reconciled like any other up to the last line: a release this
-    // host has not served yet comes up rather than waiting to be asked for, because a deploy is
-    // the one moment an owner is watching and the only one where the health check runs at all —
-    // an app first booted by a visitor reports a broken binary to them. Sleep is what a release
-    // that has already had its microVM does between requests.
     if wanted.desired_state == DesiredInstanceState::OnRequest {
         let Some(current) = current.filter(|instance| instance.present) else {
             return InstancePlan::Start {
@@ -320,12 +299,6 @@ fn plan_volumes(desired: &HostDesiredState, observed: &ObservedState) -> Vec<Vol
         .collect()
 }
 
-/// Not a diff against reality: the host cannot see the bucket it writes to, so a bundle already
-/// written is left alone even if the object has since expired underneath it.
-///
-/// Authoritative, like `instances` and unlike `volumes`: an export this end remembers and desired
-/// state does not mention is dropped. Safe to be authoritative about because forgetting costs a
-/// re-upload at worst, where forgetting a volume would cost the tenant's data.
 fn plan_exports(desired: &HostDesiredState, observed: &ObservedState) -> Vec<ExportPlan> {
     let written_ids: BTreeSet<&ExportId> = observed
         .exports
@@ -493,8 +466,6 @@ mod tests {
             assert_eq!(result.instances, vec![InstancePlan::None { app_id: app_id() }]);
         }
 
-        /// The shape a reboot produces: the daemon's records survive on disk, so the instance is
-        /// still present and still wanted, but nothing has run since the host came up.
         #[test]
         fn a_vm_that_has_not_run_since_the_host_booted_is_started() {
             let result = plan(
@@ -542,7 +513,6 @@ mod tests {
         }
     }
 
-    /// A release comes up once so that somebody watches it come up, and sleeps from then on.
     mod an_app_that_runs_on_request {
         use super::*;
 
@@ -550,8 +520,6 @@ mod tests {
             desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest)
         }
 
-        /// Where the health check happens: a release nothing has ever run is one nothing has ever
-        /// checked, and leaving the first boot to a visitor reports a broken binary to them.
         #[test]
         fn one_this_host_has_never_served_is_started_rather_than_put_to_sleep() {
             let result = plan(
@@ -585,8 +553,6 @@ mod tests {
             );
         }
 
-        /// Replaced rather than started: a start keeps the record it found, so the release the
-        /// host reports would stay the one this deploy supersedes.
         #[test]
         fn a_deploy_onto_one_that_is_asleep_replaces_it_rather_than_leaving_it_asleep() {
             let result = plan(
@@ -679,8 +645,6 @@ mod tests {
                     blocked_by: vec![app_id()]
                 }
             );
-            // Deleting an app takes two passes — stop the instance, then tear the volume down —
-            // and only a generation change runs a pass. Without this the second one never comes.
             assert!(result.has_deferred_work());
         }
 
@@ -774,8 +738,6 @@ mod tests {
             assert!(matches!(written.exports[0], ExportPlan::None { .. }));
         }
 
-        /// A failed export is remembered as a record but not as a bundle, so the next reconcile
-        /// is what retries it.
         #[test]
         fn a_bundle_that_failed_is_retried() {
             let result = plan(
@@ -813,8 +775,6 @@ mod tests {
             );
         }
 
-        /// `absent` only reaches a record the control plane still has. One it never had, or has
-        /// lost, is a record nothing would ever withdraw.
         #[test]
         fn a_record_desired_state_does_not_mention_at_all_is_forgotten_too() {
             let result = plan(

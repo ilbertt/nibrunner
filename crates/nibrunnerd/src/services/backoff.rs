@@ -1,5 +1,3 @@
-//! How long a start waits after the one before it failed.
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BackoffPolicy {
     pub initial_backoff_ms: u64,
@@ -33,15 +31,11 @@ pub struct AttemptWindow {
     pub last_attempt_at_ms: Option<i64>,
 }
 
-/// A budget nothing has spent: what an instance is born with, and what a deliberate stop gives
-/// back.
 pub const NO_START_ATTEMPTS: AttemptWindow = AttemptWindow {
     attempts: 0,
     last_attempt_at_ms: None,
 };
 
-/// Staying up longer than `reset_after_ms` restarts the budget, so a monthly failure never
-/// exhausts it.
 pub fn next_attempt_window(window: &AttemptWindow, now_ms: i64, reset_after_ms: u64) -> AttemptWindow {
     let elapsed = window.last_attempt_at_ms.map_or(0, |at| now_ms - at);
     AttemptWindow {

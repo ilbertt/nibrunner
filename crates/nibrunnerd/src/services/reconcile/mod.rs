@@ -1,6 +1,3 @@
-//! Pull, converge, report. Nothing here is driven by a command: desired state describes a world,
-//! this compares it with what the host is observed to be doing, and the difference is the work.
-
 pub mod checkpoints;
 pub mod exports;
 pub mod idle;
@@ -19,8 +16,6 @@ use protocol::{DesiredInstanceState, HostDesiredState};
 use crate::adapters::vm::UNKNOWN_VM;
 use crate::host::Host;
 
-/// The union of what the host is running and what this daemon has notes on: a microVM with no
-/// note is an orphan to stop, and a note with no microVM is an instance that is gone.
 pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
     let snapshot = host.state.snapshot().await;
     let mut app_ids: BTreeSet<protocol::AppId> = host.vms.adopted_app_ids().await.into_iter().collect();
@@ -40,9 +35,6 @@ pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
                     deployment_id: record.map(|record| record.deployment_id.clone()),
                     present: status.loaded || record.is_some(),
                     running: status.active,
-                    // `started_this_boot` keeps a reboot out of this: the record survives on disk,
-                    // so without it every instance would look exited after a reboot and be left
-                    // alone.
                     exited: !status.active
                         && status.started_this_boot
                         && record.is_some_and(|record| record.started_at.is_some() && !record.stop_requested),
@@ -55,8 +47,6 @@ pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
     }
 }
 
-/// Hostnames, the health check and whether the app should be up all change without the artifact
-/// changing, so they are folded in before anything reads the record.
 async fn sync_desired(host: &Host, desired: &HostDesiredState) {
     for wanted in &desired.instances {
         host.state
@@ -94,9 +84,6 @@ async fn apply_stops(host: &Host, plan: &ReconcilePlan) {
     }
 }
 
-/// The apps this host answers for without running anything. Nothing boots here — that is what
-/// makes them cheap — but the slot and the record are what a request has to arrive to, so they
-/// are made before the activators bind and before routing is rendered.
 async fn apply_sleeps(host: &Host, plan: &ReconcilePlan) {
     for action in &plan.instances {
         if let InstancePlan::Sleep { desired } = action {
@@ -105,8 +92,6 @@ async fn apply_sleeps(host: &Host, plan: &ReconcilePlan) {
     }
 }
 
-/// A tenant only ever boots onto a host whose isolation ruleset is in the kernel: the guest is an
-/// arbitrary binary one routing decision away from the control plane and its neighbours.
 async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
     let starts: Vec<_> = plan
         .instances
@@ -131,9 +116,6 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
     }
 }
 
-/// One pass. The order is the contract: what a request has to find is made before anything binds
-/// to it, the ruleset is in the kernel before anything boots, and the forwards are rendered again
-/// after the starts that produced them.
 pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
     let observed = observe(host, desired).await;
     let plan = plan_reconcile(desired, &observed);
@@ -142,35 +124,19 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
         .await;
     sync_desired(host, desired).await;
 
-    // The fetch does not need the host to have stopped anything, so it runs beside the stops
-    // rather than after them.
     let prefetch = instances::prefetch_artifacts(host, &plan);
     let stops = apply_stops(host, &plan);
     tokio::join!(prefetch, stops);
 
     volumes::apply_volumes(host, &plan, &observed, desired).await;
-    // Before the activators below, because the slot one binds on is allocated here.
     apply_sleeps(host, &plan).await;
-    // Before the forwards below are withdrawn from a tenant that has just stopped, so the port it
-    // was reached on is answered rather than closed.
     network::apply_activators(host).await;
-    // Before anything boots: nothing persists the ruleset across a reboot, so a host that started
-    // its VMs first would serve tenants through a kernel with no table of ours.
     network::apply_network(host).await;
     apply_starts(host, &plan).await;
     volumes::apply_teardowns(host, &plan).await;
-    // After the volumes and before the report: a checkpoint is cut against a filesystem this pass
-    // may have only just provisioned into, and what it reports is read on the strength of the same
-    // document that asked for it.
     checkpoints::apply_checkpoints(host, &plan).await;
-    // Last of the storage work, and after the checkpoints: an export cuts one of its own, and the
-    // reap inside it must not run while the pass above is still deciding what should exist.
     exports::apply_exports(host, &plan).await;
-    // Again, because a start is where an app that is not `on-request` first gets a slot: without
-    // this its loopback port stays nobody's until the next pass, and a request arriving in
-    // between is refused by the kernel rather than answered by this daemon saying why.
     network::apply_activators(host).await;
-    // And again, because the instances started above are the ones whose forwards this renders.
     network::apply_network(host).await;
     network::apply_routes(host).await;
     host.persist().await;
@@ -242,8 +208,6 @@ mod tests {
         assert!(host.state.record(&app_id()).await.unwrap().started_at.is_some());
     }
 
-    /// The one path that may cold-boot: a first sleep, a redeploy, a host that rebooted, a guest
-    /// image that moved. Every other failure leaves the app down and says why.
     #[tokio::test]
     async fn a_snapshot_nothing_can_load_is_a_cold_boot_instead() {
         let host = test_host().await;
@@ -348,9 +312,6 @@ mod tests {
         assert_eq!(host.vms.calls(), vec![VmCall::Stop]);
     }
 
-    /// A pass that lands while a snapshot is being taken: the capture has taken the VMM down and
-    /// `stop_requested` is not written until it returns, so reading that as a crash would drop the
-    /// app out of desired state and take its hostnames off the proxy with it.
     #[tokio::test]
     async fn a_pass_that_lands_mid_capture_reads_the_microvm_as_asleep_rather_than_crashed() {
         let host = test_host().await;
@@ -387,8 +348,6 @@ mod tests {
 
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Failed);
-        // The guest's own account wins over the exit code, which is 0 whenever it powered itself
-        // off deliberately.
         assert!(record.message.unwrap().as_str().contains("used its 5 restarts"));
     }
 
@@ -412,8 +371,6 @@ mod tests {
                 .port_for(app_hostname().hostname.as_str()),
             Some(record.host_port)
         );
-        // Written down, so a daemon that restarts finds what this pass did rather than starting
-        // the app a second time.
         let mut connection = host.store.acquire().await.unwrap();
         assert_eq!(
             crate::repositories::instances::all(&mut connection)
@@ -431,9 +388,6 @@ mod tests {
         );
     }
 
-    /// The port an app is reached on has to answer from the pass that created it. A slot that
-    /// exists with nothing listening on it is a request meeting a refused connection, which an
-    /// edge in front of this host cannot tell from a host that is not there.
     #[tokio::test]
     async fn the_port_an_app_is_reached_on_answers_from_the_pass_that_allocated_it() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
@@ -462,8 +416,6 @@ mod tests {
         assert!(host.vms.calls().contains(&VmCall::Discard));
     }
 
-    /// An instance whose filesystem this host does not hold is one nothing may boot: a guest
-    /// pointed at a device that is not there would come up with no data at all.
     #[tokio::test]
     async fn an_instance_whose_volume_is_not_here_does_not_boot() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;

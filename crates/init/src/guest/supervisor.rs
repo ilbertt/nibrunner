@@ -1,8 +1,3 @@
-//! Starting the tenant, watching it, and reaping whatever else dies.
-//!
-//! Ported from `apps/runtime/src/supervise.c`. Every child that dies is reaped, tenant or not —
-//! nobody else in the guest will.
-
 use std::ffi::CString;
 use std::time::{Duration, Instant};
 
@@ -18,12 +13,6 @@ use crate::supervise::{backoff_ms, budget_resets, Outcome, SHUTDOWN_GRACE_MS};
 
 pub(crate) use crate::supervise::Outcome as Ended;
 
-/// Blocked rather than handled, so nothing is delivered between the fork and the exec and every
-/// arrival is taken deliberately by the loop below.
-///
-/// Must be called before the first fork, and early enough that a shutdown arriving during boot is
-/// still honoured: PID 1 discards signals it has neither blocked nor handled, so an unblocked
-/// SIGINT before this point is gone for good.
 pub(crate) fn block_signals() {
     let mut blocked = SigSet::empty();
     blocked.add(Signal::SIGINT);
@@ -68,8 +57,6 @@ pub(crate) fn supervise(config: &InstanceConfig) -> Ended {
                     "the tenant exited ({status}); restart {restarts} of {} in {delay}ms",
                     config.max_restarts
                 ));
-                // Interruptible: a shutdown that arrived while the guest was waiting to restart is
-                // a shutdown, not something to serve out the backoff first.
                 if wait_for_signal(Duration::from_millis(u64::from(delay))) == Arrived::Shutdown {
                     return Outcome::ShutdownRequested;
                 }
@@ -84,12 +71,6 @@ enum Watched {
     Exited { status: i32 },
 }
 
-/// Polls the tenant's output and takes signals between reads.
-///
-/// The two together rather than one waiting on the other: a tenant printing steadily must not
-/// delay a shutdown, and a tenant that has gone quiet must not stop this side noticing that its
-/// log connection went away. The interval is what bounds both, and it is short enough that a
-/// shutdown is not something anybody waits on.
 fn watch(tenant: Pid, mut output: TenantOutput, forwarder: &mut Forwarder) -> Watched {
     loop {
         output.forward(forwarder);
@@ -97,7 +78,6 @@ fn watch(tenant: Pid, mut output: TenantOutput, forwarder: &mut Forwarder) -> Wa
             Arrived::Shutdown => return Watched::ShutdownRequested,
             Arrived::ChildDied | Arrived::Nothing => {
                 if let Some(status) = reap_until(tenant) {
-                    // Whatever the tenant wrote before it went, before the pipes are dropped.
                     output.forward(forwarder);
                     return Watched::Exited { status };
                 }
@@ -108,15 +88,12 @@ fn watch(tenant: Pid, mut output: TenantOutput, forwarder: &mut Forwarder) -> Wa
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The read ends of the tenant's own stdout and stderr.
 pub(crate) struct TenantOutput {
     stdout: std::fs::File,
     stderr: std::fs::File,
 }
 
 impl TenantOutput {
-    /// Non-blocking, so a tenant that is quiet costs one syscall per stream and a tenant that is
-    /// loud is drained until it is not.
     fn forward(&mut self, forwarder: &mut Forwarder) {
         for (stream, pipe) in [
             (protocol::TenantLogStream::Stdout, &mut self.stdout),
@@ -139,7 +116,6 @@ pub(crate) struct Tenant {
     output: TenantOutput,
 }
 
-/// The tenant's exit status if it was among the children that died, and `None` if it was not.
 fn reap_until(tenant: Pid) -> Option<i32> {
     let mut tenant_status = None;
     loop {
@@ -166,27 +142,18 @@ enum Arrived {
     Nothing,
 }
 
-/// `sigtimedwait` rather than a handler, because a signal taken deliberately at a point of this
-/// loop's choosing cannot arrive between a fork and an exec. `nix` wraps the untimed form only.
 #[allow(unsafe_code)]
 fn wait_for_signal(within: Duration) -> Arrived {
     let blocked = waited_signals();
-    // Built through `nix` rather than as a bare `libc::timespec`, whose `tv_sec` is a type that
-    // differs between musl versions and is deprecated to name directly.
     let timeout = nix::sys::time::TimeSpec::from_duration(within);
-    // Safety: the set is one this process built and has blocked, and the timeout is a struct this
-    // frame owns for the length of the call. No info is asked for, so the second argument is null.
     let taken = unsafe { libc::sigtimedwait(blocked.as_ref(), std::ptr::null_mut(), timeout.as_ref()) };
     match Signal::try_from(taken) {
         Ok(Signal::SIGINT | Signal::SIGTERM) => Arrived::Shutdown,
         Ok(Signal::SIGCHLD) => Arrived::ChildDied,
-        // A timeout, or an interruption: either way there is nothing to act on and the caller
-        // decides whether to wait again.
         _ => Arrived::Nothing,
     }
 }
 
-/// SIGTERM, then SIGKILL once the grace period is up.
 fn stop(tenant: Pid) {
     let _ = nix::sys::signal::kill(tenant, Signal::SIGTERM);
     let deadline = Instant::now() + Duration::from_millis(u64::from(SHUTDOWN_GRACE_MS));
@@ -201,8 +168,6 @@ fn stop(tenant: Pid) {
     let _ = waitpid(tenant, None);
 }
 
-/// Forked and exec'd directly rather than through `std::process`, because PID 1 owns the reaping
-/// of every child in the guest and a second reaper racing this one would lose exit statuses.
 fn spawn(config: &InstanceConfig) -> Option<Tenant> {
     let executable = CString::new(paths::TENANT_BINARY).ok()?;
     let mut argv = vec![executable.clone()];
@@ -215,17 +180,12 @@ fn spawn(config: &InstanceConfig) -> Option<Tenant> {
         .filter_map(|(name, value)| CString::new(format!("{name}={value}")).ok())
         .collect();
 
-    // The tenant's own descriptors, so its output reaches the host rather than PID 1's console.
-    // Non-blocking on this side: a tenant that fills a pipe nobody is draining should block, which
-    // is back-pressure, but this side must never block reading one that is empty.
     let (stdout_read, stdout_write) = nix::unistd::pipe().ok()?;
     let (stderr_read, stderr_write) = nix::unistd::pipe().ok()?;
     for read in [&stdout_read, &stderr_read] {
         let _ = nix::fcntl::fcntl(read, nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK));
     }
 
-    // Safety: between the fork and the exec this calls only async-signal-safe functions, which is
-    // the whole of what a forked child of a single-threaded process may do.
     match unsafe { nix::unistd::fork() } {
         Err(error) => {
             log(&format!("the tenant could not be forked: {error}"));
@@ -244,13 +204,10 @@ fn spawn(config: &InstanceConfig) -> Option<Tenant> {
         }
         Ok(ForkResult::Child) => {
             let failed = |_| unsafe { libc::_exit(127) };
-            // Unblocked in the child, so a tenant that installs its own handlers gets the signals
-            // its own users send it rather than a mask it never asked for.
             let _ = SigSet::all().thread_unblock();
             let _ = nix::unistd::dup2_stdout(&stdout_write).map_err(failed);
             let _ = nix::unistd::dup2_stderr(&stderr_write).map_err(failed);
             let _ = nix::unistd::chdir(paths::APP_DIR).map_err(failed);
-            // The group first: after setuid there is no privilege left to change it with.
             let _ = nix::unistd::setgid(Gid::from_raw(paths::TENANT_GID)).map_err(failed);
             let _ = nix::unistd::setgroups(&[]).map_err(failed);
             let _ = nix::unistd::setuid(Uid::from_raw(paths::TENANT_UID)).map_err(failed);

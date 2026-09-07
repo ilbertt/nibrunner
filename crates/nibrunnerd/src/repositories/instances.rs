@@ -1,16 +1,9 @@
-//! What this host is running, as it last wrote it down.
-
 use protocol::AppId;
 use sqlx::SqliteConnection;
 
 use crate::repositories::StoreError;
 use crate::services::report::instance_record::InstanceRecord;
 
-/// A record this daemon cannot read is left out rather than failing the load.
-///
-/// The same reasoning the JSON store had: a host whose notes were written by a different version
-/// of this binary should come up serving what it can still understand, and re-derive the rest by
-/// observing. What it must never do is refuse to start, because then nothing on it recovers.
 pub async fn all(connection: &mut SqliteConnection) -> Result<Vec<InstanceRecord>, StoreError> {
     let rows = sqlx::query!("select record from instances order by app_id")
         .fetch_all(&mut *connection)
@@ -22,8 +15,6 @@ pub async fn all(connection: &mut SqliteConnection) -> Result<Vec<InstanceRecord
         .collect())
 }
 
-/// Replaced whole, because the caller holds every record and one it no longer has is an app it no
-/// longer runs.
 pub async fn replace_all(
     connection: &mut SqliteConnection,
     records: &[InstanceRecord],
@@ -48,7 +39,6 @@ pub async fn replace_all(
     Ok(())
 }
 
-/// What an operator sees without a JSON tool, from the generated columns rather than a second copy.
 pub async fn summary(connection: &mut SqliteConnection) -> Result<Vec<(AppId, String)>, StoreError> {
     let rows = sqlx::query!("select app_id, state from instances order by app_id")
         .fetch_all(&mut *connection)

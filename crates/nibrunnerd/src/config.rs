@@ -1,17 +1,3 @@
-//! Everything the daemon reads at startup, from one file, validated once so that nothing further
-//! in has to ask whether a setting makes sense.
-//!
-//! A file rather than the environment. What a host is configured to be is something an operator
-//! reads back six months later, and an environment cannot be read back: it is spread across a
-//! unit file, a shell profile and whatever started the process, and no two hosts can be diffed.
-//! It is also the only shape in which a wrong setting can be *refused* — an environment variable
-//! nobody set and one whose name was mistyped are the same absence, so a typo silently takes the
-//! default, where an unknown key here is an error that names the line it is on.
-//!
-//! Validated at startup rather than at first use, for the same reason the ruleset is rendered
-//! whole: a host that is going to refuse a setting should refuse it while an operator is still
-//! watching, not on the pass that first needed it.
-
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
@@ -19,20 +5,13 @@ use protocol::Ipv4Address;
 
 const DEFAULT_STATE_DIR: &str = "/var/lib/nibrunner";
 const DEFAULT_RUNTIME_DIR: &str = "/run/nibrunner";
-/// On a disk that may be a cache, because a snapshot is one: losing one costs a cold boot and
-/// nothing else.
 const DEFAULT_SNAPSHOT_DIR: &str = "/var/lib/nibrunner/snapshots";
 const DEFAULT_GUEST_IMAGE_DIR: &str = "/var/lib/nibrunner/guest";
 const DEFAULT_STORAGE_PREFIX: &str = "volumes";
 
-/// Where the file is unless something says otherwise, and the one thing still read from the
-/// environment: a process has to be told where to read before it can read anything.
 pub const DEFAULT_CONFIG_FILE: &str = "/etc/nibrunner/config.toml";
 pub const CONFIG_FILE_VARIABLE: &str = "NIBRUNNER_CONFIG";
 
-/// The longest prefix an object store will be asked to carry. Not a limit of any store; a limit
-/// on how wrong a value can be before it is worth saying so, since a prefix is prepended to every
-/// key this host ever writes.
 const MAX_STORAGE_PREFIX_BYTES: usize = 512;
 
 #[derive(Debug, thiserror::Error)]
@@ -58,14 +37,9 @@ impl ConfigError {
     }
 }
 
-/// What a volume is made of, which is the one thing about this host that is meant to change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VolumeBackendKind {
-    /// A sparse file on this host's own disk. Needs nothing of the machine but a filesystem, and
-    /// gives nothing back when the machine goes.
     LocalFile,
-    /// A file inside a ZeroFS filesystem, reached by the guest over NBD. What makes a volume
-    /// outlive the host it was written on.
     Zerofs,
 }
 
@@ -78,8 +52,6 @@ impl VolumeBackendKind {
     }
 }
 
-/// Where this host's ZeroFS is, and where what it serves can be reached. Every path here belongs
-/// to a service this daemon does not own and must never start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZerofsSettings {
     pub binary: PathBuf,
@@ -87,11 +59,7 @@ pub struct ZerofsSettings {
     pub mount_path: PathBuf,
     pub nbd_socket_path: PathBuf,
     pub checkpoint_runtime_dir: PathBuf,
-    /// A second config, read by the read-only server an export's checkpoint is served from. Not
-    /// the live server's: every setting about writing is absent from it, and copying them across
-    /// would suggest that process takes part in any of it.
     pub checkpoint_config_file: PathBuf,
-    /// Scratch for one pass over one filesystem, made on the way in and removed on the way out.
     pub checkpoint_cache_dir: PathBuf,
 }
 
@@ -109,46 +77,24 @@ pub struct HostConfig {
     pub runtime_dir: PathBuf,
     pub snapshot_dir: PathBuf,
     pub guest_image_dir: PathBuf,
-    /// Where the embedded Firecracker is extracted to, under a directory named for its version so
-    /// two daemons of different versions on one host cannot overwrite each other's copy.
     pub firecracker_dir: PathBuf,
-    /// The document the daemon watches. One of the three sources of the same state.
     pub desired_state_file: PathBuf,
-    /// Where anything local reaches this daemon.
     pub api_socket: PathBuf,
-    /// Where the artifact bytes come from: a local directory for dev, an S3 URL for a fleet.
     pub artifact_store_url: String,
-    /// Where a volume's blocks live, for the backend that keeps them in an object store.
     pub volume_store_url: Option<String>,
     pub storage_prefix: String,
     pub volume_backend: VolumeBackendKind,
-    /// Present exactly when the backend is `zerofs`, so nothing downstream has to ask twice.
     pub zerofs: Option<ZerofsSettings>,
-    /// Where a tenant's own public port is reached, which is not this host's address and not
-    /// something a guest can discover.
     pub port_relay_public_ipv4: Option<Ipv4Address>,
     pub control_plane_cidrs_v4: Vec<String>,
     pub control_plane_cidrs_v6: Vec<String>,
-    /// The proxy's own listener, and the certificate it serves. ACME is deferred, so a host with
-    /// no certificate serves HTTP only and says so.
     pub proxy_https_port: Option<u16>,
     pub proxy_http_port: Option<u16>,
     pub proxy_tls_certificate: Option<PathBuf>,
     pub proxy_tls_key: Option<PathBuf>,
-    /// The remote control plane, when there is one. Absent is the ordinary case: the file is the
-    /// source that ships.
     pub control_plane_url: Option<String>,
     pub versions_file: PathBuf,
-    /// Where a finished export's bundle is put. Its own store rather than the artifact one: a
-    /// bundle is a tenant's whole dataset in the clear, and the two want different lifecycle rules
-    /// and different permissions — an export needs no delete, and an artifact is never reaped.
-    ///
-    /// Never inside `export_staging_dir`, and the default is deliberately a sibling: the staging
-    /// tree is removed whole by the reap, so a store nested in it would lose every bundle this
-    /// host had written the first time an export was left behind.
     pub export_store_url: String,
-    /// Where a bundle is assembled. Under the state directory by default, because it is a second
-    /// copy of a tenant's dataset and belongs on the disk this host already treats as private.
     pub export_staging_dir: PathBuf,
 }
 
@@ -157,14 +103,10 @@ impl HostConfig {
         self.state_dir.join(name)
     }
 
-    /// Everything this host knows about itself. One database rather than the documents it used to
-    /// be, because a pass writes all of it and a crash must not leave half.
     pub fn state_db_file(&self) -> PathBuf {
         self.in_state_dir("state.db")
     }
 
-    /// The documents an older daemon on this host wrote. Read once, on the first start after the
-    /// upgrade, and never written again.
     pub fn instances_file(&self) -> PathBuf {
         self.in_state_dir("instances.json")
     }
@@ -173,9 +115,6 @@ impl HostConfig {
         self.in_state_dir("slots.json")
     }
 
-    /// Beside the slots rather than inside them: `slots.json` is a plain app-to-slot record that a
-    /// daemon either side of this reads the same way, and a key that is not an app in there would
-    /// read back as one holding a slot.
     pub fn slot_cursor_file(&self) -> PathBuf {
         self.in_state_dir("slot-cursor.json")
     }
@@ -212,8 +151,6 @@ impl HostConfig {
         self.in_state_dir("logs")
     }
 
-    /// A daemon with no certificate has no HTTPS listener: serving one from a certificate that is
-    /// not there would be a proxy answering handshakes it cannot complete.
     pub fn tls_material(&self) -> Option<(&Path, &Path)> {
         match (&self.proxy_tls_certificate, &self.proxy_tls_key) {
             (Some(certificate), Some(key)) => Some((certificate.as_path(), key.as_path())),
@@ -222,12 +159,6 @@ impl HostConfig {
     }
 }
 
-/// The document as written.
-///
-/// Every field is optional, so an empty file is a valid host and a host that names nothing gets
-/// the single-machine defaults. `deny_unknown_fields` on all of it is the point of the exercise:
-/// a setting this daemon does not have is a mistake worth stopping for, and it is the one class
-/// of mistake an environment could never report.
 mod file {
     use serde::Deserialize;
 
@@ -323,12 +254,6 @@ mod file {
 }
 
 impl HostConfig {
-    /// The file the environment names, or the one at the default path, or the defaults.
-    ///
-    /// A path given explicitly must exist: naming a file is saying it matters, and reading past
-    /// it would leave a host running on defaults its operator believes it is not running on. The
-    /// default path is allowed to be absent, which is what makes a fresh single-machine host work
-    /// with nothing installed but the binary.
     pub fn load() -> Result<Self, ConfigError> {
         match std::env::var(CONFIG_FILE_VARIABLE)
             .ok()
@@ -352,8 +277,6 @@ impl HostConfig {
             reason: error.to_string(),
         })?;
         Self::from_toml(&text).map_err(|error| match error {
-            // The parse failure carries the line and column; what it cannot carry is which file,
-            // because it never saw a path.
             ConfigError::Malformed { reason, .. } => ConfigError::Malformed {
                 path: path.display().to_string(),
                 reason,
@@ -389,9 +312,6 @@ impl HostConfig {
             .https_port
             .map(|port| listener("proxy.https_port", port))
             .transpose()?;
-        // One socket cannot carry both, and a host that asked for it would come up serving
-        // whichever bound first: the same daemon answering plaintext on the port it was told to
-        // serve TLS on is worse than not starting.
         if let (Some(http), Some(https)) = (http, https) {
             if http == https {
                 return Err(ConfigError::invalid(
@@ -411,9 +331,6 @@ impl HostConfig {
                 ))
             }
         };
-        // Named settings that nothing would read are the mistake this file exists to catch: a host
-        // configured for ZeroFS and running on local files is one whose volumes quietly do not
-        // survive it.
         if document.volumes.zerofs.is_some() && backend != VolumeBackendKind::Zerofs {
             return Err(ConfigError::invalid(
                 "volumes.zerofs",
@@ -567,7 +484,6 @@ impl HostConfig {
         })
     }
 
-    /// Everything under one directory, for a test and for `just run-dev`.
     pub fn under(root: &Path) -> Self {
         Self {
             state_dir: root.join("state"),
@@ -597,8 +513,6 @@ impl HostConfig {
     }
 }
 
-/// Absolute, because the daemon's working directory is whatever started it: a relative path in a
-/// file that outlives the shell that wrote it names a different place every time.
 fn absolute(field: &str, value: &str) -> Result<PathBuf, ConfigError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -621,8 +535,6 @@ fn directory(field: &str, value: Option<&str>, fallback: &str) -> Result<PathBuf
     }
 }
 
-/// A path, or a name under the directory it belongs to. The fallback is derived rather than
-/// written down twice, so moving `state_dir` moves everything that had not been named separately.
 fn beneath(field: &str, value: Option<&str>, parent: &Path, name: &str) -> Result<PathBuf, ConfigError> {
     match value {
         Some(value) => absolute(field, value),
@@ -630,9 +542,6 @@ fn beneath(field: &str, value: Option<&str>, parent: &Path, name: &str) -> Resul
     }
 }
 
-/// A port an app slot already takes cannot also be the proxy's. Slots are allocated without asking
-/// anything about the proxy, so the collision surfaces as a listener that will not bind — on a
-/// pass that has nothing to do with the proxy, long after whoever wrote the file has gone.
 fn listener(field: &str, port: u16) -> Result<u16, ConfigError> {
     if port == 0 {
         return Err(ConfigError::invalid(
@@ -661,9 +570,6 @@ enum Family {
     V6,
 }
 
-/// Validated because these are interpolated into the ruleset as text. `nft` would reject a
-/// malformed one, but it rejects the *whole* file: one bad line in this config would leave a host
-/// with no isolation at all rather than with one range missing.
 fn cidrs(field: &str, values: &[String], family: Family) -> Result<Vec<String>, ConfigError> {
     values
         .iter()
@@ -709,9 +615,6 @@ fn cidrs(field: &str, values: &[String], family: Family) -> Result<Vec<String>, 
         .collect()
 }
 
-/// `s3://bucket[/prefix]`, or an absolute directory on this host. Refused here rather than at the
-/// first deploy, because a scheme this daemon has no backend for is a host that will fetch
-/// nothing, and finding that out at startup costs an operator a minute instead of an outage.
 fn object_store_url(field: &str, value: &str) -> Result<String, ConfigError> {
     let value = value.trim();
     if let Some(rest) = value.strip_prefix("s3://") {
@@ -731,9 +634,6 @@ fn object_store_url(field: &str, value: &str) -> Result<String, ConfigError> {
     Ok(absolute(field, value)?.display().to_string())
 }
 
-/// A key prefix in an object store, not a path on this host. A leading slash makes an empty first
-/// segment and `..` means nothing to a bucket, so both are refused here rather than becoming a key
-/// nobody can find again.
 fn storage_prefix(field: &str, value: &str) -> Result<String, ConfigError> {
     let value = value.trim();
     if value.is_empty() {
@@ -769,8 +669,6 @@ fn storage_prefix(field: &str, value: &str) -> Result<String, ConfigError> {
     Ok(value.to_string())
 }
 
-/// Reached over HTTP, and with a host in it. Anything else is a value that would fail on the first
-/// poll rather than here.
 fn control_plane_url(field: &str, value: &str) -> Result<String, ConfigError> {
     let value = value.trim().trim_end_matches('/');
     let rest = value
@@ -849,7 +747,6 @@ mod tests {
         assert!(message.contains("21000"), "{message}");
         let extra = refused("[proxy]\nhttps_port = 22062\n");
         assert!(extra.contains("22000"), "{extra}");
-        // One past the last slot is nobody's.
         assert_eq!(
             parsed("[proxy]\nhttp_port = 21063\n").proxy_http_port,
             Some(21063)
@@ -1001,9 +898,6 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
         assert!(matches!(error, ConfigError::Unreadable { .. }), "{error}");
     }
 
-    /// The annotated copy is what an operator starts from, so it is held to the same rules as
-    /// anything they write themselves — and it claims to show every key at its default, which is
-    /// only true if what it parses to is the default.
     #[test]
     fn the_sample_this_repository_ships_is_a_configuration_this_daemon_accepts() {
         let sample = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/config.toml");

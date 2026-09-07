@@ -1,7 +1,3 @@
-//! Slots are per app, never per instance, so a redeploy is invisible to routing. They are
-//! released only on an explicit volume `absent`: reusing a port sooner would route one tenant
-//! into another.
-
 use std::collections::BTreeMap;
 
 use nft_render::{describe_slot, AppSlot, FIRST_SLOT, SLOT_COUNT};
@@ -21,25 +17,18 @@ impl SlotExhausted {
 
 const SLOT_SPAN: u32 = SLOT_COUNT - FIRST_SLOT;
 
-/// Both directions, because a cursor read off disk may be negative and the scan has to land on a
-/// slot this host has whatever the file said.
 fn wrapped(offset: i64) -> u32 {
     let span = i64::from(SLOT_SPAN);
     let inside = ((offset % span) + span) % span;
     FIRST_SLOT + inside as u32
 }
 
-/// Where the next scan starts. A hint and never an authority: the scan only ever returns a slot
-/// nothing holds, so a cursor that is stale, missing or nonsense costs a different free slot
-/// rather than a wrong one.
 pub fn read_slot_cursor(value: Option<serde_json::Value>) -> i64 {
     value
         .and_then(|value| value.as_i64())
         .unwrap_or(i64::from(FIRST_SLOT))
 }
 
-/// A record file that cannot be read degrades to an empty allocator rather than throwing, and a
-/// slot two apps claim is honoured for the first of them only.
 pub fn assignments_from(records: BTreeMap<String, serde_json::Value>) -> BTreeMap<AppId, u32> {
     let mut assignments = BTreeMap::new();
     let mut taken = std::collections::BTreeSet::new();
@@ -50,8 +39,6 @@ pub fn assignments_from(records: BTreeMap<String, serde_json::Value>) -> BTreeMa
         let Ok(app_id) = AppId::parse(app_id) else {
             continue;
         };
-        // Past what this host has, or already somebody else's. A file can say anything; what it
-        // says can only ever cost this app a slot, never give it one another app holds.
         if !(FIRST_SLOT..SLOT_COUNT).contains(&slot) || taken.contains(&slot) {
             continue;
         }
@@ -67,9 +54,6 @@ pub struct SlotAllocator {
 }
 
 impl SlotAllocator {
-    /// What a daemon that has just read its own notes hands back. Replaced whole rather than
-    /// merged: the table on disk is the whole of what this host allocated, and a slot in memory
-    /// that is not in it is one a crash lost.
     pub fn restore(&mut self, assignments: BTreeMap<AppId, u32>, cursor: i64) {
         self.assignments = assignments;
         self.cursor = cursor;
@@ -90,10 +74,6 @@ impl SlotAllocator {
         }
     }
 
-    /// The next free slot at or after the cursor rather than the lowest free one, wrapping once
-    /// so the scan still ends. A slot only comes back when its app's volume is torn down, and
-    /// handing it straight to the next app makes an address a client may still be dialling
-    /// somebody else's — so a freed slot waits for the cursor to come round to it.
     fn next_free(&self) -> Option<u32> {
         let taken: std::collections::BTreeSet<u32> = self.assignments.values().copied().collect();
         (0..SLOT_SPAN)
@@ -107,9 +87,6 @@ impl SlotAllocator {
         }
         let free = self.next_free().ok_or(SlotExhausted { limit: SLOT_COUNT })?;
         self.assignments.insert(app_id.clone(), free);
-        // Only past a slot this just gave away. An app being handed the one it already holds is
-        // every redeploy, and moving the cursor there would leave it wherever the last redeploy
-        // happened to be — which is as likely to sit on a freed slot as anywhere else.
         self.cursor = i64::from(free) + 1;
         Ok(describe_slot(free, app_id.clone()))
     }
@@ -153,8 +130,6 @@ mod tests {
         assert_eq!(ports.len(), 3);
     }
 
-    /// Asserted against a full host rather than an empty one: the freed slot is then the only one
-    /// left, so this says the pool grew back without saying which order it is drawn from.
     #[test]
     fn a_released_slot_becomes_available_again() {
         let mut allocator = SlotAllocator::empty();
@@ -234,15 +209,11 @@ mod tests {
         ]);
         let assignments = assignments_from(records);
         assert_eq!(assignments.get(&app(2)), Some(&3));
-        // A duplicate slot is honoured once, and one past the host limit not at all.
         assert_eq!(assignments.get(&app(3)), None);
         assert_eq!(assignments.get(&app(4)), None);
         assert_eq!(assignments.len(), 1);
     }
 
-    /// What a daemon reading its own notes hands back, replacing whatever it had: a slot in
-    /// memory that is not on disk is one a crash lost, and keeping it would be this host holding a
-    /// port nothing recorded it holding.
     #[test]
     fn restoring_replaces_what_was_held_rather_than_merging_with_it() {
         let mut allocator = SlotAllocator::empty();

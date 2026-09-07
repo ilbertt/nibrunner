@@ -1,5 +1,3 @@
-//! Building the host, and the three loops it runs.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -35,8 +33,6 @@ pub enum StartupError {
     Unusable(String),
 }
 
-/// Everything a host is, built once. What fails here fails before a tenant exists, which is the
-/// only place a host is allowed to refuse to be one.
 pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     for directory in [&config.state_dir, &config.runtime_dir, &config.snapshot_dir] {
         crate::json_store::make_directory(directory, 0o700).map_err(|error| {
@@ -48,24 +44,16 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         .map_err(|error| StartupError::Unusable(error.to_string()))?;
     let commands: Arc<dyn crate::ports::CommandRunner> = Arc::new(HostCommands);
     let state = HostState::shared();
-    // Opened before anything reads it, and migrated on the way: a host that has just been given
-    // the binary has no database, and one given a newer binary has an older schema.
     let store = crate::repositories::open(&config.state_db_file())
         .await
         .map_err(|error| StartupError::Unusable(error.message()))?;
-    // Whatever an older daemon on this host left in documents, once. A host upgraded with apps on
-    // it must not re-allocate their slots — that would move a tenant's port under a live client.
     if let Err(error) = crate::repositories::import_documents(&store, &config).await {
         tracing::warn!(error = %error.message(), "what an earlier daemon wrote could not be carried over");
     }
-    // Empty here and filled by `host.load()`, which is the one place that reads the notes.
     let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
 
     let storage_prefix = ObjectKey::parse(&config.storage_prefix)
         .map_err(|_| StartupError::Config("volumes.storage_prefix is not a key".into()))?;
-    // Chosen once, here, rather than asked per volume: what a volume is made of is a property of
-    // the host, and a daemon that could answer differently on two passes is one whose tenant finds
-    // its disk somewhere else.
     let volumes: Arc<dyn crate::adapters::volumes::VolumeBackend> = match &config.zerofs {
         None => Arc::new(LocalFileVolumes::new(
             config.volumes_dir(),
@@ -108,8 +96,6 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         state: state.clone(),
     });
 
-    // Built in two steps because the waker needs the host and the host needs the activator the
-    // waker is behind: the activator is given a waker that holds the host once the host exists.
     let waker_slot: Arc<tokio::sync::OnceCell<Arc<AppWaker>>> = Arc::new(tokio::sync::OnceCell::new());
     let activator = AppActivator::new(
         state.clone(),
@@ -122,7 +108,6 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         crate::services::exports::store::ObjectExportStore::open(&config.export_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
     );
-    // Only where a volume is something a checkpoint can be cut from.
     let checkpoint_servers = config.zerofs.as_ref().map(|settings| CheckpointServers {
         binary: settings.binary.clone(),
         config_file: settings.checkpoint_config_file.clone(),
@@ -152,9 +137,6 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     Ok(host)
 }
 
-/// The activator holds this rather than the waker itself, because the waker holds the host and
-/// the host holds the activator. Nothing is ever asked of it before the host exists: the only
-/// thing that calls it is a request on a port the reconcile has not bound yet.
 struct DeferredWaker {
     waker: Arc<tokio::sync::OnceCell<Arc<AppWaker>>>,
 }
@@ -181,9 +163,6 @@ fn open_network() -> Result<Arc<dyn HostNetwork>, StartupError> {
         .map_err(|error| StartupError::Unusable(error.message()))
 }
 
-/// Off Linux there is no tap to make and no guest to put behind one. The daemon still builds, so
-/// every test but the ones that boot runs anywhere, and it refuses at startup rather than at the
-/// first deploy.
 #[cfg(not(target_os = "linux"))]
 fn open_network() -> Result<Arc<dyn HostNetwork>, StartupError> {
     Err(StartupError::Unusable(
@@ -200,8 +179,6 @@ pub fn host_versions(host: &Host) -> HostVersions {
     })
 }
 
-/// The edge, where a host has one. A daemon with no ports configured serves nothing itself, which
-/// is what a host behind a proxy of its own wants.
 pub fn serve_proxy(host: &Arc<Host>) {
     if let Some(port) = host.config.proxy_http_port {
         let router = host.router.clone();
@@ -233,8 +210,6 @@ mod tests {
     use crate::test_support::*;
     use std::time::Duration;
 
-    /// The one loop that has to work before anything else does: a document appears, and the host
-    /// converges on it without anybody telling it to.
     #[tokio::test]
     async fn a_document_written_to_the_watched_file_is_converged_on() {
         let host = test_host().await;
@@ -258,7 +233,6 @@ mod tests {
         assert_eq!(host.cached_desired_state().await.as_ref(), Some(&desired));
     }
 
-    /// A host with nothing on it is not a host that failed: a fresh machine has no document yet.
     #[tokio::test]
     async fn a_missing_document_is_the_ordinary_state_of_a_fresh_host() {
         let host = test_host().await;

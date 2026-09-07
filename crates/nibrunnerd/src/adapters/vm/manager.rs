@@ -1,9 +1,3 @@
-//! Everything that happens to one microVM, and the order it happens in.
-//!
-//! The daemon never becomes a guest's supervisor in the sense that matters: it stages the files,
-//! starts a process in a session of its own, and stops caring. A daemon that goes away leaves
-//! every tenant running, and the one that comes back adopts them.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,7 +25,6 @@ pub const GUEST_KERNEL_FILENAME: &str = "vmlinux";
 pub const GUEST_ROOTFS_FILENAME: &str = "rootfs.ext4";
 
 const VM_DIR_MODE: u32 = 0o700;
-/// Firecracker numbers guest CIDs from 3; 0, 1 and 2 are the hypervisor's own.
 const FIRST_GUEST_CID: u32 = 3;
 
 pub struct VmManager {
@@ -58,9 +51,6 @@ impl VmManager {
         FirecrackerApi::at(self.processes.api_socket(app_id))
     }
 
-    /// The stamp a snapshot taken now would carry, and the one a stored snapshot has to match to
-    /// be loadable. Both readings are of the host as it is at this moment rather than as it was
-    /// when the daemon started, because a deploy moves the guest image under a running daemon.
     fn current_stamp(&self, request: &SuspendRequest) -> SnapshotStamp {
         SnapshotStamp {
             deployment_id: request.deployment_id.clone(),
@@ -70,17 +60,12 @@ impl VmManager {
         }
     }
 
-    /// The stamp first and on its own: while it is there a start takes the snapshot beside it as
-    /// an instruction, and once it is gone none of what remains is loadable by anything.
     fn discard_snapshot(&self, app_id: &AppId) {
         let paths = snapshot_paths(&self.snapshot_dir, app_id);
         let _ = std::fs::remove_file(&paths.stamp_path);
         let _ = std::fs::remove_dir_all(&paths.directory);
     }
 
-    /// Everything a cold boot puts on disk and in the kernel before the VMM is asked for
-    /// anything: the tap, the host's view of the guest behind it, the config drive and the
-    /// machine description Firecracker reads.
     async fn stage(&self, request: &BootRequest) -> Result<PathBuf, VmError> {
         let slot = &request.slot;
         let host = |error: crate::adapters::net::tap::NetworkError| VmError::Host(error.message());
@@ -92,10 +77,6 @@ impl VmManager {
             })
             .await
             .map_err(host)?;
-        // Written before the guest exists rather than after it answers, because nothing has to
-        // ask the guest for it: the MAC is the slot's, and the config below is what hands it
-        // over. Left to ARP, the host's first probe of a new guest pays the resolution a wake
-        // already knows not to spend.
         self.network
             .refresh_neighbour(&Neighbour {
                 guest_ipv4: slot.guest_ipv4.clone(),
@@ -156,8 +137,6 @@ impl VmManager {
                 host_ipv4: slot.host_ipv4.clone(),
                 subnet_prefix_length: slot.subnet_prefix_length,
             },
-            // Relative, because Firecracker resolves it against its working directory — which is
-            // this app's, so two guests never share a vsock path.
             &VmVsock {
                 guest_cid: FIRST_GUEST_CID + slot.slot,
                 path: guest_contract::vsock::GUEST_VSOCK_FILENAME.to_string(),
@@ -178,14 +157,6 @@ impl VmManager {
         Ok(config_file)
     }
 
-    /// Every reason this microVM must not be snapshotted now, or `None`.
-    ///
-    /// The states a snapshot must never be taken in are read from this daemon's own record rather
-    /// than accepted from the caller, because they are the preconditions of the operation and not
-    /// an opinion about it: a caller that could supply them could also forget to.
-    ///
-    /// A disk that cannot be measured refuses too. Sleeping is an optimisation and refusing it
-    /// costs an app nothing it notices, so every doubt here resolves the same way.
     async fn refusal_to_snapshot(&self, app_id: &AppId) -> Option<String> {
         let Some(record) = self.state.record(app_id).await else {
             return refusal_to_sleep(None).map(str::to_string);
@@ -203,8 +174,6 @@ impl VmManager {
                 Some("the disk it would be written to cannot be measured".into())
             }
             Ok(disk) => {
-                // The one place these numbers exist, so a sleep says it on the way past whether
-                // or not it is allowed to proceed.
                 tracing::info!(
                     %app_id,
                     total_bytes = disk.total_bytes,
@@ -222,9 +191,6 @@ impl VmManager {
 impl Vmm for VmManager {
     async fn boot(&self, request: BootRequest) -> Result<(), VmError> {
         let app_id = request.desired.app_id.clone();
-        // Ahead of everything, because everything below replaces what a snapshot of this app was
-        // taken against — and a start that still found a stamp would restore the old guest onto
-        // the new deployment's disk rather than boot the new one.
         self.discard_snapshot(&app_id);
         let staged = std::time::Instant::now();
         let config_file = self.stage(&request).await?;
@@ -250,14 +216,6 @@ impl Vmm for VmManager {
         Ok(())
     }
 
-    /// A microVM taken down at a point it can be put back on, rather than one taken down.
-    ///
-    /// The flush comes before the pause on purpose: one that hangs then leaves a microVM that is
-    /// still serving, where a pause first would freeze the tenant for the whole of it.
-    ///
-    /// The stamp is written last, once the microVM is down and the files beside it are complete.
-    /// Nothing before that point is loadable, which is what makes every way this can fail leave a
-    /// cold boot rather than a half-restore.
     async fn sleep(&self, request: SuspendRequest) -> Result<(), VmError> {
         if let Some(reason) = self.refusal_to_snapshot(&request.app_id).await {
             return Err(VmError::SleepRefused { reason });
@@ -269,17 +227,12 @@ impl Vmm for VmManager {
         self.discard_snapshot(&request.app_id);
         make_directory(&paths.directory, VM_DIR_MODE).map_err(|error| VmError::Host(error.to_string()))?;
         if let Err(error) = self.volumes.flush().await {
-            // Best-effort, and deliberately: a microVM nothing could take down because a flush
-            // failed is worse than one taken down having lost what the flush would have saved.
             tracing::warn!(app_id = %request.app_id, error = %error.message(), "the volume backend would not flush");
         }
 
-        // Timed as one window because it is one: the guest is stopped from the pause to the stop,
-        // so this is what sleeping costs a tenant rather than what it costs the host.
         let paused = std::time::Instant::now();
         api.pause().await?;
         if let Err(error) = api.create_snapshot(&paths.state_path, &paths.memory_path).await {
-            // A microVM left paused answers nothing and is never asked to run again.
             let _ = api.resume().await;
             return Err(error);
         }
@@ -299,11 +252,6 @@ impl Vmm for VmManager {
         Ok(())
     }
 
-    /// The microVM that went to sleep, back where it was.
-    ///
-    /// The stamp is checked before anything starts, and a snapshot that fails the check is thrown
-    /// away rather than left: it is unloadable from here on, and a stamp on disk is what a start
-    /// reads to decide it is a restore.
     async fn wake(&self, request: SuspendRequest) -> Result<(), VmError> {
         let paths = snapshot_paths(&self.snapshot_dir, &request.app_id);
         let expected = self.current_stamp(&request);
@@ -312,15 +260,10 @@ impl Vmm for VmManager {
             return Err(error);
         }
 
-        // Taking the stamp is what makes a restore happen at most once. A daemon that dies
-        // between here and the load leaves a microVM that cold-boots off its disk, rather than
-        // one that resumes into a guest whose disk has since moved on without it.
         let _ = std::fs::remove_file(&paths.stamp_path);
 
         let restoring = std::time::Instant::now();
         let working_dir = self.working_dir_for(&request.app_id);
-        // No config file: `PUT /snapshot/load` is refused by a Firecracker that has been given
-        // any resource but a logger.
         let started = self
             .processes
             .spawn(&request.app_id, &self.firecracker, &working_dir, None)
@@ -348,13 +291,8 @@ impl Vmm for VmManager {
             }
         };
         if outcome.is_err() {
-            // The start already consumed the stamp, so this Firecracker holds no guest and never
-            // will: stopping it is what leaves a cold boot rather than a process in the way of one.
             self.processes.stop(&request.app_id).await;
         }
-        // Every way out, so no retry of a restore that failed halfway can find the files it did
-        // not finish with. The stamp is already gone and would stop a second load on its own;
-        // this is what keeps at-most-once from resting on that single fact.
         self.discard_snapshot(&request.app_id);
         outcome?;
         tracing::info!(
@@ -366,7 +304,6 @@ impl Vmm for VmManager {
         Ok(())
     }
 
-    /// Before the stop, so a stop that fails leaves a running microVM and never a stale snapshot.
     async fn stop(&self, app_id: &AppId) -> Result<(), VmError> {
         self.discard_snapshot(app_id);
         self.processes.stop(app_id).await;
@@ -392,8 +329,6 @@ impl Vmm for VmManager {
         self.processes.adopted_app_ids()
     }
 
-    /// The console is truncated on every start, so the whole file belongs to the run in progress
-    /// and nothing has to bound the read by time.
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String> {
         let console = std::fs::read_to_string(self.processes.console_path(app_id)).ok()?;
         guest_contract::control::last_guest_line(&console)
@@ -404,9 +339,6 @@ impl Vmm for VmManager {
     }
 }
 
-/// The version the guest image names itself, read out of the manifest the build wrote beside it.
-/// A host with no manifest reports the Firecracker it carries and `unknown` for the image, which
-/// is enough to invalidate a snapshot but not enough to claim a version it cannot see.
 pub fn read_guest_image_version(guest_image_dir: &Path) -> String {
     let manifest: Option<serde_json::Value> =
         crate::json_store::read_json(&guest_image_dir.join("manifest.json"))
@@ -475,7 +407,6 @@ mod tests {
         }
     }
 
-    /// What the guest's init reads off `vdc`, read back out of the image the way it would.
     fn config_drive(working_dir: &Path) -> String {
         use std::io::Read;
         let image = std::fs::read(working_dir.join("config.squashfs")).unwrap();
@@ -501,8 +432,6 @@ mod tests {
         }
     }
 
-    /// Everything a cold boot puts on the host before the VMM is asked for anything, asserted as
-    /// what it wrote rather than as calls it made.
     #[tokio::test]
     async fn staging_writes_the_machine_description_the_boot_contract_names() {
         let fixture = fixture();
@@ -541,9 +470,6 @@ mod tests {
         assert_eq!(fixture.manager.logs.attached().await, vec![app_id()]);
     }
 
-    /// The runtime refuses a key it does not know and reads both public-port lines as optional,
-    /// so an app that asked for no port has to be a file with neither line rather than one with
-    /// an empty value.
     #[tokio::test]
     async fn an_app_that_asked_for_no_public_port_is_sent_neither_half_of_one() {
         let fixture = fixture();
@@ -558,8 +484,6 @@ mod tests {
         assert!(written.contains("NIBRUN_HTTP_PORT=3000"));
     }
 
-    /// The two halves travel together or not at all, and the address is the relay's rather than
-    /// this host's — which is why a guest cannot work it out for itself.
     #[tokio::test]
     async fn an_app_that_asked_is_told_the_address_and_the_port_together() {
         let mut fixture = fixture();
@@ -571,7 +495,6 @@ mod tests {
         assert!(written.contains("NIBRUN_EXTRA_PUBLIC_PORT=22000"));
     }
 
-    /// A guest may only be captured where waking it is survivable, and the record is what says so.
     #[tokio::test]
     async fn a_sleep_is_refused_for_every_reason_the_record_gives() {
         let fixture = fixture();
@@ -601,8 +524,6 @@ mod tests {
         assert!(stopping.message().contains("asked to stop"));
     }
 
-    /// A snapshot nothing can load is thrown away rather than left for a later start to find and
-    /// take as an instruction.
     #[tokio::test]
     async fn a_wake_with_no_loadable_snapshot_says_so_and_leaves_nothing_behind() {
         let fixture = fixture();

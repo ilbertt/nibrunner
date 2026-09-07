@@ -1,10 +1,3 @@
-//! The bytes the guest's filesystem process speaks. `apps/runtime/src/guest-filesystem.h` states
-//! the format; this is the half that encodes and decodes it.
-//!
-//! Nothing here is text. A path goes out behind its own length and a name comes back behind one,
-//! because the tenant's binary created these names and ext4 allows anything in them but `/` and
-//! NUL. Length prefixes are what make quoting unnecessary rather than merely relaxed.
-
 use protocol::{
     DirectoryListing, FilesystemEntry, FilesystemEntryKind, GuestPath, Timestamp, DIRECTORY_ENTRY_LIMIT,
 };
@@ -14,19 +7,14 @@ const CODE_OFFSET: usize = 4;
 const LENGTH_OFFSET: usize = 5;
 pub const FRAME_HEADER_BYTES: usize = 9;
 
-/// What one frame's body may hold, which is the guest's ceiling and the reason it never allocates.
 pub const BODY_MAX_BYTES: usize = 65_536;
 
-/// A chunk a caller can read or write without having to work out how much room its own path
-/// left. `fits_one_request` is what actually decides; this is the size that always does.
 pub const GUEST_FILESYSTEM_CHUNK_BYTES: usize = 32_768;
 
 const STATUS_OK: u8 = 0;
 const TRUNCATE: u8 = 1;
 const NO_FLAGS: u8 = 0;
 
-/// What `mkfs.ext4` puts at the root of every filesystem it writes. A tenant did not create these
-/// and has no use for them. At the root only: the same name deeper in the tree is a tenant's.
 pub const MKFS_ROOT_ENTRIES: [&str; 1] = ["lost+found"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,8 +134,6 @@ pub fn encode_request(request: &GuestFilesystemRequest) -> Vec<u8> {
     frame
 }
 
-/// Asked before sending rather than discovered afterwards: the guest answers an oversized frame
-/// by hanging up, which would cost the connection as well as the request.
 pub fn fits_one_request(request: &GuestFilesystemRequest) -> bool {
     body_of(request).len() <= BODY_MAX_BYTES
 }
@@ -185,7 +171,6 @@ pub fn is_refusal(status: u8) -> bool {
     status != STATUS_OK
 }
 
-/// One kind byte, an unsigned size, then a signed instant in seconds.
 const DETAILS_BYTES: usize = 17;
 const UINT32_BYTES: usize = 4;
 const UINT64_BYTES: usize = 8;
@@ -203,9 +188,6 @@ fn u64_at(body: &[u8], offset: usize) -> u64 {
     u64::from_be_bytes(bytes)
 }
 
-/// ext4 dates every file it holds, but nothing stops the bytes describing one being nonsense, and
-/// a name is worth more to whoever is looking than a date nobody set. An instant that cannot be
-/// written down costs its own field rather than the entry carrying it.
 fn timestamp_from(seconds: i64) -> Timestamp {
     seconds
         .checked_mul(1000)
@@ -214,7 +196,6 @@ fn timestamp_from(seconds: i64) -> Timestamp {
 }
 
 fn chrono_seconds(epoch_ms: i64) -> Option<Timestamp> {
-    // Through the seconds and no further, because seconds are all a filesystem stamps a file with.
     let rendered = Timestamp::from_epoch_ms(epoch_ms);
     let text = rendered.as_str();
     if text.starts_with("1970-01-01T00:00:00") && epoch_ms != 0 {
@@ -271,8 +252,6 @@ pub fn decode_usage(body: &[u8]) -> Result<MeasuredBytes, MalformedGuestReply> {
     })
 }
 
-/// The ticks are cumulative since the guest booted and mean nothing on their own: a share is the
-/// difference between two of these over the time between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeasuredCompute {
     pub memory_total_bytes: u64,
@@ -295,9 +274,6 @@ pub fn decode_compute(body: &[u8]) -> Result<MeasuredCompute, MalformedGuestRepl
     })
 }
 
-/// `.` and `..` never arrive: the guest leaves out the filesystem's own bookkeeping. What is left
-/// out here instead is what `mkfs.ext4` put at the root of the volume, because that is the host's
-/// knowledge and not the guest's. `truncated` can come from either side.
 pub fn decode_listing(body: &[u8], path: &GuestPath) -> Result<DirectoryListing, MalformedGuestReply> {
     if body.is_empty() {
         return Err(MalformedGuestReply {
@@ -470,22 +446,12 @@ mod tests {
     }
 }
 
-// The guest's half
-//
-// The same frame, read the other way round. Kept here rather than in the guest so that there is
-// one definition of the format and not two that agree by hand: a round-trip test can only exist
-// where both directions are in reach of each other, and a change to the wire that breaks one end
-// fails to compile against the other.
-
-/// A frame the guest could not read. The status it answers with is the one the host renders as
-/// "the guest could not read the request", so the reason is for this side's log and never travels.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("a request about the tenant's files could not be read: {reason}")]
 pub struct MalformedRequest {
     pub reason: &'static str,
 }
 
-/// What the guest answers a request it could not read with.
 pub const STATUS_MALFORMED_REQUEST: u8 = 6;
 
 struct Cursor<'a> {
@@ -516,9 +482,6 @@ impl<'a> Cursor<'a> {
 
     fn path(&mut self, reason: &'static str) -> Result<GuestPath, MalformedRequest> {
         let bytes = self.field(reason)?;
-        // Parsed rather than taken as given. A path arrives from off this machine, and the one
-        // thing the guest must never do is walk out of the volume because something asked it to;
-        // the rest of the server can then treat a `GuestPath` as a path that has been checked.
         let text = std::str::from_utf8(bytes).map_err(|_| MalformedRequest { reason })?;
         GuestPath::parse(text).map_err(|_| MalformedRequest { reason })
     }
@@ -544,8 +507,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// The header of a request, read by the guest. Separate from the body for the same reason the
-/// host reads a reply in two goes: the length says how much more to wait for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestHeader {
     pub verb: u8,
@@ -569,8 +530,6 @@ pub fn decode_request_header(header: &[u8]) -> Result<RequestHeader, MalformedRe
         header[LENGTH_OFFSET + 2],
         header[LENGTH_OFFSET + 3],
     ]) as usize;
-    // Refused rather than allocated for. The ceiling is what lets the guest read into a buffer it
-    // sized once at startup, which is the whole reason it never allocates per request.
     if body_length > BODY_MAX_BYTES {
         return Err(MalformedRequest {
             reason: "the body exceeds the limit",
@@ -582,12 +541,6 @@ pub fn decode_request_header(header: &[u8]) -> Result<RequestHeader, MalformedRe
     })
 }
 
-/// The request a verb and its body describe.
-///
-/// Every field is bounds-checked against the body it came from, so a truncated or lying frame is a
-/// refusal rather than a read past the end of a buffer. Trailing bytes are not an error: a host
-/// that learns a longer form of a verb this guest is older than should still be understood as far
-/// as this guest goes.
 pub fn decode_request(
     header: RequestHeader,
     body: &[u8],
@@ -645,8 +598,6 @@ pub fn decode_request(
     }
 }
 
-/// One reply. A refusal carries no body: the status is the whole of what travels, because the
-/// sentence it becomes is the host's to render and a tenant's path is not an operator's to read.
 pub fn encode_reply(status: u8, body: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + body.len());
     frame.extend_from_slice(FRAME_MAGIC);
@@ -660,12 +611,6 @@ pub fn encode_refusal(status: u8) -> Vec<u8> {
     encode_reply(status, &[])
 }
 
-/// What the guest has about one entry, which is what `stat` gave it.
-///
-/// The instant is seconds, not a `Timestamp`: seconds are all a filesystem stamps a file with, and
-/// what to do about one that cannot be written down is the *host's* decision — it costs that field
-/// rather than the entry carrying it. A guest that made that decision would be making it for a
-/// renderer it cannot see.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryDetails {
     pub kind: FilesystemEntryKind,
@@ -709,16 +654,8 @@ pub fn encode_compute(measured: &MeasuredCompute) -> Vec<u8> {
     encode_reply(STATUS_OK, &body)
 }
 
-/// One name per entry, behind a single length byte — which is what caps a name at 255 bytes on
-/// this wire, well under what ext4 allows in the filesystem itself.
 pub const MAX_ENTRY_NAME_BYTES: usize = 255;
 
-/// A listing, filled until the frame is full rather than until the directory ends.
-///
-/// `truncated` is set here when the body would not hold another entry, which is the guest's half
-/// of the same flag the host sets when its own limit is reached first. A name longer than one
-/// length byte is skipped rather than truncated: half a filename is a name that points at nothing,
-/// and one that cannot be shown is better left out than shown wrong.
 pub fn encode_listing(entries: &[(String, EntryDetails)]) -> Vec<u8> {
     let mut body = vec![0u8];
     let mut truncated = false;
@@ -796,16 +733,6 @@ mod both_ends {
         }
     }
 
-    /// A name is reported and a path is accepted, and the asymmetry is the design: the tenant's
-    /// own binary created these names, so anything ext4 allows has to survive being *described* —
-    /// while the direction that carries a request stays strict.
-    ///
-    /// The quote rule is the one that costs something. It is there because nibrun's path ends up
-    /// in a command string its reader's tooling tokenises, so a directory named `it's` can be
-    /// listed and never descended into. Nothing on *this* wire tokenises anything — the path goes
-    /// out behind its own length — so the restriction buys this daemon nothing. Kept anyway,
-    /// because the schema is the contract with the control plane and one end relaxing it alone
-    /// would be a path this host accepts and that one refuses. See DECISIONS.md.
     #[test]
     fn a_name_may_hold_what_a_path_may_not() {
         for awkward in ["/-leading-dash", "/a b c", "/naïve", "/a.file", "/deep/er/still"] {
@@ -818,7 +745,6 @@ mod both_ends {
                 "{refused} was accepted as a path"
             );
         }
-        // The same text, as a name in a listing that comes back: reported without complaint.
         let entries = [entry("it's a \"file\"", FilesystemEntryKind::File, 1)];
         let frame = encode_listing(&entries);
         let listing = decode_listing(&frame[FRAME_HEADER_BYTES..], &path("/data")).unwrap();

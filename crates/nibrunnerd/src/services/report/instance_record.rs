@@ -7,9 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::services::backoff::{AttemptWindow, NO_START_ATTEMPTS};
 use crate::services::health::{GraceInputs, HealthTracker};
 
-/// A cache, not an authority: the microVM processes are what is actually running, and a record
-/// that cannot be read back is discarded rather than trusted. Routing is rendered straight from
-/// these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceRecord {
@@ -19,7 +16,6 @@ pub struct InstanceRecord {
     pub hostnames: Vec<AppHostname>,
     pub host_port: HostPort,
     pub http_port: HttpPort,
-    /// Absent on a note written before an app could ask for one, which is every app that had not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_extra_public_port: Option<bool>,
     pub guest_ipv4: Ipv4Address,
@@ -29,9 +25,6 @@ pub struct InstanceRecord {
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
     pub desired_running: bool,
-    /// Whether a request is what brings this app's microVM up. Beside `desired_running` rather
-    /// than folded into it, because they answer different questions: should this app be
-    /// reachable, and what does having it reachable cost while nobody is asking.
     pub on_request: bool,
     #[serde(default)]
     pub start_attempts: AttemptWindow,
@@ -46,9 +39,6 @@ pub struct InstanceRecord {
     pub message: Option<StateMessage>,
 }
 
-/// What desired state says about an app, as the record's own fields. Named once because a start
-/// and a sleep write the same ones, and a field only one of them carried would be a record whose
-/// contents depended on how the app happened to come to be here.
 #[derive(Debug, Clone)]
 pub struct RecordFields {
     pub app_id: AppId,
@@ -93,7 +83,6 @@ impl InstanceRecord {
         }
     }
 
-    /// The fields desired state owns, written over whatever the record held.
     pub fn adopt(&mut self, fields: RecordFields) {
         self.deployment_id = fields.deployment_id;
         self.volume_id = fields.volume_id;
@@ -109,8 +98,6 @@ impl InstanceRecord {
         self.on_request = fields.on_request;
     }
 
-    /// Whether this app is asleep between requests: a record holding its slot and its hostnames
-    /// with no microVM behind them.
     pub fn is_idle(&self) -> bool {
         self.state == InstanceState::Idle
     }
@@ -119,8 +106,6 @@ impl InstanceRecord {
         self.has_extra_public_port.unwrap_or(false)
     }
 
-    /// What every health decision about a record needs, in the one place that knows `started_at`
-    /// is a wire timestamp here and a clock reading there.
     pub fn grace_inputs(&self, now_ms: i64) -> GraceInputs<'_> {
         GraceInputs {
             health_check: &self.health_check,
@@ -130,9 +115,6 @@ impl InstanceRecord {
     }
 }
 
-/// Whether a note this daemon left is one it can still read. Structural rather than
-/// schema-driven: these are the daemon's own notes, and the recovery for an unreadable one is to
-/// re-derive it from what is running rather than to reject the file.
 pub fn read_instance_records(value: Option<serde_json::Value>) -> Vec<InstanceRecord> {
     let Some(serde_json::Value::Array(entries)) = value else {
         return Vec::new();
@@ -155,8 +137,6 @@ mod tests {
         assert_eq!(read_instance_records(Some(written)), vec![record]);
     }
 
-    /// Dropping one is what replaces the still-running microVM it describes, so the guard stays
-    /// the thing that decides.
     #[test]
     fn a_note_missing_a_field_this_daemon_needs_is_discarded_rather_than_guessed_at() {
         let mut written = serde_json::to_value(instance_record(|_| {})).unwrap();
@@ -169,9 +149,6 @@ mod tests {
         assert_eq!(read_instance_records(Some(serde_json::json!({}))), vec![]);
     }
 
-    /// The two fields a note written before they existed does not carry, and the defaults that
-    /// let such a note still be read: an app that had not asked for a port, and a budget nothing
-    /// had spent.
     #[test]
     fn a_note_that_predates_a_field_reads_as_the_no_it_meant() {
         let mut written = serde_json::to_value(instance_record(|_| {})).unwrap();

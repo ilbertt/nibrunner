@@ -1,14 +1,3 @@
-//! The remote control plane, as an addon rather than a second input.
-//!
-//! It polls nibrun's own agent routes and writes what comes back into the file the daemon
-//! watches. That is the whole of the integration: the reconciler has one source and cannot learn
-//! which of them produced the document, a host that loses the control plane goes on converging on
-//! the last one it was given, and this can be run as a separate process or not at all.
-//!
-//! v1 ships the client types, the shape of the loop, and the filesystem-query channel. What is
-//! not here is a session that renews and a report that goes back — the seams are named so that
-//! adding them is this file and nothing else.
-
 use std::time::Duration;
 
 use protocol::{
@@ -35,7 +24,6 @@ impl ControlPlaneError {
         self.to_string()
     }
 
-    /// A 401 is the session having expired, which is a round trip rather than a fault.
     pub fn is_session_expired(&self) -> bool {
         matches!(self, ControlPlaneError::Refused { status: 401, .. })
     }
@@ -44,8 +32,6 @@ impl ControlPlaneError {
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY: usize = 256;
 
-/// Every call is an outbound POST carrying one JSON document, including the two that read: a
-/// request body keeps them to exactly one wire format and one validation path.
 pub struct ControlPlaneClient {
     base_url: String,
     http: reqwest::Client,
@@ -97,8 +83,6 @@ impl ControlPlaneClient {
                 body: protocol::truncate_chars(text, MAX_BODY),
             });
         }
-        // The two programs ship on different pipelines, so every reply is validated before it is
-        // believed rather than trusted for having arrived.
         serde_json::from_str(&text).map_err(|error| ControlPlaneError::Mismatch {
             route: route.to_string(),
             reason: error.to_string(),
@@ -124,12 +108,6 @@ impl ControlPlaneClient {
         .await
     }
 
-    /// A read somebody is waiting for, or nothing.
-    ///
-    /// The control plane holds this request open until a read arrives, so a poll that came back
-    /// with nothing has already spent longer than any pause this side would add. The apps offered
-    /// are sent on every poll rather than registered once: one torn down between two polls stops
-    /// being offered on the next, with nothing to invalidate.
     pub async fn fetch_filesystem_query(
         &self,
         session_token: &protocol::SecretString,
@@ -143,8 +121,6 @@ impl ControlPlaneClient {
         .await
     }
 
-    /// Sent whatever the answer was, because a failure is the answer as far as whoever asked is
-    /// concerned: a host that stays quiet turns a refusal somebody could act on into a timeout.
     pub async fn send_filesystem_query_result(
         &self,
         session_token: &protocol::SecretString,
@@ -160,8 +136,6 @@ impl ControlPlaneClient {
         Ok(())
     }
 
-    /// Nothing comes back. The desired-state poll is the only channel carrying state to a host, so
-    /// a second copy on this reply would be a second thing to keep true.
     pub async fn send_reported_state(
         &self,
         session_token: &protocol::SecretString,
@@ -171,7 +145,6 @@ impl ControlPlaneClient {
             .post(agent_routes::REPORTED_STATE, report, Some(session_token))
             .await
             .or_else(|error| match error {
-                // A 204 carries no body, which is not a message that fails to match the protocol.
                 ControlPlaneError::Mismatch { .. } => Ok(serde::de::IgnoredAny),
                 other => Err(other),
             })?;
@@ -179,19 +152,12 @@ impl ControlPlaneClient {
     }
 }
 
-/// What the poller needs to describe this host when it opens a session.
 #[derive(Debug, Clone)]
 pub struct HostIdentity {
     pub versions: HostVersions,
     pub capacity: HostCapacity,
 }
 
-/// One poll, and the write is what the daemon reacts to — so a poll that changed nothing costs a
-/// comparison and no reconcile.
-///
-/// Writing the file rather than handing the document straight to the reconciler is what keeps the
-/// addon an addon: the reconciler has one source, and a host that loses its control plane goes on
-/// converging on the last document it was given rather than on nothing.
 pub async fn poll_once(
     client: &ControlPlaneClient,
     desired_state_file: &std::path::Path,
@@ -251,8 +217,6 @@ mod tests {
         assert!(!refused.is_session_expired());
     }
 
-    /// The poller's whole contract with the daemon: it writes the file, and a document that did
-    /// not move is not a write.
     #[tokio::test]
     async fn a_poll_that_changed_nothing_does_not_touch_the_file() {
         let directory = tempfile::tempdir().unwrap();

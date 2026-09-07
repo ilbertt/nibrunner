@@ -4,17 +4,12 @@ use protocol::AppId;
 
 use crate::firewall::APP_COUNTER_PREFIX;
 
-/// What the kernel has counted against one app since the table it lives in was last written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppTraffic {
     pub packets: u64,
     pub bytes: u64,
 }
 
-/// `nft -j list counters` answers with one object per counter under a top-level `nftables` array,
-/// mixed in with a `metainfo` entry. Everything here is defensive about shape rather than typed
-/// against it: this is another process's output, and a counter that cannot be read is one app
-/// whose activity is unknown rather than a reason to fail the pass that reads the rest.
 pub fn parse_app_traffic(json: &str) -> BTreeMap<AppId, AppTraffic> {
     let mut traffic = BTreeMap::new();
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) else {
@@ -41,9 +36,6 @@ pub fn parse_app_traffic(json: &str) -> BTreeMap<AppId, AppTraffic> {
     traffic
 }
 
-/// Counters this table holds that are not an app's are somebody else's to explain, so they are
-/// skipped. The prefix is what attributes a counter, and the id rule only refuses a name no id
-/// could be.
 fn app_id_from(name: &str) -> Option<AppId> {
     name.strip_prefix(APP_COUNTER_PREFIX)
         .and_then(|value| AppId::parse(value).ok())

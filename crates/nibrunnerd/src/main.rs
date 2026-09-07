@@ -1,6 +1,3 @@
-//! One process. It reads where it keeps things, adopts whatever microVMs it finds still running,
-//! converges on the document it watches, and answers for the apps it holds.
-
 use std::sync::Arc;
 
 use nibrunnerd::config::HostConfig;
@@ -49,8 +46,6 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
     if !adopted.is_empty() {
         tracing::info!(adopted = adopted.len(), "microVMs from an earlier daemon adopted");
     }
-    // A port answered before the first pass, because an app this host stopped has no forward and
-    // its port would otherwise refuse connections rather than saying why.
     nibrunnerd::services::reconcile::network::apply_activators(&host).await;
     run::serve_proxy(&host);
 
@@ -59,9 +54,6 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
         tokio::spawn(nibrunnerd::controllers::status_loop(host.clone())),
         tokio::spawn(nibrunnerd::controllers::measurement_loop(host.clone())),
     ];
-    // Only where this host was given one to talk to. A host that was not runs on the file alone,
-    // which is the ordinary single-machine case — and the reconciler has exactly one source either
-    // way, because what these write is that same file.
     if let Some(url) = host.config.control_plane_url.clone() {
         let sessions = std::sync::Arc::new(nibrunnerd::services::control_plane::SessionHolder::new(
             nibrunnerd::adapters::control_plane::ControlPlaneClient::new(url.clone()),

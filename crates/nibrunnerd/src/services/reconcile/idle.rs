@@ -1,26 +1,11 @@
-//! When an app that runs on request has gone quiet enough to sleep.
-
 use protocol::InstanceState;
 
 use crate::services::report::InstanceRecord;
 
-/// What an `on-request` app is given when the control plane names no timeout of its own — an api
-/// that predates the field, or one that could not read it. Long enough not to stop an app out
-/// from under somebody reading a page, short enough that most of a quiet day is reclaimed.
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
 
-/// Only a microVM that is up can be put down, and only one that is not on its way up.
-///
-/// `unhealthy` is not among them, though it is up: an app failing its probes has gone quiet
-/// *because* it is broken, so the silence is a symptom of the fault rather than evidence nobody
-/// wants it. Sleeping it would turn a failure the owner can see into one they cannot, and take it
-/// out of the restart and backoff machinery that exists to answer exactly this.
 const SLEEPABLE_STATES: [InstanceState; 1] = [InstanceState::Running];
 
-/// An app with no activity recorded is never quiet: it is one this daemon has not watched long
-/// enough to say anything about, and the first counter reading gives it a starting point. Erring
-/// towards awake is the only safe direction — the cost is memory, and the cost of the other
-/// mistake is somebody's request meeting a microVM being shut down underneath it.
 pub fn has_gone_quiet(
     record: &InstanceRecord,
     timeout_ms: Option<u64>,
@@ -109,8 +94,6 @@ mod tests {
         }
     }
 
-    /// The two ways of knowing nothing. A restarted daemon has watched no traffic yet, and an app
-    /// desired state no longer calls `on-request` has no timeout to be measured against.
     #[test]
     fn an_app_nothing_has_been_observed_about_is_left_alone() {
         assert!(!quiet(
@@ -133,22 +116,9 @@ use protocol::AppId;
 
 use crate::host::Host;
 
-/// When each app was last reached by something that was not this host.
-///
-/// The counters are cumulative and the table they live in is replaced rather than edited, so a
-/// count standing below the one before it is the ruleset having been rewritten — which every
-/// health flip on every app does — and not an app that has gone quiet. Read as a difference it
-/// would be a negative one; read as evidence it is none at all, and the moment already recorded
-/// stands.
-///
-/// A slot with no counter is an app that is not forwarded: stopped, unhealthy, or never started.
-/// Nothing can have reached it, so its moment stands too rather than being reset by its own
-/// absence — which is what stops a restart looking like use.
 pub struct Activity {
     pub traffic: BTreeMap<AppId, AppTraffic>,
     pub last_active_at_ms: BTreeMap<AppId, i64>,
-    /// Which apps the count actually moved for, which is not the same as which moments equal now:
-    /// a first reading starts the clock at now without having observed anything.
     pub moved: BTreeSet<AppId>,
 }
 
@@ -168,8 +138,6 @@ pub fn activity_after(
         if before.is_some_and(|before| after.bytes > before.bytes) {
             moved.insert(app_id.clone());
         }
-        // No interval behind the first reading of a counter, so it starts the clock rather than
-        // answering it: an app whose counter has just appeared has not been idle since the epoch.
         let moment = if moved.contains(&app_id) {
             now_ms
         } else {
@@ -200,8 +168,6 @@ pub async fn record_activity(host: &Host) {
     };
     let next = activity_after(taken, &snapshot.app_traffic, &snapshot.last_active_at_ms, now);
 
-    // A slot this host no longer holds takes its history with it: the app is somewhere else or
-    // nowhere, and either way what it last did here is not something to keep answering about.
     let held: BTreeSet<AppId> = host.slots().await.into_iter().map(|slot| slot.app_id).collect();
     let traffic: BTreeMap<_, _> = next
         .traffic
@@ -214,9 +180,6 @@ pub async fn record_activity(host: &Host) {
         .filter(|(app_id, _)| held.contains(app_id))
         .collect();
 
-    // One line a tick, because the counts being read at all is the thing worth seeing: `measured:
-    // 0` on a host running apps is a counter that never appeared, which reads the same as a quiet
-    // host in every other respect.
     tracing::info!(
         measured = traffic.len(),
         moved = next.moved.len(),
@@ -231,13 +194,7 @@ pub async fn record_activity(host: &Host) {
         .await;
 }
 
-/// Runs on the measurement tick rather than the status one: the moment it reads is only written
-/// there, so asking sixty times more often would be sixty readings of the same answer — and a
-/// sleep flushes a filesystem and snapshots a microVM, which is not work to put in front of the
-/// health probes of every other app on the host.
 pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
-    // Read from desired state rather than from the record, so an owner shortening it takes effect
-    // on the next document rather than on the app's next boot.
     let timeouts: BTreeMap<AppId, u64> = {
         let cache = host.cache.lock().await;
         cache
@@ -288,9 +245,6 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
         tracing::info!(app_id = %record.app_id, quiet_for_ms, "app has gone quiet; letting it sleep");
         crate::services::reconcile::instances::suspend_instance(host, &record.app_id, "idle").await;
     }
-    // Here rather than on the next status tick: the record already says the app is not running,
-    // so until this runs the forward rule points at a guest that has gone, and a request arriving
-    // in that second is refused rather than answered by the activator.
     crate::services::reconcile::network::apply_network(host).await;
 }
 

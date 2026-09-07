@@ -1,5 +1,3 @@
-//! Provisioning and tearing down what an app writes to.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use protocol::{AppId, HostDesiredState, ReportedVolume, StateMessage, VolumeId, VolumeState};
@@ -9,17 +7,6 @@ use crate::services::reconcile::plan::{ObservedState, ObservedVolume, ReconcileP
 use crate::services::report::InstanceRecord;
 use crate::state::merge_volume_reports;
 
-/// Which app owns which volume, so that a backing on disk can be observed as one app's filesystem
-/// rather than as an orphan to leave alone.
-///
-/// Desired state as well as this daemon's own records, because the record is dropped the moment
-/// the instance is forgotten — and for an app being deleted that happens first: the control plane
-/// stops naming the instance a pass before the volume teardown is unblocked. Keyed on the record
-/// alone, the backing stops being observed in the very pass that was going to remove it, the
-/// teardown is never planned again, and a tenant's filesystem is kept forever under an app that
-/// is gone.
-///
-/// The control plane naming a volume is what makes it this app's, so desired state wins.
 pub fn volume_owners(
     desired: &HostDesiredState,
     records: &BTreeMap<AppId, InstanceRecord>,
@@ -34,17 +21,12 @@ pub fn volume_owners(
     owners
 }
 
-/// The truth a restarted daemon converges against: what the backend is actually holding, not what
-/// it remembers.
 pub async fn observe_volumes(host: &Host, owners: &BTreeMap<VolumeId, AppId>) -> Vec<ObservedVolume> {
     host.volumes
         .observe(owners)
         .await
         .into_iter()
         .filter_map(|backing| {
-            // A backing with no app is one this daemon has lost its record of. Reporting it under
-            // a guessed app would be worse than leaving it out: the control plane reads these to
-            // decide a tenant's filesystem is gone.
             let app_id = owners.get(&backing.volume_id)?.clone();
             Some(ObservedVolume {
                 volume_id: backing.volume_id,
@@ -58,8 +40,6 @@ pub async fn observe_volumes(host: &Host, owners: &BTreeMap<VolumeId, AppId>) ->
         .collect()
 }
 
-/// Derived from the observation rather than accumulated from provisioning, so a volume nobody
-/// touched still reports itself — and a restarted daemon does not report none while serving one.
 pub fn to_reported_volume(observed: &ObservedVolume) -> ReportedVolume {
     ReportedVolume {
         volume_id: observed.volume_id.clone(),
@@ -125,8 +105,6 @@ pub async fn apply_volumes(
         }
     }
 
-    // Anything still named is still being waited on; anything not is a removal the control plane
-    // has taken in, and holding it after that would report a volume nobody is asking about.
     let still_named: BTreeSet<VolumeId> = desired
         .volumes
         .iter()
@@ -136,8 +114,6 @@ pub async fn apply_volumes(
 
     let existing: Vec<ReportedVolume> = observed.volumes.iter().map(to_reported_volume).collect();
     let snapshot = host.state.snapshot().await;
-    // After the observation, because a removal this host carried out is not something the next
-    // observation can find: the backing it would have been read from is gone.
     let mut all_updates: Vec<ReportedVolume> = snapshot.deleted_volumes.values().cloned().collect();
     all_updates.extend(updates);
     let merged = merge_volume_reports(existing, all_updates);
@@ -154,8 +130,6 @@ pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
         match host.volumes.teardown(&desired.volume_id, &desired.app_id).await {
             Ok(()) => {
                 host.allocator.lock().await.release(&desired.app_id);
-                // `deleted` rather than `deleting`: everything above has already happened, and the
-                // control plane finishes deleting the app on the strength of this.
                 let report = ReportedVolume {
                     volume_id: desired.volume_id.clone(),
                     app_id: desired.app_id.clone(),
@@ -166,9 +140,6 @@ pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
                     usage: None,
                     message: None,
                 };
-                // Remembered as well as reported: the report reaches whoever reads it on the next
-                // write, and a restart in between would otherwise leave nobody able to say the
-                // volume is gone.
                 host.state.remember_deleted_volume(report.clone()).await;
                 host.state
                     .modify(|snapshot| {
@@ -233,8 +204,6 @@ mod tests {
     #[tokio::test]
     async fn a_volume_that_could_not_be_provisioned_is_reported_failed_with_the_reason() {
         let host = test_host().await;
-        // Asking for a volume smaller than the one on disk is the one refusal the backend makes
-        // without a host tool being involved.
         host.volumes
             .provision(&desired_volume(|volume| {
                 volume.size_bytes = VOLUME_SIZE_BYTES * 4

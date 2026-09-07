@@ -1,15 +1,3 @@
-//! The host's end of the guest's filesystem port.
-//!
-//! Ported from `apps/agent/src/lib/filesystem/client.ts`. Every answer comes from a `readdir`, a
-//! `pread` or a `pwrite` *inside* the microVM, against the filesystem the tenant has mounted — so
-//! a listing is what is there rather than what had reached the block device by the last flush, and
-//! a write is possible at all, which it never was from outside a mount the guest holds read-write.
-//!
-//! One connection serves as many requests as the caller makes: browsing is many small reads and an
-//! upload is many more, and the guest holds nothing between them. The connection *is* the
-//! resource, though — the guest gives a worker to whoever holds one and takes it back when the
-//! socket closes, so a caller that leaks one costs the tenant a process until it times out.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -22,8 +10,6 @@ use protocol::{AppId, DirectoryListing, GuestPath};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-/// A listing is read while somebody waits for it, so this is bounded well below the export path's
-/// hour.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, thiserror::Error)]
@@ -32,8 +18,6 @@ pub enum GuestFilesystemError {
     Unreachable { app_id: AppId },
     #[error("the guest running {app_id} took a request about its files and never answered")]
     Silent { app_id: AppId },
-    /// Read as a sentence rather than as a code, because this is the half of a failure that
-    /// reaches whoever asked. None of them names the path.
     #[error("the guest running {app_id} would not do that with its files: {refusal}")]
     Refused { app_id: AppId, refusal: &'static str },
     #[error("more was asked of the guest running {app_id} at once than one request carries")]
@@ -54,8 +38,6 @@ pub struct GuestFilesystem {
 }
 
 impl GuestFilesystem {
-    /// Dialled and connected through to the filesystem port. A guest that is not running has no
-    /// socket to dial, which is the ordinary answer for an app that is asleep or stopped.
     pub async fn dial(app_id: &AppId, vsock_path: &Path) -> Result<Self, GuestFilesystemError> {
         let unreachable = || GuestFilesystemError::Unreachable {
             app_id: app_id.clone(),
@@ -88,19 +70,16 @@ impl GuestFilesystem {
         decode_details(&body).map_err(|error| self.malformed(&error))
     }
 
-    /// How full the volume is. No path, because the volume is one filesystem all the way down.
     pub async fn usage(&mut self) -> Result<MeasuredBytes, GuestFilesystemError> {
         let body = self.exchange(&GuestFilesystemRequest::Usage).await?;
         decode_usage(&body).map_err(|error| self.malformed(&error))
     }
 
-    /// What the guest is spending. No path either: this one is not about the filesystem at all.
     pub async fn compute(&mut self) -> Result<MeasuredCompute, GuestFilesystemError> {
         let body = self.exchange(&GuestFilesystemRequest::Compute).await?;
         decode_compute(&body).map_err(|error| self.malformed(&error))
     }
 
-    /// Short of `length` is the end of the file, which is how a reader in chunks learns to stop.
     pub async fn read(
         &mut self,
         path: &GuestPath,
@@ -115,7 +94,6 @@ impl GuestFilesystem {
         .await
     }
 
-    /// `truncate` cuts the file at `offset` first, so a replacement leaves none of the old tail.
     pub async fn write(
         &mut self,
         path: &GuestPath,
@@ -140,8 +118,6 @@ impl GuestFilesystem {
             .map(|_| ())
     }
 
-    /// One entry, never a tree: a directory that still holds something is refused, because a
-    /// recursive delete is not something a browse should be able to ask for by accident.
     pub async fn remove(&mut self, path: &GuestPath) -> Result<(), GuestFilesystemError> {
         self.exchange(&GuestFilesystemRequest::Remove { path: path.clone() })
             .await
@@ -229,9 +205,6 @@ mod tests {
     use protocol::FilesystemEntryKind;
     use tokio::net::UnixListener;
 
-    /// A guest that answers the connect, then replies to each request with the bytes given. The
-    /// same encoders the guest itself uses, which is the point of the shared crate: a listing this
-    /// host decodes is one something encoded with the function it decodes against.
     async fn guest_answering(replies: Vec<(u8, Vec<u8>)>) -> (tempfile::TempDir, std::path::PathBuf) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("guest.vsock");
@@ -364,7 +337,6 @@ mod tests {
         };
         assert!(matches!(error, GuestFilesystemError::TooLarge { .. }), "{error}");
 
-        // The connection is still good, which is the whole point of asking first.
         assert!(client.usage().await.is_ok());
     }
 

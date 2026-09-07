@@ -1,7 +1,3 @@
-//! Writing an export, and clearing up after one that did not finish.
-//!
-//! Ported from `apps/agent/src/services/export-manager.service.ts`.
-
 use protocol::{
     CheckpointId, DesiredExport, ExportId, ExportState, HostDesiredState, ReportedExport, StateMessage,
     Timestamp,
@@ -13,10 +9,6 @@ use crate::services::exports::freeze::frozen;
 use crate::services::exports::reader::ReaderDevice;
 use crate::services::reconcile::plan::{ExportPlan, ObservedExport, ReconcilePlan};
 
-/// An export's checkpoint is named after the export, so an orphan says who owned it without
-/// anything having written that down. That is what a state-driven reap needs: a daemon killed
-/// between cutting one and deleting it comes back to a list of names it can recognise, and
-/// retrying is the same code path as the first attempt rather than a recovery mode beside it.
 const EXPORT_PREFIX: &str = "export-";
 
 pub fn export_checkpoint_id(export_id: &ExportId) -> Option<CheckpointId> {
@@ -27,9 +19,6 @@ pub fn is_export_checkpoint(checkpoint_id: &CheckpointId) -> bool {
     checkpoint_id.as_str().starts_with(EXPORT_PREFIX)
 }
 
-/// What this host has already written, from its own note rather than from the store: a bundle is
-/// in an object store somebody else owns, and asking it on every pass would be a round trip to
-/// re-learn something that cannot change.
 pub async fn observe_exports(host: &Host, desired: &HostDesiredState) -> Vec<ObservedExport> {
     let written = host.state.snapshot().await.export_reports;
     desired
@@ -48,10 +37,6 @@ pub async fn observe_exports(host: &Host, desired: &HostDesiredState) -> Vec<Obs
 }
 
 pub async fn apply_exports(host: &Host, plan: &ReconcilePlan) {
-    // Derived from what the store says exists rather than from anything this process remembers,
-    // which is what makes retrying the same code path as doing it the first time. Runs on every
-    // pass and not only when an export is planned: an orphan is precisely a checkpoint nothing
-    // asked for, and while any exists the store pauses segment reclamation for *every* tenant here.
     reap(host, plan).await;
 
     let mut reports = host.state.snapshot().await.export_reports;
@@ -71,7 +56,6 @@ pub async fn apply_exports(host: &Host, plan: &ReconcilePlan) {
         .await;
 }
 
-/// One export at a time on a host, because the reader is one device.
 async fn write(host: &Host, desired: &DesiredExport) -> ReportedExport {
     let Some(checkpoint_id) = export_checkpoint_id(&desired.export_id) else {
         return failed(
@@ -84,9 +68,6 @@ async fn write(host: &Host, desired: &DesiredExport) -> ReportedExport {
 
     let written = write_inner(host, desired, &checkpoint_id, &staging_dir).await;
 
-    // Whether or not the upload worked: this is a second copy of a tenant's dataset in the clear
-    // on a shared host, and the report is written from what came back rather than from what is
-    // still lying about.
     let _ = std::fs::remove_dir_all(&staging_dir);
 
     match written {
@@ -116,12 +97,6 @@ async fn write_inner(
     checkpoint_id: &CheckpointId,
     staging_dir: &std::path::Path,
 ) -> Result<u64, String> {
-    // The whole of what a frozen tenant pays for, and the order inside it is the guarantee. The
-    // freeze first, because only the guest's kernel can checkpoint the ext4 journal, which the
-    // dump never replays — an unfrozen filesystem is missing recent metadata however durable the
-    // storage under it is. Then the checkpoint, which is the step that captures *now*.
-    // Derived from where this host puts a microVM's working directory rather than asked of the
-    // VMM: an app that is not running has no VMM to ask, and that is the ordinary case here.
     let vsock_path = host
         .config
         .vm_dir()
@@ -134,8 +109,6 @@ async fn write_inner(
         .create_checkpoint(checkpoint_id)
         .await
         .map_err(|error| error.message())?;
-    // Handed straight back if the guest let go, rather than left for the reap: a cut nobody can
-    // vouch for is useless to the export and still pauses reclamation for the whole host.
     if let Err(error) = lease.assert_held() {
         let _ = host.volumes.delete_checkpoint(checkpoint_id).await;
         return Err(error.message());
@@ -148,8 +121,6 @@ async fn write_inner(
     );
 
     let read = read_into_staging(host, desired, checkpoint_id, staging_dir).await;
-    // Released as soon as the bytes are out, whichever way the read went: nothing after this
-    // reads it, and holding one costs the whole host its storage reclamation.
     if let Err(error) = host.volumes.delete_checkpoint(checkpoint_id).await {
         tracing::error!(
             %checkpoint_id,
@@ -174,8 +145,6 @@ async fn write_inner(
     Ok(bundle.size_bytes)
 }
 
-/// The server and the device, both taken down in reverse: the device goes first, because taking
-/// the socket away from a kernel client that still holds it is how a detach turns into a hang.
 async fn read_into_staging(
     host: &Host,
     desired: &DesiredExport,
@@ -192,7 +161,6 @@ async fn read_into_staging(
         .map_err(|error| error.message())?;
     let reader = match ReaderDevice::attach(&host.nbd, server.socket_path(), &desired.volume_id).await {
         Ok(reader) => reader,
-        // Two steps rather than one, so an attach that failed still stops the server it started.
         Err(error) => {
             server.stop().await;
             return Err(error.message());
@@ -204,13 +172,7 @@ async fn read_into_staging(
     dumped.map_err(|error| error.message())
 }
 
-/// Cleanup that does not depend on this process having made the mess.
-///
-/// Nothing in-process covers a daemon killed between cutting a checkpoint and deleting it, and
-/// that is the case worth covering — while any checkpoint exists the store pauses segment
-/// deletion, compaction and metadata reclamation for *every* tenant on the host.
 async fn reap(host: &Host, plan: &ReconcilePlan) {
-    // Names an export in flight on this pass would use, which must not be reaped out from under it.
     let in_flight: Vec<CheckpointId> = plan
         .exports
         .iter()
@@ -231,8 +193,6 @@ async fn reap(host: &Host, plan: &ReconcilePlan) {
     if orphans.is_empty() {
         return;
     }
-    // A staging tree outlives a kill for the same reason a checkpoint does, and it is a tenant's
-    // whole dataset in the clear on a shared host.
     let _ = std::fs::remove_dir_all(&host.config.export_staging_dir);
     let _ = host.nbd.detach(&nft_render::export_reader_device_path()).await;
     for checkpoint_id in &orphans {
@@ -296,8 +256,6 @@ mod tests {
         assert!(!is_export_checkpoint(&CheckpointId::parse("nightly-1").unwrap()));
     }
 
-    /// A host keeping volumes as local files has no pinned view to read, and an export that ran
-    /// against the live disk would hand over a filesystem the tenant was writing to.
     #[tokio::test]
     async fn a_host_that_cannot_pin_a_view_reports_the_export_failed_rather_than_reading_the_live_disk() {
         let host = test_host().await;
@@ -332,8 +290,6 @@ mod tests {
         assert!(host.state.snapshot().await.export_reports.is_empty());
     }
 
-    /// An export already written is not written again: this host holds write-only credentials on
-    /// the store, so re-writing on doubt would re-upload a tenant's whole dataset every restart.
     #[tokio::test]
     async fn an_export_this_host_has_already_written_is_not_written_twice() {
         let host = test_host().await;

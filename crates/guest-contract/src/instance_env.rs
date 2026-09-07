@@ -1,8 +1,3 @@
-//! `/instance.env`, the file the config drive carries. Line-oriented `KEY=VALUE`, so the guest's
-//! init needs no parser. Two namespaces and nothing else: `NIBRUN_<KEY>` for what the runtime
-//! itself needs, `ENV_<NAME>` for one of the tenant's own variables. The prefixes exist so the two
-//! can never collide. `apps/runtime/src/config.h` is the format contract.
-
 use protocol::{
     AppHostname, AppHostnameKind, HostPort, Hostname, HttpPort, Ipv4Address, RestartPolicy, TenantArguments,
     TenantEnvironment,
@@ -11,13 +6,9 @@ use protocol::{
 pub const INSTANCE_ENV_FILENAME: &str = "instance.env";
 pub const INSTANCE_CONFIG_IMAGE: &str = "config.squashfs";
 
-/// The two namespaces the runtime parses, so a tenant variable called NIBRUN_HTTP_PORT stays the
-/// tenant's.
 const RUNTIME_PREFIX: &str = "NIBRUN_";
 const TENANT_PREFIX: &str = "ENV_";
 
-/// Public rather than the VPC's: the guest network is cut off from every private destination, and
-/// a resolver inside one would mean opening that back up for whatever else answers on the address.
 const DNS_SERVERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +27,6 @@ pub struct InstanceEnvContent<'a> {
     pub restart_policy: &'a RestartPolicy,
 }
 
-/// Names the variable and never its value, which is the tenant's secret.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{variable_name} has no representation on the config drive")]
 pub struct UnrepresentableEnvironment {
@@ -47,8 +37,6 @@ fn has_forbidden_character(value: &str) -> bool {
     value.contains(['\n', '\r', '\0'])
 }
 
-/// The name nibrun issued the app, never one its owner brought: it is the hostname the app is
-/// always reachable at, and the only one that cannot be taken away underneath a running binary.
 fn platform_hostname(hostnames: &[AppHostname]) -> Option<&Hostname> {
     hostnames
         .iter()
@@ -56,8 +44,6 @@ fn platform_hostname(hostnames: &[AppHostname]) -> Option<&Hostname> {
         .map(|each| &each.hostname)
 }
 
-/// `backoffFactor` is written the way JavaScript prints a number: `2` rather than `2.0`, which is
-/// what the guest's `strtod` reads and what the reference implementation's test asserts.
 fn js_number(value: f64) -> String {
     if value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
@@ -66,8 +52,6 @@ fn js_number(value: f64) -> String {
     }
 }
 
-/// A value containing a newline has no representation in a format with no quoting, so it fails
-/// the instance rather than truncating somebody's configuration into the next line.
 pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, UnrepresentableEnvironment> {
     let mut lines = vec![format!("{RUNTIME_PREFIX}HTTP_PORT={}", content.http_port)];
     if let Some(hostname) = platform_hostname(content.hostnames) {
@@ -96,8 +80,6 @@ pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, U
         policy.reset_after_ms
     ));
     lines.push(format!("{RUNTIME_PREFIX}DNS={}", DNS_SERVERS.join(",")));
-    // Numbered rather than delimited: a format with no quoting cannot carry a separator an
-    // argument might itself contain, and the guest refuses a gap rather than shifting the rest down.
     for (index, argument) in content.args.iter().enumerate() {
         if has_forbidden_character(argument) {
             return Err(UnrepresentableEnvironment {
@@ -117,14 +99,6 @@ pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, U
     Ok(format!("{}\n", lines.join("\n")))
 }
 
-// ---------------------------------------------------------------------------------------------
-// The guest's half
-//
-// The same file, read the other way round. Here rather than in the guest for the same reason the
-// filesystem codec's two halves sit together: a round-trip test can only exist where both
-// directions are in reach of each other.
-
-/// What the guest could not read. Names the key and never the value, which is the tenant's.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InstanceEnvError {
     #[error("{key} is missing, which is a bug in whatever wrote this file")]
@@ -137,24 +111,14 @@ pub enum InstanceEnvError {
     TooMany { what: &'static str },
 }
 
-/// glibc's resolver reads at most this many and silently drops the rest.
 pub const MAX_NAMESERVERS: usize = 3;
-/// Mirrors `MAX_ARGUMENTS` in the protocol, which refuses to write more.
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_TENANT_VARIABLES: usize = 256;
 pub const CONFIG_MAX_BYTES: usize = 128 * 1024;
 
-/// What one boot was configured with.
-///
-/// The runtime carries no defaults for any of it. `DEFAULT_RESTART_POLICY` in the protocol is the
-/// only place those values exist; the host resolves them and writes them out, so a missing key is
-/// a bug in the writer and is reported as one rather than papered over.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstanceConfig {
     pub http_port: u32,
-    /// `None` where the writer sent none, which is what lets a host adopt this image before the
-    /// agent that writes it. Every other key here is required, and an agent older than the image
-    /// would otherwise fail every boot.
     pub hostname: Option<String>,
     pub public_ipv4: Option<String>,
     pub extra_public_port: Option<u32>,
@@ -164,20 +128,10 @@ pub struct InstanceConfig {
     pub backoff_factor: f64,
     pub reset_after_ms: u32,
     pub nameservers: Vec<String>,
-    /// `argv[1..]`; `argv[0]` is the binary itself, which the runtime owns.
     pub arguments: Vec<String>,
-    /// The tenant's own, with references already expanded.
     pub environment: Vec<(String, String)>,
 }
 
-/// Only a `$NIBRUN_NAME` or `${NIBRUN_NAME}` expands, and only inside a tenant's value.
-///
-/// The prefix is what keeps the substitution off values it was never meant for: a secret holding
-/// `$`, `$$` or `$HOME` arrives byte for byte. A name this runtime does not offer fails the boot
-/// rather than reaching the tenant as itself — a tenant that asked for a value and silently got
-/// the text of the question is worse served than one told. The cost is that a value holding a
-/// literal `$NIBRUN_` has no representation, which is the bargain the format already makes for
-/// one holding a newline.
 fn expand(key: &str, value: &str, runtime: &[(String, String)]) -> Result<String, InstanceEnvError> {
     if !value.contains(&format!("${RUNTIME_PREFIX}")) && !value.contains(&format!("${{{RUNTIME_PREFIX}")) {
         return Ok(value.to_string());
@@ -226,10 +180,6 @@ fn expand(key: &str, value: &str, runtime: &[(String, String)]) -> Result<String
     Ok(expanded)
 }
 
-/// Line-oriented `KEY=VALUE`, so nothing here is a parser in the sense the format was avoiding.
-///
-/// Reports the first thing it rejects and never a partial config: a guest that booted a tenant
-/// with half its configuration would be a deploy that looked like it worked.
 pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError> {
     let mut runtime: Vec<(String, String)> = Vec::new();
     let mut tenant: Vec<(String, String)> = Vec::new();
@@ -248,8 +198,6 @@ pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError
         } else if let Some(name) = key.strip_prefix(TENANT_PREFIX) {
             tenant.push((name.to_string(), value.to_string()));
         }
-        // A key in neither namespace is not this runtime's to interpret, and refusing one would
-        // stop a host that learned a new key from booting an image older than it.
     }
 
     let named = |key: &str| {
@@ -275,8 +223,6 @@ pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError
         .map(str::to_string)
         .collect();
 
-    // Numbered from zero, and a gap is refused rather than shifting the rest down: an argument
-    // list silently one short is a tenant started with somebody else's command line.
     let mut arguments = Vec::new();
     while let Some(argument) = named(&format!("{RUNTIME_PREFIX}ARG_{}", arguments.len())) {
         if arguments.len() == MAX_ARGUMENTS {
@@ -330,16 +276,6 @@ pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError
 }
 
 impl InstanceConfig {
-    /// The environment the tenant is exec'd with.
-    ///
-    /// The platform's own first — the port the host probes, the name the edge routes to, the path
-    /// the volume is mounted at, and the address and port a tenant hands to its own users. Then
-    /// the tenant's. A tenant variable of any of those names is dropped rather than exported: it
-    /// would describe an instance that does not exist.
-    ///
-    /// `PORT` carries the same number as `NIBRUN_HTTP_PORT` under the name every other host uses,
-    /// and is dropped from the tenant's for the same reason. It is an alias and never a second
-    /// choice: nothing reads it back, and a reference names the prefixed one.
     pub fn tenant_environment(&self) -> Vec<(String, String)> {
         let mut owned = vec![
             ("NIBRUN_HTTP_PORT".to_string(), self.http_port.to_string()),
@@ -544,9 +480,6 @@ mod tests {
 
 #[cfg(test)]
 mod both_ends {
-    //! The host writes this file and the guest reads it. Both are here, so a key one end starts
-    //! writing and the other never learned to read is a test that fails rather than a boot that
-    //! does something unexpected on a machine somewhere.
 
     use super::*;
     use protocol::{TenantValue, DEFAULT_HTTP_PORT, DEFAULT_RESTART_POLICY};
@@ -612,7 +545,6 @@ mod both_ends {
         );
     }
 
-    /// `PORT` is the name every other host uses, and an alias rather than a second choice.
     #[test]
     fn the_tenant_is_handed_the_port_under_both_names() {
         let exported = parse_instance_env(&written(&[("PORT", "1234")], &[]))
@@ -652,13 +584,6 @@ mod both_ends {
         assert_eq!(value("BOTH"), format!("my-app.nibrun.app:{port}"));
     }
 
-    /// A tenant that asked for a value and silently got the text of the question is worse served
-    /// than one told the boot failed — and both ends say so on their own.
-    ///
-    /// The host refuses to *write* one: `TenantValue` will not accept a value naming a runtime
-    /// value the guest does not offer, so this never reaches a config drive by the ordinary route.
-    /// The guest refuses to *read* one anyway, because a file it was handed is a file it has to
-    /// judge for itself.
     #[test]
     fn a_reference_this_runtime_does_not_offer_fails_the_boot_at_both_ends() {
         assert!(
@@ -672,12 +597,9 @@ mod both_ends {
             matches!(&error, InstanceEnvError::UnknownReference { reference, .. } if reference == "NIBRUN_NO_SUCH_THING"),
             "{error}"
         );
-        // The key is named and the value is not: what a tenant configured is theirs.
         assert!(error.to_string().contains("BAD"), "{error}");
     }
 
-    /// The runtime carries no defaults, so a missing key is a bug in the writer and is reported as
-    /// one rather than papered over.
     #[test]
     fn a_key_the_writer_left_out_is_reported_rather_than_defaulted() {
         let whole = written(&[], &[]);
@@ -700,8 +622,6 @@ mod both_ends {
         }
     }
 
-    /// Absent is allowed for exactly one key, which is what lets a host adopt this image before
-    /// the agent that writes it.
     #[test]
     fn a_hostname_is_the_one_thing_a_boot_can_do_without() {
         let without: String = written(&[], &[])

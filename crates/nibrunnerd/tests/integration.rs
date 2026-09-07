@@ -1,27 +1,15 @@
-//! The lane that needs a host.
-//!
-//! Everything here touches a Linux kernel: the nftables ruleset is loaded rather than rendered,
-//! the filesystem is made by a real `mke2fs`, and the tap is a device the kernel creates. None of
-//! it runs by default — set `NIBRUNNER_INTEGRATION=1`, run as root on Linux — because a test that
-//! silently skipped would be a claim nothing checked.
-//!
-//! What is *not* here is a booted guest. That needs `/dev/kvm` and the guest image beside it, and
-//! it is the one thing this lane cannot pretend to have proven by passing.
-
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 use std::sync::Arc;
 
 use nibrunnerd::ports::{CommandRunner, RecordingCommandRunner};
 
-/// Refuses rather than skips: a lane that is asked for and cannot run has to say so.
 fn enabled() -> bool {
     std::env::var("NIBRUNNER_INTEGRATION").is_ok_and(|value| value == "1")
 }
 
 fn require_root() {
     #[cfg(unix)]
-    // Safety: `geteuid` reads a property of this process and cannot fail.
     #[allow(unsafe_code, reason = "asking who this process is has no safe spelling")]
     if unsafe { libc::geteuid() } != 0 {
         panic!("NIBRUNNER_INTEGRATION=1 was set but this is not running as root");
@@ -32,10 +20,6 @@ fn commands() -> Arc<dyn CommandRunner> {
     Arc::new(nibrunnerd::adapters::exec::HostCommands)
 }
 
-/// nibrun's own notes say this ruleset has only ever been rendered and asserted as text. Loading
-/// it is the difference between a ruleset that parses and one the kernel holds: a priority nft
-/// rejects, a set it will not build, a chain hook that does not exist all fail here and nowhere
-/// earlier.
 #[tokio::test]
 async fn the_isolation_ruleset_loads_into_the_kernel() {
     if !enabled() {
@@ -60,7 +44,6 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
         .await
         .expect("the kernel takes the ruleset");
 
-    // Read back from the kernel rather than from what was sent: the point is what it is holding.
     let held = commands()
         .stdout_of(nibrunnerd::ports::CommandRequest::new(&[
             "nft", "list", "table", "ip", "nibrun",
@@ -72,8 +55,6 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
     assert!(held.contains("reject comment \"guest to host\""));
     assert!(held.contains("dnat to 10.201.0.2:3000"));
     assert!(held.contains("masquerade"));
-    // The one that would take the whole table down if it were wrong: nft refuses the name
-    // `dstnat` on the output hook, and -100 is the number behind it.
     assert!(held.contains("hook output"));
     assert!(!held.contains("drop"));
 
@@ -86,15 +67,12 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
     assert!(v6.contains("fe80::/10"));
     assert!(v6.contains("2600:1f18:abcd::/56"));
 
-    // The counters the activity measurement reads are the ones the kernel created.
     let traffic = firewall.traffic().await.expect("the kernel lists its counters");
     assert!(traffic.contains_key(&protocol::AppId::parse("app-1").unwrap()));
 
     firewall.apply(&state).await.expect("a rerun is not an error");
 }
 
-/// A volume is a sparse file `mke2fs` has written a superblock into, and the check that it has
-/// one is a comparison against two bytes rather than a filesystem this host parses.
 #[tokio::test]
 async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     if !enabled() {
@@ -110,7 +88,6 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     let desired = protocol::DesiredVolume {
         volume_id: protocol::VolumeId::parse("vol-1").unwrap(),
         app_id: protocol::AppId::parse("app-1").unwrap(),
-        // Small enough to be quick, large enough for ext4 to accept.
         size_bytes: 16 * 1024 * 1024,
         desired_state: protocol::DesiredPresence::Present,
     };
@@ -119,7 +96,6 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     let attached = volumes.provision(&desired).await.expect("the volume is made");
     assert_eq!(attached.size_bytes, desired.size_bytes);
 
-    // The second pass finds a superblock and does not reformat: a tenant's data would be gone.
     let recorded = RecordingCommandRunner::succeeding();
     let second = nibrunnerd::adapters::volumes::local_file::LocalFileVolumes::new(
         directory.path().to_path_buf(),
@@ -136,9 +112,6 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     );
 }
 
-/// The tap a slot names, made through `/dev/net/tun` and addressed over netlink. What this proves
-/// is the half a guest needs before it exists: the device, its address, and the neighbour entry a
-/// wake depends on.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
@@ -149,7 +122,6 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
     use nibrunnerd::adapters::net::tap::{HostNetwork, KernelNetwork, Neighbour, TapInterface};
 
     let network = KernelNetwork::open().expect("a netlink socket");
-    // The last slot, so a host running this beside real apps does not take one of theirs.
     let slot = nft_render::describe_slot(
         nft_render::SLOT_COUNT - 1,
         protocol::AppId::parse("integration").unwrap(),
@@ -175,8 +147,6 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
         .await
         .expect("the neighbour entry is written");
 
-    // Read back from the kernel: the pairing a wake writes so the first connection after it does
-    // not pay ARP re-resolution.
     let neighbours = commands()
         .stdout_of(nibrunnerd::ports::CommandRequest::new(&[
             "ip",
@@ -193,8 +163,6 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
     );
 }
 
-/// The hypervisor this binary carries is the one the guest image was built against, and it has to
-/// be able to say so on the host it will run on.
 #[tokio::test]
 async fn the_embedded_hypervisor_runs_on_this_host() {
     if !enabled() {

@@ -1,5 +1,3 @@
-//! The integer every per-app resource derives from.
-
 use std::collections::BTreeMap;
 
 use protocol::AppId;
@@ -15,17 +13,12 @@ pub async fn all(connection: &mut SqliteConnection) -> Result<BTreeMap<AppId, u3
     Ok(rows
         .into_iter()
         .filter_map(|row| {
-            // A row naming something that is not an app id is one this daemon did not write. Left
-            // out rather than refused: the alternative is a host that will not start because of a
-            // line nothing reads any more.
             let app_id = AppId::parse(row.app_id).ok()?;
             Some((app_id, u32::try_from(row.slot).ok()?))
         })
         .collect())
 }
 
-/// Replaced whole rather than merged, because the caller holds the entire table in memory and a
-/// slot it no longer has is a slot nothing else may take while a stale row still claims it.
 pub async fn replace_all(
     connection: &mut SqliteConnection,
     assignments: &BTreeMap<AppId, u32>,
@@ -45,7 +38,6 @@ pub async fn replace_all(
     Ok(())
 }
 
-/// Where the next search for a free slot begins. Zero on a host that has never allocated one.
 pub async fn cursor(connection: &mut SqliteConnection) -> Result<i64, StoreError> {
     let held = sqlx::query!("select cursor from slot_cursor where only_row = 0")
         .fetch_optional(&mut *connection)
@@ -75,9 +67,6 @@ mod tests {
         AppId::parse(format!("app-{index}")).expect("a fixture is a valid app id")
     }
 
-    /// The whole point of the slot table: an app's integer outlives the daemon that allocated it,
-    /// because every per-app resource derives from it and a redeploy that moved one would move a
-    /// tenant's port under whatever is routing to it.
     #[tokio::test]
     async fn what_was_written_is_what_comes_back() {
         let pool = in_memory().await;
@@ -91,8 +80,6 @@ mod tests {
         assert_eq!(cursor(&mut connection).await.unwrap(), 6);
     }
 
-    /// Replaced whole: a slot the caller no longer holds is one nothing else may take while a
-    /// stale row still claims it.
     #[tokio::test]
     async fn a_slot_that_was_released_does_not_survive_the_next_write() {
         let pool = in_memory().await;
@@ -110,7 +97,6 @@ mod tests {
         assert_eq!(held.get(&app(1)), None);
     }
 
-    /// A host that has never allocated one starts its search at the beginning.
     #[tokio::test]
     async fn a_host_with_no_cursor_yet_reads_zero_rather_than_failing() {
         let pool = in_memory().await;
@@ -118,8 +104,6 @@ mod tests {
         assert_eq!(cursor(&mut connection).await.unwrap(), 0);
     }
 
-    /// Two apps on one slot is two tenants on one port, one tap and one device. The schema is what
-    /// makes that unrepresentable rather than merely unlikely.
     #[tokio::test]
     async fn two_apps_cannot_hold_the_same_slot() {
         let pool = in_memory().await;

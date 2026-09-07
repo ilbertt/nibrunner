@@ -1,5 +1,3 @@
-//! Removals this host carried out that whatever reads the report has not acknowledged.
-
 use std::collections::BTreeMap;
 
 use protocol::{ReportedVolume, VolumeId};

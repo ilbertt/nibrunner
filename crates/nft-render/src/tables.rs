@@ -2,15 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::firewall::{NFTABLES_FAMILIES, NFTABLES_TABLE};
 
-/// Which of this daemon's tables the kernel is holding, as one comparable value. The kernel
-/// allocates a handle when a table is created, so a ruleset something else flushed and rebuilt
-/// carries different ones and a ruleset that is simply gone carries none, which is what tells a
-/// kernel still holding what was written from one that would merely be sent the same text again.
 pub type KernelTables = String;
 
-/// `nft -j list tables` answers with one object per table under a top-level `nftables` array,
-/// mixed in with a `metainfo` entry. An entry that cannot be read counts as a table that is not
-/// there, so the ruleset is written again rather than assumed to be in place.
 pub fn parse_kernel_tables(json: &str) -> KernelTables {
     let mut handles: BTreeMap<String, u64> = BTreeMap::new();
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) else {
@@ -34,7 +27,6 @@ pub fn parse_kernel_tables(json: &str) -> KernelTables {
             handles.insert(family.to_string(), handle);
         }
     }
-    // Named in the order the ruleset writes them, so the same pair of tables never renders two ways.
     NFTABLES_FAMILIES
         .iter()
         .filter_map(|family| handles.get(*family).map(|handle| format!("{family}:{handle}")))

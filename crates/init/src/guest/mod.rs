@@ -1,5 +1,3 @@
-//! The Linux half: everything that only means anything as PID 1 inside a microVM.
-
 mod channels;
 mod control;
 mod filesystem;
@@ -13,8 +11,6 @@ use std::process::ExitCode;
 use guest_contract::instance_env::{parse_instance_env, InstanceConfig, CONFIG_MAX_BYTES};
 use guest_contract::paths;
 
-/// What the tenant's own files are created with, and what its umask is set to before anything of
-/// its own runs: group and other may read, neither may write.
 const TENANT_UMASK: libc::mode_t = 0o022;
 
 pub(crate) fn run() -> ExitCode {
@@ -35,9 +31,6 @@ pub(crate) fn run() -> ExitCode {
         }
     };
 
-    // After the data filesystem exists and before the tenant does: both channels have that
-    // filesystem as their only job, and the host may ask about it while the tenant is still
-    // starting.
     let channels = channels::start();
 
     log(&format!(
@@ -78,7 +71,6 @@ fn read_instance_config() -> Result<InstanceConfig, String> {
         ));
     }
     let config = parse_instance_env(&text).map_err(|error| error.to_string())?;
-    // The config drive carries the tenant's secrets; nothing needs it after this.
     nix::mount::umount(paths::CONFIG_MOUNT)
         .map_err(|error| format!("{} could not be unmounted: {error}", paths::CONFIG_MOUNT))?;
     log(&format!(
@@ -105,9 +97,6 @@ fn write_resolv_conf(config: &InstanceConfig) -> Result<(), String> {
 
 fn prepare_tenant_filesystem() -> Result<(), String> {
     mounts::artifact(paths::ARTIFACT_DEVICE, paths::ARTIFACT_MOUNT).map_err(|error| error.to_string())?;
-    // Checked here rather than left to execve, which would spend the whole restart budget on the
-    // same EACCES. The tenant runs as an unprivileged uid, so a binary the artifact builder wrote
-    // without world-execute cannot be started at all.
     let details = std::fs::metadata(paths::TENANT_BINARY)
         .map_err(|_| format!("the artifact drive holds no binary at {}", paths::TENANT_BINARY))?;
     if !details.is_file() {
@@ -129,17 +118,10 @@ fn prepare_tenant_filesystem() -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
-/// A guest reset is what Firecracker turns into "the microVM exited". Powering off or halting
-/// instead leaves the VMM process running with nobody inside it, and the host would never see the
-/// instance stop.
 fn shutdown(channels: Option<&channels::Channels>) -> ExitCode {
-    // Before the unmount: a filesystem left frozen would never return from one, and a worker still
-    // holding a file open would keep it busy.
     if let Some(channels) = channels {
         channels.stop();
     }
-    // Unmounted rather than only synced, so the next boot finds a clean filesystem instead of
-    // replaying a journal.
     if let Err(error) = nix::mount::umount(paths::DATA_DIR) {
         if !matches!(error, nix::errno::Errno::EINVAL | nix::errno::Errno::ENOENT) {
             log(&format!("could not unmount {}: {error}", paths::DATA_DIR));
@@ -153,10 +135,6 @@ fn shutdown(channels: Option<&channels::Channels>) -> ExitCode {
     }
 }
 
-/// The rootfs image carries no device nodes of its own, so whether init starts with a stdin,
-/// stdout and stderr at all depends on the kernel having mounted devtmpfs before executing it.
-/// Claiming the console here gives runtime diagnostics a reliable sink; tenant output gets its own
-/// descriptors when it is spawned.
 fn adopt_console() {
     use std::os::fd::AsRawFd;
     let Ok(console) = std::fs::OpenOptions::new()
@@ -174,18 +152,12 @@ fn adopt_console() {
     }
 }
 
-/// Firecracker's `SendCtrlAltDel` arrives as a key sequence, and the kernel's default response is
-/// to reset the machine on the spot — which ends the VM with the tenant mid-write. Disabling it
-/// turns the same sequence into a SIGINT to PID 1, which is the only way the guest ever hears
-/// "please stop".
 fn route_ctrl_alt_del_here() {
     if unsafe { libc::reboot(libc::RB_DISABLE_CAD) } < 0 {
         log("could not take over ctrl-alt-del");
     }
 }
 
-/// The console, directly. Nothing here buffers: a guest that died with its last line in a buffer
-/// is a guest that did not say why.
 pub(crate) fn log(message: &str) {
     use std::io::Write;
     let mut stderr = std::io::stderr();

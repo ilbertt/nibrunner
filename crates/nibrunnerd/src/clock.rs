@@ -1,5 +1,3 @@
-//! One reading of the wall clock, so a test can hold it still.
-
 use protocol::Timestamp;
 
 pub fn now_ms() -> i64 {

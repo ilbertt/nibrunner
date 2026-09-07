@@ -1,12 +1,3 @@
-//! The per-VM API socket. The boot config is read once and never again, so everything after boot
-//! — pausing, snapshotting, restoring — happens here.
-//!
-//! Shapes are Firecracker 1.16.1's, off the swagger that release ships. Two of them are worth
-//! naming because a neighbouring version differs: `/vm` mounts `PATCH` and only `PATCH`, for
-//! `Paused` and `Resumed` alike, and `sync_snapshot_files` does not exist here — 1.16.1 always
-//! syncs. A body Firecracker does not recognise is rejected outright, so a field invented for a
-//! later version fails the call rather than being ignored.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,13 +14,8 @@ const SNAPSHOT_LOAD_PATH: &str = "/snapshot/load";
 
 const MAX_DETAIL_LENGTH: usize = 200;
 
-/// A 256 MiB guest measures ~1.7s to snapshot, and is paused for every millisecond of it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Firecracker binds its API socket after `exec`, so the first call always races the bind, and
-/// whatever is left of an interval when the socket appears is added to the wake. Measured against
-/// the guest console, the socket is up ~3ms after the process starts and a 10ms grid spent ~8ms
-/// of the wake waiting to ask again.
 const BIND_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const BIND_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -55,11 +41,6 @@ struct MemBackend<'a> {
 struct LoadSnapshot<'a> {
     snapshot_path: &'a str,
     mem_backend: MemBackend<'a>,
-    /// Not a refinement. Firecracker emulates no RTC on x86_64, so kvmclock is the guest's only
-    /// source of wall time, and the default of `false` resumes the clock where the snapshot left
-    /// it — a guest that slept an hour wakes an hour in the past and its first outbound TLS
-    /// handshake fails on a certificate that is not yet valid. A wrong answer from a
-    /// healthy-looking app rather than a microVM that visibly did not come up.
     clock_realtime: bool,
 }
 
@@ -92,8 +73,6 @@ impl FirecrackerApi {
         let request = Request::builder()
             .method(method)
             .uri(path)
-            // Firecracker's API is HTTP/1.1 over a unix socket, so the authority is a formality
-            // and only the path is read.
             .header("host", "localhost")
             .header("content-type", "application/json")
             .body(Full::new(bytes::Bytes::from(rendered)))
@@ -111,8 +90,6 @@ impl FirecrackerApi {
         if status == hyper::StatusCode::NO_CONTENT {
             return Ok(());
         }
-        // Every refusal is a `fault_message`, and a body that is not one is still the only
-        // account of itself the VMM gave.
         let detail = response
             .into_body()
             .collect()
@@ -126,9 +103,6 @@ impl FirecrackerApi {
         })
     }
 
-    /// A call to a Firecracker that has only just been started has to be prepared to find nothing
-    /// listening yet. Only a connection that never completed is repeated: a refusal is the VMM's
-    /// answer, and asking again does not change it.
     async fn until_bound<B: Serialize>(&self, method: Method, path: &str, body: &B) -> Result<(), VmError> {
         let deadline = std::time::Instant::now() + BIND_TIMEOUT;
         loop {
@@ -151,7 +125,6 @@ impl FirecrackerApi {
             .await
     }
 
-    /// Both files are created or truncated by this, and the microVM has to be paused already.
     pub async fn create_snapshot(&self, state_path: &Path, memory_path: &Path) -> Result<(), VmError> {
         self.call(
             Method::PUT,
@@ -165,13 +138,6 @@ impl FirecrackerApi {
         .await
     }
 
-    /// Accepted only by a Firecracker that has configured nothing, which is why a restore is
-    /// started without a config file. It leaves the microVM paused; resuming it is a call of its
-    /// own.
-    ///
-    /// `mem_backend` rather than the `mem_file_path` beside it: that spelling is deprecated
-    /// upstream and the two are mutually exclusive, so sending both is a rejection rather than a
-    /// preference.
     pub async fn load_snapshot(&self, state_path: &Path, memory_path: &Path) -> Result<(), VmError> {
         self.until_bound(
             Method::PUT,
@@ -194,8 +160,6 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    /// A listening socket speaking Firecracker's own shapes, because what is being checked is the
-    /// bytes this end puts on the wire.
     struct FakeVmm {
         seen: Arc<Mutex<Vec<(String, String, String)>>>,
         status: hyper::StatusCode,
@@ -296,7 +260,6 @@ mod tests {
             r#"{"snapshot_path":"/snap/vmstate","mem_file_path":"/snap/memory","snapshot_type":"Full"}"#
         );
         assert_eq!(calls[1].1, "/snapshot/load");
-        // `mem_file_path` and `mem_backend` are mutually exclusive upstream, so only one travels.
         assert!(!calls[1].2.contains("mem_file_path"));
         assert_eq!(
             calls[1].2,
@@ -324,8 +287,6 @@ mod tests {
         }
     }
 
-    /// A socket nothing is listening on is the VMM not being there, which is a different thing
-    /// from one that answered — and only the first is worth asking again.
     #[tokio::test]
     async fn a_socket_nothing_answers_is_unreachable_rather_than_a_refusal() {
         let directory = tempfile::tempdir().unwrap();

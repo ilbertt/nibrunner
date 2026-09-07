@@ -1,10 +1,3 @@
-//! The host's end of the guest's log vsock.
-//!
-//! Firecracker turns a guest-initiated connection on port 51000 into a connection to
-//! `<uds_path>_51000` on the host, so this listens on that path for as long as the microVM has a
-//! slot — through a sleep and a wake, because the guest reconnects on its own and a listener torn
-//! down between them would lose the first thing it said.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,7 +11,6 @@ use crate::clock::now_timestamp;
 use crate::ports::{LogSink, TenantLogBody, TenantLogEvent};
 use guest_contract::logs::{decode_frames, GuestLogFrame};
 
-/// The peer is a kernel the tenant controls, and every accepted socket costs the host a decoder.
 const MAX_GUEST_CONNECTIONS: usize = 4;
 const PRIVATE_SOCKET_MODE: u32 = 0o600;
 
@@ -28,7 +20,6 @@ struct Attachment {
     task: tokio::task::JoinHandle<()>,
 }
 
-/// Which apps this host is listening for, and on which path.
 #[derive(Default)]
 pub struct TenantLogReceiver {
     attachments: Mutex<BTreeMap<AppId, Attachment>>,
@@ -39,8 +30,6 @@ impl TenantLogReceiver {
         Arc::new(Self::default())
     }
 
-    /// A listener for one app's guest. Re-attaching the same path only updates which deployment
-    /// the output is stamped with, so a redeploy does not drop a connection the guest still holds.
     pub async fn attach(
         self: &Arc<Self>,
         app_id: AppId,
@@ -97,8 +86,6 @@ impl TenantLogReceiver {
 
 async fn serve(listener: UnixListener, source: Arc<Mutex<(AppId, DeploymentId)>>, sink: Arc<dyn LogSink>) {
     let connections = Arc::new(tokio::sync::Semaphore::new(MAX_GUEST_CONNECTIONS));
-    // One identity per listener rather than per connection: a gap in the sequence within it means
-    // buffering dropped records, and a new one means this receiver restarted.
     let source_id = uuid::Uuid::new_v4().to_string();
     let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
     loop {
@@ -106,7 +93,6 @@ async fn serve(listener: UnixListener, source: Arc<Mutex<(AppId, DeploymentId)>>
             return;
         };
         let Ok(permit) = connections.clone().try_acquire_owned() else {
-            // Over the cap: opened to be closed, because a decoder is what each one costs.
             drop(stream);
             continue;
         };
@@ -130,8 +116,6 @@ async fn pump(
 ) {
     let mut buffered: Vec<u8> = Vec::new();
     let mut chunk = vec![0u8; 16 * 1024];
-    // One decoder per stream, held across chunks: a multi-byte character split across two frames
-    // is half a glyph until the rest of it arrives.
     let mut carried: BTreeMap<&'static str, Vec<u8>> = BTreeMap::new();
     loop {
         let Ok(read) = stream.read(&mut chunk).await else {
@@ -197,7 +181,6 @@ async fn pump(
     }
 }
 
-/// Where Firecracker delivers a guest's own connection on the tenant log port.
 pub fn tenant_log_socket_path(working_dir: &Path) -> PathBuf {
     working_dir.join(guest_contract::vsock::tenant_log_socket_name())
 }
@@ -232,7 +215,6 @@ mod tests {
             .unwrap();
 
         let mut guest = UnixStream::connect(&socket_path).await.unwrap();
-        // Split across two writes, which is what a transport does to a frame.
         let frame = encode_frame(ENCODE_KIND_STDOUT, "listening\n".as_bytes());
         guest.write_all(&frame[..5]).await.unwrap();
         guest.write_all(&frame[5..]).await.unwrap();
@@ -253,7 +235,6 @@ mod tests {
             }
         );
         assert_eq!(events[1].body, TenantLogBody::Gap { dropped_bytes: 4096 });
-        // One source across the connection, and a sequence that says where a record sat in it.
         assert_eq!(events[0].source_id, events[1].source_id);
         assert_eq!((events[0].sequence, events[1].sequence), (0, 1));
     }
@@ -307,7 +288,6 @@ mod tests {
             .attach(app_id(), newer.clone(), socket_path.clone(), sink.clone())
             .await
             .unwrap();
-        // The guest's connection survived, which is what a redeploy of the daemon must not break.
         drop(guest);
         let mut second = UnixStream::connect(&socket_path).await.unwrap();
         second

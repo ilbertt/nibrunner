@@ -1,5 +1,3 @@
-//! Which hostname reaches which app, and the two listeners that answer for them.
-
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -21,8 +19,6 @@ use crate::services::report::routes::RouteTarget;
 
 const LOOPBACK: &str = "127.0.0.1";
 
-/// Rendered from the records rather than configured separately, and replaced whole: routing that
-/// is a function of state cannot drift from what is running.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteTable {
     by_hostname: BTreeMap<String, HostPort>,
@@ -77,10 +73,6 @@ impl Router {
         self.routes.read().await.clone()
     }
 
-    /// A hostname this host answers for reaches the app's loopback port, up or down: the forward
-    /// rule is what decides whether the guest or this daemon answers there. A hostname it does
-    /// not is a 404 of its own rather than a connection refused, so an edge in front of this can
-    /// tell a host that is not serving an app from one that is not there.
     pub async fn handle(self: Arc<Self>, request: Request<Incoming>) -> Response<ProxyBody> {
         let Some(hostname) = hostname_of(&request) else {
             return say(StatusCode::BAD_REQUEST, "This request names no host.\n");
@@ -95,8 +87,6 @@ impl Router {
     }
 }
 
-/// Serves plain HTTP. What a host with no certificate has, and what sits behind an edge that
-/// terminates TLS of its own.
 pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Result<()> {
     let listener = TcpListener::bind(address).await?;
     tracing::info!(%address, "the proxy is listening");
@@ -110,8 +100,6 @@ pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Re
                 let router = router.clone();
                 async move { Ok::<_, std::convert::Infallible>(router.handle(request).await) }
             });
-            // A cold boot outlasts any sensible idle ceiling, and a request abandoned while the
-            // microVM it asked for is still coming up is the one thing this must not do.
             let _ = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
                 .await;
@@ -119,8 +107,6 @@ pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Re
     }
 }
 
-/// Serves HTTPS from a certificate and a key on disk. ACME is deferred, so this is what a host
-/// with an origin certificate does; a host with neither serves HTTP alone and says so.
 pub async fn serve_https(
     router: Arc<Router>,
     address: SocketAddr,
@@ -193,14 +179,11 @@ mod tests {
             table.port_for(app_hostname().hostname.as_str()),
             Some(record.host_port)
         );
-        // Matched without regard to case, because a client chooses that and a host does not.
         assert_eq!(table.port_for("www.example.com"), Some(record.host_port));
         assert_eq!(table.port_for("nobody.example.com"), None);
         assert_eq!(table.hostnames().len(), 2);
     }
 
-    /// Stopping an app moves nothing the edge would have to be told about: the route is the same
-    /// whether the guest or the daemon is what answers on the port.
     #[test]
     fn the_table_is_identical_whether_the_app_is_up_or_down() {
         let up = RouteTable::from_targets(&renderable_routes(&[instance_record(|_| {})]));

@@ -1,6 +1,3 @@
-//! What this host says it is running. Read off a file the deploy wrote rather than compiled in,
-//! so a report cannot claim a version the binaries on disk no longer are.
-
 use std::path::Path;
 
 use protocol::HostVersions;
@@ -21,9 +18,6 @@ impl VersionsError {
     }
 }
 
-/// What a host with no versions file reports: this binary's own version, and `none` for the
-/// three components it did not fetch. The schema has no way to say "not applicable", so it says
-/// `none` rather than omitting the field.
 pub fn compiled_versions(firecracker: &str, guest_image: &str) -> HostVersions {
     HostVersions {
         agent: env!("CARGO_PKG_VERSION").to_string(),

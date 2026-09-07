@@ -1,8 +1,3 @@
-//! What an export hands over: the tenant's data, the binary that was running on it, and the
-//! environment it was running under.
-//!
-//! Ported from `apps/agent/src/lib/exports/bundle.ts`.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,25 +9,12 @@ use crate::ports::{ArtifactStore, CommandRequest, CommandRunner};
 const STAGING_MODE: u32 = 0o700;
 const DATA_DIRECTORY: &str = "data";
 const ENV_FILENAME: &str = ".env";
-/// The tenant's environment in the clear, which is what it is for and why nobody else may read it.
 const ENV_MODE: u32 = 0o600;
 const BUNDLE_NAME: &str = "bundle.tar.gz";
 const BINARY_MODE: u32 = 0o755;
 
-/// What `mke2fs` puts at the root of every filesystem it writes. A tenant did not create these and
-/// has no use for them, so an export does not show them.
-///
-/// **At the root only.** `lost+found` is reserved by the filesystem in exactly one directory; the
-/// same name deeper in the tree is a directory a tenant made, and hiding it would be hiding their
-/// own data from them.
 const MKFS_ROOT_ENTRIES: [&str; 1] = ["lost+found"];
 
-/// A tenant filesystem is unbounded, and a shorter ceiling would abort a large export part-way.
-///
-/// An hour is a number that can actually be reached. It does not sit under the guest's own freeze
-/// ceiling: the read runs against a checkpoint with nobody frozen behind it, so the two bound
-/// different things — that one the cut, this one the read — rather than being two answers to the
-/// same question.
 const DUMP_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, thiserror::Error)]
@@ -53,19 +35,12 @@ impl BundleError {
     }
 }
 
-/// Read with `debugfs`, which walks inodes in userspace: the bundle is built from a filesystem the
-/// host never asks its kernel to interpret. Mounting it — even read-only — would give that up.
-///
-/// `debugfs` reports a failed `rdump` on stderr and still exits 0, so an empty destination is the
-/// only reliable signal that nothing came out.
 pub async fn dump_volume(
     commands: &Arc<dyn CommandRunner>,
     device_path: &str,
     staging_dir: &Path,
 ) -> Result<(), BundleError> {
     let unwritable = |error: std::io::Error| BundleError::Unwritable(error.to_string());
-    // Removed first: a staging tree that outlived a kill is a tenant's dataset in the clear, and
-    // an export that added to one would hand over somebody else's files.
     if let Err(error) = std::fs::remove_dir_all(staging_dir) {
         if error.kind() != std::io::ErrorKind::NotFound {
             return Err(unwritable(error));
@@ -93,18 +68,12 @@ pub async fn dump_volume(
             device_path: device_path.to_string(),
         });
     }
-    // Dropped after the emptiness check and never before it: a filesystem holding nothing but
-    // `lost+found` is a tenant who has written no data, and removing it first would report that
-    // as a dump that failed.
     for entry in MKFS_ROOT_ENTRIES {
         let _ = std::fs::remove_dir_all(destination.join(entry));
     }
     Ok(())
 }
 
-/// Re-checked rather than trusted from the wire, and refused rather than corrected: this becomes a
-/// path inside an archive somebody extracts on their own machine, and the schema already
-/// constrains it, so anything else came from a peer that did not honour the contract.
 pub fn bundle_binary_name(artifact: &DesiredArtifact) -> Result<&str, BundleError> {
     let filename = artifact.filename.as_str();
     let unsafe_name = || BundleError::UnsafeFilename {
@@ -119,14 +88,7 @@ pub fn bundle_binary_name(artifact: &DesiredArtifact) -> Result<&str, BundleErro
     Ok(filename)
 }
 
-/// Quoted, where the config drive's `instance.env` refuses a value it cannot represent instead.
-/// The two have different readers: that one is parsed by an init with no parser, so a value it
-/// cannot carry is an instance that must not boot, while this one is read by whatever the owner
-/// runs the binary under next — and an export is the last thing that may fail on a value somebody
-/// set. So the escaping is dotenv's, and a newline becomes `\n` rather than the end of the line.
 pub fn render_dotenv(environment: &TenantEnvironment) -> String {
-    // Already ordered: the environment is a sorted map, so a bundle written twice is the same
-    // bundle twice.
     environment
         .iter()
         .map(|(name, value)| format!("{name}={}\n", quoted(value.expose())))
@@ -156,8 +118,6 @@ pub struct WrittenBundle {
     pub size_bytes: u64,
 }
 
-/// The binary is fetched from the artifact store rather than lifted out of the local squashfs
-/// cache, because the download proves the digest on the way past.
 pub async fn write_bundle(
     artifacts: &Arc<dyn ArtifactStore>,
     artifact: &DesiredArtifact,
@@ -170,14 +130,8 @@ pub async fn write_bundle(
         .map_err(|error| BundleError::Artifact(error.message()))?;
 
     let binary_path = staging_dir.join(&binary_name);
-    // A transfer writes what a transfer writes, and an archive records the mode it finds. Without
-    // this the bundle carries a binary the owner has to chmod before the copy they were handed
-    // will run.
     write_file(&binary_path, &bytes, BINARY_MODE)?;
 
-    // An empty file for an app that set no variables, and no file at all when the control plane
-    // could not say what it was configured with: the first is an answer, and the second would be
-    // an empty file pretending to be one.
     if let Some(environment) = environment {
         write_file(
             &staging_dir.join(ENV_FILENAME),
@@ -197,7 +151,6 @@ pub async fn write_bundle(
     })
 }
 
-/// Named entries rather than the whole directory, which would sweep the archive into itself.
 fn archive(
     bundle_path: &Path,
     staging_dir: &Path,
@@ -208,8 +161,6 @@ fn archive(
     let file = std::fs::File::create(bundle_path).map_err(unwritable)?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
-    // Names come from a tenant's own filenames, so they are carried as data rather than through a
-    // shell: nothing here interprets them.
     builder
         .append_dir_all(DATA_DIRECTORY, staging_dir.join(DATA_DIRECTORY))
         .map_err(unwritable)?;
@@ -241,8 +192,6 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), BundleError> {
         .map_err(|error| BundleError::Unwritable(error.to_string()))?;
     file.write_all(bytes)
         .map_err(|error| BundleError::Unwritable(error.to_string()))?;
-    // Set again, because the mode above only applies to a file this call created and an export
-    // that reran over its own staging tree would otherwise keep whatever was there.
     std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))
         .map_err(|error| BundleError::Unwritable(error.to_string()))?;
     Ok(())
@@ -259,7 +208,6 @@ mod tests {
         assert_eq!(bundle_binary_name(&artifact(|_| {})).unwrap(), "pocketbase");
         for bad in ["../server", "bin/server", ".hidden", "-rf", "", "."] {
             let Ok(filename) = protocol::Filename::parse(bad) else {
-                // Refused a layer earlier, which is where it should be refused.
                 continue;
             };
             let named = artifact(|artifact| artifact.filename = filename);
@@ -296,7 +244,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
         let planted = staging.join(DATA_DIRECTORY).join("lost+found");
-        // Standing in for `debugfs`: what it leaves behind for a filesystem nobody has written to.
         let commands: Arc<dyn CommandRunner> = RecordingCommandRunner::answering(move |_| {
             std::fs::create_dir_all(&planted).unwrap();
             Ok(CommandResult::succeeded())

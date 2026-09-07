@@ -1,5 +1,3 @@
-//! Handing one request onwards and its answer back.
-
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -12,8 +10,6 @@ use hyper_util::rt::TokioExecutor;
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
 
-/// Headers describing one hop of a connection rather than the message travelling on it. Copying
-/// them onto the next hop is how a proxy tells a client about a connection it does not have.
 const HOP_BY_HOP: [&str; 8] = [
     "connection",
     "keep-alive",
@@ -33,8 +29,6 @@ fn strip_hop_by_hop(headers: &mut hyper::HeaderMap) {
 
 pub fn upstream_client() -> Client<HttpConnector, Incoming> {
     let mut connector = HttpConnector::new();
-    // A guest that has just been restored accepts long before it answers; the connect itself is
-    // the fast part, and a request that is already waiting on a wake must not be given up on here.
     connector.set_nodelay(true);
     Client::builder(TokioExecutor::new()).build(connector)
 }
@@ -49,10 +43,6 @@ fn rewritten(uri: &Uri, host: &str, port: u16) -> Uri {
         .unwrap_or_else(|_| Uri::from_static("http://127.0.0.1/"))
 }
 
-/// One request to an address, and its answer back. `keep_alive` is the difference between the
-/// edge, which pools upstream connections and should, and the activator, which must not: a
-/// connection opened to the activator while the microVM was down goes on being answered by it
-/// long after the rule that should have taken it over is in the kernel.
 pub async fn forward(
     client: &Client<HttpConnector, Incoming>,
     request: Request<Incoming>,
@@ -84,7 +74,6 @@ pub async fn forward(
     }
 }
 
-/// Plain and short, because a person reads it in a browser with no styling around it.
 pub fn say(status: StatusCode, message: &str) -> Response<ProxyBody> {
     Response::builder()
         .status(status)
@@ -99,7 +88,6 @@ pub fn say(status: StatusCode, message: &str) -> Response<ProxyBody> {
         .expect("a constant response is always buildable")
 }
 
-/// The hostname a request names, without the port an edge may have carried with it.
 pub fn hostname_of(request: &Request<Incoming>) -> Option<String> {
     request
         .headers()

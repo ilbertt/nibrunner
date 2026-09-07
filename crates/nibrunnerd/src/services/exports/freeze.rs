@@ -1,9 +1,3 @@
-//! Holding a tenant's filesystem still for exactly as long as it takes to cut a checkpoint.
-//!
-//! Ported from `apps/agent/src/lib/exports/freeze.ts`. The connection *is* the lease: dropping it
-//! is what tells the guest to thaw, so a daemon that dies mid-export cannot leave a tenant's
-//! filesystem wedged behind it.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -14,8 +8,6 @@ use tokio::net::UnixStream;
 const FREEZE_REQUEST: &str = "FREEZE\n";
 const FREEZE_HELD: &str = "OK";
 
-/// The guest answers a freeze once ext4 has checkpointed its journal, which is work rather than a
-/// round trip.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
@@ -24,10 +16,6 @@ pub enum FreezeError {
     Silent { socket_path: String },
     #[error("the guest running {app_id} would not freeze its filesystem: {reply}")]
     Refused { app_id: AppId, reply: String },
-    /// The guest thaws itself if a freeze is held past its own ceiling, and a checkpoint cut
-    /// across that moment is worthless: the tenant was writing while it was taken, so it is
-    /// neither the state before nor the state after. Reported as a failed export rather than read
-    /// from, because the point of freezing is that nobody has to wonder afterwards.
     #[error("the guest running {app_id} thawed before the checkpoint was recorded")]
     Lost { app_id: AppId },
 }
@@ -38,35 +26,19 @@ impl FreezeError {
     }
 }
 
-/// A held freeze, for as long as this is alive.
-///
-/// A stopped app has no VMM to ask and needs none: its guest unmounted the filesystem on the way
-/// down, which is the same journal checkpoint under another name. A VMM that is running and does
-/// not answer is the case that must not be waved through — that is a guest whose journal still
-/// holds writes the bundle would otherwise miss without saying so.
 pub struct FreezeLease {
     app_id: AppId,
-    /// `None` where there was no guest to hold. Kept open for the life of the lease and never
-    /// read from again: what matters is that this side has not let go.
     held: Option<UnixStream>,
 }
 
 impl FreezeLease {
-    /// Whether the guest was still frozen. Ask before trusting anything taken while it was.
-    ///
-    /// A guest that thawed early closes its end, which this side sees as a readable socket at
-    /// end-of-file. Nothing is ever sent on this connection after the reply, so anything readable
-    /// on it is the far end having gone.
     pub fn assert_held(&self) -> Result<(), FreezeError> {
         let Some(stream) = &self.held else {
             return Ok(());
         };
         let mut byte = [0u8; 1];
         match stream.try_read(&mut byte) {
-            // Would block: nothing to read, so the far end is still there and still holding.
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
-            // Zero bytes is end-of-file, and anything else is a guest that said something it was
-            // never going to say. Both are a lease this side can no longer vouch for.
             _ => Err(FreezeError::Lost {
                 app_id: self.app_id.clone(),
             }),
@@ -74,7 +46,6 @@ impl FreezeLease {
     }
 }
 
-/// The tenant's filesystem, held still. Nothing to hold where no VMM is listening.
 pub async fn frozen(app_id: &AppId, vsock_path: &Path) -> Result<FreezeLease, FreezeError> {
     let Ok(stream) = UnixStream::connect(vsock_path).await else {
         tracing::info!(
@@ -139,7 +110,6 @@ mod tests {
     use crate::test_support::app_id;
     use tokio::net::UnixListener;
 
-    /// A guest that answers the connect and the freeze, then holds the connection open.
     async fn guest_that(
         answers: &'static [&'static str],
         hangs_up: bool,
@@ -162,14 +132,11 @@ mod tests {
             if hangs_up {
                 return;
             }
-            // Holds the lease open until the far end drops it, which is what a frozen guest does.
             std::future::pending::<()>().await;
         });
         (directory, path)
     }
 
-    /// A stopped app unmounted its filesystem on the way down, which is the same journal
-    /// checkpoint under another name — so there is nothing to hold and nothing to wait for.
     #[tokio::test]
     async fn no_vmm_to_ask_is_a_lease_over_nothing_rather_than_a_failure() {
         let directory = tempfile::tempdir().unwrap();
@@ -186,13 +153,10 @@ mod tests {
         assert!(lease.assert_held().is_ok());
     }
 
-    /// A checkpoint cut across a thaw is neither the state before nor the state after, so a lease
-    /// this side cannot vouch for has to say so rather than be read from.
     #[tokio::test]
     async fn a_guest_that_thawed_early_is_a_lease_that_cannot_be_vouched_for() {
         let (_directory, path) = guest_that(&["OK 1234", "OK"], true).await;
         let lease = frozen(&app_id(), &path).await.unwrap();
-        // The guest's end is gone the moment it answered; the socket reads end-of-file.
         tokio::task::yield_now().await;
         for _ in 0..50 {
             if lease.assert_held().is_err() {

@@ -9,12 +9,6 @@ pub struct RouteTarget {
     pub host_port: HostPort,
 }
 
-/// Responsibility, not liveness: a host answers for every app it holds a slot for, up or down.
-/// The route is the same either way, so stopping and starting an app rewrites no config — and a
-/// hostname this host does own is answered rather than falling through to the wildcard's 404.
-///
-/// What the loopback port leads to is the forward rule's decision. With it the guest answers,
-/// without it the daemon does.
 pub fn renderable_routes(records: &[InstanceRecord]) -> Vec<RouteTarget> {
     records
         .iter()

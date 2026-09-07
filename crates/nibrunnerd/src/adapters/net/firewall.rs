@@ -1,14 +1,3 @@
-//! The kernel's copy of the ruleset, and the memory of what was last put there.
-//!
-//! Which tenants are forwarded changes on the probe rather than on desired state, so this is
-//! applied on every status tick — and an unchanged ruleset has to cost nothing rather than a
-//! table replacement a second, which would also zero the counters the activity measurement reads.
-//!
-//! What makes skipping safe is that the memory is never the whole answer: the kernel is asked
-//! whether the tables it names are still the ones this daemon created. Anything else that drops
-//! or rebuilds them then becomes a ruleset the next pass rewrites, rather than one this process
-//! never writes again because the text it would send has not changed.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -21,7 +10,6 @@ use tokio::sync::Mutex;
 
 use crate::ports::{CommandError, CommandRequest, CommandRunner};
 
-/// What was written, and the tables it was written into, which is what says it is still there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Applied {
     ruleset: String,
@@ -34,8 +22,6 @@ pub struct HostFirewall {
 }
 
 impl HostFirewall {
-    /// Never applied by this process yet, so the first apply always runs: what is in the kernel
-    /// came from whichever daemon ran before, and the host may have changed since.
     pub fn new(commands: Arc<dyn CommandRunner>) -> Self {
         Self {
             commands,
@@ -43,9 +29,6 @@ impl HostFirewall {
         }
     }
 
-    /// `None` when nft could not be asked at all, which has to stay apart from a host holding no
-    /// tables of ours: both write the ruleset, but only the second is a state worth remembering
-    /// having reached.
     async fn kernel_tables(&self) -> Option<KernelTables> {
         self.commands
             .stdout_of(CommandRequest::new(&["nft", "-j", "list", "tables"]))
@@ -69,8 +52,6 @@ impl HostFirewall {
         self.commands
             .stdout_of(CommandRequest::new(&["nft", "-f", "-"]).with_stdin(ruleset.clone()))
             .await?;
-        // Tables that cannot be read back leave the next pass nothing to compare against, so it
-        // writes them again rather than taking this pass's success as proof they are in place.
         *applied = self
             .kernel_tables()
             .await
@@ -78,8 +59,6 @@ impl HostFirewall {
         Ok(())
     }
 
-    /// What the kernel has counted against each app, which is a different question from what this
-    /// process last wrote: the rules are ours, the counts are traffic's.
     pub async fn traffic(&self) -> Result<BTreeMap<AppId, AppTraffic>, CommandError> {
         let json = self
             .commands
@@ -169,8 +148,6 @@ mod tests {
         );
     }
 
-    /// An operator's `nft flush ruleset` leaves the text unchanged and the kernel empty, which is
-    /// exactly the case a memory of what was written cannot answer on its own.
     #[tokio::test]
     async fn a_ruleset_something_else_dropped_is_written_again() {
         let flushed = Arc::new(std::sync::atomic::AtomicBool::new(false));

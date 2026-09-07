@@ -1,6 +1,3 @@
-//! One file per app under the state directory. What v1 does with tenant output, behind the trait
-//! a remote store replaces later.
-
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -12,8 +9,6 @@ use crate::ports::{LogSink, TenantLogBody, TenantLogEvent};
 
 const LOG_DIR_MODE: u32 = 0o700;
 
-/// A gap is a line rather than a counter, so it lands in the same ordered stream as the output it
-/// replaces.
 const GAP_MESSAGE: &str = "tenant output dropped by host buffering";
 
 pub struct FileLogSink {
@@ -29,13 +24,9 @@ impl FileLogSink {
         self.directory.join(format!("{app_id}.log"))
     }
 
-    /// One line per record, carrying what a reader needs to tell a repeat from a loss: the source
-    /// the receiver was on and the sequence within it.
     fn render(event: &TenantLogEvent) -> String {
         match &event.body {
             TenantLogBody::Data { stream, text } => {
-                // The tenant's own bytes, exactly as they arrived: the newline is theirs, and a
-                // chunk that did not end in one is a line still being written.
                 format!(
                     "{} {} {}/{} {}",
                     event.observed_at,
@@ -124,7 +115,6 @@ mod tests {
         assert!(lines[0].ends_with("stdout source-1/0 listening"));
         assert!(lines[1].contains("dropped by host buffering: 4096 bytes"));
         assert!(lines[2].ends_with("stderr source-1/2 warning"));
-        // Appended rather than replaced: a redeploy does not lose what the last release said.
         sink.publish(vec![event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,

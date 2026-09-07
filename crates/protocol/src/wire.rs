@@ -1,6 +1,3 @@
-//! The scalar types every document resolves to. Each is a validated newtype, so a value that
-//! reached a struct has already passed the check the TypeBox schema on the other side applies.
-
 use std::fmt;
 use std::net::Ipv4Addr;
 
@@ -15,13 +12,11 @@ impl InvalidValue {
         Self(format!("{what} is not {rule}"))
     }
 
-    /// A refusal whose text is the whole message, for the checks that read better as a sentence.
     pub(crate) fn new_public(message: &str) -> Self {
         Self(message.to_string())
     }
 }
 
-/// The same newtype, refused with a sentence of its own rather than "<what> is not <rule>".
 macro_rules! validated_string_public {
     ($(#[$meta:meta])* $name:ident, $rule:expr, $check:expr) => {
         validated_string!($(#[$meta])* $name, stringify!($name), $rule, $check);
@@ -93,7 +88,6 @@ macro_rules! validated_string {
 
 const MAX_IDENTIFIER_LENGTH: usize = 63;
 
-/// `^[0-9A-Za-z][0-9A-Za-z_-]{0,62}$`
 pub fn is_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     match chars.next() {
@@ -109,42 +103,15 @@ macro_rules! identifier {
     };
 }
 
-identifier!(
-    /// The account an app belongs to.
-    OwnerId
-);
-identifier!(
-    /// A tenant app, and the microVM running it: an app runs one, so the two never differ.
-    AppId
-);
-identifier!(
-    /// One uploaded binary.
-    ArtifactId
-);
-identifier!(
-    /// One artifact plus the configuration it was launched with.
-    DeploymentId
-);
-identifier!(
-    /// One app host.
-    HostId
-);
-identifier!(
-    /// An app's persistent filesystem.
-    VolumeId
-);
-identifier!(
-    /// A point-in-time view of a volume, readable while the owning host still has it open.
-    CheckpointId
-);
-identifier!(
-    /// One request for a downloadable copy of an app.
-    ExportId
-);
-identifier!(
-    /// One read of one directory, alive only while its answer is still awaited.
-    FilesystemQueryId
-);
+identifier!(OwnerId);
+identifier!(AppId);
+identifier!(ArtifactId);
+identifier!(DeploymentId);
+identifier!(HostId);
+identifier!(VolumeId);
+identifier!(CheckpointId);
+identifier!(ExportId);
+identifier!(FilesystemQueryId);
 
 const SHA256_HEX_LENGTH: usize = 64;
 
@@ -155,19 +122,10 @@ fn is_sha256_hex(value: &str) -> bool {
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
-validated_string!(
-    /// Lowercase hex SHA-256, unprefixed.
-    Sha256Digest,
-    "digest",
-    "a lowercase hex sha-256",
-    is_sha256_hex
-);
+validated_string!(Sha256Digest, "digest", "a lowercase hex sha-256", is_sha256_hex);
 
 const MAX_TIMESTAMP_LENGTH: usize = 35;
 
-/// `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$`. The offset is
-/// mandatory: a local time with no offset is the failure this exists to catch, and it is the one
-/// a lenient parser turns into a silently wrong instant. Calendar validity is not checked.
 fn is_timestamp(value: &str) -> bool {
     if value.len() > MAX_TIMESTAMP_LENGTH {
         return false;
@@ -219,7 +177,6 @@ fn is_timestamp(value: &str) -> bool {
 }
 
 validated_string!(
-    /// ISO 8601 instant with a mandatory UTC offset.
     Timestamp,
     "timestamp",
     "an ISO 8601 instant with an offset",
@@ -227,7 +184,6 @@ validated_string!(
 );
 
 impl Timestamp {
-    /// The instant as JavaScript's `toISOString` writes it: milliseconds, and `Z`.
     pub fn from_epoch_ms(epoch_ms: i64) -> Self {
         let instant = chrono::DateTime::from_timestamp_millis(epoch_ms)
             .unwrap_or_else(|| chrono::DateTime::from_timestamp_millis(0).expect("the epoch"));
@@ -238,7 +194,6 @@ impl Timestamp {
         Self::from_epoch_ms(chrono::Utc::now().timestamp_millis())
     }
 
-    /// `Date.parse` for the instants this type admits.
     pub fn epoch_ms(&self) -> i64 {
         chrono::DateTime::parse_from_rfc3339(&self.0)
             .map(|instant| instant.timestamp_millis())
@@ -248,7 +203,6 @@ impl Timestamp {
 
 pub const MAX_DNS_LABEL_LENGTH: usize = 63;
 
-/// `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`
 fn is_dns_label(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > MAX_DNS_LABEL_LENGTH {
@@ -263,7 +217,6 @@ validated_string!(DnsLabel, "label", "a DNS label", is_dns_label);
 
 const MAX_HOSTNAME_LENGTH: usize = 253;
 
-/// At least two labels, each a DNS label.
 fn is_hostname(value: &str) -> bool {
     value.len() <= MAX_HOSTNAME_LENGTH && {
         let labels: Vec<&str> = value.split('.').collect();
@@ -303,7 +256,6 @@ impl From<Ipv4Addr> for Ipv4Address {
 const MAX_OBJECT_KEY_LENGTH: usize = 1024;
 
 validated_string!(
-    /// Key within a bucket. Which bucket is deploy configuration, not protocol.
     ObjectKey,
     "object key",
     "between 1 and 1024 characters",
@@ -312,9 +264,6 @@ validated_string!(
 
 const MAX_FILENAME_LENGTH: usize = 127;
 
-/// `^[0-9A-Za-z][0-9A-Za-z._-]{0,126}$`: a single path segment and nothing else. Requiring the
-/// first character to be alphanumeric excludes `.`, `..` and a leading dash that would read as a
-/// flag to whatever unpacks it.
 fn is_filename(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(first) if first.is_ascii_alphanumeric())
@@ -322,18 +271,10 @@ fn is_filename(value: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-validated_string!(
-    /// One path segment, safe to use as a name inside an archive.
-    Filename,
-    "filename",
-    "one path segment",
-    is_filename
-);
+validated_string!(Filename, "filename", "one path segment", is_filename);
 
 pub const MAX_STATE_MESSAGE_LENGTH: usize = 512;
 
-/// Operator-facing detail about why something is in the state it is in. Never the tenant's own
-/// output. Built rather than parsed, so it is cut to the wire's ceiling instead of refused.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StateMessage(String);
@@ -426,22 +367,13 @@ macro_rules! port {
     };
 }
 
-port!(
-    /// HTTP port the tenant binary listens on inside the guest. Branded apart from the host port
-    /// so that assigning one to the other is a type error rather than a routing bug.
-    HttpPort
-);
-port!(
-    /// Port on the app host that forwards to an instance. Allocated by the host.
-    HostPort
-);
+port!(HttpPort);
+port!(HostPort);
 
 pub const DEFAULT_HTTP_PORT: HttpPort = HttpPort(3000);
 
 pub const MAX_SECRET_LENGTH: usize = 32_768;
 
-/// A tenant's own value, which is a secret wherever it is typed. Serialised in full, because it
-/// travels to the config drive; never printed, because `Debug` is what ends up in a log line.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct SecretString(String);

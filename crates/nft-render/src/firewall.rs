@@ -9,10 +9,8 @@ pub const NFTABLES_FAMILIES: [&str; 2] = ["ip", "ip6"];
 pub const INSTANCE_METADATA_ADDRESS_V4: &str = "169.254.169.254";
 pub const INSTANCE_METADATA_ADDRESS_V6: &str = "fd00:ec2::254";
 
-/// nft rejects the name `dstnat` on the output hook, and the whole ruleset with it.
 const OUTPUT_NAT_PRIORITY: i32 = -100;
 
-/// After the isolation chain on the same hook, so only traffic that was allowed is counted.
 const TRAFFIC_CHAIN_PRIORITY: &str = "filter + 10";
 
 const PRIVATE_DESTINATIONS_V4: [&str; 6] = [
@@ -24,25 +22,13 @@ const PRIVATE_DESTINATIONS_V4: [&str; 6] = [
     "100.64.0.0/10",
 ];
 
-/// A tap carries a link-local v6 address from birth, and `table ip` cannot see it.
 const PRIVATE_DESTINATIONS_V6: [&str; 3] = ["::1/128", "fe80::/10", "fc00::/7"];
 
 const CHAIN_INDENT: &str = "  ";
 const RULE_INDENT: &str = "    ";
 
-/// One verdict for every isolation rule, so none of them can silently be the odd one out.
-///
-/// `reject` rather than `drop`: a dropped packet is indistinguishable from a slow one, so a tenant
-/// reaching a denied address waits out its own timeout with nothing logged, and on a one-vCPU
-/// guest one stuck call is enough to starve a runtime's IO threads. Staying silent hides only that
-/// a filter exists, which the addresses a guest cannot reach already tell it.
 const DENY: &str = "reject";
 
-/// A named counter per app, referenced from every chain that sees traffic reaching its guest. The
-/// name carries the attribution, so reading one back needs no rule to be recognised by its shape.
-///
-/// Bare, not quoted: nft takes a declaration name as an identifier and rejects a quoted string
-/// there, hyphens in an app id notwithstanding.
 pub fn app_counter_name(app_id: &AppId) -> String {
     format!("app_{app_id}")
 }
@@ -74,16 +60,6 @@ fn set(values: &[&str]) -> String {
     format!("{{ {} }}", values.join(", "))
 }
 
-/// Zeroed whenever the ruleset changes, because the table is replaced rather than edited. Whoever
-/// reads these has to treat a count standing below the one before it as a reset and not as an app
-/// that has gone quiet.
-///
-/// Deliberately not counted on the nat rules that forward to a guest. A nat hook is traversed for
-/// the packet that creates a conntrack entry and no other, so a count taken there is a count of
-/// connections: measured on a live host, twenty requests over one keep-alive connection moved it
-/// by one, against the tap's own forty-two thousand. An app being read through a pooled connection
-/// or holding a websocket open would have looked idle, and idle is the direction that puts a
-/// microVM down underneath somebody.
 fn counter_objects(state: &FirewallState) -> Vec<String> {
     state
         .instances
@@ -105,9 +81,6 @@ fn chain(header: &str, rules: &[String]) -> Vec<String> {
     lines
 }
 
-/// Declared and deleted before being written, which is what makes the same text apply to a host
-/// that has the table and one that does not. `nft -f` runs the three as one transaction, so there
-/// is no instant at which the table is missing.
 fn table(family: &str, body: Vec<String>) -> Vec<String> {
     let mut lines = vec![
         format!("table {family} {NFTABLES_TABLE}"),
@@ -120,8 +93,6 @@ fn table(family: &str, body: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// Rendered whole and applied with `nft -f`, so the rules are a function of state rather than a
-/// history of edits: no incremental add can be missed and a rerun converges.
 pub fn render_ruleset(state: &FirewallState) -> String {
     let mut lines = Vec::new();
     let mut v4_body = counter_objects(state);
@@ -141,23 +112,6 @@ pub fn render_ruleset(state: &FirewallState) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
-/// Counts, and decides nothing: every rule here is a bare `counter` with no verdict, so traffic
-/// passes through exactly as it would if the chains were absent.
-///
-/// Two chains because there are two ways in and they meet different hooks. The proxy dials the
-/// loopback port, which is locally generated and reaches `output`; anything from off the box is
-/// forwarded and reaches `forward`. One counter behind both is what makes "is anybody using this
-/// app" a single number rather than a sum somebody could forget to take.
-///
-/// A loopback source is what makes the output chain only the proxy's traffic. The nat output hook
-/// has already rewritten the destination by the time this runs, and the postrouting snat that
-/// re-sources it onto the tap has not, so a packet from the proxy is still 127.0.0.1 here. The
-/// daemon's own health probes dial the guest address directly and are sourced from the tap, so
-/// they are not counted: being kept awake by the probing of the process deciding to sleep it is
-/// the one way this measurement could be circular.
-///
-/// The forward chain sits after the isolation rules rather than beside them: those end in a
-/// verdict, so what reaches this has already been allowed, and nothing rejected is counted as use.
 fn traffic_chains_v4(state: &FirewallState) -> Vec<String> {
     if state.instances.is_empty() {
         return Vec::new();
@@ -210,7 +164,6 @@ fn forward_chain_v4(state: &FirewallState) -> Vec<String> {
     chain("forward {", &rules)
 }
 
-/// Guest traffic to the host's own tap address never reaches the forward hook.
 fn input_chain_v4() -> Vec<String> {
     let tap = tap_match();
     chain(
@@ -223,7 +176,6 @@ fn input_chain_v4() -> Vec<String> {
     )
 }
 
-/// AWS allocates VPC IPv6 from global unicast, so only the named rule denies the control plane.
 fn forward_chain_v6(state: &FirewallState) -> Vec<String> {
     let tap = tap_match();
     let mut rules = vec![
@@ -266,9 +218,6 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
             instance.host_port, instance.guest_ipv4, instance.http_port
         )
     }));
-    // The same port on both sides, and both protocols: what arrives here has already been
-    // forwarded once without being renumbered, and rewriting it now would leave a binary
-    // announcing a port nothing reaches. Which protocol a tenant wants is not nibrun's to know.
     for instance in &state.instances {
         let Some(port) = instance.extra_public_port else {
             continue;
@@ -292,7 +241,6 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
     }));
 
     let mut postrouting = vec!["type nat hook postrouting priority srcnat; policy accept;".to_string()];
-    // A loopback source address is unreplyable from the guest, so it is re-sourced onto the tap.
     postrouting.extend(state.instances.iter().map(|instance| {
         format!(
             "oifname {tap} ip saddr 127.0.0.0/8 ip daddr {} snat to {}",

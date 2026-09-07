@@ -1,6 +1,3 @@
-//! The fixtures every test in this crate builds from, ported from `apps/agent/tests/support`.
-//! Each takes a closure so a test names only the field it is about.
-
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -15,8 +12,6 @@ use crate::services::report::instance_record::{InstanceRecord, RecordFields};
 pub const VOLUME_SIZE_BYTES: u64 = 4_096;
 pub const OBSERVED_AT: &str = "2026-08-03T10:00:00.000Z";
 pub const HOST_STORAGE_PREFIX: &str = "filesystems/host-1";
-/// What stands in for a tenant's binary, and the digest of exactly these bytes — asserted in
-/// `vm::artifacts`, so the fixture cannot drift from what it claims to be.
 pub const ARTIFACT_BYTES: &[u8] = b"#!/usr/bin/env fake-binary\n";
 pub const ARTIFACT_DIGEST: &str = "8eacc8ea7f20363ff4eeb79bc80edf5926effee2e7e13207a198ce341a0326f5";
 
@@ -55,7 +50,6 @@ pub fn app_hostname() -> AppHostname {
     }
 }
 
-/// A tenant's own variables, which are secrets wherever they are typed — including in a test.
 pub fn tenant_environment(values: &[(&str, &str)]) -> TenantEnvironment {
     values
         .iter()
@@ -67,7 +61,6 @@ pub fn artifact(edit: impl FnOnce(&mut DesiredArtifact)) -> DesiredArtifact {
     let mut value = DesiredArtifact {
         digest: Sha256Digest::parse(ARTIFACT_DIGEST).unwrap(),
         size_bytes: ARTIFACT_BYTES.len() as u64,
-        // A uuid, as the api will assign: it carries no name, which is why `filename` exists.
         object_key: ObjectKey::parse("artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45").unwrap(),
         filename: Filename::parse("pocketbase").unwrap(),
     };
@@ -209,14 +202,8 @@ pub fn instance_record(edit: impl FnOnce(&mut InstanceRecord)) -> InstanceRecord
     value
 }
 
-/// Every app in these fixtures is `app-1`, which is slot 0, which is one fixed loopback port.
-/// A test that runs a whole pass binds it, so the ones that do take this first — otherwise they
-/// race each other for a port and the loser looks like a daemon that failed to listen.
 pub static ONE_HOST_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// A whole host built out of recording services, under a directory that goes away with the test.
-/// What it substitutes is everything that would need a hypervisor or a kernel; what it does not
-/// substitute is the daemon's own logic, which is the thing being tested.
 pub struct TestHost {
     _directory: tempfile::TempDir,
     pub host: Arc<crate::host::Host>,
@@ -226,7 +213,6 @@ pub struct TestHost {
 }
 
 impl TestHost {
-    /// What left the box, for a test that wants to assert nothing did.
     pub fn exports_written(&self) -> Vec<(std::path::PathBuf, protocol::ObjectKey)> {
         self.exports.uploads()
     }
@@ -258,7 +244,6 @@ pub async fn test_host() -> TestHost {
     use crate::ports::{RecordingCommandRunner, RecordingVmm, StubArtifactStore};
     use crate::state::HostState;
 
-    /// Nothing here has a microVM to be woken, so a waker that would boot one is not the subject.
     struct NeverWoken;
 
     #[async_trait::async_trait]
@@ -275,8 +260,6 @@ pub async fn test_host() -> TestHost {
     let vms = RecordingVmm::new();
     let exports = crate::services::exports::store::RecordingExportStore::accepting();
     let host = Arc::new(Host {
-        // Room for four apps at the default size, so a test that wants a host with no room says
-        // so rather than depending on what the machine running it happens to have.
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         state: state.clone(),
         allocator: Arc::new(Mutex::new(SlotAllocator::empty())),
@@ -290,8 +273,6 @@ pub async fn test_host() -> TestHost {
         artifacts: StubArtifactStore::holding(ARTIFACT_BYTES.to_vec()),
         store: crate::repositories::in_memory().await,
         exports: exports.clone(),
-        // A test host keeps its volumes as local files, which is not something a checkpoint can be
-        // cut from — so an export against one fails saying so rather than half-running.
         checkpoint_servers: None,
         nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),
         commands: commands.clone(),

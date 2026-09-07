@@ -1,5 +1,3 @@
-//! Reading and writing the daemon's own notes.
-
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -53,8 +51,6 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StoreErr
         })
 }
 
-/// Through a uniquely named sibling and a rename, which is atomic within a directory: a torn
-/// write cannot leave an unparsable state file, and two writes in flight cannot collide.
 pub fn write_text(path: &Path, value: &str, mode: u32) -> Result<(), StoreError> {
     let unwritable = |source: std::io::Error| StoreError::Unwritable {
         path: path.to_path_buf(),
@@ -108,7 +104,6 @@ mod tests {
             read_json::<serde_json::Value>(&path).unwrap(),
             Some(serde_json::json!({ "a": 1 }))
         );
-        // Nothing is left beside it: a torn write would show up as a stray temporary.
         let siblings: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
         assert_eq!(siblings.len(), 1);
     }

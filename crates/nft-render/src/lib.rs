@@ -1,7 +1,3 @@
-//! The host's network as a function of state: one small integer per app that every per-app
-//! resource derives from, the nftables ruleset rendered whole, and the parsers for what `nft`
-//! answers when asked what the kernel holds.
-
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
 
 pub mod counters;

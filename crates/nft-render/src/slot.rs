@@ -1,34 +1,23 @@
 use protocol::{AppId, HostPort, Ipv4Address};
 
-/// A host port, a tap, a /30 and an NBD minor all derive from one small integer, so there is one
-/// number to persist and no way for three of the four to survive a restart while the fourth does not.
 pub const FIRST_SLOT: u32 = 0;
 
-/// `nbds_max` on the nbd module, which decides how many `/dev/nbdN` the kernel creates. It is read
-/// once when the module loads, so on a running host it is a ceiling rather than a setting.
 const NBD_DEVICE_COUNT: u32 = 64;
 
 fn nbd_device_path(minor: u32) -> String {
     format!("/dev/nbd{minor}")
 }
 
-/// Held back from the app range, because an export reads a checkpoint served by a second reader
-/// and that needs a device the live volume is not already on. Reserved rather than taken from the
-/// free ones on the day: an app's slot persists and an export's does not.
 pub fn export_reader_device_path() -> String {
     nbd_device_path(NBD_DEVICE_COUNT - 1)
 }
 
-/// Everything below the reader's device: ports and taps are cheap, and the minors are the ceiling.
 pub const SLOT_COUNT: u32 = NBD_DEVICE_COUNT - 1;
 
 pub const HOST_PORT_BASE: u16 = 21_000;
 
-/// Where the port an app asking for one is reached at starts. A slot's own, so nothing has to be
-/// allocated or told apart, and the same number on both sides of every hop.
 pub const EXTRA_PUBLIC_PORT_BASE: u16 = 22_000;
 
-/// A /30 per slot: .0 network, .1 host, .2 guest, .3 broadcast.
 pub const GUEST_NETWORK_CIDR: &str = "10.201.0.0/16";
 const GUEST_SUBNET_PREFIX_LENGTH: u8 = 30;
 const ADDRESSES_PER_SLOT: u32 = 4;
@@ -40,7 +29,6 @@ const GUEST_ADDRESS_OFFSET: u32 = 2;
 
 pub const TAP_NAME_PREFIX: &str = "nbr";
 
-/// Locally administered and unicast, with the guest address in the last four octets.
 const MAC_PREFIX: &str = "02:00";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,22 +1,3 @@
-//! A volume as a file inside a ZeroFS filesystem, reached by the guest over NBD.
-//!
-//! Ported from `apps/agent/src/lib/volumes/zerofs.ts`, `topology.ts`, `device-file.ts` and
-//! `services/volume-manager.service.ts`. This is the backend that makes a volume outlive the
-//! machine it was written on: the blocks are in an object store, and what the host holds is a
-//! cache and a mount.
-//!
-//! **ZeroFS is a long-running service this daemon does not own, and never starts.** Restarting it
-//! stalls every attached microVM at once and drops whatever was acknowledged but unflushed, so
-//! everything here talks to it over its admin CLI and nothing here launches one.
-//!
-//! The invariant that makes that a rule rather than a preference: **exactly one read-write
-//! `zerofs run` per storage prefix, fleet-wide.** A second writer is fenced by SlateDB's epoch
-//! only after a window of acknowledging writes that are then discarded — so a host that started
-//! its own would lose a tenant's data rather than fail to start. Whatever supervises the host is
-//! the lock, and a single-instance unit is how it is held. A checkpoint server is not a second
-//! writer: it is opened `--checkpoint`, which ZeroFS refuses to open read-write at all, against a
-//! pinned manifest that no longer advances, so it takes no epoch and can acknowledge nothing.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -32,42 +13,20 @@ use crate::adapters::volumes::{
 };
 use crate::ports::{CommandRequest, CommandRunner};
 
-/// ZeroFS resolves every NBD export by looking this directory up on each negotiation.
 pub const NBD_DIRECTORY: &str = ".nbd";
 
-/// ZeroFS's `gb` read as GiB, the larger of the two it could mean. The reading is only ever used
-/// to hold disk back for it, and reserving five gigabytes too many costs a cold boot where
-/// reserving five too few costs the cache every app on the host runs from.
 const BYTES_PER_CONFIGURED_GB: u64 = 1_073_741_824;
 
-/// The two `[cache]` sizes this daemon holds back for, spelled as ZeroFS spells them.
 const CACHE_DISK_SETTING: &str = "disk_size_gb";
 const CACHE_MEMORY_SETTING: &str = "memory_size_gb";
 
-/// What ZeroFS is assumed to want when its own config cannot be read, which is the number that
-/// config holds today.
-///
-/// Guessed rather than raised into a failure, because the two ways of being wrong are not
-/// symmetrical: a host that reports no capacity is one nothing is ever placed on, where a host
-/// that reports memory it does not have kills a tenant — and, ZeroFS being the disk every app on
-/// the host runs through, most likely several of them.
 const ASSUMED_CACHE_BYTES: u64 = 2048 * 1_048_576;
 
-/// Where this host's ZeroFS is, and where what it serves can be reached.
-///
-/// One ZeroFS per host, so every volume placed here shares one prefix — one process, one cache,
-/// one S3 client, and the only shape whose cost does not scale with tenant count. What it costs is
-/// that the restore property is per host rather than per app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZerofsFilesystem {
     pub storage_prefix: ObjectKey,
-    /// The host's own mount, where `.nbd/<volume-id>` is created and sized. What that file holds
-    /// is an image this host never asks its kernel to interpret.
     pub mount_path: PathBuf,
     pub nbd_socket_path: PathBuf,
-    /// One directory per checkpoint server, each with an NBD socket of its own. Separate from
-    /// `nbd_socket_path` because a checkpoint is served by a second process, and sharing the live
-    /// server's path would be two listeners fighting over one address.
     pub checkpoint_runtime_dir: PathBuf,
     pub binary: PathBuf,
     pub config_file: PathBuf,
@@ -110,7 +69,6 @@ impl ZerofsVolumes {
         self
     }
 
-    /// `zerofs <args> -c <config>`, which is the whole of how this daemon talks to the service.
     async fn admin(&self, args: &[&str]) -> Result<String, VolumeError> {
         let binary = self.filesystem.binary.display().to_string();
         let config = self.filesystem.config_file.display().to_string();
@@ -123,8 +81,6 @@ impl ZerofsVolumes {
             .map_err(|error| VolumeError::Unusable(error.message()))
     }
 
-    /// The device a volume's app was given. A volume with no slot is one this host has no record
-    /// of placing, which is a different thing from one whose device is broken.
     async fn device_for(&self, app_id: &protocol::AppId) -> Option<String> {
         self.allocator
             .lock()
@@ -164,9 +120,6 @@ impl ZerofsVolumes {
         let unreadable = || VolumeError::SuperblockUnreadable {
             device_path: device_path.to_string(),
         };
-        // On the same blocking thread and the same deadline as the liveness probe, and for the
-        // same reason: this opens a block device, and one whose NBD server has gone answers
-        // neither the open nor the read.
         let read = tokio::task::spawn_blocking(move || read_superblock_magic(&path));
         match tokio::time::timeout(SUPERBLOCK_READ_TIMEOUT, read).await {
             Ok(Ok(Some(magic))) => Ok(has_ext_magic(&magic)),
@@ -174,13 +127,6 @@ impl ZerofsVolumes {
         }
     }
 
-    /// Deliberately the defaults.
-    ///
-    /// Formatting an 8 GiB volume measures 0.10s against a real ZeroFS, and ~0.09s of that is
-    /// recoverable only by `lazy_journal_init` — the one extended option that narrows what
-    /// survives an unclean shutdown. A log-structured store with compression is why: a fresh
-    /// filesystem is almost entirely zeroes, so what reaches S3 is a few hundred KiB whatever
-    /// `mke2fs` is asked to write. There is no time here worth buying.
     async fn format_once(&self, device_path: &str) -> Result<bool, VolumeError> {
         if self.is_formatted(device_path).await? {
             return Ok(false);
@@ -200,11 +146,6 @@ impl ZerofsVolumes {
         Ok(true)
     }
 
-    /// What ZeroFS is entitled to, read out of the file it is itself started with rather than
-    /// written down a second time here. It grows into both numbers lazily, so a disk or a host
-    /// that looks empty today is one whose free space is already spoken for — and anything else
-    /// helping itself to either has to hold this much back rather than what ZeroFS happens to be
-    /// holding now.
     pub fn cache_disk_bytes(&self) -> Option<u64> {
         self.cache_bytes(CACHE_DISK_SETTING)
     }
@@ -219,7 +160,6 @@ impl ZerofsVolumes {
     }
 }
 
-/// The same ceiling the liveness probe carries, for the same reason.
 const SUPERBLOCK_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn device_file_size(path: &Path) -> Option<u64> {
@@ -229,7 +169,6 @@ fn device_file_size(path: &Path) -> Option<u64> {
         .map(|info| info.len())
 }
 
-/// `None` where the device would not answer, which is the case that must not be guessed at.
 fn read_superblock_magic(device_path: &str) -> Option<[u8; 2]> {
     use std::io::{Read, Seek, SeekFrom};
     let mut device = std::fs::File::open(device_path).ok()?;
@@ -237,14 +176,11 @@ fn read_superblock_magic(device_path: &str) -> Option<[u8; 2]> {
     let mut magic = [0u8; 2];
     match device.read_exact(&mut magic) {
         Ok(()) => Some(magic),
-        // Shorter than a superblock is a device nothing has formatted, not one that refused to
-        // answer: a blank device reads as zeroes, which is not the magic.
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Some([0, 0]),
         Err(_) => None,
     }
 }
 
-/// The configured number, or nothing at all: a value this cannot read is not one to guess at.
 pub fn cache_gigabytes(config: &str, setting: &str) -> Option<u64> {
     let document: toml::Value = toml::from_str(config).ok()?;
     let configured = document.get("cache")?.get(setting)?;
@@ -260,7 +196,6 @@ pub fn cache_gigabytes(config: &str, setting: &str) -> Option<u64> {
     (gigabytes > 0).then_some(gigabytes)
 }
 
-/// Names one per line, whatever else the line carries.
 pub fn parse_checkpoint_names(output: &str) -> Vec<String> {
     output
         .lines()
@@ -286,8 +221,6 @@ impl VolumeBackend for ZerofsVolumes {
             device_path: &slot.nbd_device_path,
             volume_id: &desired.volume_id,
         };
-        // Only where the device does not already work. A reattach on a healthy device is a tenant
-        // whose disk goes away for the length of one, for no reason.
         if !self.devices.is_usable(&slot.nbd_device_path).await {
             self.devices.reattach(&target).await?;
         }
@@ -347,8 +280,6 @@ impl VolumeBackend for ZerofsVolumes {
         self.devices.detach(&device_path).await
     }
 
-    /// The flush first, so the detach happens at a durability point rather than dropping whatever
-    /// the periodic flush had not yet uploaded.
     async fn teardown(&self, volume_id: &VolumeId, app_id: &protocol::AppId) -> Result<(), VolumeError> {
         let _ = self.flush().await;
         let _ = self.detach(volume_id, app_id).await;
@@ -360,17 +291,10 @@ impl VolumeBackend for ZerofsVolumes {
         }
     }
 
-    /// Under `ignore_fsync` the guest's own flushes are a no-op, so this is the whole of what
-    /// stands between a microVM going down — stopped or asleep — and the loss of everything since
-    /// the last periodic flush.
     async fn flush(&self) -> Result<(), VolumeError> {
         self.admin(&["flush"]).await.map(|_| ())
     }
 
-    /// Named by the document rather than by this host. A checkpoint is of the whole filesystem —
-    /// one ZeroFS per host, every volume in it — so the name is the only thing that says which one
-    /// was asked for, and an agent killed between cutting one and reporting it comes back to a
-    /// list of names it recognises rather than to a recovery mode.
     async fn create_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
         self.admin(&["checkpoint", "create", checkpoint_id.as_str()])
             .await
@@ -383,9 +307,6 @@ impl VolumeBackend for ZerofsVolumes {
             .map(|_| ())
     }
 
-    /// An empty list where ZeroFS would not answer, which reads as a host holding no checkpoints.
-    /// That is the safe way round: a name this host cannot see is one the pass will try to cut
-    /// again, where a name it invents is one nothing will ever delete.
     async fn observe_checkpoints(&self) -> Vec<protocol::CheckpointId> {
         let Ok(listed) = self.admin(&["checkpoint", "list"]).await else {
             return Vec::new();
@@ -396,9 +317,6 @@ impl VolumeBackend for ZerofsVolumes {
             .collect()
     }
 
-    /// A reading that could not be taken is the assumed number rather than none, and it is said
-    /// out loud: a host whose ZeroFS config moved would otherwise silently promise a tenant memory
-    /// the cache is going to take back.
     fn reserved_cache(&self) -> CacheReservation {
         let assumed = |setting: &str, taken: Option<u64>| match taken {
             Some(bytes) => bytes,
@@ -423,9 +341,6 @@ impl VolumeBackend for ZerofsVolumes {
         owners: &std::collections::BTreeMap<VolumeId, protocol::AppId>,
     ) -> Vec<ObservedBacking> {
         let Ok(entries) = std::fs::read_dir(self.filesystem.nbd_directory()) else {
-            // A mount that will not list is a ZeroFS that is not there, and reporting no volumes
-            // is what a host whose filesystems live elsewhere looks like. Said out loud, because
-            // the two are indistinguishable to whatever reads the report.
             tracing::warn!(
                 directory = %self.filesystem.nbd_directory().display(),
                 "the zerofs nbd directory would not list; this host reports no volumes"
@@ -440,9 +355,6 @@ impl VolumeBackend for ZerofsVolumes {
             let Some(size_bytes) = device_file_size(&entry.path()) else {
                 continue;
             };
-            // A device file with no app is one this daemon has lost its record of. It is reported
-            // with no device rather than under a guessed app: what reads these decides on the
-            // strength of them that a tenant's filesystem is gone.
             let device_path = match owners.get(&volume_id) {
                 Some(app_id) => self.device_for(app_id).await,
                 None => None,
@@ -487,8 +399,6 @@ mod tests {
         assert_eq!(cache_gigabytes(config, "memory_size_gb"), Some(8));
     }
 
-    /// A value this cannot read is not one to guess at: what the reading is used for is holding
-    /// disk back, and a guess of zero is a host that lets something else take ZeroFS's cache.
     #[test]
     fn a_cache_size_that_is_not_there_or_not_positive_is_not_guessed() {
         assert_eq!(
@@ -529,7 +439,6 @@ mod tests {
         );
         let volume_id = VolumeId::parse("vol-1").unwrap();
         assert_eq!(volumes.ensure_device_file(&volume_id, 1024).unwrap(), 1024);
-        // Rounded up, because Firecracker computes sectors as `size >> 9`.
         assert_eq!(volumes.ensure_device_file(&volume_id, 1025).unwrap(), 1536);
         assert_eq!(
             volumes.ensure_device_file(&volume_id, 512).unwrap_err(),
@@ -540,8 +449,6 @@ mod tests {
         );
     }
 
-    /// The flush is the durability point. Tearing down without one drops whatever the periodic
-    /// flush had not yet uploaded, on the one path that is allowed to destroy data.
     #[tokio::test]
     async fn a_teardown_flushes_before_it_removes_anything() {
         let root = tempfile::tempdir().unwrap();
@@ -614,8 +521,6 @@ mod tests {
         );
     }
 
-    /// What a restarted daemon converges against is what ZeroFS is exporting, not what it
-    /// remembers — so an unreadable mount reports nothing rather than the last thing it knew.
     #[tokio::test]
     async fn a_mount_that_will_not_list_reports_no_volumes() {
         let root = tempfile::tempdir().unwrap();
@@ -657,9 +562,6 @@ mod tests {
         assert_eq!(volumes.reserved_cache().disk_bytes, ASSUMED_CACHE_BYTES);
     }
 
-    /// The device is attached before anything is written to it, and a device that will not
-    /// answer a read of its superblock stops the provision rather than being formatted on a
-    /// guess: formatting one that was merely unreachable destroys a tenant's filesystem.
     #[tokio::test]
     async fn a_device_is_attached_first_and_never_formatted_on_a_guess() {
         let root = tempfile::tempdir().unwrap();
@@ -676,8 +578,6 @@ mod tests {
         ));
 
         let desired = desired_volume(|volume| volume.size_bytes = 268_435_456);
-        // `/dev/nbd0` is not a device on the machine running this, which is the same shape as one
-        // whose server has gone: unreadable, and so not something to format.
         assert_eq!(
             volumes.provision(&desired).await.unwrap_err(),
             VolumeError::SuperblockUnreadable {
@@ -692,8 +592,6 @@ mod tests {
             "only the attach, and nothing that writes: {asked:?}"
         );
         assert_eq!(asked[0][0], "nbd-client");
-        // The device file is sized whatever the device did, because that is ZeroFS's export and
-        // not the kernel's device: the next pass finds it and attaches again.
         assert_eq!(
             device_file_size(&filesystem(root.path()).device_file_for(&desired.volume_id)),
             Some(268_435_456)

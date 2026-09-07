@@ -1,11 +1,3 @@
-//! The seams: everything this daemon does that touches the host, behind a trait.
-//!
-//! Ports rather than services, and the difference is the point — nothing here decides anything.
-//! `reconcile` and the rest of `services/` decide; these are the holes they act through, and
-//! `adapters/` is what fills them on a real machine. A test fills them with the recording
-//! implementations at the bottom of this file, which is why the whole of this daemon's reasoning
-//! can be exercised on a laptop with no kernel, no hypervisor and no network.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -16,8 +8,6 @@ use protocol::{AppId, DeploymentId, DesiredInstance, ObjectKey, Sha256Digest};
 
 use crate::adapters::vm::VmStatus;
 
-/// `nft` and `mke2fs` are the only two host tools this daemon spawns besides the Firecracker it
-/// carries. Anything else it needs, it does itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRequest {
     pub command: Vec<String>,
@@ -70,7 +60,6 @@ impl CommandResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CommandError {
-    /// The tail of stderr: the head of a long one is a banner, and the reason is at the end.
     #[error("{executable} exited {code}{reason}")]
     Failed {
         executable: String,
@@ -106,7 +95,6 @@ impl CommandError {
 pub trait CommandRunner: Send + Sync {
     async fn run(&self, request: CommandRequest) -> Result<CommandResult, CommandError>;
 
-    /// The output of a command that had to succeed.
     async fn stdout_of(&self, request: CommandRequest) -> Result<String, CommandError> {
         let result = self.run(request.clone()).await?;
         if result.code == 0 {
@@ -125,7 +113,6 @@ pub struct BootRequest {
     pub artifact_image_path: PathBuf,
 }
 
-/// What both halves of a suspend need to name the microVM they are acting on.
 #[derive(Debug, Clone)]
 pub struct SuspendRequest {
     pub app_id: AppId,
@@ -157,9 +144,6 @@ impl VmError {
     }
 }
 
-/// Which of the three ways a wake can end. Returned rather than inferred from the record, because
-/// a cold boot and a restore leave the same record behind and only this can tell them apart —
-/// which is the difference between the feature working and it quietly not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakeOutcome {
     Restored,
@@ -180,19 +164,12 @@ impl WakeOutcome {
 #[async_trait]
 pub trait Vmm: Send + Sync {
     async fn boot(&self, request: BootRequest) -> Result<(), VmError>;
-    /// A microVM taken down at a point it can be put back on. Refuses rather than fails where the
-    /// guest must not be captured; the caller leaves it running.
     async fn sleep(&self, request: SuspendRequest) -> Result<(), VmError>;
-    /// The microVM that went to sleep, back where it was.
     async fn wake(&self, request: SuspendRequest) -> Result<(), VmError>;
     async fn stop(&self, app_id: &AppId) -> Result<(), VmError>;
-    /// Everything this host holds for an app, gone: the snapshot, the record of the process, the
-    /// working directory and the log attachment.
     async fn discard(&self, app_id: &AppId) -> Result<(), VmError>;
     async fn statuses(&self, app_ids: &[AppId]) -> BTreeMap<AppId, VmStatus>;
-    /// Every app this host has a microVM record for, whether or not this daemon started it.
     async fn adopted_app_ids(&self) -> Vec<AppId>;
-    /// Why the guest powered itself off, off the console this daemon captured for it.
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String>;
     fn working_dir(&self, app_id: &AppId) -> PathBuf;
 }
@@ -217,14 +194,9 @@ impl ArtifactError {
 
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
-    /// The whole object. Bounded by what an artifact may be rather than streamed, because the
-    /// bytes are hashed and packed into an image before anything runs them.
     async fn read(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ArtifactError>;
 }
 
-/// What the receiver hands the sink, before a host id exists to stamp it with. The daemon learns
-/// its host id from a session it may not hold yet when a guest starts writing, and keeping that
-/// field off until the record is built is what lets output survive the gap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantLogEvent {
     pub app_id: AppId,
@@ -241,9 +213,9 @@ pub enum TenantLogBody {
         stream: protocol::TenantLogStream,
         text: String,
     },
-    /// A record rather than a counter, so it lands in the same ordered stream as the output it
-    /// replaces: reading the log is how you find out something is missing, and from where.
-    Gap { dropped_bytes: u64 },
+    Gap {
+        dropped_bytes: u64,
+    },
 }
 
 #[async_trait]
@@ -251,7 +223,6 @@ pub trait LogSink: Send + Sync {
     async fn publish(&self, events: Vec<TenantLogEvent>);
 }
 
-/// The three sources produce the same document and the reconciler never learns which one did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesiredStateOrigin {
     File,
@@ -271,7 +242,6 @@ impl DesiredStateOrigin {
     }
 }
 
-/// What a recorded runner answers one request with.
 type CommandAnswer = dyn Fn(&CommandRequest) -> Result<CommandResult, CommandError> + Send + Sync;
 
 pub struct RecordingCommandRunner {
@@ -316,9 +286,6 @@ impl CommandRunner for RecordingCommandRunner {
     }
 }
 
-/// Every way the daemon can act on a microVM, recorded rather than performed. Which of them a
-/// wake reached is the whole assertion: a restore and a cold boot leave the same app serving, and
-/// the only thing that tells them apart from the outside is how long the visitor waited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmCall {
     Boot,
@@ -425,7 +392,6 @@ impl Vmm for RecordingVmm {
     }
 }
 
-/// The artifact bucket as the bytes a transfer is meant to see.
 pub struct StubArtifactStore {
     bytes: Vec<u8>,
 }
@@ -443,7 +409,6 @@ impl ArtifactStore for StubArtifactStore {
     }
 }
 
-/// Everything a sink was handed, in order.
 #[derive(Default)]
 pub struct RecordingLogSink {
     events: Mutex<Vec<TenantLogEvent>>,

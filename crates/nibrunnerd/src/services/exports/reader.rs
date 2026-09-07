@@ -1,15 +1,3 @@
-//! A checkpoint's filesystem as a block device, for as long as one export needs it.
-//!
-//! Ported from `apps/agent/src/lib/exports/reader.ts`, which starts the server through a
-//! templated systemd unit. This daemon has no systemd, so it starts the process itself and waits
-//! for the socket rather than for `systemctl start` to return — the unit's own `ExecStartPost`
-//! does exactly that wait, and for the same reason: ZeroFS execs well before it is answering on
-//! anything.
-//!
-//! A checkpoint server is **not** a second writer, which is what makes starting one allowed at
-//! all. `--checkpoint` opens read-only against a pinned manifest that no longer advances, so it
-//! takes no SlateDB writer epoch and cannot fence the live server.
-
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -19,22 +7,15 @@ use protocol::{CheckpointId, VolumeId};
 use crate::adapters::volumes::nbd::{NbdDevices, NbdTarget};
 use crate::adapters::volumes::VolumeError;
 
-/// `[servers.nbd] unix_socket` in the checkpoint config, under the checkpoint's own directory.
 const NBD_SOCKET_FILENAME: &str = "nbd.sock";
 
-/// The instance name, which is what keeps two servers off each other's socket and cache. ZeroFS
-/// expands it in its own config file, so this is the whole of the interface.
 const CHECKPOINT_VARIABLE: &str = "NIBRUN_CHECKPOINT";
 
-/// How long a server is given to answer. Generous because it is opening an object store, and
-/// bounded because the alternative to giving up is an export that hangs rather than reports.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_POLL: Duration = Duration::from_millis(100);
 
-/// A server that has not gone after this is one this host stops waiting on; the reap will find it.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Where the read-only servers live, and what they are started with.
 pub struct CheckpointServers {
     pub binary: PathBuf,
     pub config_file: PathBuf,
@@ -53,15 +34,7 @@ impl CheckpointServers {
         self.cache_dir.join(checkpoint_id.as_str())
     }
 
-    /// Started for one export's read and stopped when it ends.
-    ///
-    /// Nothing restarts it. It serves one read, and a server that silently went away and came back
-    /// would leave the reader attached across the gap — where one that stays dead is something the
-    /// export can notice and report.
     pub async fn start(&self, checkpoint_id: &CheckpointId) -> Result<CheckpointServer, VolumeError> {
-        // Scratch for one pass over one filesystem rather than a working set to keep warm, so it
-        // is made on the way in and removed on the way out rather than accumulating a directory
-        // per export.
         let cache = self.cache_path_for(checkpoint_id);
         crate::json_store::make_directory(&cache, 0o700)
             .map_err(|error| VolumeError::Unusable(error.to_string()))?;
@@ -78,8 +51,6 @@ impl CheckpointServers {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            // Killed with this daemon rather than outliving it: it holds nothing a restart would
-            // want back, unlike a tenant's microVM.
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| {
@@ -97,8 +68,6 @@ impl CheckpointServers {
     }
 }
 
-/// One running server. Stopping it is `stop`, and dropping it kills the process without the
-/// tidying — which is the right way round for a daemon going down in a hurry.
 pub struct CheckpointServer {
     checkpoint_id: CheckpointId,
     socket_path: PathBuf,
@@ -107,8 +76,6 @@ pub struct CheckpointServer {
 }
 
 impl CheckpointServer {
-    /// The socket appearing is the readiness signal, because the process execs long before it is
-    /// answering on anything and there is nothing else to ask.
     async fn wait_until_answering(&self) -> Result<(), VolumeError> {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         while tokio::time::Instant::now() < deadline {
@@ -128,9 +95,6 @@ impl CheckpointServer {
         &self.socket_path
     }
 
-    /// Tolerated rather than checked, because this also runs on the way out of an export that
-    /// already failed, where an error here would replace the reason it failed with the reason its
-    /// cleanup did.
     pub async fn stop(mut self) {
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(STOP_TIMEOUT, self.child.wait()).await;
@@ -138,10 +102,6 @@ impl CheckpointServer {
     }
 }
 
-/// The device a checkpoint is read through, attached for one export and detached after it.
-///
-/// One device, and so one export reading at a time on a host: a second export attaching a second
-/// checkpoint to it would read the first export's filesystem.
 pub struct ReaderDevice<'a> {
     devices: &'a NbdDevices,
     device_path: String,
@@ -154,8 +114,6 @@ impl<'a> ReaderDevice<'a> {
         volume_id: &VolumeId,
     ) -> Result<ReaderDevice<'a>, VolumeError> {
         let device_path = nft_render::export_reader_device_path();
-        // Harmless on a device nothing is attached to, and the case it covers is a daemon that
-        // died mid-export: the kernel still holds the minor, and an attach over it finds it busy.
         let _ = devices.detach(&device_path).await;
         devices
             .attach_checkpoint(&NbdTarget {
@@ -171,8 +129,6 @@ impl<'a> ReaderDevice<'a> {
         &self.device_path
     }
 
-    /// The device goes before the server does: taking the socket away from a kernel client that
-    /// still holds it is how a detach turns into a hang.
     pub async fn detach(self) {
         let _ = self.devices.detach(&self.device_path).await;
     }
@@ -185,8 +141,6 @@ mod tests {
 
     fn servers(root: &Path) -> CheckpointServers {
         CheckpointServers {
-            // A shell that exits immediately: enough to assert the readiness wait, which is what
-            // this daemon does differently from the unit it was ported from.
             binary: PathBuf::from("/usr/bin/true"),
             config_file: root.join("checkpoint.toml"),
             runtime_dir: root.join("run"),
@@ -237,8 +191,6 @@ mod tests {
             vec!["nbd-client".to_string(), "-d".into(), "/dev/nbd63".into()]
         );
         assert!(asked[1].contains(&"/dev/nbd63".to_string()));
-        // Never `-persist`: a checkpoint server is started for one export and stopped after it, so
-        // one that died mid-read is not coming back.
         assert!(!asked[1].contains(&"-persist".to_string()));
         assert_eq!(
             asked[2],

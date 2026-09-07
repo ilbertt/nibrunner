@@ -8,7 +8,6 @@ use protocol::{
 use crate::services::report::InstanceRecord;
 use guest_contract::instance_env::PublicAddress;
 
-/// Optional fields are omitted rather than sent empty: absent is the one convention for unknown.
 pub fn to_reported_instance(
     record: &InstanceRecord,
     reached_at: Option<&PublicAddress>,
@@ -32,9 +31,6 @@ pub fn to_reported_instance(
     }
 }
 
-/// Stitched onto the report rather than onto the observation the reports are built from: a volume
-/// is observed by looking at this host's own storage, and how full the filesystem on it is can
-/// only be had by asking the guest — which the reconcile must never be made to wait for.
 fn with_usage(volume: ReportedVolume, measured: Option<&FilesystemUsage>) -> ReportedVolume {
     match measured {
         None => volume,
@@ -53,7 +49,6 @@ pub struct ReportInputs<'a> {
     pub allocatable: HostCapacity,
     pub versions: HostVersions,
     pub records: &'a [InstanceRecord],
-    /// Where each app that asked for a public port answers, which is not on the record it is about.
     pub reached_at: &'a BTreeMap<AppId, PublicAddress>,
     pub volumes: Vec<ReportedVolume>,
     pub volume_usage: &'a BTreeMap<AppId, FilesystemUsage>,
@@ -173,8 +168,6 @@ mod tests {
         assert_eq!(serde_json::to_value(&exited).unwrap()["lastExitCode"], 0);
     }
 
-    /// The control plane holds neither half: the address is the relay's and the port is the
-    /// slot's, so a report that omits them is an app nothing can be told where to reach.
     #[test]
     fn an_app_that_asked_for_its_own_port_is_reported_with_where_it_answers() {
         let reached = PublicAddress {
@@ -190,7 +183,6 @@ mod tests {
         assert_eq!(instance.extra_public_port, Some(reached.port));
     }
 
-    /// Keyed on the app rather than on the volume, which is the mistake the two ids invite.
     #[test]
     fn a_volume_carries_the_reading_last_taken_of_it_and_no_other() {
         let matched = report_with([(app_id(), measured())].into_iter().collect());
@@ -223,8 +215,6 @@ mod tests {
     fn the_assembled_report_is_the_document_it_will_be_sent_as() {
         let report = report_with(BTreeMap::new());
         let written = serde_json::to_value(&report).unwrap();
-        // Round-tripping through the wire types is the check: a field renamed on either side
-        // stops matching here rather than on a host.
         let parsed: HostReportedState = serde_json::from_value(written).unwrap();
         assert_eq!(parsed, report);
     }
