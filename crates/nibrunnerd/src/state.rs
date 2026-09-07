@@ -11,7 +11,7 @@ use nft_render::AppTraffic;
 use protocol::{AppId, ComputeUsage, FilesystemUsage, ReportedVolume, VolumeId};
 use tokio::sync::{Notify, RwLock};
 
-use crate::report::InstanceRecord;
+use crate::services::report::InstanceRecord;
 
 #[derive(Debug, Default, Clone)]
 pub struct HostSnapshot {

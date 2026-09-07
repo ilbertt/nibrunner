@@ -3,8 +3,8 @@
 use protocol::AppId;
 use sqlx::SqliteConnection;
 
-use crate::report::instance_record::InstanceRecord;
 use crate::repositories::StoreError;
+use crate::services::report::instance_record::InstanceRecord;
 
 /// A record this daemon cannot read is left out rather than failing the load.
 ///

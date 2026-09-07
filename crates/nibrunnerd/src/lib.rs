@@ -9,34 +9,40 @@
 //! writes the same file, so the reconciler still has exactly one source and cannot learn which
 //! of them produced the document it converged on.
 
+//! # How this crate is arranged
+//!
+//! Five layers, and the direction of every dependency between them is downwards:
+//!
+//! | | |
+//! | --- | --- |
+//! | `controllers` | The loops. They own timing and nothing else. |
+//! | `services` | What this daemon decides: the reconcile pass, the waker, health, exports, the browse. |
+//! | `repositories` | The only place SQL is written. |
+//! | `ports` | The traits everything above acts through, and the recording doubles a test fills them with. |
+//! | `adapters` | What fills those traits on a real machine: the hypervisor, the kernel's tables, a device, a store. |
+//!
+//! `host` is the aggregate the layers are handed, `state` is what it holds in memory, and `config`
+//! is what it was told at startup. Nothing in `services` knows there is a database, and nothing in
+//! it touches the host except through `ports` — which is why the whole of this daemon's reasoning
+//! is exercised by tests on a laptop with no kernel, no hypervisor and no network.
+
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
 
-pub mod artifact_store;
-pub mod backoff;
+pub mod adapters;
 pub mod clock;
 pub mod config;
 pub mod control;
+pub mod controllers;
 pub mod desired;
-pub mod exec;
-pub mod exports;
-pub mod filesystem;
-pub mod health;
 pub mod host;
 pub mod json_store;
-pub mod logs;
-pub mod net;
-pub mod proxy;
-pub mod reconcile;
-pub mod report;
+pub mod ports;
 pub mod repositories;
 pub mod run;
 pub mod services;
 pub mod state;
 #[cfg(test)]
 pub mod test_support;
-pub mod vm;
-pub mod volumes;
-pub mod waker;
 
 /// rustls is built here without a default cryptography provider, because the one it would pick is
 /// aws-lc-rs — whose `aws-lc-sys` needs cmake and a C toolchain for the target, which is what

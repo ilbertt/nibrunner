@@ -7,10 +7,10 @@ use std::sync::Arc;
 use protocol::*;
 use tokio::sync::Mutex;
 
-use crate::backoff::NO_START_ATTEMPTS;
-use crate::health::initial_tracker;
-use crate::reconcile::plan::{ObservedInstance, ObservedState, ObservedVolume};
-use crate::report::instance_record::{InstanceRecord, RecordFields};
+use crate::services::backoff::NO_START_ATTEMPTS;
+use crate::services::health::initial_tracker;
+use crate::services::reconcile::plan::{ObservedInstance, ObservedState, ObservedVolume};
+use crate::services::report::instance_record::{InstanceRecord, RecordFields};
 
 pub const VOLUME_SIZE_BYTES: u64 = 4_096;
 pub const OBSERVED_AT: &str = "2026-08-03T10:00:00.000Z";
@@ -220,9 +220,9 @@ pub static ONE_HOST_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 pub struct TestHost {
     _directory: tempfile::TempDir,
     pub host: Arc<crate::host::Host>,
-    pub vms: Arc<crate::services::RecordingVmm>,
-    pub commands: Arc<crate::services::RecordingCommandRunner>,
-    pub exports: Arc<crate::exports::store::RecordingExportStore>,
+    pub vms: Arc<crate::ports::RecordingVmm>,
+    pub commands: Arc<crate::ports::RecordingCommandRunner>,
+    pub exports: Arc<crate::services::exports::store::RecordingExportStore>,
 }
 
 impl TestHost {
@@ -247,16 +247,16 @@ impl TestHost {
 }
 
 pub async fn test_host() -> TestHost {
+    use crate::adapters::net::allocator::SlotAllocator;
+    use crate::adapters::net::firewall::HostFirewall;
+    use crate::adapters::proxy::activator::{AppActivator, WakeRefusal, Waker};
+    use crate::adapters::proxy::Router;
+    use crate::adapters::volumes::local_file::LocalFileVolumes;
     use crate::config::HostConfig;
     use crate::desired::DesiredStateCache;
     use crate::host::Host;
-    use crate::net::allocator::SlotAllocator;
-    use crate::net::firewall::HostFirewall;
-    use crate::proxy::activator::{AppActivator, WakeRefusal, Waker};
-    use crate::proxy::Router;
-    use crate::services::{RecordingCommandRunner, RecordingVmm, StubArtifactStore};
+    use crate::ports::{RecordingCommandRunner, RecordingVmm, StubArtifactStore};
     use crate::state::HostState;
-    use crate::volumes::local_file::LocalFileVolumes;
 
     /// Nothing here has a microVM to be woken, so a waker that would boot one is not the subject.
     struct NeverWoken;
@@ -273,7 +273,7 @@ pub async fn test_host() -> TestHost {
     let state = HostState::shared();
     let commands = RecordingCommandRunner::succeeding();
     let vms = RecordingVmm::new();
-    let exports = crate::exports::store::RecordingExportStore::accepting();
+    let exports = crate::services::exports::store::RecordingExportStore::accepting();
     let host = Arc::new(Host {
         // Room for four apps at the default size, so a test that wants a host with no room says
         // so rather than depending on what the machine running it happens to have.
@@ -293,7 +293,7 @@ pub async fn test_host() -> TestHost {
         // A test host keeps its volumes as local files, which is not something a checkpoint can be
         // cut from — so an export against one fails saying so rather than half-running.
         checkpoint_servers: None,
-        nbd: crate::volumes::nbd::NbdDevices::new(commands.clone()),
+        nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),
         commands: commands.clone(),
         firewall: Arc::new(HostFirewall::new(commands.clone())),
         router: Router::new(),

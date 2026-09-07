@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use nibrunnerd::services::{CommandRunner, RecordingCommandRunner};
+use nibrunnerd::ports::{CommandRunner, RecordingCommandRunner};
 
 /// Refuses rather than skips: a lane that is asked for and cannot run has to say so.
 fn enabled() -> bool {
@@ -29,7 +29,7 @@ fn require_root() {
 }
 
 fn commands() -> Arc<dyn CommandRunner> {
-    Arc::new(nibrunnerd::exec::HostCommands)
+    Arc::new(nibrunnerd::adapters::exec::HostCommands)
 }
 
 /// nibrun's own notes say this ruleset has only ever been rendered and asserted as text. Loading
@@ -42,7 +42,7 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
         return;
     }
     require_root();
-    let firewall = nibrunnerd::net::firewall::HostFirewall::new(commands());
+    let firewall = nibrunnerd::adapters::net::firewall::HostFirewall::new(commands());
     let state = nft_render::FirewallState {
         instances: vec![nft_render::ForwardedInstance {
             app_id: protocol::AppId::parse("app-1").unwrap(),
@@ -62,7 +62,7 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
 
     // Read back from the kernel rather than from what was sent: the point is what it is holding.
     let held = commands()
-        .stdout_of(nibrunnerd::services::CommandRequest::new(&[
+        .stdout_of(nibrunnerd::ports::CommandRequest::new(&[
             "nft", "list", "table", "ip", "nibrun",
         ]))
         .await
@@ -78,7 +78,7 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
     assert!(!held.contains("drop"));
 
     let v6 = commands()
-        .stdout_of(nibrunnerd::services::CommandRequest::new(&[
+        .stdout_of(nibrunnerd::ports::CommandRequest::new(&[
             "nft", "list", "table", "ip6", "nibrun",
         ]))
         .await
@@ -102,7 +102,7 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     }
     require_root();
     let directory = tempfile::tempdir().unwrap();
-    let volumes = nibrunnerd::volumes::local_file::LocalFileVolumes::new(
+    let volumes = nibrunnerd::adapters::volumes::local_file::LocalFileVolumes::new(
         directory.path().to_path_buf(),
         protocol::ObjectKey::parse("volumes").unwrap(),
         commands(),
@@ -115,13 +115,13 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
         desired_state: protocol::DesiredPresence::Present,
     };
 
-    use nibrunnerd::volumes::VolumeBackend;
+    use nibrunnerd::adapters::volumes::VolumeBackend;
     let attached = volumes.provision(&desired).await.expect("the volume is made");
     assert_eq!(attached.size_bytes, desired.size_bytes);
 
     // The second pass finds a superblock and does not reformat: a tenant's data would be gone.
     let recorded = RecordingCommandRunner::succeeding();
-    let second = nibrunnerd::volumes::local_file::LocalFileVolumes::new(
+    let second = nibrunnerd::adapters::volumes::local_file::LocalFileVolumes::new(
         directory.path().to_path_buf(),
         protocol::ObjectKey::parse("volumes").unwrap(),
         recorded.clone(),
@@ -146,7 +146,7 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
         return;
     }
     require_root();
-    use nibrunnerd::net::tap::{HostNetwork, KernelNetwork, Neighbour, TapInterface};
+    use nibrunnerd::adapters::net::tap::{HostNetwork, KernelNetwork, Neighbour, TapInterface};
 
     let network = KernelNetwork::open().expect("a netlink socket");
     // The last slot, so a host running this beside real apps does not take one of theirs.
@@ -178,7 +178,7 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
     // Read back from the kernel: the pairing a wake writes so the first connection after it does
     // not pay ARP re-resolution.
     let neighbours = commands()
-        .stdout_of(nibrunnerd::services::CommandRequest::new(&[
+        .stdout_of(nibrunnerd::ports::CommandRequest::new(&[
             "ip",
             "neigh",
             "show",
@@ -201,16 +201,17 @@ async fn the_embedded_hypervisor_runs_on_this_host() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    let binary = nibrunnerd::vm::process::extract_firecracker(directory.path()).expect("a hypervisor");
+    let binary =
+        nibrunnerd::adapters::vm::process::extract_firecracker(directory.path()).expect("a hypervisor");
     let version = commands()
-        .stdout_of(nibrunnerd::services::CommandRequest::new(&[
+        .stdout_of(nibrunnerd::ports::CommandRequest::new(&[
             &binary.display().to_string(),
             "--version",
         ]))
         .await
         .expect("the hypervisor answers");
     assert!(
-        version.contains(nibrunnerd::vm::process::FIRECRACKER_VERSION),
+        version.contains(nibrunnerd::adapters::vm::process::FIRECRACKER_VERSION),
         "it should name the version this build pins, said: {version}"
     );
 }

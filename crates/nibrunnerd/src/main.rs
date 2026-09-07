@@ -40,7 +40,7 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
         state_dir = %host.config.state_dir.display(),
         desired_state_file = %host.config.desired_state_file.display(),
         guest_memory_mib = host.guest_memory_mib,
-        firecracker = nibrunnerd::vm::process::FIRECRACKER_VERSION,
+        firecracker = nibrunnerd::adapters::vm::process::FIRECRACKER_VERSION,
         "nibrunnerd starting"
     );
 
@@ -51,13 +51,13 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
     }
     // A port answered before the first pass, because an app this host stopped has no forward and
     // its port would otherwise refuse connections rather than saying why.
-    nibrunnerd::reconcile::network::apply_activators(&host).await;
+    nibrunnerd::services::reconcile::network::apply_activators(&host).await;
     run::serve_proxy(&host);
 
     let loops = vec![
-        tokio::spawn(run::converge_loop(host.clone())),
-        tokio::spawn(run::status_loop(host.clone())),
-        tokio::spawn(run::measurement_loop(host.clone())),
+        tokio::spawn(nibrunnerd::controllers::converge_loop(host.clone())),
+        tokio::spawn(nibrunnerd::controllers::status_loop(host.clone())),
+        tokio::spawn(nibrunnerd::controllers::measurement_loop(host.clone())),
     ];
 
     shutdown().await;
@@ -71,8 +71,11 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
 
 async fn persist_on_the_way_out(host: &Arc<nibrunnerd::host::Host>) {
     host.persist().await;
-    let report = nibrunnerd::report::writer::build(host, run::host_versions(host)).await;
-    nibrunnerd::report::writer::write(&nibrunnerd::report::writer::reported_state_file(host), &report);
+    let report = nibrunnerd::services::report::writer::build(host, run::host_versions(host)).await;
+    nibrunnerd::services::report::writer::write(
+        &nibrunnerd::services::report::writer::reported_state_file(host),
+        &report,
+    );
 }
 
 #[cfg(unix)]

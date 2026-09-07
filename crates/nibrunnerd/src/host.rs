@@ -7,18 +7,18 @@ use std::sync::Arc;
 use protocol::{AppId, HostDesiredState};
 use tokio::sync::Mutex;
 
+use crate::adapters::net::allocator::SlotAllocator;
+use crate::adapters::net::firewall::HostFirewall;
+use crate::adapters::proxy::activator::AppActivator;
+use crate::adapters::proxy::Router;
+use crate::adapters::volumes::nbd::NbdDevices;
+use crate::adapters::volumes::VolumeBackend;
 use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
-use crate::exports::reader::CheckpointServers;
-use crate::exports::store::ExportStore;
-use crate::net::allocator::SlotAllocator;
-use crate::net::firewall::HostFirewall;
-use crate::proxy::activator::AppActivator;
-use crate::proxy::Router;
-use crate::services::{ArtifactStore, CommandRunner, Vmm};
+use crate::ports::{ArtifactStore, CommandRunner, Vmm};
+use crate::services::exports::reader::CheckpointServers;
+use crate::services::exports::store::ExportStore;
 use crate::state::SharedState;
-use crate::volumes::nbd::NbdDevices;
-use crate::volumes::VolumeBackend;
 
 pub struct Host {
     pub config: HostConfig,
@@ -59,7 +59,7 @@ impl Host {
     pub async fn slot_for(
         &self,
         app_id: &AppId,
-    ) -> Result<nft_render::AppSlot, crate::net::allocator::SlotExhausted> {
+    ) -> Result<nft_render::AppSlot, crate::adapters::net::allocator::SlotExhausted> {
         self.allocator.lock().await.allocate(app_id)
     }
 

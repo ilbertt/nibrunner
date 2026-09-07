@@ -153,18 +153,18 @@ pub async fn import_documents(
         return Ok(());
     }
 
-    let records = crate::report::instance_record::read_instance_records(
+    let records = crate::services::report::instance_record::read_instance_records(
         crate::json_store::read_json(&config.instances_file())
             .ok()
             .flatten(),
     );
-    let assignments = crate::net::allocator::assignments_from(
+    let assignments = crate::adapters::net::allocator::assignments_from(
         crate::json_store::read_json(&config.slots_file())
             .ok()
             .flatten()
             .unwrap_or_default(),
     );
-    let cursor = crate::net::allocator::read_slot_cursor(
+    let cursor = crate::adapters::net::allocator::read_slot_cursor(
         crate::json_store::read_json(&config.slot_cursor_file())
             .ok()
             .flatten(),

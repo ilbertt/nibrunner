@@ -2,46 +2,30 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use protocol::{HostVersions, ObjectKey};
 use tokio::sync::Mutex;
 
-use crate::artifact_store::ObjectArtifactStore;
+use crate::adapters::artifact_store::ObjectArtifactStore;
+use crate::adapters::exec::HostCommands;
+use crate::adapters::logs::receiver::TenantLogReceiver;
+use crate::adapters::logs::FileLogSink;
+use crate::adapters::net::allocator::SlotAllocator;
+use crate::adapters::net::firewall::HostFirewall;
+use crate::adapters::net::tap::HostNetwork;
+use crate::adapters::proxy::activator::AppActivator;
+use crate::adapters::proxy::{router, Router};
+use crate::adapters::vm::manager::{read_guest_image_version, VmManager};
+use crate::adapters::vm::process::{extract_firecracker, VmProcesses, FIRECRACKER_VERSION};
+use crate::adapters::volumes::local_file::LocalFileVolumes;
+use crate::adapters::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
 use crate::config::HostConfig;
-use crate::desired::{DesiredStateCache, DesiredStateWatch};
-use crate::exec::HostCommands;
-use crate::exports::reader::CheckpointServers;
+use crate::desired::DesiredStateCache;
 use crate::host::Host;
-use crate::logs::receiver::TenantLogReceiver;
-use crate::logs::FileLogSink;
-use crate::net::allocator::SlotAllocator;
-use crate::net::firewall::HostFirewall;
-use crate::net::tap::HostNetwork;
-use crate::proxy::activator::AppActivator;
-use crate::proxy::{router, Router};
-use crate::report::capacity::{guest_memory_mib, read_host_memory_mib};
+use crate::services::exports::reader::CheckpointServers;
+use crate::services::report::capacity::{guest_memory_mib, read_host_memory_mib};
+use crate::services::waker::AppWaker;
 use crate::state::HostState;
-use crate::vm::manager::{read_guest_image_version, VmManager};
-use crate::vm::process::{extract_firecracker, VmProcesses, FIRECRACKER_VERSION};
-use crate::volumes::local_file::LocalFileVolumes;
-use crate::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
-use crate::waker::AppWaker;
-
-/// One tick of the status loop on a host where nothing is settling. A probe cannot land sooner
-/// than the tick that runs it, so the two share one cadence.
-const STATUS_TICK: Duration = Duration::from_secs(1);
-const SETTLING_TICK: Duration = Duration::from_millis(crate::health::STARTUP_PROBE_INTERVAL_MS);
-/// The floor a signal cannot get under. A refresh probes every instance that is due and writes
-/// the host's state to disk, so left ungated a host waking apps steadily would run it as fast as
-/// the disk allows — and a host with enough on-request apps to be waking them steadily is the one
-/// this whole feature is for.
-const MIN_REFRESH_GAP: Duration = Duration::from_millis(250);
-
-/// How often each guest is measured, and the window every activity reading is taken over.
-/// Slower than the status tick because the counters only move at the speed a tenant is used, and
-/// a sleep is not work to put in front of the health probes of every other app on the host.
-const MEASUREMENT_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartupError {
@@ -62,7 +46,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
 
     let firecracker = extract_firecracker(&config.firecracker_dir)
         .map_err(|error| StartupError::Unusable(error.to_string()))?;
-    let commands: Arc<dyn crate::services::CommandRunner> = Arc::new(HostCommands);
+    let commands: Arc<dyn crate::ports::CommandRunner> = Arc::new(HostCommands);
     let state = HostState::shared();
     // Opened before anything reads it, and migrated on the way: a host that has just been given
     // the binary has no database, and one given a newer binary has an older schema.
@@ -82,7 +66,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     // Chosen once, here, rather than asked per volume: what a volume is made of is a property of
     // the host, and a daemon that could answer differently on two passes is one whose tenant finds
     // its disk somewhere else.
-    let volumes: Arc<dyn crate::volumes::VolumeBackend> = match &config.zerofs {
+    let volumes: Arc<dyn crate::adapters::volumes::VolumeBackend> = match &config.zerofs {
         None => Arc::new(LocalFileVolumes::new(
             config.volumes_dir(),
             storage_prefix,
@@ -134,8 +118,8 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         }),
     );
 
-    let exports: Arc<dyn crate::exports::store::ExportStore> = Arc::new(
-        crate::exports::store::ObjectExportStore::open(&config.export_store_url)
+    let exports: Arc<dyn crate::services::exports::store::ExportStore> = Arc::new(
+        crate::services::exports::store::ObjectExportStore::open(&config.export_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
     );
     // Only where a volume is something a checkpoint can be cut from.
@@ -153,7 +137,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         store,
         exports,
         checkpoint_servers,
-        nbd: crate::volumes::nbd::NbdDevices::new(commands.clone()),
+        nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),
         commands: commands.clone(),
         cache: Mutex::new(DesiredStateCache::new()),
         vms,
@@ -176,11 +160,14 @@ struct DeferredWaker {
 }
 
 #[async_trait::async_trait]
-impl crate::proxy::activator::Waker for DeferredWaker {
-    async fn wake(&self, app_id: &protocol::AppId) -> Result<(), crate::proxy::activator::WakeRefusal> {
+impl crate::adapters::proxy::activator::Waker for DeferredWaker {
+    async fn wake(
+        &self,
+        app_id: &protocol::AppId,
+    ) -> Result<(), crate::adapters::proxy::activator::WakeRefusal> {
         match self.waker.get() {
             Some(waker) => waker.wake(app_id).await,
-            None => Err(crate::proxy::activator::WakeRefusal::Failed {
+            None => Err(crate::adapters::proxy::activator::WakeRefusal::Failed {
                 reason: "this host is still starting".into(),
             }),
         }
@@ -189,7 +176,7 @@ impl crate::proxy::activator::Waker for DeferredWaker {
 
 #[cfg(target_os = "linux")]
 fn open_network() -> Result<Arc<dyn HostNetwork>, StartupError> {
-    crate::net::tap::KernelNetwork::open()
+    crate::adapters::net::tap::KernelNetwork::open()
         .map(|network| Arc::new(network) as Arc<dyn HostNetwork>)
         .map_err(|error| StartupError::Unusable(error.message()))
 }
@@ -205,93 +192,12 @@ fn open_network() -> Result<Arc<dyn HostNetwork>, StartupError> {
 }
 
 pub fn host_versions(host: &Host) -> HostVersions {
-    crate::report::versions::read_host_versions(&host.config.versions_file).unwrap_or_else(|_| {
-        crate::report::versions::compiled_versions(
+    crate::services::report::versions::read_host_versions(&host.config.versions_file).unwrap_or_else(|_| {
+        crate::services::report::versions::compiled_versions(
             FIRECRACKER_VERSION,
             &read_guest_image_version(&host.config.guest_image_dir),
         )
     })
-}
-
-/// Converges against the last document this host was given before anything has written a new one,
-/// then watches for one. A file that is not there yet is a host with nothing to run, which is the
-/// ordinary state of a fresh machine rather than a failure.
-pub async fn converge_loop(host: Arc<Host>) {
-    let watch = DesiredStateWatch::on(&host.config.desired_state_file);
-    // The cached copy first: a restart during an outage of whatever writes the file is a
-    // non-event, because the host still knows what it is supposed to be running.
-    if let Some(cached) = host.cached_desired_state().await {
-        if host.cache.lock().await.accept(cached.clone()) {
-            crate::reconcile::reconcile(&host, &cached).await;
-        }
-    }
-    loop {
-        match crate::desired::read_desired_state(&host.config.desired_state_file) {
-            Ok(Some(desired)) => {
-                let news = host.cache.lock().await.accept(desired.clone());
-                if news {
-                    let _ = crate::desired::cache_desired_state(
-                        &host.config.cached_desired_state_file(),
-                        &desired,
-                    );
-                    crate::reconcile::reconcile(&host, &desired).await;
-                } else if host.state.snapshot().await.deferred_work {
-                    // Only a document moving runs a pass, and work the last one deferred does not
-                    // move it — so a volume waiting on an instance to stop would never be carried.
-                    crate::reconcile::reconcile(&host, &desired).await;
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::error!(error = %error.message(), "the desired state file was not read");
-            }
-        }
-        watch.changed().await;
-    }
-}
-
-/// Probes what is due, puts the result in the kernel and the routes, and writes down what
-/// changed. Raced rather than slept, because the length is chosen from the state as it stands
-/// now: a microVM that comes up during it is one this decision could not have known about.
-pub async fn status_loop(host: Arc<Host>) {
-    let versions = host_versions(&host);
-    let reported_state_file = crate::report::writer::reported_state_file(&host);
-    loop {
-        crate::reconcile::refresh(&host).await;
-        let report = crate::report::writer::build(&host, versions.clone()).await;
-        crate::report::writer::write(&reported_state_file, &report);
-
-        let now = crate::clock::now_ms();
-        // Exactly the condition the fast probe grid runs on, rather than the states it tends to
-        // appear in: a tick taken for something no longer being probed that fast is one taken for
-        // as long as that instance is up.
-        let settling = host
-            .state
-            .records()
-            .await
-            .iter()
-            .any(|record| crate::health::is_on_startup_grid(&record.health, &record.grace_inputs(now)));
-        let tick = if settling { SETTLING_TICK } else { STATUS_TICK };
-        tokio::select! {
-            _ = tokio::time::sleep(tick) => {}
-            _ = async {
-                tokio::time::sleep(MIN_REFRESH_GAP).await;
-                host.state.refresh_signalled().await;
-            } => {}
-        }
-    }
-}
-
-/// Measures what the host's counters say, decides which apps have gone quiet, and lets them
-/// sleep. Deciding straight after measuring, because the measurement is the only thing that moves
-/// the answer: an app is let go on the reading that found it quiet rather than on a tick that
-/// happened to come later.
-pub async fn measurement_loop(host: Arc<Host>) {
-    loop {
-        tokio::time::sleep(MEASUREMENT_INTERVAL).await;
-        crate::reconcile::idle::record_activity(&host).await;
-        crate::reconcile::idle::apply_sleep(&host).await;
-    }
 }
 
 /// The edge, where a host has one. A daemon with no ports configured serves nothing itself, which
@@ -324,8 +230,8 @@ pub fn serve_proxy(host: &Arc<Host>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_support::*;
+    use std::time::Duration;
 
     /// The one loop that has to work before anything else does: a document appears, and the host
     /// converges on it without anybody telling it to.
@@ -338,7 +244,7 @@ mod tests {
         });
         crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
 
-        let converging = tokio::spawn(converge_loop(host.arc().clone()));
+        let converging = tokio::spawn(crate::controllers::converge_loop(host.arc().clone()));
         for _ in 0..200 {
             if host.state.record(&app_id()).await.is_some() {
                 break;
@@ -348,7 +254,7 @@ mod tests {
         converging.abort();
 
         assert!(host.state.record(&app_id()).await.is_some());
-        assert_eq!(host.vms.calls(), vec![crate::services::VmCall::Boot]);
+        assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Boot]);
         assert_eq!(host.cached_desired_state().await.as_ref(), Some(&desired));
     }
 
@@ -356,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_document_is_the_ordinary_state_of_a_fresh_host() {
         let host = test_host().await;
-        let converging = tokio::spawn(converge_loop(host.arc().clone()));
+        let converging = tokio::spawn(crate::controllers::converge_loop(host.arc().clone()));
         tokio::time::sleep(Duration::from_millis(100)).await;
         converging.abort();
         assert!(host.state.records().await.is_empty());
