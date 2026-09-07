@@ -597,4 +597,259 @@ mod tests {
             Some(268_435_456)
         );
     }
+
+    fn volumes_with_sysfs(
+        root: &Path,
+        sysfs: &Path,
+        commands: Arc<crate::ports::MockCommandRunner>,
+    ) -> ZerofsVolumes {
+        ZerofsVolumes::new(
+            filesystem(root),
+            Arc::new(Mutex::new(SlotAllocator::empty())),
+            commands.clone(),
+        )
+        .with_devices(NbdDevices::with_sysfs(sysfs.to_path_buf(), commands))
+    }
+
+    #[test]
+    fn every_export_this_host_serves_lives_under_one_directory_of_the_mount() {
+        let root = tempfile::tempdir().unwrap();
+        let filesystem = filesystem(root.path());
+        assert_eq!(filesystem.nbd_directory(), root.path().join("mnt/.nbd"));
+        assert!(filesystem
+            .device_file_for(&VolumeId::parse("vol-1").unwrap())
+            .starts_with(filesystem.nbd_directory()));
+    }
+
+    #[tokio::test]
+    async fn an_app_that_holds_no_slot_has_no_device_to_be_detached_from() {
+        let root = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_succeeding();
+        let volumes = ZerofsVolumes::new(
+            filesystem(root.path()),
+            Arc::new(Mutex::new(SlotAllocator::empty())),
+            commands,
+        );
+        volumes
+            .detach(&VolumeId::parse("vol-1").unwrap(), &app_id())
+            .await
+            .unwrap();
+        assert!(log.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_volume_whose_app_holds_no_slot_has_nowhere_to_be_attached() {
+        let root = tempfile::tempdir().unwrap();
+        let volumes = ZerofsVolumes::new(
+            filesystem(root.path()),
+            Arc::new(Mutex::new(SlotAllocator::empty())),
+            mocks::commands_succeeding().0,
+        );
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+        volumes.ensure_device_file(&volume_id, 1024).unwrap();
+        assert_eq!(
+            volumes.attach(&volume_id, &app_id()).await.unwrap_err(),
+            VolumeError::NotHere {
+                volume_id: volume_id.clone()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn what_the_mount_holds_is_listed_and_what_is_not_a_volume_is_passed_over() {
+        let root = tempfile::tempdir().unwrap();
+        let sysfs = tempfile::tempdir().unwrap();
+        let (commands, _) = mocks::commands_succeeding();
+        let volumes = volumes_with_sysfs(root.path(), sysfs.path(), commands);
+        let held = VolumeId::parse("vol-1").unwrap();
+        volumes.ensure_device_file(&held, 4096).unwrap();
+        std::fs::write(volumes.filesystem.nbd_directory().join("not a volume"), b"").unwrap();
+        std::fs::create_dir_all(volumes.filesystem.nbd_directory().join("vol-2")).unwrap();
+
+        let observed = volumes.observe(&Default::default()).await;
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].volume_id, held);
+        assert_eq!(observed[0].size_bytes, 4096);
+        assert_eq!(observed[0].device_path, None);
+        assert!(!observed[0].attached, "a volume no app holds is not attached");
+        assert_eq!(observed[0].storage_prefix, ObjectKey::parse("volumes").unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_volume_an_app_holds_is_observed_on_the_device_that_app_was_given() {
+        let root = tempfile::tempdir().unwrap();
+        let (commands, _) = mocks::commands_succeeding();
+        let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
+        let slot = allocator.lock().await.allocate(&app_id()).unwrap();
+        let sysfs = tempfile::tempdir().unwrap();
+        let volumes = ZerofsVolumes::new(filesystem(root.path()), allocator, commands.clone())
+            .with_devices(NbdDevices::with_sysfs(sysfs.path().to_path_buf(), commands));
+        let held = VolumeId::parse("vol-1").unwrap();
+        volumes.ensure_device_file(&held, 4096).unwrap();
+
+        let owners = std::collections::BTreeMap::from([(held.clone(), app_id())]);
+        let observed = volumes.observe(&owners).await;
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0].device_path.as_deref(),
+            Some(slot.nbd_device_path.as_str())
+        );
+        assert!(!observed[0].attached, "nothing in sysfs holds the device");
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_zerofs_would_not_take_is_a_refusal_rather_than_a_silent_success() {
+        let root = tempfile::tempdir().unwrap();
+        let (commands, _) = mocks::commands_answering(|request| {
+            Err(crate::ports::CommandError::Unstartable {
+                executable: request.executable().to_string(),
+                reason: "no such file".into(),
+            })
+        });
+        let volumes = ZerofsVolumes::new(
+            filesystem(root.path()),
+            Arc::new(Mutex::new(SlotAllocator::empty())),
+            commands,
+        );
+        for refused in [
+            volumes
+                .create_checkpoint(&crate::test_support::checkpoint_id())
+                .await,
+            volumes
+                .delete_checkpoint(&crate::test_support::checkpoint_id())
+                .await,
+            volumes.flush().await,
+        ] {
+            let error = refused.unwrap_err();
+            assert!(matches!(error, VolumeError::Unusable(_)), "{error}");
+        }
+        assert!(volumes.observe_checkpoints().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_checkpoint_command_names_the_checkpoint_and_the_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_answering(|request| {
+            let listing = request.command.contains(&"list".to_string());
+            Ok(crate::ports::CommandResult::with_stdout(if listing {
+                "chk-1  2026-09-04\nnot.a.checkpoint  2026-09-05\n"
+            } else {
+                ""
+            }))
+        });
+        let volumes = ZerofsVolumes::new(
+            filesystem(root.path()),
+            Arc::new(Mutex::new(SlotAllocator::empty())),
+            commands,
+        );
+        volumes
+            .create_checkpoint(&crate::test_support::checkpoint_id())
+            .await
+            .unwrap();
+        volumes
+            .delete_checkpoint(&crate::test_support::checkpoint_id())
+            .await
+            .unwrap();
+        let listed = volumes.observe_checkpoints().await;
+        assert_eq!(listed, vec![crate::test_support::checkpoint_id()]);
+
+        let asked = log.commands();
+        assert_eq!(asked[0][1..4], ["checkpoint", "create", "chk-1"]);
+        assert_eq!(asked[1][1..4], ["checkpoint", "delete", "chk-1"]);
+        assert_eq!(asked[2][1..3], ["checkpoint", "list"]);
+        for call in asked {
+            assert_eq!(call[0], "/opt/nibrun/bin/zerofs/zerofs");
+            assert_eq!(call[call.len() - 2], "-c");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_file_that_will_not_be_made_is_named_rather_than_provisioned_around() {
+        let root = tempfile::tempdir().unwrap();
+        let filesystem = filesystem(root.path());
+        std::fs::create_dir_all(&filesystem.mount_path).unwrap();
+        std::fs::write(filesystem.nbd_directory(), b"a file, not a directory").unwrap();
+        let volumes = ZerofsVolumes::new(
+            filesystem,
+            Arc::new(Mutex::new(SlotAllocator::empty())),
+            mocks::commands_succeeding().0,
+        );
+        let error = volumes
+            .ensure_device_file(&VolumeId::parse("vol-1").unwrap(), 1024)
+            .unwrap_err();
+        assert!(matches!(error, VolumeError::Unusable(_)), "{error}");
+    }
+
+    #[test]
+    fn a_cache_size_written_as_a_fraction_is_read_down_to_whole_gigabytes() {
+        assert_eq!(
+            cache_gigabytes("[cache]\ndisk_size_gb = 1.5\n", "disk_size_gb"),
+            Some(1)
+        );
+        assert_eq!(
+            cache_gigabytes("[cache]\ndisk_size_gb = 0.5\n", "disk_size_gb"),
+            None
+        );
+        assert_eq!(
+            cache_gigabytes("[cache]\ndisk_size_gb = -1.5\n", "disk_size_gb"),
+            None
+        );
+        assert_eq!(
+            cache_gigabytes("[storage]\ndisk_size_gb = 4\n", "disk_size_gb"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_listing_with_nothing_in_it_names_no_checkpoints() {
+        assert!(parse_checkpoint_names("").is_empty());
+        assert!(parse_checkpoint_names("\n   \n\t\n").is_empty());
+        assert_eq!(parse_checkpoint_names("  leading   space\n"), vec!["leading"]);
+    }
+
+    #[test]
+    fn a_superblock_read_off_the_end_of_a_short_file_is_not_read_as_a_filesystem() {
+        let directory = tempfile::tempdir().unwrap();
+        let short = directory.path().join("short");
+        std::fs::write(&short, b"tiny").unwrap();
+        assert_eq!(read_superblock_magic(&short.display().to_string()), Some([0, 0]));
+        assert_eq!(
+            read_superblock_magic(&directory.path().join("absent").display().to_string()),
+            None
+        );
+
+        let formatted = directory.path().join("formatted");
+        let mut image = vec![0u8; SUPERBLOCK_MAGIC_OFFSET as usize + 2];
+        image[SUPERBLOCK_MAGIC_OFFSET as usize..].copy_from_slice(&0xef53u16.to_le_bytes());
+        std::fs::write(&formatted, &image).unwrap();
+        assert_eq!(
+            read_superblock_magic(&formatted.display().to_string()),
+            Some(0xef53u16.to_le_bytes())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_nothing_can_be_read_from_is_never_taken_as_unformatted_and_written_over() {
+        let root = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_succeeding();
+        let volumes = ZerofsVolumes::new(
+            filesystem(root.path()),
+            Arc::new(Mutex::new(SlotAllocator::empty())),
+            commands,
+        );
+        let error = volumes
+            .format_once("/dev/nbd-that-is-not-there")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            VolumeError::SuperblockUnreadable {
+                device_path: "/dev/nbd-that-is-not-there".to_string()
+            }
+        );
+        assert!(
+            log.calls().is_empty(),
+            "nothing was written to a device it could not read"
+        );
+    }
 }

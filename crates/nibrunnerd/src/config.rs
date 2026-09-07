@@ -906,6 +906,161 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
     }
 
     #[test]
+    fn a_port_the_kernel_would_pick_is_not_a_port_this_host_can_be_found_on() {
+        let message = refused("[proxy]\nhttp_port = 0\n");
+        assert!(message.contains("proxy.http_port"), "{message}");
+        assert!(message.contains("kernel picking one"), "{message}");
+        assert_eq!(parsed("[proxy]\nhttp_port = 443\n").proxy_http_port, Some(443));
+    }
+
+    #[test]
+    fn a_path_that_is_only_whitespace_names_nothing_and_is_refused() {
+        let message = refused("[proxy]\ntls_certificate = \"   \"\n");
+        assert!(message.contains("proxy.tls_certificate"), "{message}");
+        assert!(message.contains("is not a path"), "{message}");
+        assert_eq!(
+            parsed("[proxy]\ntls_key = \"  /tls/origin.key  \"\n").proxy_tls_key,
+            Some(PathBuf::from("/tls/origin.key"))
+        );
+    }
+
+    #[test]
+    fn a_url_with_a_scheme_and_no_host_reaches_no_control_plane() {
+        let message = refused("[control_plane]\nurl = \"https://\"\n");
+        assert!(message.contains("control_plane.url"), "{message}");
+        assert!(refused("[control_plane]\nurl = \"ftp://nibrun.example.com\"\n").contains("http"));
+        assert_eq!(
+            parsed("[control_plane]\nurl = \"http://127.0.0.1:8080//\"\n").control_plane_url,
+            Some("http://127.0.0.1:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn a_store_named_by_a_relative_path_would_move_with_the_working_directory() {
+        let message = refused("[volumes]\nstore_url = \"srv/volumes\"\n");
+        assert!(message.contains("volumes.store_url"), "{message}");
+        assert!(message.contains("absolute"), "{message}");
+        assert_eq!(
+            parsed("[exports]\nstore_url = \"s3://nibrun-exports\"\n").export_store_url,
+            "s3://nibrun-exports"
+        );
+        assert_eq!(parsed("").volume_store_url, None);
+    }
+
+    #[test]
+    fn a_prefix_longer_than_a_key_may_be_is_refused_by_its_length() {
+        let too_long = "a".repeat(MAX_STORAGE_PREFIX_BYTES + 1);
+        let message = refused(&format!("[volumes]\nstorage_prefix = \"{too_long}\"\n"));
+        assert!(message.contains("at most 512 bytes"), "{message}");
+        let longest = "b".repeat(MAX_STORAGE_PREFIX_BYTES);
+        assert_eq!(
+            parsed(&format!("[volumes]\nstorage_prefix = \"{longest}\"\n")).storage_prefix,
+            longest
+        );
+    }
+
+    #[test]
+    fn an_address_no_packet_could_be_relayed_to_is_refused() {
+        let message = refused("[proxy]\nport_relay_public_ipv4 = \"not.an.address\"\n");
+        assert!(message.contains("proxy.port_relay_public_ipv4"), "{message}");
+        assert!(refused("[proxy]\nport_relay_public_ipv4 = \"fd00::1\"\n").contains("IPv4"));
+        assert_eq!(
+            parsed("[proxy]\nport_relay_public_ipv4 = \"203.0.113.10\"\n")
+                .port_relay_public_ipv4
+                .map(|address| address.to_string()),
+            Some("203.0.113.10".to_string())
+        );
+    }
+
+    #[test]
+    fn a_key_without_its_certificate_is_no_more_tls_material_than_the_other_way_round() {
+        assert_eq!(
+            parsed("[proxy]\ntls_key = \"/tls/origin.key\"\n").tls_material(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_range_that_is_written_with_room_around_it_is_still_the_range_it_names() {
+        assert_eq!(
+            parsed("[network]\ncontrol_plane_cidrs_v6 = [\" fd00::/8 \"]\n").control_plane_cidrs_v6,
+            vec!["fd00::/8".to_string()]
+        );
+        assert!(refused("[network]\ncontrol_plane_cidrs_v6 = [\"fd00::/129\"]\n").contains("wider"));
+        assert!(
+            refused("[network]\ncontrol_plane_cidrs_v4 = [\"10.0.0.0/eight\"]\n")
+                .contains("not a prefix length")
+        );
+        assert!(parsed("").control_plane_cidrs_v4.is_empty());
+    }
+
+    #[test]
+    fn every_backend_this_host_has_is_named_the_way_the_configuration_spells_it() {
+        assert_eq!(VolumeBackendKind::LocalFile.as_str(), "local-file");
+        assert_eq!(VolumeBackendKind::Zerofs.as_str(), "zerofs");
+        assert_eq!(
+            parsed("[volumes]\nbackend = \"local-file\"\n").volume_backend,
+            VolumeBackendKind::LocalFile
+        );
+    }
+
+    #[test]
+    fn a_host_rooted_under_one_directory_keeps_every_file_it_writes_inside_it() {
+        let root = Path::new("/srv/one-host");
+        let config = HostConfig::under(root);
+        for path in [
+            config.state_db_file(),
+            config.instances_file(),
+            config.slots_file(),
+            config.slot_cursor_file(),
+            config.activity_file(),
+            config.host_id_file(),
+            config.cached_desired_state_file(),
+            config.deleted_volumes_file(),
+            config.artifact_cache_dir(),
+            config.vm_dir(),
+            config.volumes_dir(),
+            config.logs_dir(),
+            config.desired_state_file.clone(),
+            config.api_socket.clone(),
+            config.versions_file.clone(),
+            config.export_staging_dir.clone(),
+            config.firecracker_dir.clone(),
+        ] {
+            assert!(
+                path.starts_with(root),
+                "{} escapes {}",
+                path.display(),
+                root.display()
+            );
+        }
+        assert_eq!(config.in_state_dir("anything"), root.join("state/anything"));
+        assert_eq!(config.volume_backend, VolumeBackendKind::LocalFile);
+        assert_eq!(config.tls_material(), None);
+    }
+
+    #[test]
+    fn every_file_this_host_keeps_has_a_name_of_its_own() {
+        let config = HostConfig::under(Path::new("/srv/one-host"));
+        let named = [
+            config.state_db_file(),
+            config.instances_file(),
+            config.slots_file(),
+            config.slot_cursor_file(),
+            config.activity_file(),
+            config.host_id_file(),
+            config.cached_desired_state_file(),
+            config.deleted_volumes_file(),
+            config.artifact_cache_dir(),
+            config.vm_dir(),
+            config.volumes_dir(),
+            config.logs_dir(),
+        ];
+        let distinct: std::collections::BTreeSet<_> = named.iter().collect();
+        assert_eq!(distinct.len(), named.len());
+    }
+
+    #[test]
     fn a_whole_document_reads_back_as_it_was_written() {
         let config = parsed(
             r#"

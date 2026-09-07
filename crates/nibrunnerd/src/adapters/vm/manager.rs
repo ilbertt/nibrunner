@@ -596,6 +596,195 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_boot_a_tap_could_not_be_made_for_starts_no_hypervisor_at_all() {
+        let mut fixture = fixture();
+        fixture.manager.network = mocks::network_refusing(crate::adapters::net::tap::NetworkError {
+            what: "a tap device",
+            device: "nbr0".into(),
+            reason: "operation not permitted".into(),
+        });
+        let error = fixture
+            .manager
+            .boot(boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VmError::Host(_)), "{error}");
+        assert!(error.message().contains("operation not permitted"), "{error}");
+        assert!(fixture.manager.processes.read_record(&app_id()).is_none());
+        assert!(fixture.manager.logs.attached().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_hypervisor_that_would_not_start_takes_the_log_attachment_down_behind_it() {
+        let fixture = fixture();
+        let error = fixture
+            .manager
+            .boot(boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VmError::Host(_)), "{error}");
+        assert!(
+            fixture.manager.logs.attached().await.is_empty(),
+            "a socket nothing will write to is not left listening"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_takes_the_snapshot_with_it_so_nothing_is_woken_back_into_the_old_state() {
+        let fixture = fixture();
+        let paths = snapshot_paths(&fixture.manager.snapshot_dir, &app_id());
+        make_directory(&paths.directory, 0o700).unwrap();
+        std::fs::write(&paths.memory_path, b"pretend memory").unwrap();
+        write_json(
+            &paths.stamp_path,
+            &SnapshotStamp {
+                deployment_id: deployment_id(),
+                guest_image_version: fixture.manager.guest_image_version.clone(),
+                host_boot_id: fixture.manager.processes.boot_id().to_string(),
+                slot: 0,
+            },
+        )
+        .unwrap();
+
+        fixture.manager.stop(&app_id()).await.unwrap();
+        assert!(!paths.directory.exists());
+        assert!(!paths.stamp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_microvm_nothing_was_ever_recorded_for_is_still_stopped_and_discarded_cleanly() {
+        let fixture = fixture();
+        fixture.manager.stop(&app_id()).await.unwrap();
+        fixture.manager.discard(&app_id()).await.unwrap();
+        assert!(fixture.manager.adopted_app_ids().await.is_empty());
+        assert_eq!(fixture.manager.guest_verdict(&app_id()).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_console_that_holds_nothing_the_guest_said_gives_no_verdict() {
+        let fixture = fixture();
+        make_directory(
+            fixture
+                .manager
+                .processes
+                .console_path(&app_id())
+                .parent()
+                .unwrap(),
+            0o700,
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.manager.processes.console_path(&app_id()),
+            "[    0.0] Linux version 6.1.180\n[   15.7] reboot: Restarting system\n",
+        )
+        .unwrap();
+        assert_eq!(fixture.manager.guest_verdict(&app_id()).await, None);
+    }
+
+    #[tokio::test]
+    async fn the_working_directory_a_boot_uses_is_the_one_the_rest_of_the_host_is_told_about() {
+        let fixture = fixture();
+        assert_eq!(
+            fixture.manager.working_dir(&app_id()),
+            fixture.manager.working_dir_for(&app_id())
+        );
+        assert!(fixture
+            .manager
+            .working_dir(&app_id())
+            .starts_with(&fixture.manager.vm_dir));
+        assert_ne!(
+            fixture.manager.working_dir(&app_id()),
+            fixture
+                .manager
+                .working_dir(&protocol::AppId::parse("app-2").unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_status_of_every_app_asked_after_is_answered_for_even_when_none_is_running() {
+        let fixture = fixture();
+        let neighbour = protocol::AppId::parse("app-2").unwrap();
+        let statuses = fixture.manager.statuses(&[app_id(), neighbour.clone()]).await;
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[&app_id()], VmStatus::default());
+        assert_eq!(statuses[&neighbour], VmStatus::default());
+        assert!(fixture.manager.statuses(&[]).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_sleep_the_disk_cannot_hold_is_refused_before_the_microvm_is_paused() {
+        let mut fixture = fixture();
+        fixture.manager.snapshot_dir = PathBuf::from("/nowhere/nibrunner/snapshots");
+        fixture
+            .state
+            .put_record(instance_record(|record| record.health.ever_healthy = true))
+            .await;
+        let error = fixture
+            .manager
+            .sleep(SuspendRequest {
+                app_id: app_id(),
+                deployment_id: deployment_id(),
+                slot: nft_render::describe_slot(0, app_id()),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VmError::SleepRefused { .. }), "{error}");
+        assert!(error.message().contains("cannot be measured"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_wake_with_no_snapshot_kept_at_all_says_so_rather_than_starting_a_cold_guest() {
+        let fixture = fixture();
+        let error = fixture
+            .manager
+            .wake(SuspendRequest {
+                app_id: app_id(),
+                deployment_id: deployment_id(),
+                slot: nft_render::describe_slot(0, app_id()),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VmError::SnapshotUnusable { .. }), "{error}");
+        assert!(error.message().contains("kept none"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn staging_the_same_app_twice_rebuilds_its_config_rather_than_refusing() {
+        let fixture = fixture();
+        fixture
+            .manager
+            .stage(&boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap();
+        let changed = desired_instance(|instance| {
+            instance.config.environment = tenant_environment(&[("MODE", "production")])
+        });
+        fixture.manager.stage(&boot_request(changed)).await.unwrap();
+        let written = config_drive(&fixture.manager.working_dir_for(&app_id()));
+        assert!(written.contains("MODE"), "{written}");
+        assert_eq!(fixture.manager.logs.attached().await, vec![app_id()]);
+    }
+
+    #[test]
+    fn a_guest_image_manifest_that_names_no_version_is_not_read_as_one() {
+        let directory = tempfile::tempdir().unwrap();
+        for manifest in ["{}", r#"{"version":7}"#, "not json"] {
+            std::fs::write(directory.path().join("manifest.json"), manifest).unwrap();
+            assert_eq!(
+                read_guest_image_version(directory.path()),
+                "unknown",
+                "{manifest}"
+            );
+        }
+    }
+
+    #[test]
+    fn this_build_names_the_hypervisor_it_carries() {
+        assert_eq!(firecracker_version(), FIRECRACKER_VERSION);
+        assert!(!firecracker_version().is_empty());
+    }
+
     #[test]
     fn the_guest_image_names_its_own_version_and_an_absent_one_is_not_invented() {
         let directory = tempfile::tempdir().unwrap();

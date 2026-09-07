@@ -335,4 +335,106 @@ mod tests {
         let refused = ensure_loadable(&paths.stamp_path, &rebooted).unwrap_err();
         assert!(refused.message().contains("rebooted"));
     }
+
+    #[test]
+    fn a_stamp_this_host_cannot_read_is_no_snapshot_at_all() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = snapshot_paths(directory.path(), &app_id());
+        std::fs::create_dir_all(&paths.directory).unwrap();
+        std::fs::write(&paths.stamp_path, "{ not a stamp").unwrap();
+        let refused = ensure_loadable(&paths.stamp_path, &stamp()).unwrap_err();
+        assert!(refused.message().contains("kept none"), "{refused}");
+    }
+
+    #[test]
+    fn the_first_reason_a_snapshot_drifted_is_the_one_the_operator_is_told() {
+        let everything_moved = SnapshotStamp {
+            deployment_id: DeploymentId::parse("dep-2").unwrap(),
+            guest_image_version: "another".into(),
+            host_boot_id: "another".into(),
+            slot: 8,
+        };
+        assert!(drift_from(&everything_moved, &stamp())
+            .unwrap()
+            .contains("deployed again"));
+    }
+
+    #[test]
+    fn a_snapshot_is_the_memory_the_app_was_promised_rather_than_what_it_had_touched() {
+        assert_eq!(snapshot_bytes_for(0), 0);
+        assert_eq!(snapshot_bytes_for(1), 1_048_576);
+        assert_eq!(snapshot_bytes_for(256), 256 * 1_048_576);
+    }
+
+    #[test]
+    fn what_holds_a_snapshot_is_measured_where_it_would_be_written_and_made_if_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshots = directory.path().join("snapshots");
+        let disk = measure_snapshot_disk(&snapshots, 4 * GIB).unwrap();
+        assert!(snapshots.is_dir());
+        assert!(disk.total_bytes > 0);
+        assert!(disk.available_bytes <= disk.total_bytes);
+        assert_eq!(disk.cache_bytes, 4 * GIB);
+        assert_eq!(disk.snapshot_bytes, 0);
+
+        std::fs::write(snapshots.join("memory"), vec![b'x'; 2048]).unwrap();
+        assert_eq!(measure_snapshot_disk(&snapshots, 0).unwrap().snapshot_bytes, 2048);
+    }
+
+    #[test]
+    fn a_snapshot_directory_that_cannot_be_made_is_not_measured_as_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = directory.path().join("snapshots");
+        std::fs::write(&occupied, b"a file, not a directory").unwrap();
+        assert!(measure_snapshot_disk(&occupied, 0).is_err());
+    }
+
+    #[test]
+    fn a_cache_that_grew_past_the_disk_leaves_no_budget_rather_than_wrapping_round() {
+        let disk = SnapshotDisk {
+            total_bytes: 10 * GIB,
+            available_bytes: GIB,
+            cache_bytes: 100 * GIB,
+            snapshot_bytes: 0,
+        };
+        assert_eq!(snapshot_budget(&disk), 0);
+        assert!(refusal_for_disk(&disk, 1).is_some());
+    }
+
+    #[test]
+    fn a_refusal_names_what_the_host_holds_in_units_an_operator_reads() {
+        let refused = refusal_for_disk(
+            &SnapshotDisk {
+                snapshot_bytes: 30 * GIB,
+                ..host_disk()
+            },
+            snapshot_bytes_for(4096),
+        )
+        .unwrap();
+        assert!(refused.contains("GiB"), "{refused}");
+        assert!(refused.contains("30.0 GiB"), "{refused}");
+    }
+
+    #[test]
+    fn a_snapshot_that_would_exactly_fill_the_budget_is_still_taken() {
+        let disk = SnapshotDisk {
+            total_bytes: 100 * GIB,
+            available_bytes: 100 * GIB,
+            cache_bytes: 0,
+            snapshot_bytes: 0,
+        };
+        assert_eq!(snapshot_budget(&disk), 92 * GIB);
+        assert_eq!(refusal_for_disk(&disk, 92 * GIB), None);
+        assert!(refusal_for_disk(&disk, 92 * GIB + 1).is_some());
+    }
+
+    #[test]
+    fn what_is_held_under_a_snapshot_directory_is_counted_however_deep_it_sits() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("app-1").join("deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("memory"), vec![b'x'; 100]).unwrap();
+        std::fs::write(directory.path().join("stamp.json"), vec![b'x'; 10]).unwrap();
+        assert_eq!(read_snapshot_bytes(directory.path()), 110);
+    }
 }

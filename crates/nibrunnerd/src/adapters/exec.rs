@@ -97,4 +97,40 @@ mod tests {
             CommandError::TimedOut { .. }
         ));
     }
+
+    #[tokio::test]
+    async fn a_tool_a_signal_took_down_has_no_code_of_its_own_and_is_not_read_as_success() {
+        let result = HostCommands
+            .run(CommandRequest::new(&["sh", "-c", "kill -9 $$"]))
+            .await
+            .unwrap();
+        assert_eq!(result.code, -1);
+        assert!(HostCommands
+            .stdout_of(CommandRequest::new(&["sh", "-c", "kill -9 $$"]))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn what_a_tool_wrote_before_it_failed_is_still_carried_up_with_the_refusal() {
+        let error = HostCommands
+            .stdout_of(CommandRequest::new(&[
+                "sh",
+                "-c",
+                "echo 'first line' >&2; echo 'the reason' >&2; exit 4",
+            ]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.message(), "sh exited 4: the reason");
+    }
+
+    #[tokio::test]
+    async fn nothing_this_host_runs_inherits_a_terminal_to_read_from() {
+        let result = HostCommands
+            .run(CommandRequest::new(&["sh", "-c", "cat; echo done"]))
+            .await
+            .unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout.trim(), "done");
+    }
 }

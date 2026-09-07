@@ -227,4 +227,59 @@ mod tests {
             })
         );
     }
+
+    #[tokio::test]
+    async fn a_ruleset_the_kernel_would_not_take_is_handed_up_and_never_remembered_as_applied() {
+        let (commands, log) = mocks::commands_answering(|request| {
+            if request.command.contains(&"-f".to_string()) {
+                Err(CommandError::Unstartable {
+                    executable: "nft".into(),
+                    reason: "not found".into(),
+                })
+            } else {
+                Ok(CommandResult::with_stdout(holding((2, 4))))
+            }
+        });
+        let firewall = HostFirewall::new(commands);
+        let state = FirewallState {
+            instances: vec![instance()],
+            ..Default::default()
+        };
+        let error = firewall.apply(&state).await.unwrap_err();
+        assert!(matches!(error, CommandError::Unstartable { .. }), "{error}");
+        firewall.apply(&state).await.unwrap_err();
+        assert_eq!(writes(&log), 2, "a ruleset that never landed is written again");
+    }
+
+    #[tokio::test]
+    async fn counters_this_host_cannot_read_are_a_failure_rather_than_an_empty_reading() {
+        let (commands, _) = mocks::commands_answering(|_| {
+            Err(CommandError::TimedOut {
+                executable: "nft".into(),
+            })
+        });
+        let error = HostFirewall::new(commands).traffic().await.unwrap_err();
+        assert!(matches!(error, CommandError::TimedOut { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_counter_listing_that_is_not_json_reads_as_no_traffic_rather_than_a_failure() {
+        let firewall = HostFirewall::new(listing("not json at all".to_string()).0);
+        assert!(firewall.traffic().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_ruleset_that_changed_is_written_even_when_the_kernel_still_holds_the_old_one() {
+        let (commands, log) = listing(holding((2, 4)));
+        let firewall = HostFirewall::new(commands);
+        firewall.apply(&FirewallState::default()).await.unwrap();
+        firewall
+            .apply(&FirewallState {
+                instances: vec![instance()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(writes(&log), 2);
+    }
 }

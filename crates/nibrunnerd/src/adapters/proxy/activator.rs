@@ -399,4 +399,98 @@ mod tests {
             .await
             .is_err());
     }
+
+    async fn raw(port: HostPort, request: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port.get()))
+            .await
+            .unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            stream.read_to_string(&mut answer),
+        )
+        .await
+        .expect("the activator closes the connection it answered on")
+        .unwrap();
+        answer
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_would_be_upgraded_is_told_to_come_back_once_the_app_is_up() {
+        let state = HostState::shared();
+        guest(&state, "served by the tenant\n").await;
+        let waker = CountingWaker::allowing();
+        let activator = AppActivator::new(state, waker.clone());
+        let host_port = serving(&activator, &app_id()).await;
+
+        let answered = raw(
+            host_port,
+            "GET /ws HTTP/1.0\r\nHost: app-1.apps.example.com\r\nupgrade: websocket\r\n\r\n",
+        )
+        .await;
+        assert!(answered.starts_with("HTTP/1.0 503 "), "{answered}");
+        assert!(answered.contains("retry-after: 2"), "{answered}");
+        assert!(
+            answered.ends_with("This app is starting. Please reconnect.\n"),
+            "{answered}"
+        );
+        assert_eq!(waker.count(), 1, "the app is still woken for the reconnect");
+    }
+
+    #[tokio::test]
+    async fn a_request_that_woke_an_app_counts_as_the_app_having_been_used() {
+        let state = HostState::shared();
+        guest(&state, "served by the tenant\n").await;
+        let before = crate::clock::now_ms();
+        let activator = AppActivator::new(state.clone(), CountingWaker::allowing());
+        let host_port = serving(&activator, &app_id()).await;
+        assert_eq!(get(host_port).await.status(), 200);
+        let stamped = state.snapshot().await.last_active_at_ms.get(&app_id()).copied();
+        assert!(stamped.is_some_and(|at| at >= before), "{stamped:?}");
+    }
+
+    #[tokio::test]
+    async fn an_app_that_was_never_asked_for_on_request_is_not_marked_as_used_by_a_refusal() {
+        let state = HostState::shared();
+        state
+            .put_record(instance_record(|record| record.on_request = false))
+            .await;
+        let activator = AppActivator::new(state.clone(), CountingWaker::allowing());
+        let host_port = serving(&activator, &app_id()).await;
+        assert_eq!(get(host_port).await.status(), 503);
+        assert!(state.snapshot().await.last_active_at_ms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_slot_that_moved_to_another_port_stops_being_answered_for_on_the_old_one() {
+        let state = HostState::shared();
+        state.put_record(instance_record(|_| {})).await;
+        let activator = AppActivator::new(state, CountingWaker::allowing());
+        let first = serving(&activator, &app_id()).await;
+        let second = serving(&activator, &app_id()).await;
+        assert_ne!(first, second);
+        assert_eq!(activator.listening_for().await, vec![app_id()]);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", first.get()))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_port_nothing_can_bind_leaves_the_activator_answering_for_nothing() {
+        let held = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let taken = HostPort::new(held.local_addr().unwrap().port()).unwrap();
+        let activator = AppActivator::new(HostState::shared(), CountingWaker::allowing());
+        activator.serve(&[(app_id(), taken)]).await;
+        assert!(activator.listening_for().await.is_empty());
+    }
+
+    #[test]
+    fn a_guest_is_reached_on_the_loopback_the_relay_sits_on() {
+        assert_eq!(GUEST_HOST, LOOPBACK);
+    }
 }

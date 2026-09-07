@@ -202,6 +202,53 @@ mod tests {
         assert_eq!(cache.latest().map(|state| state.instances.len()), Some(1));
     }
 
+    #[test]
+    fn a_file_that_is_not_json_at_all_is_told_apart_from_one_that_is_the_wrong_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("desired.json");
+        std::fs::write(&path, "}{").unwrap();
+        let error = read_desired_state(&path).unwrap_err();
+        assert!(matches!(error, DesiredStateError::Unreadable(_)), "{error}");
+        assert!(error.message().contains("does not hold the JSON"));
+
+        std::fs::write(&path, r#"{"hostId":"host-1","volumes":[]}"#).unwrap();
+        let error = read_desired_state(&path).unwrap_err();
+        assert!(matches!(error, DesiredStateError::Malformed { .. }), "{error}");
+        assert!(error.message().contains("desired.json"), "{error}");
+    }
+
+    #[test]
+    fn a_cache_that_has_taken_nothing_in_yet_has_nothing_to_converge_on() {
+        let cache = DesiredStateCache::new();
+        assert!(cache.latest().is_none());
+        assert!(DesiredStateCache::default().latest().is_none());
+    }
+
+    #[test]
+    fn a_document_that_moved_back_to_what_it_was_is_still_a_change_to_converge_on() {
+        let mut cache = DesiredStateCache::new();
+        let empty = desired_state(|_| {});
+        let one = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
+        assert!(cache.accept(empty.clone()));
+        assert!(cache.accept(one));
+        assert!(cache.accept(empty.clone()));
+        assert_eq!(cache.latest(), Some(&empty));
+    }
+
+    #[test]
+    fn a_watch_makes_the_directory_it_is_asked_to_watch() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("state");
+        let watch = DesiredStateWatch::on(&nested.join("desired.json"));
+        assert_eq!(watch.directory(), nested);
+        assert!(nested.is_dir());
+    }
+
+    #[test]
+    fn a_path_with_no_parent_at_all_is_watched_where_this_host_stands() {
+        assert_eq!(DesiredStateWatch::on(Path::new("/")).directory(), Path::new("."));
+    }
+
     #[tokio::test]
     async fn a_watch_settles_when_the_document_is_replaced() {
         let directory = tempfile::tempdir().unwrap();

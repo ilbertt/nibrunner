@@ -226,4 +226,57 @@ mod tests {
         assert_eq!(allocator.cursor(), 8);
         assert_eq!(allocator.assignments().len(), 1);
     }
+
+    #[test]
+    fn every_slot_the_host_holds_is_listed_so_the_ruleset_can_be_rendered_from_it() {
+        let mut allocator = SlotAllocator::empty();
+        assert!(allocator.slots().is_empty());
+        let first = allocator.allocate(&app(1)).unwrap();
+        let second = allocator.allocate(&app(2)).unwrap();
+        let slots = allocator.slots();
+        assert_eq!(slots.len(), 2);
+        let ports: std::collections::BTreeSet<u16> = slots.iter().map(|slot| slot.host_port.get()).collect();
+        assert_eq!(
+            ports,
+            std::collections::BTreeSet::from([first.host_port.get(), second.host_port.get()])
+        );
+        allocator.release(&app(1));
+        assert_eq!(allocator.slots().len(), 1);
+    }
+
+    #[test]
+    fn the_cursor_follows_the_slot_that_was_just_handed_out() {
+        let mut allocator = SlotAllocator::empty();
+        let handed = allocator.allocate(&app(1)).unwrap();
+        assert_eq!(allocator.cursor(), i64::from(handed.slot) + 1);
+        allocator.allocate(&app(1)).unwrap();
+        assert_eq!(allocator.cursor(), i64::from(handed.slot) + 1);
+    }
+
+    #[test]
+    fn a_host_with_no_room_left_says_how_many_slots_it_has_rather_than_only_that_it_is_full() {
+        let exhausted = SlotExhausted { limit: SLOT_COUNT };
+        assert_eq!(
+            exhausted.message(),
+            format!("all {SLOT_COUNT} host slots are allocated")
+        );
+    }
+
+    #[test]
+    fn a_slot_read_off_disk_is_the_slot_the_app_keeps_being_given() {
+        let restored = assignments_from(BTreeMap::from([("app-1".to_string(), serde_json::json!(9))]));
+        let mut allocator = SlotAllocator::empty();
+        allocator.restore(restored, 10);
+        assert_eq!(allocator.allocate(&app(1)).unwrap().slot, 9);
+        assert_eq!(allocator.lookup(&app(1)).unwrap().slot, 9);
+        assert!(allocator.lookup(&app(2)).is_none());
+    }
+
+    #[test]
+    fn a_slot_number_no_host_could_have_handed_out_is_not_restored() {
+        for unusable in [serde_json::json!(-1), serde_json::json!(u64::MAX)] {
+            let restored = assignments_from(BTreeMap::from([("app-1".to_string(), unusable.clone())]));
+            assert!(restored.is_empty(), "{unusable} was restored as a slot");
+        }
+    }
 }

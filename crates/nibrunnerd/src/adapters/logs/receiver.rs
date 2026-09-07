@@ -302,4 +302,148 @@ mod tests {
         assert!(receiver.attached().await.is_empty());
         assert!(UnixStream::connect(&socket_path).await.is_err());
     }
+
+    #[tokio::test]
+    async fn a_receiver_that_was_never_attached_is_detached_without_complaint() {
+        let receiver = TenantLogReceiver::new();
+        assert!(receiver.attached().await.is_empty());
+        receiver.detach(&app_id()).await;
+        assert!(receiver.attached().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_socket_that_moved_takes_the_old_one_down_rather_than_leaving_two_listening() {
+        let directory = tempfile::tempdir().unwrap();
+        let (sink, _) = mocks::log_sink();
+        let receiver = TenantLogReceiver::new();
+        let first = tenant_log_socket_path(&directory.path().join("one"));
+        let second = tenant_log_socket_path(&directory.path().join("two"));
+        receiver
+            .attach(app_id(), deployment_id(), first.clone(), sink.clone())
+            .await
+            .unwrap();
+        receiver
+            .attach(app_id(), deployment_id(), second.clone(), sink)
+            .await
+            .unwrap();
+        assert_eq!(receiver.attached().await, vec![app_id()]);
+        assert!(!first.exists(), "the socket nothing writes to is removed");
+        assert!(UnixStream::connect(&second).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_directory_the_socket_cannot_be_bound_in_is_a_failure_rather_than_a_silent_loss() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = directory.path().join("vm");
+        std::fs::write(&occupied, b"a file, not a directory").unwrap();
+        let (sink, _) = mocks::log_sink();
+        let receiver = TenantLogReceiver::new();
+        assert!(receiver
+            .attach(app_id(), deployment_id(), tenant_log_socket_path(&occupied), sink)
+            .await
+            .is_err());
+        assert!(receiver.attached().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn frames_this_host_cannot_read_end_the_stream_rather_than_being_guessed_at() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = tenant_log_socket_path(directory.path());
+        let (sink, spy) = mocks::log_sink();
+        let receiver = TenantLogReceiver::new();
+        receiver
+            .attach(app_id(), deployment_id(), socket_path.clone(), sink.clone())
+            .await
+            .unwrap();
+
+        let mut guest = UnixStream::connect(&socket_path).await.unwrap();
+        guest
+            .write_all(b"not a frame this host would ever have written")
+            .await
+            .unwrap();
+        guest.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(spy.events().is_empty());
+
+        let mut second = UnixStream::connect(&socket_path).await.unwrap();
+        second
+            .write_all(&encode_frame(ENCODE_KIND_STDOUT, b"after\n"))
+            .await
+            .unwrap();
+        second.flush().await.unwrap();
+        until(|| !spy.events().is_empty()).await;
+    }
+
+    #[tokio::test]
+    async fn a_frame_with_nothing_in_it_is_not_published_as_an_empty_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = tenant_log_socket_path(directory.path());
+        let (sink, spy) = mocks::log_sink();
+        let receiver = TenantLogReceiver::new();
+        receiver
+            .attach(app_id(), deployment_id(), socket_path.clone(), sink)
+            .await
+            .unwrap();
+
+        let mut guest = UnixStream::connect(&socket_path).await.unwrap();
+        guest
+            .write_all(&encode_frame(ENCODE_KIND_STDOUT, b""))
+            .await
+            .unwrap();
+        guest
+            .write_all(&encode_frame(ENCODE_KIND_STDOUT, b"something\n"))
+            .await
+            .unwrap();
+        guest.flush().await.unwrap();
+
+        until(|| !spy.events().is_empty()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let events = spy.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].sequence, 0,
+            "an empty frame takes no place in the stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_guests_on_the_same_socket_share_one_run_of_sequence_numbers() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = tenant_log_socket_path(directory.path());
+        let (sink, spy) = mocks::log_sink();
+        let receiver = TenantLogReceiver::new();
+        receiver
+            .attach(app_id(), deployment_id(), socket_path.clone(), sink)
+            .await
+            .unwrap();
+
+        for line in ["first\n", "second\n"] {
+            let mut guest = UnixStream::connect(&socket_path).await.unwrap();
+            guest
+                .write_all(&encode_frame(ENCODE_KIND_STDOUT, line.as_bytes()))
+                .await
+                .unwrap();
+            guest.flush().await.unwrap();
+            until({
+                let spy = spy.clone();
+                let wanted = if line == "first\n" { 1 } else { 2 };
+                move || spy.events().len() == wanted
+            })
+            .await;
+        }
+        let events = spy.events();
+        assert_eq!((events[0].sequence, events[1].sequence), (0, 1));
+        assert_eq!(events[0].source_id, events[1].source_id);
+    }
+
+    #[test]
+    fn the_socket_a_guest_writes_to_sits_beside_the_machine_description_it_boots_from() {
+        let working_dir = Path::new("/var/lib/nibrunner/vm/app-1");
+        let socket_path = tenant_log_socket_path(working_dir);
+        assert_eq!(socket_path.parent(), Some(working_dir));
+        assert_ne!(
+            socket_path,
+            tenant_log_socket_path(Path::new("/var/lib/nibrunner/vm/app-2"))
+        );
+    }
 }
