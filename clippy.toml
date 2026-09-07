@@ -1,6 +1,3 @@
-# The version clippy checks API suggestions against. Pinned to the toolchain rather than left to
-# clippy's own default, so a lint cannot suggest something this crate's MSRV forbids.
 msrv = "1.90.0"
 
-# Names `doc_markdown` would otherwise ask to be wrapped in backticks.
 doc-valid-idents = ["ZeroFS", "SlateDB", "Firecracker", "microVM", "microVMs", "nftables", "nibrun", "IPv4", "IPv6", "TypeBox", "..."]

@@ -98,7 +98,7 @@ takes the default. The same goes for the values — a relative path, a CIDR `nft
 `s3://` URL with no bucket, or a proxy port that an app slot is going to want are all refused
 while an operator is still watching rather than on the pass that first needed them.
 
-`deploy/config.toml` is the annotated copy, every key at its default. The short version:
+`deploy/config.toml` is a copy with every key at its default. What each one is:
 
 | Key | Default | What it is |
 | --- | --- | --- |

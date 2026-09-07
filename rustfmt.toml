@@ -1,9 +1,5 @@
-# Only what rustfmt settles on a stable toolchain: every option below is stable, so `cargo fmt`
-# does the same thing for everyone rather than quietly doing less on a machine without nightly.
 edition = "2021"
 
-# Wide enough that a `where` clause, a long path or a comment holding a sentence does not wrap
-# into something harder to read than the line it replaced.
 max_width = 110
 
 use_small_heuristics = "Default"

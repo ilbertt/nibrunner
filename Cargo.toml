@@ -14,33 +14,21 @@ edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.90"
 
-# Lint levels live here rather than as `#![deny(...)]` at the top of every crate root: one place
-# to change them, and a crate that opts in with `[lints] workspace = true` cannot drift from the
-# rest by forgetting an attribute.
 [workspace.lints.rust]
 missing_docs = "allow"
 unsafe_code = "warn"
 unreachable_pub = "warn"
-# `unused_qualifications` is deliberately absent. It flags `protocol::Timestamp::epoch_ms` where
-# `Timestamp` is already imported, and in a file that names types from four crates the qualified
-# spelling is the one that tells a reader where something came from.
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "allow", priority = -1 }
 
-# The ones that turn a crash into a compile error. This daemon holds tenants' microVMs up: a
-# panic in a reconcile pass takes the loop with it, and every one of these is a panic written as
-# an expression.
 unwrap_used = "warn"
 expect_used = "allow"
 panic = "warn"
 indexing_slicing = "allow"
 
 cast_possible_truncation = "allow"
-# `integer_division` is allowed rather than warned: every division in this codebase is a
-# deliberate floor — mebibytes from bytes, an octet from an index — and each is commented where
-# the rounding matters. A lint that fires on all of them says nothing about any of them.
 integer_division = "allow"
 
 too_many_lines = "allow"
@@ -55,16 +43,8 @@ nft-render = { path = "crates/nft-render", package = "nibrunner-nft-render" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# SQLite with the C library compiled in rather than linked from the host, which is the same
-# arrangement Bun ships: nothing to install beside the binary. `macros` is the point of choosing
-# sqlx at all — the schema is checked against the queries at build time.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "json"] }
-# The config file. `parse_only` because nothing here writes TOML back out, and the writer half
-# carries a second copy of the document model.
 toml = { version = "0.8", default-features = false, features = ["parse"] }
-# The bundle an export hands over. Written in-process rather than by spawning `tar`: an export
-# already needs `debugfs`, and a `tar` whose entry names come from a tenant's own filenames is one
-# more surface than a library that takes them as data.
 tar = "0.4"
 flate2 = "1"
 thiserror = "2"
@@ -80,13 +60,7 @@ http-body-util = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2"
-# `aws-base` + `ring` rather than the `aws` feature: `aws` forces the aws-lc-rs backend, whose
-# `aws-lc-sys` needs cmake and a C toolchain for the target — which is the one thing that would
-# stop this being a static cross-compiled binary. object_store signs with ring instead.
 object_store = { version = "0.14", default-features = false, features = ["fs", "aws-base", "reqwest", "ring"] }
-# object_store's own `reqwest` feature turns on the dependency without a TLS backend, so the
-# backend is chosen here. `rustls-no-provider` keeps aws-lc-rs out; `main` installs ring's
-# provider before anything dials, because rustls refuses to pick one for itself.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "http2", "json"] }
 backhand = { version = "0.25", default-features = false, features = ["gzip"] }
 sha2 = "0.10"
