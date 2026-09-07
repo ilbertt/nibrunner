@@ -56,6 +56,7 @@ impl CommandRunner for HostCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::CommandRunnerExt;
     use std::time::Duration;
 
     #[tokio::test]

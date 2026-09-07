@@ -5,7 +5,7 @@ use std::time::Duration;
 use protocol::VolumeId;
 
 use crate::adapters::volumes::VolumeError;
-use crate::ports::{CommandRequest, CommandRunner};
+use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
 const NBD_CLIENT: &str = "nbd-client";
 
@@ -164,18 +164,15 @@ fn direct_read(_device_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::RecordingCommandRunner;
+    use crate::test_support::mocks::{self, CommandLog};
 
-    fn devices(sysfs: &Path) -> (NbdDevices, Arc<RecordingCommandRunner>) {
-        let commands = RecordingCommandRunner::succeeding();
-        (
-            NbdDevices::with_sysfs(sysfs.to_path_buf(), commands.clone()),
-            commands,
-        )
+    fn devices(sysfs: &Path) -> (NbdDevices, CommandLog) {
+        let (commands, log) = mocks::commands_succeeding();
+        (NbdDevices::with_sysfs(sysfs.to_path_buf(), commands), log)
     }
 
-    fn asked(commands: &RecordingCommandRunner) -> Vec<Vec<String>> {
-        commands.calls().into_iter().map(|call| call.command).collect()
+    fn asked(log: &CommandLog) -> Vec<Vec<String>> {
+        log.commands()
     }
 
     fn attribute(sysfs: &Path, device: &str, attribute: &str, value: &str) {

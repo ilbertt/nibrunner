@@ -47,14 +47,21 @@ libc.workspace = true
 nix.workspace = true
 uuid.workspace = true
 async-trait = "0.1"
+mockall = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink.workspace = true
 netlink-packet-route.workspace = true
 
+[features]
+testing = ["dep:mockall", "dep:tempfile"]
+
 [dev-dependencies]
 tempfile.workspace = true
+mockall.workspace = true
 nft-render.workspace = true
+nibrunnerd = { path = ".", features = ["testing"] }
 
 [build-dependencies]
 sha2.workspace = true

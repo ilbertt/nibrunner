@@ -137,7 +137,7 @@ impl<'a> ReaderDevice<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::RecordingCommandRunner;
+    use crate::test_support::mocks;
 
     fn servers(root: &Path) -> CheckpointServers {
         CheckpointServers {
@@ -171,8 +171,8 @@ mod tests {
     #[tokio::test]
     async fn the_reader_device_is_taken_down_before_it_is_attached() {
         let sysfs = tempfile::tempdir().unwrap();
-        let commands = RecordingCommandRunner::succeeding();
-        let devices = NbdDevices::with_sysfs(sysfs.path().to_path_buf(), commands.clone());
+        let (commands, log) = mocks::commands_succeeding();
+        let devices = NbdDevices::with_sysfs(sysfs.path().to_path_buf(), commands);
         let volume_id = VolumeId::parse("vol-1").unwrap();
 
         let reader = ReaderDevice::attach(
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(reader.path(), "/dev/nbd63");
         reader.detach().await;
 
-        let asked: Vec<Vec<String>> = commands.calls().into_iter().map(|call| call.command).collect();
+        let asked = log.commands();
         assert_eq!(
             asked[0],
             vec!["nbd-client".to_string(), "-d".into(), "/dev/nbd63".into()]

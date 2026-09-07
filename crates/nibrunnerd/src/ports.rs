@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -91,10 +90,19 @@ impl CommandError {
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait CommandRunner: Send + Sync {
     async fn run(&self, request: CommandRequest) -> Result<CommandResult, CommandError>;
+}
 
+#[async_trait]
+pub trait CommandRunnerExt {
+    async fn stdout_of(&self, request: CommandRequest) -> Result<String, CommandError>;
+}
+
+#[async_trait]
+impl<T: CommandRunner + ?Sized> CommandRunnerExt for T {
     async fn stdout_of(&self, request: CommandRequest) -> Result<String, CommandError> {
         let result = self.run(request.clone()).await?;
         if result.code == 0 {
@@ -161,6 +169,7 @@ impl WakeOutcome {
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait Vmm: Send + Sync {
     async fn boot(&self, request: BootRequest) -> Result<(), VmError>;
@@ -192,6 +201,7 @@ impl ArtifactError {
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
     async fn read(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ArtifactError>;
@@ -218,6 +228,7 @@ pub enum TenantLogBody {
     },
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait LogSink: Send + Sync {
     async fn publish(&self, events: Vec<TenantLogEvent>);
@@ -242,50 +253,6 @@ impl DesiredStateOrigin {
     }
 }
 
-type CommandAnswer = dyn Fn(&CommandRequest) -> Result<CommandResult, CommandError> + Send + Sync;
-
-pub struct RecordingCommandRunner {
-    calls: Mutex<Vec<CommandRequest>>,
-    answer: Box<CommandAnswer>,
-}
-
-impl RecordingCommandRunner {
-    pub fn succeeding() -> Arc<Self> {
-        Self::answering(|_| Ok(CommandResult::succeeded()))
-    }
-
-    pub fn answering(
-        answer: impl Fn(&CommandRequest) -> Result<CommandResult, CommandError> + Send + Sync + 'static,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            calls: Mutex::new(Vec::new()),
-            answer: Box::new(answer),
-        })
-    }
-
-    pub fn calls(&self) -> Vec<CommandRequest> {
-        self.calls.lock().expect("no panic holds this lock").clone()
-    }
-
-    pub fn executables(&self) -> Vec<String> {
-        self.calls()
-            .iter()
-            .map(|request| request.executable().to_string())
-            .collect()
-    }
-}
-
-#[async_trait]
-impl CommandRunner for RecordingCommandRunner {
-    async fn run(&self, request: CommandRequest) -> Result<CommandResult, CommandError> {
-        self.calls
-            .lock()
-            .expect("no panic holds this lock")
-            .push(request.clone());
-        (self.answer)(&request)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmCall {
     Boot,
@@ -295,152 +262,14 @@ pub enum VmCall {
     Discard,
 }
 
-pub struct RecordingVmm {
-    calls: Mutex<Vec<VmCall>>,
-    status: Mutex<VmStatus>,
-    on_sleep: Mutex<Option<VmError>>,
-    on_wake: Mutex<Option<VmError>>,
-    verdict: Mutex<Option<String>>,
-    working_dir: PathBuf,
-}
-
-impl RecordingVmm {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            calls: Mutex::new(Vec::new()),
-            status: Mutex::new(VmStatus::default()),
-            on_sleep: Mutex::new(None),
-            on_wake: Mutex::new(None),
-            verdict: Mutex::new(None),
-            working_dir: PathBuf::from("/nowhere/vm"),
-        })
-    }
-
-    pub fn calls(&self) -> Vec<VmCall> {
-        self.calls.lock().expect("no panic holds this lock").clone()
-    }
-
-    pub fn set_status(&self, status: VmStatus) {
-        *self.status.lock().expect("no panic holds this lock") = status;
-    }
-
-    pub fn refuse_sleep(&self, error: VmError) {
-        *self.on_sleep.lock().expect("no panic holds this lock") = Some(error);
-    }
-
-    pub fn refuse_wake(&self, error: VmError) {
-        *self.on_wake.lock().expect("no panic holds this lock") = Some(error);
-    }
-
-    pub fn set_verdict(&self, verdict: impl Into<String>) {
-        *self.verdict.lock().expect("no panic holds this lock") = Some(verdict.into());
-    }
-
-    fn record(&self, call: VmCall) {
-        self.calls.lock().expect("no panic holds this lock").push(call);
-    }
-}
-
-#[async_trait]
-impl Vmm for RecordingVmm {
-    async fn boot(&self, _request: BootRequest) -> Result<(), VmError> {
-        self.record(VmCall::Boot);
-        Ok(())
-    }
-
-    async fn sleep(&self, _request: SuspendRequest) -> Result<(), VmError> {
-        self.record(VmCall::Sleep);
-        match self.on_sleep.lock().expect("no panic holds this lock").clone() {
-            None => Ok(()),
-            Some(error) => Err(error),
-        }
-    }
-
-    async fn wake(&self, _request: SuspendRequest) -> Result<(), VmError> {
-        self.record(VmCall::Wake);
-        match self.on_wake.lock().expect("no panic holds this lock").clone() {
-            None => Ok(()),
-            Some(error) => Err(error),
-        }
-    }
-
-    async fn stop(&self, _app_id: &AppId) -> Result<(), VmError> {
-        self.record(VmCall::Stop);
-        Ok(())
-    }
-
-    async fn discard(&self, _app_id: &AppId) -> Result<(), VmError> {
-        self.record(VmCall::Discard);
-        Ok(())
-    }
-
-    async fn statuses(&self, app_ids: &[AppId]) -> BTreeMap<AppId, VmStatus> {
-        let status = *self.status.lock().expect("no panic holds this lock");
-        app_ids.iter().map(|app_id| (app_id.clone(), status)).collect()
-    }
-
-    async fn adopted_app_ids(&self) -> Vec<AppId> {
-        Vec::new()
-    }
-
-    async fn guest_verdict(&self, _app_id: &AppId) -> Option<String> {
-        self.verdict.lock().expect("no panic holds this lock").clone()
-    }
-
-    fn working_dir(&self, app_id: &AppId) -> PathBuf {
-        self.working_dir.join(app_id.as_str())
-    }
-}
-
-pub struct StubArtifactStore {
-    bytes: Vec<u8>,
-}
-
-impl StubArtifactStore {
-    pub fn holding(bytes: impl Into<Vec<u8>>) -> Arc<Self> {
-        Arc::new(Self { bytes: bytes.into() })
-    }
-}
-
-#[async_trait]
-impl ArtifactStore for StubArtifactStore {
-    async fn read(&self, _object_key: &ObjectKey) -> Result<Vec<u8>, ArtifactError> {
-        Ok(self.bytes.clone())
-    }
-}
-
-#[derive(Default)]
-pub struct RecordingLogSink {
-    events: Mutex<Vec<TenantLogEvent>>,
-}
-
-impl RecordingLogSink {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    pub fn events(&self) -> Vec<TenantLogEvent> {
-        self.events.lock().expect("no panic holds this lock").clone()
-    }
-}
-
-#[async_trait]
-impl LogSink for RecordingLogSink {
-    async fn publish(&self, events: Vec<TenantLogEvent>) {
-        self.events
-            .lock()
-            .expect("no panic holds this lock")
-            .extend(events);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::mocks;
 
     #[tokio::test]
     async fn a_command_that_failed_names_the_tail_of_what_it_said() {
-        let runner = RecordingCommandRunner::answering(|_| {
+        let (runner, log) = mocks::commands_answering(|_| {
             Ok(CommandResult {
                 code: 1,
                 stdout: String::new(),
@@ -452,16 +281,68 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.message(), "nft exited 1: the actual reason");
-        assert_eq!(runner.executables(), vec!["nft"]);
-        assert_eq!(runner.calls()[0].command, vec!["nft", "-f", "-"]);
+        assert_eq!(log.executables(), vec!["nft"]);
+        assert_eq!(log.calls()[0].command, vec!["nft", "-f", "-"]);
     }
 
     #[tokio::test]
     async fn a_command_that_succeeded_hands_back_what_it_wrote() {
-        let runner = RecordingCommandRunner::answering(|_| Ok(CommandResult::with_stdout("ok")));
+        let (runner, _log) = mocks::commands_answering(|_| Ok(CommandResult::with_stdout("ok")));
         assert_eq!(
             runner.stdout_of(CommandRequest::new(&["nft"])).await.unwrap(),
             "ok"
         );
+    }
+
+    #[tokio::test]
+    async fn a_command_that_could_not_be_started_is_handed_up_rather_than_swallowed() {
+        let (runner, _log) = mocks::commands_answering(|request| {
+            Err(CommandError::Unstartable {
+                executable: request.executable().to_string(),
+                reason: "no such file".into(),
+            })
+        });
+        let error = runner
+            .stdout_of(CommandRequest::new(&["mke2fs"]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.message(), "mke2fs could not be run: no such file");
+    }
+
+    #[test]
+    fn a_request_with_no_words_in_it_names_no_executable() {
+        assert_eq!(CommandRequest::new(&[]).executable(), "");
+    }
+
+    #[test]
+    fn a_failure_with_nothing_on_stderr_still_names_the_code() {
+        let request = CommandRequest::new(&["nft"]);
+        let result = CommandResult {
+            code: 2,
+            stdout: String::new(),
+            stderr: "   \n".into(),
+        };
+        assert_eq!(CommandError::failed(&request, &result).message(), "nft exited 2");
+    }
+
+    #[test]
+    fn stdin_is_carried_on_the_request_that_will_be_fed_it() {
+        let request = CommandRequest::new(&["nft", "-f", "-"]).with_stdin("table inet nibrun {}");
+        assert_eq!(request.stdin.as_deref(), Some("table inet nibrun {}"));
+    }
+
+    #[test]
+    fn every_way_a_wake_can_end_has_a_name_a_reader_can_tell_apart() {
+        assert_eq!(WakeOutcome::Restored.as_str(), "restored");
+        assert_eq!(WakeOutcome::AlreadyRunning.as_str(), "already-running");
+        assert_eq!(WakeOutcome::ColdBoot.as_str(), "cold-boot");
+    }
+
+    #[test]
+    fn every_source_a_document_can_arrive_from_has_a_name() {
+        assert_eq!(DesiredStateOrigin::File.as_str(), "file");
+        assert_eq!(DesiredStateOrigin::Socket.as_str(), "socket");
+        assert_eq!(DesiredStateOrigin::ControlPlane.as_str(), "control-plane");
+        assert_eq!(DesiredStateOrigin::Cache.as_str(), "cache");
     }
 }

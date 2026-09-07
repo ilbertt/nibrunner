@@ -1,3 +1,5 @@
+pub mod mocks;
+
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -207,9 +209,9 @@ pub static ONE_HOST_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 pub struct TestHost {
     _directory: tempfile::TempDir,
     pub host: Arc<crate::host::Host>,
-    pub vms: Arc<crate::ports::RecordingVmm>,
-    pub commands: Arc<crate::ports::RecordingCommandRunner>,
-    pub exports: Arc<crate::services::exports::store::RecordingExportStore>,
+    pub vms: mocks::VmmSpy,
+    pub commands: mocks::CommandLog,
+    pub exports: mocks::ExportSpy,
 }
 
 impl TestHost {
@@ -241,7 +243,6 @@ pub async fn test_host() -> TestHost {
     use crate::config::HostConfig;
     use crate::desired::DesiredStateCache;
     use crate::host::Host;
-    use crate::ports::{RecordingCommandRunner, RecordingVmm, StubArtifactStore};
     use crate::state::HostState;
 
     struct NeverWoken;
@@ -256,23 +257,23 @@ pub async fn test_host() -> TestHost {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let config = HostConfig::under(directory.path());
     let state = HostState::shared();
-    let commands = RecordingCommandRunner::succeeding();
-    let vms = RecordingVmm::new();
-    let exports = crate::services::exports::store::RecordingExportStore::accepting();
+    let (commands, command_log) = mocks::commands_succeeding();
+    let (vms, vm_spy) = mocks::vmm();
+    let (exports, export_spy) = mocks::exports_accepting();
     let host = Arc::new(Host {
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         state: state.clone(),
         allocator: Arc::new(Mutex::new(SlotAllocator::empty())),
         cache: Mutex::new(DesiredStateCache::new()),
-        vms: vms.clone(),
+        vms,
         volumes: Arc::new(LocalFileVolumes::new(
             config.volumes_dir(),
             ObjectKey::parse(&config.storage_prefix).expect("a storage prefix"),
             commands.clone(),
         )),
-        artifacts: StubArtifactStore::holding(ARTIFACT_BYTES.to_vec()),
+        artifacts: mocks::artifacts_holding(ARTIFACT_BYTES.to_vec()),
         store: crate::repositories::in_memory().await,
-        exports: exports.clone(),
+        exports,
         checkpoint_servers: None,
         nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),
         commands: commands.clone(),
@@ -284,8 +285,8 @@ pub async fn test_host() -> TestHost {
     TestHost {
         _directory: directory,
         host,
-        vms,
-        commands,
-        exports,
+        vms: vm_spy,
+        commands: command_log,
+        exports: export_spy,
     }
 }

@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use nibrunnerd::ports::{CommandRunner, RecordingCommandRunner};
+use nibrunnerd::ports::{CommandRunner, CommandRunnerExt};
+use nibrunnerd::test_support::mocks;
 
 fn enabled() -> bool {
     std::env::var("NIBRUNNER_INTEGRATION").is_ok_and(|value| value == "1")
@@ -96,18 +97,18 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     let attached = volumes.provision(&desired).await.expect("the volume is made");
     assert_eq!(attached.size_bytes, desired.size_bytes);
 
-    let recorded = RecordingCommandRunner::succeeding();
+    let (recorded, log) = mocks::commands_succeeding();
     let second = nibrunnerd::adapters::volumes::local_file::LocalFileVolumes::new(
         directory.path().to_path_buf(),
         protocol::ObjectKey::parse("volumes").unwrap(),
-        recorded.clone(),
+        recorded,
     );
     second
         .provision(&desired)
         .await
         .expect("a converged volume needs nothing");
     assert!(
-        recorded.executables().is_empty(),
+        log.executables().is_empty(),
         "a formatted volume must never be formatted again"
     );
 }

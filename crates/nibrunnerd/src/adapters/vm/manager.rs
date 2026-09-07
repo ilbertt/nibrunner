@@ -362,24 +362,23 @@ pub fn firecracker_version() -> &'static str {
 mod tests {
     use super::*;
     use crate::adapters::logs::FileLogSink;
-    use crate::adapters::net::tap::RecordingNetwork;
     use crate::adapters::volumes::local_file::LocalFileVolumes;
-    use crate::ports::RecordingCommandRunner;
     use crate::state::HostState;
+    use crate::test_support::mocks;
     use crate::test_support::*;
     use protocol::ObjectKey;
 
     struct Fixture {
         _directory: tempfile::TempDir,
         manager: VmManager,
-        network: Arc<RecordingNetwork>,
+        network: mocks::NetworkSpy,
         state: SharedState,
     }
 
     fn fixture() -> Fixture {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let network = RecordingNetwork::new();
+        let (network, network_spy) = mocks::network();
         let state = HostState::shared();
         let manager = VmManager {
             vm_dir: root.join("vm"),
@@ -389,11 +388,11 @@ mod tests {
             guest_image_version: "6.1.180-test".into(),
             public_ipv4: None,
             processes: VmProcesses::new(root.join("run")),
-            network: network.clone(),
+            network,
             volumes: Arc::new(LocalFileVolumes::new(
                 root.join("volumes"),
                 ObjectKey::parse("volumes").unwrap(),
-                RecordingCommandRunner::succeeding(),
+                mocks::commands_succeeding().0,
             )),
             logs: TenantLogReceiver::new(),
             sink: Arc::new(FileLogSink::new(root.join("logs"))),
@@ -402,7 +401,7 @@ mod tests {
         Fixture {
             _directory: directory,
             manager,
-            network,
+            network: network_spy,
             state,
         }
     }

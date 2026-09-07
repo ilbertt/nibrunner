@@ -188,7 +188,7 @@ pub fn tenant_log_socket_path(working_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::RecordingLogSink;
+    use crate::test_support::mocks;
     use crate::test_support::{app_id, deployment_id};
     use guest_contract::logs::{encode_frame, ENCODE_KIND_GAP, ENCODE_KIND_STDOUT};
     use tokio::io::AsyncWriteExt;
@@ -207,7 +207,7 @@ mod tests {
     async fn what_a_guest_writes_arrives_as_events_in_order() {
         let directory = tempfile::tempdir().unwrap();
         let socket_path = tenant_log_socket_path(directory.path());
-        let sink = RecordingLogSink::new();
+        let (sink, spy) = mocks::log_sink();
         let receiver = TenantLogReceiver::new();
         receiver
             .attach(app_id(), deployment_id(), socket_path.clone(), sink.clone())
@@ -224,8 +224,8 @@ mod tests {
             .unwrap();
         guest.flush().await.unwrap();
 
-        until(|| sink.events().len() == 2).await;
-        let events = sink.events();
+        until(|| spy.events().len() == 2).await;
+        let events = spy.events();
         assert_eq!(events[0].app_id, app_id());
         assert_eq!(
             events[0].body,
@@ -243,7 +243,7 @@ mod tests {
     async fn a_character_split_across_frames_is_not_emitted_in_halves() {
         let directory = tempfile::tempdir().unwrap();
         let socket_path = tenant_log_socket_path(directory.path());
-        let sink = RecordingLogSink::new();
+        let (sink, spy) = mocks::log_sink();
         let receiver = TenantLogReceiver::new();
         receiver
             .attach(app_id(), deployment_id(), socket_path.clone(), sink.clone())
@@ -262,9 +262,9 @@ mod tests {
             .unwrap();
         guest.flush().await.unwrap();
 
-        until(|| !sink.events().is_empty()).await;
+        until(|| !spy.events().is_empty()).await;
         assert_eq!(
-            sink.events()[0].body,
+            spy.events()[0].body,
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
                 text: "☃".into()
@@ -276,7 +276,7 @@ mod tests {
     async fn attaching_the_same_path_again_only_restamps_the_deployment() {
         let directory = tempfile::tempdir().unwrap();
         let socket_path = tenant_log_socket_path(directory.path());
-        let sink = RecordingLogSink::new();
+        let (sink, spy) = mocks::log_sink();
         let receiver = TenantLogReceiver::new();
         receiver
             .attach(app_id(), deployment_id(), socket_path.clone(), sink.clone())
@@ -295,8 +295,8 @@ mod tests {
             .await
             .unwrap();
         second.flush().await.unwrap();
-        until(|| !sink.events().is_empty()).await;
-        assert_eq!(sink.events()[0].deployment_id, newer);
+        until(|| !spy.events().is_empty()).await;
+        assert_eq!(spy.events()[0].deployment_id, newer);
 
         receiver.detach(&app_id()).await;
         assert!(receiver.attached().await.is_empty());

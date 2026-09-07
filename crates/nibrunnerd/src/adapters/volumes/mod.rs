@@ -62,6 +62,7 @@ impl CacheReservation {
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait VolumeBackend: Send + Sync {
     async fn provision(&self, desired: &DesiredVolume) -> Result<AttachedVolume, VolumeError>;

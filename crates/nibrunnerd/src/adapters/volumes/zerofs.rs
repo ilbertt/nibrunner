@@ -11,7 +11,7 @@ use crate::adapters::volumes::{
     align_to_sector, has_ext_magic, AttachedVolume, CacheReservation, ObservedBacking, VolumeBackend,
     VolumeError, FILESYSTEM_LABEL, SUPERBLOCK_MAGIC_OFFSET,
 };
-use crate::ports::{CommandRequest, CommandRunner};
+use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
 pub const NBD_DIRECTORY: &str = ".nbd";
 
@@ -378,7 +378,7 @@ impl VolumeBackend for ZerofsVolumes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::RecordingCommandRunner;
+    use crate::test_support::mocks;
     use crate::test_support::{app_id, desired_volume};
 
     fn filesystem(root: &Path) -> ZerofsFilesystem {
@@ -435,7 +435,7 @@ mod tests {
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
-            RecordingCommandRunner::succeeding(),
+            mocks::commands_succeeding().0,
         );
         let volume_id = VolumeId::parse("vol-1").unwrap();
         assert_eq!(volumes.ensure_device_file(&volume_id, 1024).unwrap(), 1024);
@@ -452,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn a_teardown_flushes_before_it_removes_anything() {
         let root = tempfile::tempdir().unwrap();
-        let commands = RecordingCommandRunner::succeeding();
+        let (commands, log) = mocks::commands_succeeding();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
@@ -462,7 +462,7 @@ mod tests {
         volumes.ensure_device_file(&volume_id, 1024).unwrap();
         volumes.teardown(&volume_id, &app_id()).await.unwrap();
 
-        let asked: Vec<Vec<String>> = commands.calls().into_iter().map(|call| call.command).collect();
+        let asked = log.commands();
         assert_eq!(
             asked[0],
             vec![
@@ -478,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn nothing_here_ever_runs_zerofs_as_a_second_writer() {
         let root = tempfile::tempdir().unwrap();
-        let commands = RecordingCommandRunner::succeeding();
+        let (commands, log) = mocks::commands_succeeding();
         let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
         let volumes = ZerofsVolumes::new(filesystem(root.path()), allocator, commands.clone());
         let volume_id = VolumeId::parse("vol-1").unwrap();
@@ -493,7 +493,7 @@ mod tests {
             .await;
         let _ = volumes.teardown(&volume_id, &app_id()).await;
 
-        for call in commands.calls() {
+        for call in log.calls() {
             let writes = call.command.contains(&"run".to_string())
                 && !call.command.contains(&"--checkpoint".to_string());
             assert!(
@@ -510,7 +510,7 @@ mod tests {
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
-            RecordingCommandRunner::succeeding(),
+            mocks::commands_succeeding().0,
         );
         let volume_id = VolumeId::parse("vol-nowhere").unwrap();
         assert_eq!(
@@ -527,7 +527,7 @@ mod tests {
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
-            RecordingCommandRunner::succeeding(),
+            mocks::commands_succeeding().0,
         );
         assert!(volumes.observe(&Default::default()).await.is_empty());
     }
@@ -543,7 +543,7 @@ mod tests {
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
-            RecordingCommandRunner::succeeding(),
+            mocks::commands_succeeding().0,
         );
         let reserved = volumes.reserved_cache();
         assert_eq!(reserved.disk_bytes, 64 * 1_073_741_824);
@@ -556,7 +556,7 @@ mod tests {
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
-            RecordingCommandRunner::succeeding(),
+            mocks::commands_succeeding().0,
         );
         assert_eq!(volumes.reserved_cache().memory_mib(), 2048);
         assert_eq!(volumes.reserved_cache().disk_bytes, ASSUMED_CACHE_BYTES);
@@ -565,7 +565,7 @@ mod tests {
     #[tokio::test]
     async fn a_device_is_attached_first_and_never_formatted_on_a_guess() {
         let root = tempfile::tempdir().unwrap();
-        let commands = RecordingCommandRunner::succeeding();
+        let (commands, log) = mocks::commands_succeeding();
         let sysfs = tempfile::tempdir().unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
@@ -585,7 +585,7 @@ mod tests {
             }
         );
 
-        let asked: Vec<Vec<String>> = commands.calls().into_iter().map(|call| call.command).collect();
+        let asked = log.commands();
         assert_eq!(
             asked.len(),
             1,

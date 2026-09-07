@@ -20,6 +20,7 @@ impl ExportStoreError {
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait ExportStore: Send + Sync {
     async fn upload(&self, bundle_path: &Path, object_key: &ObjectKey) -> Result<(), ExportStoreError>;
@@ -91,39 +92,6 @@ impl ExportStore for ObjectExportStore {
         }
         upload.complete().await.map_err(|error| transfer(&error))?;
         Ok(())
-    }
-}
-
-pub struct RecordingExportStore {
-    uploads: std::sync::Mutex<Vec<(std::path::PathBuf, ObjectKey)>>,
-    answer: Box<dyn Fn() -> Result<(), ExportStoreError> + Send + Sync>,
-}
-
-impl RecordingExportStore {
-    pub fn accepting() -> Arc<Self> {
-        Self::answering(|| Ok(()))
-    }
-
-    pub fn answering(answer: impl Fn() -> Result<(), ExportStoreError> + Send + Sync + 'static) -> Arc<Self> {
-        Arc::new(Self {
-            uploads: std::sync::Mutex::new(Vec::new()),
-            answer: Box::new(answer),
-        })
-    }
-
-    pub fn uploads(&self) -> Vec<(std::path::PathBuf, ObjectKey)> {
-        self.uploads.lock().expect("no panic holds this lock").clone()
-    }
-}
-
-#[async_trait]
-impl ExportStore for RecordingExportStore {
-    async fn upload(&self, bundle_path: &Path, object_key: &ObjectKey) -> Result<(), ExportStoreError> {
-        self.uploads
-            .lock()
-            .expect("no panic holds this lock")
-            .push((bundle_path.to_path_buf(), object_key.clone()));
-        (self.answer)()
     }
 }
 

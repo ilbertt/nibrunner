@@ -8,7 +8,7 @@ use nft_render::{
 use protocol::AppId;
 use tokio::sync::Mutex;
 
-use crate::ports::{CommandError, CommandRequest, CommandRunner};
+use crate::ports::{CommandError, CommandRequest, CommandRunner, CommandRunnerExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Applied {
@@ -79,7 +79,8 @@ impl HostFirewall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::{CommandResult, RecordingCommandRunner};
+    use crate::ports::CommandResult;
+    use crate::test_support::mocks::{self, CommandLog};
     use nft_render::{app_counter_name, ForwardedInstance};
     use protocol::{HostPort, HttpPort, Ipv4Address};
 
@@ -101,8 +102,8 @@ mod tests {
         }
     }
 
-    fn listing(answer: String) -> Arc<RecordingCommandRunner> {
-        RecordingCommandRunner::answering(move |request| {
+    fn listing(answer: String) -> (Arc<crate::ports::MockCommandRunner>, CommandLog) {
+        mocks::commands_answering(move |request| {
             if request.command.contains(&"list".to_string()) {
                 Ok(CommandResult::with_stdout(answer.clone()))
             } else {
@@ -111,9 +112,8 @@ mod tests {
         })
     }
 
-    fn writes(commands: &RecordingCommandRunner) -> usize {
-        commands
-            .calls()
+    fn writes(log: &CommandLog) -> usize {
+        log.calls()
             .iter()
             .filter(|request| request.command.contains(&"-f".to_string()))
             .count()
@@ -121,14 +121,14 @@ mod tests {
 
     #[tokio::test]
     async fn the_ruleset_is_piped_to_nft_whole_and_a_rerun_costs_nothing() {
-        let commands = listing(holding((2, 4)));
-        let firewall = HostFirewall::new(commands.clone());
+        let (commands, log) = listing(holding((2, 4)));
+        let firewall = HostFirewall::new(commands);
         let state = FirewallState {
             instances: vec![instance()],
             ..Default::default()
         };
         firewall.apply(&state).await.unwrap();
-        let written = commands
+        let written = log
             .calls()
             .into_iter()
             .find(|request| request.command.contains(&"-f".to_string()))
@@ -142,7 +142,7 @@ mod tests {
 
         firewall.apply(&state).await.unwrap();
         assert_eq!(
-            writes(&commands),
+            writes(&log),
             1,
             "an unchanged ruleset the kernel still holds is not rewritten"
         );
@@ -151,7 +151,7 @@ mod tests {
     #[tokio::test]
     async fn a_ruleset_something_else_dropped_is_written_again() {
         let flushed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let commands = RecordingCommandRunner::answering({
+        let (commands, log) = mocks::commands_answering({
             let flushed = flushed.clone();
             move |request| {
                 if request.command.contains(&"list".to_string()) {
@@ -165,18 +165,18 @@ mod tests {
                 Ok(CommandResult::succeeded())
             }
         });
-        let firewall = HostFirewall::new(commands.clone());
+        let firewall = HostFirewall::new(commands);
         let state = FirewallState::default();
         firewall.apply(&state).await.unwrap();
         flushed.store(true, std::sync::atomic::Ordering::SeqCst);
         firewall.apply(&state).await.unwrap();
-        assert_eq!(writes(&commands), 2);
+        assert_eq!(writes(&log), 2);
     }
 
     #[tokio::test]
     async fn a_table_rebuilt_under_this_daemon_is_written_again() {
         let handles = Arc::new(std::sync::atomic::AtomicU64::new(2));
-        let commands = RecordingCommandRunner::answering({
+        let (commands, log) = mocks::commands_answering({
             let handles = handles.clone();
             move |request| {
                 if request.command.contains(&"list".to_string()) {
@@ -186,16 +186,16 @@ mod tests {
                 Ok(CommandResult::succeeded())
             }
         });
-        let firewall = HostFirewall::new(commands.clone());
+        let firewall = HostFirewall::new(commands);
         firewall.apply(&FirewallState::default()).await.unwrap();
         handles.store(8, std::sync::atomic::Ordering::SeqCst);
         firewall.apply(&FirewallState::default()).await.unwrap();
-        assert_eq!(writes(&commands), 2);
+        assert_eq!(writes(&log), 2);
     }
 
     #[tokio::test]
     async fn a_kernel_that_would_not_answer_is_not_taken_as_proof_the_rules_are_in_place() {
-        let commands = RecordingCommandRunner::answering(|request| {
+        let (commands, log) = mocks::commands_answering(|request| {
             if request.command.contains(&"list".to_string()) {
                 Err(CommandError::Unstartable {
                     executable: "nft".into(),
@@ -208,7 +208,7 @@ mod tests {
         let firewall = HostFirewall::new(commands.clone());
         firewall.apply(&FirewallState::default()).await.unwrap();
         firewall.apply(&FirewallState::default()).await.unwrap();
-        assert_eq!(writes(&commands), 2);
+        assert_eq!(writes(&log), 2);
     }
 
     #[tokio::test]
@@ -218,7 +218,7 @@ mod tests {
             r#"{{"nftables":[{{"counter":{{"family":"ip","name":"{}","table":"nibrun","handle":2,"packets":3,"bytes":512}}}}]}}"#,
             app_counter_name(&app)
         );
-        let firewall = HostFirewall::new(listing(counters));
+        let firewall = HostFirewall::new(listing(counters).0);
         assert_eq!(
             firewall.traffic().await.unwrap().get(&app),
             Some(&AppTraffic {

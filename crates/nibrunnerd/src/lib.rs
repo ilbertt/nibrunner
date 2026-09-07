@@ -1,4 +1,7 @@
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
+#![cfg_attr(
+    any(test, feature = "testing"),
+    allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)
+)]
 
 pub mod adapters;
 pub mod clock;
@@ -12,7 +15,7 @@ pub mod repositories;
 pub mod run;
 pub mod services;
 pub mod state;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 
 pub fn install_crypto_provider() {

@@ -97,6 +97,7 @@ rtnetlink = { version = "0.23", default-features = false, features = ["tokio_soc
 netlink-packet-route = "0.33"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
+mockall = "0.15"
 
 [profile.release]
 strip = true

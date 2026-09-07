@@ -137,7 +137,7 @@ pub fn build_instance_config_image(working_dir: &Path, rendered: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::StubArtifactStore;
+    use crate::test_support::mocks;
     use crate::test_support::{artifact, ARTIFACT_BYTES, ARTIFACT_DIGEST};
 
     fn artifact_bytes() -> Vec<u8> {
@@ -145,7 +145,7 @@ mod tests {
     }
 
     fn store(bytes: Vec<u8>) -> Arc<dyn ArtifactStore> {
-        StubArtifactStore::holding(bytes)
+        mocks::artifacts_holding(bytes)
     }
 
     #[test]

@@ -53,6 +53,7 @@ pub enum WakeRefusal {
     Failed { reason: String },
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait Waker: Send + Sync {
     async fn wake(&self, app_id: &AppId) -> Result<(), WakeRefusal>;

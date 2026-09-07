@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use protocol::{DesiredArtifact, TenantEnvironment};
 
-use crate::ports::{ArtifactStore, CommandRequest, CommandRunner};
+use crate::ports::{ArtifactStore, CommandRequest, CommandRunner, CommandRunnerExt};
 
 const STAGING_MODE: u32 = 0o700;
 const DATA_DIRECTORY: &str = "data";
@@ -200,7 +200,8 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), BundleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::{CommandResult, RecordingCommandRunner, StubArtifactStore};
+    use crate::ports::CommandResult;
+    use crate::test_support::mocks;
     use crate::test_support::{artifact, tenant_environment, ARTIFACT_BYTES};
 
     #[test]
@@ -232,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn a_dump_that_produced_nothing_is_a_failure_however_debugfs_exited() {
         let root = tempfile::tempdir().unwrap();
-        let commands: Arc<dyn CommandRunner> = RecordingCommandRunner::succeeding();
+        let commands: Arc<dyn CommandRunner> = mocks::commands_succeeding().0;
         let error = dump_volume(&commands, "/dev/nbd63", &root.path().join("staging"))
             .await
             .unwrap_err();
@@ -244,10 +245,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
         let planted = staging.join(DATA_DIRECTORY).join("lost+found");
-        let commands: Arc<dyn CommandRunner> = RecordingCommandRunner::answering(move |_| {
+        let commands: Arc<dyn CommandRunner> = mocks::commands_answering(move |_| {
             std::fs::create_dir_all(&planted).unwrap();
             Ok(CommandResult::succeeded())
-        });
+        })
+        .0;
 
         dump_volume(&commands, "/dev/nbd63", &staging).await.unwrap();
         let data = staging.join(DATA_DIRECTORY);
@@ -264,7 +266,7 @@ mod tests {
         std::fs::write(staging.join(DATA_DIRECTORY).join("notes.txt"), b"tenant data").unwrap();
 
         let wanted = artifact(|_| {});
-        let artifacts: Arc<dyn ArtifactStore> = StubArtifactStore::holding(ARTIFACT_BYTES);
+        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES);
         let environment = tenant_environment(&[("TOKEN", "hunter2")]);
 
         let written = write_bundle(&artifacts, &wanted, Some(&environment), &staging)
@@ -282,7 +284,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
         std::fs::create_dir_all(staging.join(DATA_DIRECTORY)).unwrap();
-        let artifacts: Arc<dyn ArtifactStore> = StubArtifactStore::holding(ARTIFACT_BYTES);
+        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES);
         let written = write_bundle(&artifacts, &artifact(|_| {}), None, &staging)
             .await
             .unwrap();
@@ -303,7 +305,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
         std::fs::create_dir_all(staging.join(DATA_DIRECTORY)).unwrap();
-        let artifacts: Arc<dyn ArtifactStore> = StubArtifactStore::holding(ARTIFACT_BYTES);
+        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES);
         let written = write_bundle(&artifacts, &artifact(|_| {}), None, &staging)
             .await
             .unwrap();

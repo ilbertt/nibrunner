@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use async_trait::async_trait;
 use protocol::Ipv4Address;
 
@@ -31,6 +29,7 @@ impl NetworkError {
     }
 }
 
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait HostNetwork: Send + Sync {
     async fn ensure_tap(&self, tap: &TapInterface) -> Result<(), NetworkError>;
@@ -38,49 +37,6 @@ pub trait HostNetwork: Send + Sync {
     async fn refresh_neighbour(&self, neighbour: &Neighbour) -> Result<(), NetworkError>;
 
     async fn tap_names(&self) -> Vec<String>;
-}
-
-#[derive(Default)]
-pub struct RecordingNetwork {
-    taps: Mutex<Vec<TapInterface>>,
-    neighbours: Mutex<Vec<Neighbour>>,
-}
-
-impl RecordingNetwork {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    pub fn taps(&self) -> Vec<TapInterface> {
-        self.taps.lock().expect("no panic holds this lock").clone()
-    }
-
-    pub fn neighbours(&self) -> Vec<Neighbour> {
-        self.neighbours.lock().expect("no panic holds this lock").clone()
-    }
-}
-
-#[async_trait]
-impl HostNetwork for RecordingNetwork {
-    async fn ensure_tap(&self, tap: &TapInterface) -> Result<(), NetworkError> {
-        self.taps
-            .lock()
-            .expect("no panic holds this lock")
-            .push(tap.clone());
-        Ok(())
-    }
-
-    async fn refresh_neighbour(&self, neighbour: &Neighbour) -> Result<(), NetworkError> {
-        self.neighbours
-            .lock()
-            .expect("no panic holds this lock")
-            .push(neighbour.clone());
-        Ok(())
-    }
-
-    async fn tap_names(&self) -> Vec<String> {
-        self.taps().into_iter().map(|tap| tap.tap_name).collect()
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -256,10 +212,11 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::mocks;
 
     #[tokio::test]
     async fn what_a_boot_asks_of_the_network_is_recorded_in_order() {
-        let network = RecordingNetwork::new();
+        let (network, spy) = mocks::network();
         let slot = nft_render::describe_slot(0, protocol::AppId::parse("app-1").unwrap());
         network
             .ensure_tap(&TapInterface {
@@ -278,6 +235,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(network.tap_names().await, vec!["nbr0".to_string()]);
-        assert_eq!(network.neighbours()[0].guest_mac, "02:00:0a:c9:00:02");
+        assert_eq!(spy.neighbours()[0].guest_mac, "02:00:0a:c9:00:02");
     }
 }

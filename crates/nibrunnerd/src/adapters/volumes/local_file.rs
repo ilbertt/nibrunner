@@ -9,7 +9,7 @@ use crate::adapters::volumes::{
     FILESYSTEM_LABEL, SUPERBLOCK_MAGIC_OFFSET,
 };
 use crate::json_store::make_directory;
-use crate::ports::{CommandRequest, CommandRunner};
+use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
 const VOLUME_DIR_MODE: u32 = 0o700;
 const VOLUME_FILE_MODE: u32 = 0o600;
@@ -211,10 +211,11 @@ impl VolumeBackend for LocalFileVolumes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::{CommandResult, RecordingCommandRunner};
+    use crate::ports::{CommandResult, MockCommandRunner};
+    use crate::test_support::mocks;
     use crate::test_support::{app_id, checkpoint_id, desired_volume, volume_id, VOLUME_SIZE_BYTES};
 
-    fn backend(directory: &Path, commands: Arc<RecordingCommandRunner>) -> LocalFileVolumes {
+    fn backend(directory: &Path, commands: Arc<MockCommandRunner>) -> LocalFileVolumes {
         LocalFileVolumes::new(
             directory.to_path_buf(),
             ObjectKey::parse("volumes").unwrap(),
@@ -225,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn a_volume_is_formatted_once_and_never_again() {
         let directory = tempfile::tempdir().unwrap();
-        let commands = RecordingCommandRunner::answering(|request| {
+        let (commands, log) = mocks::commands_answering(|request| {
             let path = request.command.last().expect("a path to format");
             let mut image = std::fs::read(path).unwrap_or_default();
             image.resize(4096, 0);
@@ -234,18 +235,16 @@ mod tests {
             std::fs::write(path, image).unwrap();
             Ok(CommandResult::succeeded())
         });
-        let volumes = backend(directory.path(), commands.clone());
+        let volumes = backend(directory.path(), commands);
         let attached = volumes.provision(&desired_volume(|_| {})).await.unwrap();
         assert_eq!(attached.size_bytes, VOLUME_SIZE_BYTES);
-        assert_eq!(commands.executables(), vec!["mke2fs"]);
-        assert!(commands.calls()[0].command.contains(&"-L".to_string()));
-        assert!(commands.calls()[0]
-            .command
-            .contains(&FILESYSTEM_LABEL.to_string()));
+        assert_eq!(log.executables(), vec!["mke2fs"]);
+        assert!(log.calls()[0].command.contains(&"-L".to_string()));
+        assert!(log.calls()[0].command.contains(&FILESYSTEM_LABEL.to_string()));
 
         volumes.provision(&desired_volume(|_| {})).await.unwrap();
         assert_eq!(
-            commands.executables().len(),
+            log.executables().len(),
             1,
             "a formatted volume is not formatted again"
         );
@@ -254,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn a_volume_grows_and_is_never_shrunk() {
         let directory = tempfile::tempdir().unwrap();
-        let volumes = backend(directory.path(), RecordingCommandRunner::succeeding());
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
         volumes.provision(&desired_volume(|_| {})).await.unwrap();
         let grown = volumes
             .provision(&desired_volume(|volume| {
@@ -276,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn a_size_that_is_not_a_whole_sector_is_rounded_up() {
         let directory = tempfile::tempdir().unwrap();
-        let volumes = backend(directory.path(), RecordingCommandRunner::succeeding());
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
         let attached = volumes
             .provision(&desired_volume(|volume| volume.size_bytes = 1000))
             .await
@@ -287,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn what_the_host_holds_is_observed_from_the_disk_rather_than_remembered() {
         let directory = tempfile::tempdir().unwrap();
-        let volumes = backend(directory.path(), RecordingCommandRunner::succeeding());
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
         assert!(volumes.observe(&Default::default()).await.is_empty());
         volumes.provision(&desired_volume(|_| {})).await.unwrap();
         std::fs::write(directory.path().join("not a volume"), b"").unwrap();
@@ -309,7 +308,7 @@ mod tests {
     #[tokio::test]
     async fn a_volume_kept_as_a_local_file_says_it_cannot_be_checkpointed() {
         let directory = tempfile::tempdir().unwrap();
-        let volumes = backend(directory.path(), RecordingCommandRunner::succeeding());
+        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
         assert!(volumes.create_checkpoint(&checkpoint_id()).await.is_err());
         assert!(volumes.observe_checkpoints().await.is_empty());
         volumes.flush().await.unwrap();
