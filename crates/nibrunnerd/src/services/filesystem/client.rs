@@ -205,31 +205,85 @@ mod tests {
     use protocol::FilesystemEntryKind;
     use tokio::net::UnixListener;
 
-    async fn guest_answering(replies: Vec<(u8, Vec<u8>)>) -> (tempfile::TempDir, std::path::PathBuf) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("guest.vsock");
-        let listener = UnixListener::bind(&path).unwrap();
-        tokio::spawn(async move {
-            let Ok((stream, _)) = listener.accept().await else {
-                return;
-            };
-            let mut wire = BufReader::new(stream);
-            let mut connect = String::new();
-            let _ = wire.read_line(&mut connect).await;
-            let _ = wire.get_mut().write_all(b"OK 1234\n").await;
-            for (status, body) in replies {
-                let mut header = Vec::new();
-                if wire.read_exact(&mut [0u8; FRAME_HEADER_BYTES]).await.is_err() {
+    type Asked = std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
+
+    struct Guest {
+        connect_reply: &'static str,
+        replies: Vec<(u8, Vec<u8>)>,
+        hangs_up: bool,
+    }
+
+    impl Default for Guest {
+        fn default() -> Self {
+            Self {
+                connect_reply: "OK 1234",
+                replies: Vec::new(),
+                hangs_up: false,
+            }
+        }
+    }
+
+    impl Guest {
+        async fn start(self) -> (tempfile::TempDir, std::path::PathBuf, Asked) {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("guest.vsock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let asked: Asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = asked.clone();
+            let Guest {
+                connect_reply,
+                replies,
+                hangs_up,
+            } = self;
+            tokio::spawn(async move {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut wire = BufReader::new(stream);
+                let mut connect = String::new();
+                let _ = wire.read_line(&mut connect).await;
+                let _ = wire
+                    .get_mut()
+                    .write_all(format!("{connect_reply}\n").as_bytes())
+                    .await;
+                for (status, body) in replies {
+                    let mut request = [0u8; FRAME_HEADER_BYTES];
+                    if wire.read_exact(&mut request).await.is_err() {
+                        return;
+                    }
+                    let length =
+                        u32::from_be_bytes([request[5], request[6], request[7], request[8]]) as usize;
+                    let mut rest = vec![0u8; length];
+                    if wire.read_exact(&mut rest).await.is_err() {
+                        return;
+                    }
+                    let mut whole = request.to_vec();
+                    whole.extend_from_slice(&rest);
+                    recorded.lock().unwrap().push(whole);
+
+                    let mut reply = Vec::new();
+                    reply.extend_from_slice(FRAME_MAGIC);
+                    reply.push(status);
+                    reply.extend_from_slice(&(body.len() as u32).to_be_bytes());
+                    reply.extend_from_slice(&body);
+                    let _ = wire.get_mut().write_all(&reply).await;
+                }
+                if hangs_up {
                     return;
                 }
-                header.extend_from_slice(FRAME_MAGIC);
-                header.push(status);
-                header.extend_from_slice(&(body.len() as u32).to_be_bytes());
-                let _ = wire.get_mut().write_all(&header).await;
-                let _ = wire.get_mut().write_all(&body).await;
-            }
-            std::future::pending::<()>().await;
-        });
+                std::future::pending::<()>().await;
+            });
+            (directory, path, asked)
+        }
+    }
+
+    async fn guest_answering(replies: Vec<(u8, Vec<u8>)>) -> (tempfile::TempDir, std::path::PathBuf) {
+        let (directory, path, _) = Guest {
+            replies,
+            ..Default::default()
+        }
+        .start()
+        .await;
         (directory, path)
     }
 
@@ -238,6 +292,17 @@ mod tests {
         body.extend_from_slice(&total.to_be_bytes());
         body.extend_from_slice(&used.to_be_bytes());
         body
+    }
+
+    fn details_body(kind: u8, size: u64, modified_seconds: u64) -> Vec<u8> {
+        let mut body = vec![kind];
+        body.extend_from_slice(&size.to_be_bytes());
+        body.extend_from_slice(&modified_seconds.to_be_bytes());
+        body
+    }
+
+    fn compute_body(readings: [u64; 4]) -> Vec<u8> {
+        readings.iter().flat_map(|value| value.to_be_bytes()).collect()
     }
 
     fn listing_body(entries: &[(&str, u8, u64, i64)], truncated: bool) -> Vec<u8> {
@@ -371,5 +436,216 @@ mod tests {
         let measured = client.usage().await.unwrap();
         assert_eq!(measured.total_bytes, 1_000);
         assert_eq!(measured.used_bytes, 400);
+    }
+
+    #[tokio::test]
+    async fn a_guest_with_nothing_listening_on_the_filesystem_port_cannot_be_browsed_either() {
+        let (_directory, path, _) = Guest {
+            connect_reply: "FAILED",
+            ..Default::default()
+        }
+        .start()
+        .await;
+        let Err(error) = GuestFilesystem::dial(&app_id(), &path).await else {
+            panic!("a guest that refused the handshake is not browsable");
+        };
+        assert!(
+            matches!(error, GuestFilesystemError::Unreachable { .. }),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_hung_up_mid_request_is_silent_rather_than_answering_with_nothing() {
+        let (_directory, path, _) = Guest {
+            hangs_up: true,
+            ..Default::default()
+        }
+        .start()
+        .await;
+        let mut client = GuestFilesystem::dial(&app_id(), &path).await.unwrap();
+        let Err(error) = client.usage().await else {
+            panic!("a guest that hung up did not measure anything");
+        };
+        assert!(matches!(error, GuestFilesystemError::Silent { .. }), "{error}");
+        assert!(error.message().contains("never answered"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_reading_the_guest_cut_short_is_not_read_as_a_smaller_one() {
+        let (_directory, path) = guest_answering(vec![
+            (0, vec![0u8; 8]),
+            (0, compute_body([1, 2, 3, 4])[..24].to_vec()),
+            (0, Vec::new()),
+        ])
+        .await;
+        let mut client = GuestFilesystem::dial(&app_id(), &path).await.unwrap();
+
+        for outcome in [
+            client.usage().await.err(),
+            client.compute().await.err(),
+            client.stat(&GuestPath::parse("/notes.txt").unwrap()).await.err(),
+        ] {
+            let error = outcome.expect("a reply the host cannot read is not a reading");
+            assert!(matches!(error, GuestFilesystemError::Malformed { .. }), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn what_a_guest_says_about_one_entry_comes_back_as_the_kind_size_and_time_it_named() {
+        let (_directory, path) = guest_answering(vec![
+            (0, details_body(2, 0, 1_760_000_000)),
+            (0, details_body(1, 4_096, 1_760_000_000)),
+        ])
+        .await;
+        let mut client = GuestFilesystem::dial(&app_id(), &path).await.unwrap();
+
+        let directory = client.stat(&GuestPath::parse("/data").unwrap()).await.unwrap();
+        assert_eq!(directory.kind, FilesystemEntryKind::Directory);
+        assert_eq!(directory.size_bytes, 0);
+
+        let file = client
+            .stat(&GuestPath::parse("/data/notes.txt").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(file.kind, FilesystemEntryKind::File);
+        assert_eq!(file.size_bytes, 4_096);
+        assert_eq!(file.modified_at.epoch_ms(), 1_760_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn what_a_guest_says_about_its_own_load_comes_back_whole() {
+        let readings = [1_031_012_352u64, 412_401_664, 900_000, 162_000];
+        let (_directory, path) = guest_answering(vec![(0, compute_body(readings))]).await;
+        let mut client = GuestFilesystem::dial(&app_id(), &path).await.unwrap();
+        let measured = client.compute().await.unwrap();
+        assert_eq!(measured.memory_total_bytes, readings[0]);
+        assert_eq!(measured.memory_used_bytes, readings[1]);
+        assert_eq!(measured.cpu_total_ticks, readings[2]);
+        assert_eq!(measured.cpu_busy_ticks, readings[3]);
+    }
+
+    #[tokio::test]
+    async fn a_read_larger_than_one_chunk_is_trimmed_before_the_guest_is_asked_for_it() {
+        let (_directory, path, asked) = Guest {
+            replies: vec![(0, vec![7u8; 4])],
+            ..Default::default()
+        }
+        .start()
+        .await;
+        let mut client = GuestFilesystem::dial(&app_id(), &path).await.unwrap();
+        let wanted = GuestPath::parse("/big").unwrap();
+        assert_eq!(client.read(&wanted, 12, u32::MAX).await.unwrap(), vec![7u8; 4]);
+
+        assert_eq!(
+            asked.lock().unwrap()[0],
+            encode_request(&GuestFilesystemRequest::Read {
+                path: wanted,
+                offset: 12,
+                length: GUEST_FILESYSTEM_CHUNK_BYTES as u32,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_is_carried_out_as_the_caller_spelled_it_and_answers_with_what_landed() {
+        let (_directory, path, asked) = Guest {
+            replies: vec![(0, 11u32.to_be_bytes().to_vec())],
+            ..Default::default()
+        }
+        .start()
+        .await;
+        let mut client = GuestFilesystem::dial(&app_id(), &path).await.unwrap();
+        let wanted = GuestPath::parse("/notes.txt").unwrap();
+        let written = client
+            .write(&wanted, 3, b"tenant data".to_vec(), true)
+            .await
+            .unwrap();
+        assert_eq!(written, 11);
+
+        assert_eq!(
+            asked.lock().unwrap()[0],
+            encode_request(&GuestFilesystemRequest::Write {
+                path: wanted,
+                offset: 3,
+                content: b"tenant data".to_vec(),
+                truncate: true,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_changes_a_caller_asks_for_are_spelled_out_to_the_guest_one_frame_each() {
+        let (_directory, path, asked) = Guest {
+            replies: vec![(0, Vec::new()), (0, Vec::new()), (0, Vec::new())],
+            ..Default::default()
+        }
+        .start()
+        .await;
+        let mut client = GuestFilesystem::dial(&app_id(), &path).await.unwrap();
+        let made = GuestPath::parse("/data/new").unwrap();
+        let gone = GuestPath::parse("/data/old").unwrap();
+        let moved = GuestPath::parse("/data/renamed").unwrap();
+
+        client.make_directory(&made).await.unwrap();
+        client.remove(&gone).await.unwrap();
+        client.move_entry(&gone, &moved).await.unwrap();
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                encode_request(&GuestFilesystemRequest::MakeDirectory { path: made }),
+                encode_request(&GuestFilesystemRequest::Remove { path: gone.clone() }),
+                encode_request(&GuestFilesystemRequest::Move {
+                    path: gone,
+                    destination: moved
+                }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_change_the_guest_would_not_make_is_a_refusal_and_not_a_change_that_happened() {
+        let (_directory, path) = guest_answering(vec![
+            (3, Vec::new()),
+            (4, Vec::new()),
+            (5, Vec::new()),
+            (200, Vec::new()),
+        ])
+        .await;
+        let mut client = GuestFilesystem::dial(&app_id(), &path).await.unwrap();
+        let somewhere = GuestPath::parse("/data/thing").unwrap();
+
+        for (attempt, expected) in [
+            (
+                client.make_directory(&somewhere).await,
+                "something is there already",
+            ),
+            (
+                client.remove(&somewhere).await,
+                "the directory still holds something",
+            ),
+            (
+                client.move_entry(&somewhere, &somewhere).await,
+                "that path leads out of the volume",
+            ),
+        ] {
+            let Err(error) = attempt else {
+                panic!("a change the guest refused was reported as made");
+            };
+            assert!(error.message().contains(expected), "{error}");
+            assert!(!error.message().contains("/data/thing"), "{error}");
+        }
+
+        let Err(error) = client.remove(&somewhere).await else {
+            panic!("a refusal this host does not recognise is still a refusal");
+        };
+        assert!(
+            error
+                .message()
+                .contains("it gave no reason this host understands"),
+            "{error}"
+        );
     }
 }

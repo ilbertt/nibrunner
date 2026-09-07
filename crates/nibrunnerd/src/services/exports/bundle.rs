@@ -318,6 +318,102 @@ mod tests {
         assert!(names_in(&with_file.path).contains(&".env".to_string()));
     }
 
+    #[tokio::test]
+    async fn a_dump_the_tool_refused_is_not_reported_as_an_empty_volume() {
+        let root = tempfile::tempdir().unwrap();
+        let commands: Arc<dyn CommandRunner> = mocks::commands_answering(|_| {
+            Err(crate::ports::CommandError::Failed {
+                executable: "debugfs".into(),
+                code: 1,
+                reason: ": no such device".into(),
+            })
+        })
+        .0;
+        let error = dump_volume(&commands, "/dev/nbd63", &root.path().join("staging"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BundleError::Unwritable(_)), "{error}");
+        assert!(error.message().contains("no such device"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn what_the_last_export_left_behind_is_cleared_before_this_one_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let leftover = staging.join(DATA_DIRECTORY).join("someone-elses.txt");
+        std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+        std::fs::write(&leftover, b"an earlier tenant").unwrap();
+
+        let planted = staging.join(DATA_DIRECTORY).join("notes.txt");
+        let commands: Arc<dyn CommandRunner> = mocks::commands_answering(move |_| {
+            std::fs::write(&planted, b"this tenant").unwrap();
+            Ok(CommandResult::succeeded())
+        })
+        .0;
+
+        dump_volume(&commands, "/dev/nbd63", &staging).await.unwrap();
+        assert!(!leftover.exists());
+        assert_eq!(
+            std::fs::read_dir(staging.join(DATA_DIRECTORY)).unwrap().count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn the_device_a_dump_read_from_is_the_one_the_caller_named() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let planted = staging.join(DATA_DIRECTORY).join("notes.txt");
+        let (commands, log) = mocks::commands_answering(move |_| {
+            std::fs::write(&planted, b"tenant data").unwrap();
+            Ok(CommandResult::succeeded())
+        });
+        let commands: Arc<dyn CommandRunner> = commands;
+
+        dump_volume(&commands, "/dev/nbd63", &staging).await.unwrap();
+        let asked = log.commands();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0][0], "debugfs");
+        assert_eq!(asked[0].last().unwrap(), "/dev/nbd63");
+        assert!(asked[0][2].starts_with("rdump / "));
+        assert!(asked[0][2].ends_with(&staging.join(DATA_DIRECTORY).display().to_string()));
+    }
+
+    #[test]
+    fn a_name_the_wire_already_accepted_is_never_turned_away_at_the_archive() {
+        for allowed in ["pocketbase", "1", "a.b", "server-v2_final.tar.gz", "x..y"] {
+            let filename = protocol::Filename::parse(allowed)
+                .unwrap_or_else(|_| panic!("{allowed} is a name the wire accepts"));
+            let named = artifact(|artifact| artifact.filename = filename);
+            assert_eq!(bundle_binary_name(&named).unwrap(), allowed);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_artifact_that_is_not_what_it_claims_is_never_handed_to_a_tenant() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(staging.join(DATA_DIRECTORY)).unwrap();
+        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(b"something else entirely".to_vec());
+
+        let Err(error) = write_bundle(&artifacts, &artifact(|_| {}), None, &staging).await else {
+            panic!("an artifact that is not what it claims was bundled anyway");
+        };
+        assert!(matches!(error, BundleError::Artifact(_)), "{error}");
+        assert!(error.message().contains("hashes to"), "{error}");
+        assert!(!staging.join(BUNDLE_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn a_bundle_that_cannot_be_written_is_a_failure_rather_than_an_empty_archive() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES);
+        assert!(write_bundle(&artifacts, &artifact(|_| {}), None, &staging)
+            .await
+            .is_err());
+    }
+
     fn names_in(bundle: &Path) -> Vec<String> {
         let read = std::fs::File::open(bundle).unwrap();
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(read));

@@ -115,4 +115,49 @@ mod tests {
         assert!(!is_ready_to_retry(&window, delay - 1, &policy()));
         assert!(is_ready_to_retry(&window, delay, &policy()));
     }
+
+    #[test]
+    fn the_policy_a_tenant_declared_is_the_policy_the_backoff_is_taken_from() {
+        let declared = protocol::RestartPolicy {
+            initial_backoff_ms: 123,
+            max_backoff_ms: 4_567,
+            backoff_factor: 3.0,
+            ..DEFAULT_RESTART_POLICY
+        };
+        let taken = BackoffPolicy::from(&declared);
+        assert_eq!(taken.initial_backoff_ms, declared.initial_backoff_ms);
+        assert_eq!(taken.max_backoff_ms, declared.max_backoff_ms);
+        assert_eq!(taken.backoff_factor, declared.backoff_factor);
+        assert_eq!(backoff_delay_ms(2, &taken), 369);
+    }
+
+    #[test]
+    fn a_ceiling_below_the_first_delay_is_still_the_ceiling() {
+        let tight = BackoffPolicy {
+            initial_backoff_ms: 5_000,
+            max_backoff_ms: 100,
+            backoff_factor: 2.0,
+        };
+        assert_eq!(backoff_delay_ms(1, &tight), 100);
+        assert_eq!(backoff_delay_ms(0, &tight), 0);
+    }
+
+    #[test]
+    fn a_start_that_owes_no_backoff_may_be_retried_the_moment_it_is_recorded() {
+        let just_recorded = AttemptWindow {
+            attempts: 0,
+            last_attempt_at_ms: Some(1_000),
+        };
+        assert!(is_ready_to_retry(&just_recorded, 1_000, &policy()));
+    }
+
+    #[test]
+    fn the_budget_resets_the_moment_the_window_lapses_and_not_a_millisecond_before() {
+        let spent = AttemptWindow {
+            attempts: 4,
+            last_attempt_at_ms: Some(0),
+        };
+        assert_eq!(next_attempt_window(&spent, 59_999, 60_000).attempts, 5);
+        assert_eq!(next_attempt_window(&spent, 60_000, 60_000).attempts, 1);
+    }
 }

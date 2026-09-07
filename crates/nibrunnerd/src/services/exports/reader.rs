@@ -198,6 +198,52 @@ mod tests {
         );
     }
 
+    fn server_that_comes_up(root: &Path, socket_path: &Path) -> PathBuf {
+        let binary = root.join("fake-checkpoint-server");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${CHECKPOINT_VARIABLE}\" > {}\ntouch {}\nexec sleep 5\n",
+                root.join("asked-for").display(),
+                socket_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        binary
+    }
+
+    #[tokio::test]
+    async fn a_server_that_came_up_answers_where_it_was_told_to_and_takes_its_cache_down_with_it() {
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint_id = CheckpointId::parse("export-one").unwrap();
+        let mut servers = servers(root.path());
+        let socket_path = servers.socket_path_for(&checkpoint_id);
+        servers.binary = server_that_comes_up(root.path(), &socket_path);
+
+        let server = servers.start(&checkpoint_id).await.unwrap();
+        assert_eq!(server.socket_path(), socket_path);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("asked-for")).unwrap(),
+            "export-one"
+        );
+        let cache = servers.cache_dir.join(checkpoint_id.as_str());
+        assert!(cache.is_dir());
+
+        server.stop().await;
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn two_checkpoints_never_share_the_cache_one_of_them_would_have_to_clear() {
+        let root = tempfile::tempdir().unwrap();
+        let servers = servers(root.path());
+        let one = CheckpointId::parse("export-one").unwrap();
+        let two = CheckpointId::parse("export-two").unwrap();
+        assert_ne!(servers.cache_path_for(&one), servers.cache_path_for(&two));
+        assert!(servers.cache_path_for(&one).starts_with(&servers.cache_dir));
+    }
+
     #[test]
     fn the_reader_device_is_not_one_an_app_could_hold() {
         let reserved = nft_render::export_reader_device_path();

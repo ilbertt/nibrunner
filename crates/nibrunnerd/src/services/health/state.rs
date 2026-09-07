@@ -324,6 +324,49 @@ mod tests {
     }
 
     #[test]
+    fn a_tenant_is_only_called_healthy_once_it_has_answered_as_often_as_it_was_asked_to() {
+        let mut tracker = initial_tracker();
+        for answered in 1..3 {
+            tracker = probe(&tracker, true, 3);
+            assert_eq!(tracker.consecutive_successes, answered);
+            assert!(!tracker.ever_healthy, "{answered} answers is not enough");
+        }
+        tracker = probe(&tracker, true, 3);
+        assert!(tracker.ever_healthy);
+
+        let lapsed = probe(&probe(&tracker, false, 3), true, 3);
+        assert_eq!(lapsed.consecutive_successes, 1);
+        assert!(lapsed.ever_healthy);
+    }
+
+    #[test]
+    fn a_tenant_that_has_never_answered_is_asked_on_the_startup_grid_until_its_grace_runs_out() {
+        let grace = |tracker: &HealthTracker, now_ms: i64| {
+            is_on_startup_grid(
+                tracker,
+                &GraceInputs {
+                    health_check: &DEFAULT_HEALTH_CHECK,
+                    started_at_ms: Some(STARTED_AT_MS),
+                    now_ms,
+                },
+            )
+        };
+        assert!(grace(&initial_tracker(), within_grace()));
+        assert!(grace(&failing(3), within_grace()));
+        assert!(!grace(&initial_tracker(), past_grace()));
+        assert!(!grace(&healthy_then(3), within_grace()));
+
+        assert!(is_on_startup_grid(
+            &initial_tracker(),
+            &GraceInputs {
+                health_check: &DEFAULT_HEALTH_CHECK,
+                started_at_ms: None,
+                now_ms: past_grace(),
+            }
+        ));
+    }
+
+    #[test]
     fn a_booted_vm_is_not_a_running_app() {
         assert_eq!(evaluate(Evaluate::default()), InstanceState::Starting);
         assert_eq!(

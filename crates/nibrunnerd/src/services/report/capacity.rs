@@ -219,4 +219,38 @@ mod tests {
         })])
         .is_empty());
     }
+
+    #[test]
+    fn a_cache_reading_larger_than_the_disk_is_never_reported_as_room_that_exists() {
+        let capacity = HostCapacity {
+            vcpu_count: 4,
+            memory_mib: 8192,
+            cache_bytes: 1_000,
+        };
+        assert_eq!(
+            allocatable_capacity(&capacity, &[], u64::MAX).cache_bytes,
+            capacity.cache_bytes
+        );
+        assert_eq!(allocatable_capacity(&capacity, &[], 0).cache_bytes, 0);
+    }
+
+    #[test]
+    fn the_disk_this_host_keeps_its_state_on_is_measured_and_a_path_that_is_not_there_is_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let space = read_filesystem_space(directory.path()).unwrap();
+        assert!(space.total_bytes > 0);
+        assert!(space.available_bytes <= space.total_bytes);
+        assert!(read_filesystem_space(&directory.path().join("no-such-place")).is_err());
+    }
+
+    #[test]
+    fn a_host_that_cannot_count_its_own_cpus_still_reports_one_rather_than_none() {
+        assert!(read_vcpu_count() >= 1);
+    }
+
+    #[test]
+    fn nothing_is_left_for_a_guest_on_a_host_whose_memory_cannot_be_read() {
+        assert_eq!(guest_memory_mib(0, 0), 0);
+        assert!(guest_memory_mib(read_host_memory_mib(), 0) <= read_host_memory_mib());
+    }
 }
