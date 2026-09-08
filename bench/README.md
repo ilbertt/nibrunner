@@ -11,6 +11,7 @@ than about the tenant.
 | [hetzner-ax41](results/hetzner-ax41.md) | AX41, 12 threads, 64 GB, ~€45/mo | **752** | **RAM, with 437 MiB left** |
 | [contention](results/contention.md) | the same AX41, tenants made to work | see below | what they cost each other |
 | [sleep-wake](results/sleep-wake.md) | the same AX41, 400 apps on-request | 400 exist, ~139 resident | disk, not RAM |
+| [daemon-restart](results/daemon-restart.md) | restarting the daemon under a fleet | — | the unit's KillMode |
 
 The 752 is idle tenants. `contention.md` is what happens when they work: memory costs a flat
 82-87 MiB per microVM plus exactly what the tenant touches, so holding 128 MiB drops the host

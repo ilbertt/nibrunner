@@ -22,6 +22,11 @@ LimitNOFILE=524288
 # ceiling the kernel picked it over the microVMs it exists to manage.
 OOMScoreAdjust=-1000
 
+# A microVM is a child of this daemon and so sits in this unit's cgroup, which systemd's
+# default KillMode empties on stop. setsid gives each one its own session, and a session
+# is not a cgroup: without this a restart of the daemon takes every tenant with it.
+KillMode=process
+
 LogExtraFields=SOURCE=nibrunnerd
 
 [Install]
