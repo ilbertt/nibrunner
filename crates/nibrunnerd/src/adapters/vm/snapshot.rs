@@ -263,12 +263,16 @@ mod tests {
     #[test]
     fn what_snapshots_may_hold_on_a_host() {
         let asleep = u64::from(nft_render::SLOT_COUNT) * snapshot_bytes_for(256);
-        assert!(asleep < snapshot_budget(&host_disk()));
+        let roomy = SnapshotDisk {
+            total_bytes: 512 * GIB,
+            ..host_disk()
+        };
+        assert!(asleep < snapshot_budget(&roomy));
         assert_eq!(
             refusal_for_disk(
                 &SnapshotDisk {
                     snapshot_bytes: asleep,
-                    ..host_disk()
+                    ..roomy
                 },
                 snapshot_bytes_for(256)
             ),

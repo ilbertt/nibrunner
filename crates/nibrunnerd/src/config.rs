@@ -720,8 +720,8 @@ mod tests {
         let extra = refused("[proxy]\nhttps_port = 22062\n");
         assert!(extra.contains("22000"), "{extra}");
         assert_eq!(
-            parsed("[proxy]\nhttp_port = 21063\n").proxy_http_port,
-            Some(21063)
+            parsed("[proxy]\nhttp_port = 23000\n").proxy_http_port,
+            Some(23000)
         );
     }
 

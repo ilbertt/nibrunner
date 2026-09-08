@@ -215,6 +215,15 @@ impl VolumeBackend for ZerofsVolumes {
             .await
             .allocate(&desired.app_id)
             .map_err(|error| VolumeError::Unusable(error.message()))?;
+        if slot.slot >= nft_render::NBD_SLOT_LIMIT {
+            return Err(VolumeError::Unusable(format!(
+                "slot {} needs /dev/nbd{}, and this backend addresses one minor per slot: \
+                 load the nbd module with nbds_max above {}, or keep this host under that many apps",
+                slot.slot,
+                slot.slot,
+                nft_render::NBD_SLOT_LIMIT
+            )));
+        }
         let socket_path = self.filesystem.nbd_socket_path.display().to_string();
         let target = NbdTarget {
             socket_path: &socket_path,

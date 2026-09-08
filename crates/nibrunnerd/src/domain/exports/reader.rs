@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn the_reader_device_is_not_one_an_app_could_hold() {
         let reserved = nft_render::export_reader_device_path();
-        for slot in 0..nft_render::SLOT_COUNT {
+        for slot in 0..nft_render::NBD_SLOT_LIMIT {
             let held = nft_render::describe_slot(slot, crate::test_support::app_id());
             assert_ne!(held.nbd_device_path, reserved);
         }

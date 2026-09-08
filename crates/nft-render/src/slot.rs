@@ -12,11 +12,19 @@ pub fn export_reader_device_path() -> String {
     nbd_device_path(NBD_DEVICE_COUNT - 1)
 }
 
-pub const SLOT_COUNT: u32 = NBD_DEVICE_COUNT - 1;
+/// The zerofs backend addresses one nbd minor per slot and the export reader holds the last
+/// of them, so a host on that backend cannot reach the slots the port layout otherwise allows.
+pub const NBD_SLOT_LIMIT: u32 = NBD_DEVICE_COUNT - 1;
 
 pub const HOST_PORT_BASE: u16 = 21_000;
 
 pub const EXTRA_PUBLIC_PORT_BASE: u16 = 22_000;
+
+/// Only the zerofs backend addresses an nbd minor, so a local-file host is not bounded by how
+/// many of those exist. What bounds every host is the port layout: the slot at the distance
+/// between the two bases would be handed a host port already spoken for as slot 0's extra
+/// public port.
+pub const SLOT_COUNT: u32 = (EXTRA_PUBLIC_PORT_BASE - HOST_PORT_BASE) as u32;
 
 pub const GUEST_NETWORK_CIDR: &str = "10.201.0.0/16";
 const GUEST_SUBNET_PREFIX_LENGTH: u8 = 30;
@@ -117,7 +125,7 @@ mod tests {
         assert_eq!(second.host_port.get(), first.host_port.get() + 1);
         assert_eq!(describe_slot(64, app("64")).guest_ipv4.as_str(), "10.201.1.2");
         assert_eq!(export_reader_device_path(), "/dev/nbd63");
-        assert_eq!(SLOT_COUNT, 63);
+        assert_eq!(SLOT_COUNT, 1_000);
     }
 
     #[test]
