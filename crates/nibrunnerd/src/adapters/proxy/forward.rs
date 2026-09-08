@@ -103,6 +103,25 @@ async fn forward_upgrade(request: Request<Incoming>, host: &str, port: u16) -> R
     Response::from_parts(parts, body.boxed())
 }
 
+// The leg to a tenant is HTTP/1.1, so a request that arrived over HTTP/2 has to be put back into
+// the shape that leg speaks. Two things carry over otherwise: the version, which the pooled client
+// refuses outright, and the authority, which HTTP/2 keeps in the URI instead of a host header — and
+// the URI is about to be rewritten onto loopback, so the tenant would be told it was asked for
+// 127.0.0.1 rather than for the name its visitor typed.
+fn as_the_upstream_speaks(parts: &mut hyper::http::request::Parts) {
+    if parts.version != hyper::Version::HTTP_2 {
+        return;
+    }
+    parts.version = hyper::Version::HTTP_11;
+    if let Some(asked_for) = parts
+        .uri
+        .authority()
+        .and_then(|authority| HeaderValue::from_str(authority.as_str()).ok())
+    {
+        parts.headers.insert(hyper::header::HOST, asked_for);
+    }
+}
+
 pub async fn forward(
     client: &Client<HttpConnector, Incoming>,
     request: Request<Incoming>,
@@ -114,6 +133,7 @@ pub async fn forward(
         return forward_upgrade(request, host, port).await;
     }
     let (mut parts, body) = request.into_parts();
+    as_the_upstream_speaks(&mut parts);
     parts.uri = rewritten(&parts.uri, host, port);
     strip_hop_by_hop(&mut parts.headers);
     let forwarded = Request::from_parts(parts, body);
@@ -204,6 +224,43 @@ mod tests {
         assert_eq!(
             rewritten(&bare, "10.201.0.2", 3000).to_string(),
             "http://10.201.0.2:3000/"
+        );
+    }
+
+    #[test]
+    fn a_request_that_arrived_over_http2_reaches_the_tenant_as_the_version_it_speaks() {
+        let arrived = Request::builder()
+            .version(hyper::Version::HTTP_2)
+            .uri("https://app-1.apps.example.com/a?b=1")
+            .body(())
+            .unwrap();
+        let (mut parts, ()) = arrived.into_parts();
+        as_the_upstream_speaks(&mut parts);
+        assert_eq!(parts.version, hyper::Version::HTTP_11);
+        assert_eq!(
+            parts.headers.get(hyper::header::HOST).unwrap(),
+            "app-1.apps.example.com",
+            "the name the visitor asked for outlives a URI that is about to name loopback"
+        );
+        assert_eq!(
+            rewritten(&parts.uri, "127.0.0.1", 21000).to_string(),
+            "http://127.0.0.1:21000/a?b=1"
+        );
+    }
+
+    #[test]
+    fn a_request_that_arrived_over_http1_is_left_the_way_it_came() {
+        let arrived = Request::builder()
+            .uri("/a")
+            .header("host", "app-1.apps.example.com")
+            .body(())
+            .unwrap();
+        let (mut parts, ()) = arrived.into_parts();
+        as_the_upstream_speaks(&mut parts);
+        assert_eq!(parts.version, hyper::Version::HTTP_11);
+        assert_eq!(
+            parts.headers.get(hyper::header::HOST).unwrap(),
+            "app-1.apps.example.com"
         );
     }
 
