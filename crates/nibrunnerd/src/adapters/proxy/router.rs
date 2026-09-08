@@ -13,7 +13,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use protocol::HostPort;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
 use crate::adapters::proxy::forward::{forward, hostname_of, note_the_hop, say, ProxyBody};
@@ -133,6 +133,15 @@ impl Router {
     }
 }
 
+// A reply leaves this proxy as more than one write — the headers, then the body, and under TLS the
+// records carrying them. With Nagle still on, the second write waits for an ACK the other end has
+// already decided to delay, so a visitor pays about 40ms for an answer the tenant produced in two.
+// The connector to the tenant is already nodelay; the leg the visitor is on was not.
+fn without_nagle(stream: TcpStream) -> TcpStream {
+    let _ = stream.set_nodelay(true);
+    stream
+}
+
 pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Result<()> {
     let listener = TcpListener::bind(address).await?;
     tracing::info!(%address, "the proxy is listening");
@@ -140,6 +149,7 @@ pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Re
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
+        let stream = without_nagle(stream);
         let router = router.clone();
         tokio::spawn(async move {
             let arrival = Arrival {
@@ -185,6 +195,7 @@ pub async fn serve_https(
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
+        let stream = without_nagle(stream);
         let router = router.clone();
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
@@ -253,6 +264,23 @@ pub fn tls_acceptor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_visitor_never_waits_on_an_ack_the_other_end_is_delaying() {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepting = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let _visitor = TcpStream::connect(address).await.unwrap();
+
+        let accepted = accepting.await.unwrap();
+        assert!(
+            !accepted.nodelay().unwrap(),
+            "the kernel still hands it over with Nagle on"
+        );
+        assert!(without_nagle(accepted).nodelay().unwrap());
+    }
     use crate::domain::report::routes::renderable_routes;
     use crate::test_support::{app_hostname, instance_record};
     use protocol::{AppHostname, AppHostnameKind, Hostname};
