@@ -341,5 +341,16 @@ ZeroFS backend has still never met a real ZeroFS.
 
 **What is otherwise still unknown.** Nothing here ran for longer than an hour, so nothing is known
 about a host that has been up for a week. The vsock log and filesystem paths, the checkpoint and
-export work, TLS, the port relay, and every second app on a host are untried: one app on one host
+export work, the port relay, and every second app on a host are untried: one app on one host
 is what this proved.
+
+**What TLS has now done.** On an AX41 serving three tenants, against a self-signed CA: a real
+tenant answered over HTTPS on both HTTP/2 and HTTP/1.1, ALPN negotiated `h2` where it was offered,
+a hostname no app holds got the proxy's own 404, and a connection whose handshake named one app
+while its request named another got a 421. With `proxy.tls_client_ca` set, a caller with no
+certificate and a caller holding one from a CA the host was never told about were both refused
+during the handshake — `tlsv13 alert certificate required`, before any request was read — and the
+edge's own certificate was served. What that run found is the only thing the unit tests could not:
+every request that arrived over HTTP/2 was answered `502`, because the version and the authority of
+an h2 request were being carried onto a leg that speaks HTTP/1.1. Three tenants stayed up across
+all four daemon restarts it took.
