@@ -352,5 +352,15 @@ certificate and a caller holding one from a CA the host was never told about wer
 during the handshake — `tlsv13 alert certificate required`, before any request was read — and the
 edge's own certificate was served. What that run found is the only thing the unit tests could not:
 every request that arrived over HTTP/2 was answered `502`, because the version and the authority of
-an h2 request were being carried onto a leg that speaks HTTP/1.1. Three tenants stayed up across
-all four daemon restarts it took.
+an h2 request were being carried onto a leg that speaks HTTP/1.1.
+
+A fourth tenant, deployed for the run and speaking RFC 6455, closed the two remaining gaps. A
+websocket opened through the TLS proxy handshook — the `Sec-WebSocket-Accept` token checked against
+the key the client sent — and echoed its payload back byte for byte; the same connection with no
+client certificate never got that far. And the tenant reported what it had been told: an
+`x-forwarded-for` appended to rather than replaced, a leg that was `http` on the plain listener and
+`https` on the TLS one, and an `x-forwarded-proto: http` written by a caller left alone even where
+the connection carrying it was encrypted — which is the whole of the header policy above, read back
+from inside a microVM.
+
+Three tenants stayed up across all five daemon restarts it took.
