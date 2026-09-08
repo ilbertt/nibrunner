@@ -92,6 +92,7 @@ pub struct HostConfig {
     pub proxy_http_port: Option<u16>,
     pub proxy_tls_certificate: Option<PathBuf>,
     pub proxy_tls_key: Option<PathBuf>,
+    pub proxy_tls_client_ca: Option<PathBuf>,
     pub versions_file: PathBuf,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
@@ -231,6 +232,7 @@ mod file {
         pub(super) https_port: Option<u16>,
         pub(super) tls_certificate: Option<String>,
         pub(super) tls_key: Option<String>,
+        pub(super) tls_client_ca: Option<String>,
         pub(super) port_relay_public_ipv4: Option<String>,
     }
 
@@ -310,6 +312,38 @@ impl HostConfig {
                     format!("a different port from proxy.http_port, which is also {http}"),
                 ));
             }
+        }
+
+        let tls_certificate = document
+            .proxy
+            .tls_certificate
+            .as_deref()
+            .map(|path| absolute("proxy.tls_certificate", path))
+            .transpose()?;
+        let tls_key = document
+            .proxy
+            .tls_key
+            .as_deref()
+            .map(|path| absolute("proxy.tls_key", path))
+            .transpose()?;
+        let tls_client_ca = document
+            .proxy
+            .tls_client_ca
+            .as_deref()
+            .map(|path| absolute("proxy.tls_client_ca", path))
+            .transpose()?;
+        let serves_tls = tls_certificate.is_some() && tls_key.is_some();
+        if https.is_some() && !serves_tls {
+            return Err(ConfigError::invalid(
+                "proxy.https_port",
+                "served without a proxy.tls_certificate and a proxy.tls_key beside it",
+            ));
+        }
+        if tls_client_ca.is_some() && !serves_tls {
+            return Err(ConfigError::invalid(
+                "proxy.tls_client_ca",
+                "read where nothing serves TLS, which is what an absent proxy.tls_certificate or proxy.tls_key means",
+            ));
         }
 
         let backend = match document.volumes.backend.as_deref() {
@@ -442,18 +476,9 @@ impl HostConfig {
             )?,
             proxy_http_port: http,
             proxy_https_port: https,
-            proxy_tls_certificate: document
-                .proxy
-                .tls_certificate
-                .as_deref()
-                .map(|path| absolute("proxy.tls_certificate", path))
-                .transpose()?,
-            proxy_tls_key: document
-                .proxy
-                .tls_key
-                .as_deref()
-                .map(|path| absolute("proxy.tls_key", path))
-                .transpose()?,
+            proxy_tls_certificate: tls_certificate,
+            proxy_tls_key: tls_key,
+            proxy_tls_client_ca: tls_client_ca,
             export_store_url: match document.exports.store_url.as_deref() {
                 Some(url) => object_store_url("exports.store_url", url)?,
                 None => state_dir.join("export-store").display().to_string(),
@@ -490,6 +515,7 @@ impl HostConfig {
             proxy_http_port: None,
             proxy_tls_certificate: None,
             proxy_tls_key: None,
+            proxy_tls_client_ca: None,
             versions_file: root.join("state/versions.json"),
             export_store_url: root.join("state/export-store").display().to_string(),
             export_staging_dir: root.join("state/exports"),
@@ -925,6 +951,33 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
     }
 
     #[test]
+    fn a_host_that_names_an_https_port_and_no_certificate_is_refused_while_someone_is_watching() {
+        let message = refused("[proxy]\nhttps_port = 8443\n");
+        assert!(message.contains("proxy.https_port"), "{message}");
+        assert!(message.contains("proxy.tls_certificate"), "{message}");
+        let half = refused("[proxy]\nhttps_port = 8443\ntls_certificate = \"/tls/origin.crt\"\n");
+        assert!(half.contains("proxy.tls_key"), "{half}");
+    }
+
+    #[test]
+    fn a_trust_pool_is_refused_where_nothing_serves_tls_to_check_a_caller_against_it() {
+        let message = refused("[proxy]\ntls_client_ca = \"/tls/origin-pull-ca.pem\"\n");
+        assert!(message.contains("proxy.tls_client_ca"), "{message}");
+        assert_eq!(
+            parsed("[proxy]\ntls_certificate = \"/tls/origin.crt\"\ntls_key = \"/tls/origin.key\"\ntls_client_ca = \"/tls/ca.pem\"\n")
+                .proxy_tls_client_ca,
+            Some(PathBuf::from("/tls/ca.pem"))
+        );
+    }
+
+    #[test]
+    fn a_host_fronted_by_nothing_needs_no_key_to_say_so() {
+        let open = parsed("[proxy]\nhttps_port = 8443\ntls_certificate = \"/tls/origin.crt\"\ntls_key = \"/tls/origin.key\"\n");
+        assert_eq!(open.proxy_https_port, Some(8443));
+        assert_eq!(open.proxy_tls_client_ca, None);
+    }
+
+    #[test]
     fn a_key_without_its_certificate_is_no_more_tls_material_than_the_other_way_round() {
         assert_eq!(
             parsed("[proxy]\ntls_key = \"/tls/origin.key\"\n").tls_material(),
@@ -1034,6 +1087,7 @@ http_port = 80
 https_port = 443
 tls_certificate = "/etc/nibrunner/origin.crt"
 tls_key = "/etc/nibrunner/origin.key"
+tls_client_ca = "/etc/nibrunner/origin-pull-ca.pem"
 port_relay_public_ipv4 = "203.0.113.10"
 
 [network]
@@ -1046,6 +1100,10 @@ control_plane_cidrs_v4 = ["172.31.0.0/16"]
         assert_eq!(config.proxy_http_port, Some(80));
         assert_eq!(config.proxy_https_port, Some(443));
         assert!(config.tls_material().is_some());
+        assert_eq!(
+            config.proxy_tls_client_ca,
+            Some(PathBuf::from("/etc/nibrunner/origin-pull-ca.pem"))
+        );
         assert_eq!(
             config.port_relay_public_ipv4.map(|address| address.to_string()),
             Some("203.0.113.10".to_string())

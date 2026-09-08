@@ -197,9 +197,12 @@ pub fn serve_proxy(host: &Arc<Host>) {
         return;
     };
     let (router, certificate, key) = (host.router.clone(), certificate.to_path_buf(), key.to_path_buf());
+    let client_ca = host.config.proxy_tls_client_ca.clone();
     tokio::spawn(async move {
         let address = SocketAddr::from(([0, 0, 0, 0], port));
-        if let Err(error) = router::serve_https(router, address, &certificate, &key).await {
+        if let Err(error) =
+            router::serve_https(router, address, &certificate, &key, client_ca.as_deref()).await
+        {
             tracing::error!(%error, "the proxy could not listen for TLS");
         }
     });

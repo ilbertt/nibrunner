@@ -114,6 +114,7 @@ while an operator is still watching rather than on the pass that first needed th
 | `volumes.zerofs.*` | see below | Only read when the backend is `zerofs` |
 | `proxy.http_port` | none | Serve plain HTTP on this port |
 | `proxy.https_port` | none | With `proxy.tls_certificate` and `proxy.tls_key` |
+| `proxy.tls_client_ca` | none | A PEM trust pool. Naming one makes a caller's own certificate the price of the handshake |
 | `proxy.port_relay_public_ipv4` | none | Where an app's own public port is reached |
 | `network.control_plane_cidrs_v4` | `[]` | Ranges a guest is denied by name |
 | `network.control_plane_cidrs_v6` | `[]` | The same, where no blanket rule covers them |

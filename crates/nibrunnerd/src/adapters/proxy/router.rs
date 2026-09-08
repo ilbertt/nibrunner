@@ -73,10 +73,25 @@ impl Router {
         self.routes.read().await.clone()
     }
 
-    pub async fn handle(self: Arc<Self>, request: Request<Incoming>) -> Response<ProxyBody> {
+    pub async fn handle(
+        self: Arc<Self>,
+        request: Request<Incoming>,
+        server_name: Option<Arc<str>>,
+    ) -> Response<ProxyBody> {
         let Some(hostname) = hostname_of(&request) else {
             return say(StatusCode::BAD_REQUEST, "This request names no host.\n");
         };
+        // One certificate covers every app on this host, so the name in the handshake is the only
+        // thing stopping a connection opened for one tenant from asking for another tenant's app.
+        if server_name
+            .as_deref()
+            .is_some_and(|name| !name.eq_ignore_ascii_case(&hostname))
+        {
+            return say(
+                StatusCode::MISDIRECTED_REQUEST,
+                "This connection was opened for a different host.\n",
+            );
+        }
         let Some(port) = self.routes().await.port_for(&hostname) else {
             return say(
                 StatusCode::NOT_FOUND,
@@ -98,7 +113,7 @@ pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Re
         tokio::spawn(async move {
             let service = service_fn(move |request| {
                 let router = router.clone();
-                async move { Ok::<_, std::convert::Infallible>(router.handle(request).await) }
+                async move { Ok::<_, std::convert::Infallible>(router.handle(request, None).await) }
             });
             let _ = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
@@ -112,10 +127,21 @@ pub async fn serve_https(
     address: SocketAddr,
     certificate: &Path,
     key: &Path,
+    client_ca: Option<&Path>,
 ) -> std::io::Result<()> {
-    let acceptor = tls_acceptor(certificate, key)?;
+    let acceptor = tls_acceptor(certificate, key, client_ca)?;
     let listener = TcpListener::bind(address).await?;
-    tracing::info!(%address, "the proxy is listening for TLS");
+    match client_ca {
+        Some(pool) => tracing::info!(
+            %address,
+            trust_pool = %pool.display(),
+            "the proxy is listening for TLS, and refuses a caller that presents no certificate of its own"
+        ),
+        None => tracing::info!(
+            %address,
+            "the proxy is listening for TLS, and serves whoever reaches this address"
+        ),
+    }
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
@@ -126,9 +152,11 @@ pub async fn serve_https(
             let Ok(stream) = acceptor.accept(stream).await else {
                 return;
             };
+            let server_name: Option<Arc<str>> = stream.get_ref().1.server_name().map(Arc::from);
             let service = service_fn(move |request| {
                 let router = router.clone();
-                async move { Ok::<_, std::convert::Infallible>(router.handle(request).await) }
+                let server_name = server_name.clone();
+                async move { Ok::<_, std::convert::Infallible>(router.handle(request, server_name).await) }
             });
             let _ = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
@@ -137,7 +165,24 @@ pub async fn serve_https(
     }
 }
 
-pub fn tls_acceptor(certificate: &Path, key: &Path) -> std::io::Result<tokio_rustls::TlsAcceptor> {
+// A trust pool that admits nobody is refused here rather than at the handshake it would refuse:
+// the file is named to require a client certificate, and an empty one requires an impossible one.
+fn client_verifier(client_ca: &Path) -> std::io::Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+    let anchors: Vec<_> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(client_ca)?))
+            .collect::<Result<_, _>>()?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(anchors);
+    rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+pub fn tls_acceptor(
+    certificate: &Path,
+    key: &Path,
+    client_ca: Option<&Path>,
+) -> std::io::Result<tokio_rustls::TlsAcceptor> {
     let certificates: Vec<_> =
         rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(certificate)?))
             .collect::<Result<_, _>>()?;
@@ -148,8 +193,12 @@ pub fn tls_acceptor(certificate: &Path, key: &Path) -> std::io::Result<tokio_rus
             "the key file holds no private key",
         )
     })?;
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
+    let builder = rustls::ServerConfig::builder();
+    let builder = match client_ca {
+        Some(client_ca) => builder.with_client_cert_verifier(client_verifier(client_ca)?),
+        None => builder.with_no_client_auth(),
+    };
+    let config = builder
         .with_single_cert(certificates, private_key)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
@@ -217,6 +266,10 @@ mod tests {
     }
 
     async fn serving(router: Arc<Router>) -> u16 {
+        serving_as(router, None).await
+    }
+
+    async fn serving_as(router: Arc<Router>, server_name: Option<&'static str>) -> u16 {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
@@ -230,7 +283,8 @@ mod tests {
                 tokio::spawn(async move {
                     let service = service_fn(move |request| {
                         let router = router.clone();
-                        async move { Ok::<_, std::convert::Infallible>(router.handle(request).await) }
+                        let server_name = server_name.map(Arc::from);
+                        async move { Ok::<_, std::convert::Infallible>(router.handle(request, server_name).await) }
                     });
                     let _ = http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service)
@@ -318,7 +372,7 @@ mod tests {
     #[test]
     fn a_certificate_this_host_does_not_have_is_an_error_rather_than_a_proxy_that_serves_nothing() {
         let directory = tempfile::tempdir().unwrap();
-        let refusal = |certificate: &Path, key: &Path| match tls_acceptor(certificate, key) {
+        let refusal = |certificate: &Path, key: &Path| match tls_acceptor(certificate, key, None) {
             Ok(_) => panic!("{} was accepted as TLS material", certificate.display()),
             Err(error) => error,
         };
@@ -330,6 +384,61 @@ mod tests {
         let error = refusal(&empty, &empty);
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("no private key"), "{error}");
+    }
+
+    async fn routed_to_one_app(server_name: Option<&'static str>) -> u16 {
+        let router = Router::new();
+        router
+            .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
+                |_| {},
+            )])))
+            .await;
+        serving_as(router, server_name).await
+    }
+
+    #[tokio::test]
+    async fn a_connection_opened_for_one_hostname_may_not_ask_for_another() {
+        let port = routed_to_one_app(Some("somewhere.else.example.com")).await;
+        let answered = asked(port, "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n").await;
+        assert!(answered.starts_with("HTTP/1.0 421 "), "{answered}");
+        assert!(
+            answered.ends_with("This connection was opened for a different host.\n"),
+            "{answered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_name_in_the_handshake_and_the_name_in_the_header_are_one_name_in_any_case() {
+        let port = routed_to_one_app(Some("app-1.apps.example.com")).await;
+        let answered = asked(port, "GET / HTTP/1.0\r\nHost: APP-1.Apps.Example.Com\r\n\r\n").await;
+        assert!(
+            !answered.starts_with("HTTP/1.0 421 "),
+            "the request reached its route rather than being read as a misdirected one: {answered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_names_no_host_is_refused_before_the_handshake_name_is_read() {
+        let port = routed_to_one_app(Some("app-1.apps.example.com")).await;
+        let answered = asked(port, "GET / HTTP/1.0\r\n\r\n").await;
+        assert!(answered.starts_with("HTTP/1.0 400 "), "{answered}");
+    }
+
+    #[test]
+    fn a_trust_pool_that_admits_nobody_is_refused_rather_than_a_listener_that_refuses_everyone() {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = directory.path().join("ca.pem");
+        std::fs::write(&empty, b"").unwrap();
+        let error = client_verifier(&empty).expect_err("an empty trust pool was accepted");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let absent = directory.path().join("absent.pem");
+        assert_eq!(
+            client_verifier(&absent)
+                .expect_err("a trust pool this host does not have was accepted")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]
