@@ -13,6 +13,7 @@ than about the tenant.
 | [sleep-wake](results/sleep-wake.md) | the same AX41, 400 apps on-request | 400 exist, ~139 resident | disk, not RAM |
 | [daemon-restart](results/daemon-restart.md) | restarting the daemon under a fleet | — | the unit's KillMode |
 | [filesystem-exports](results/filesystem-exports.md) | vsock at 200 apps, exports on local-file | 200/200 measured | exports refused, correctly |
+| [multi-app-presets](results/multi-app-presets.md) | the same AX41, six deploy-link apps, S3 artifacts, Cloudflare TLS | 6/6 | nothing — a shape test, not a ceiling |
 
 The 752 is idle tenants. `contention.md` is what happens when they work: memory costs a flat
 82-87 MiB per microVM plus exactly what the tenant touches, so holding 128 MiB drops the host
