@@ -214,6 +214,21 @@ vsock, and the usage service mocks the port. The browse itself is untouched in
 `domain/filesystem/`: the client speaks every verb the guest does and `list` is tested against it,
 waiting for something to ask.
 
+**The name in the handshake is checked against the Host header on every connection, not only on
+the ones that had to present a certificate.** Caddy turns `strict_sni_host` on as a side effect of
+client auth and answers 421 when the two disagree. That coupling is about fronting past the
+client-certificate check, but the exposure is not: one certificate covers every app on a host, so a
+connection opened for one tenant can ask for another tenant's app whether or not anything checked
+who opened it. The check is unconditional here, and the status is the same 421.
+
+**`X-Forwarded-Proto` and `X-Forwarded-Host` are written only where nothing has written them
+already.** An edge in front of this host records the visitor's own leg in those headers, and this
+proxy terminates a different one — overwriting them would replace what a tenant wants to know with
+the fact that Cloudflare dialled a loopback address. `X-Forwarded-For` is appended to instead,
+because it is a list of hops and this is one of them. Where nothing fronts the host a caller can
+then write its own `X-Forwarded-Proto` and be believed, which is the price of reading the header at
+all and is why the posture is in the config rather than inferred.
+
 ## Not done, and named as such
 
 - **Exports and the vsock filesystem browse.** The codecs for the filesystem channel are written

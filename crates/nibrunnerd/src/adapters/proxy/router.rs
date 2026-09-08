@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use protocol::HostPort;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
-use crate::adapters::proxy::forward::{forward, hostname_of, say, ProxyBody};
+use crate::adapters::proxy::forward::{forward, hostname_of, note_the_hop, say, ProxyBody};
 use crate::domain::report::routes::RouteTarget;
 
 const LOOPBACK: &str = "127.0.0.1";
@@ -61,6 +61,16 @@ impl RouteTable {
     }
 }
 
+// What a connection was before any request arrived on it: the name its handshake asked for, the
+// address it came from, and whether it was encrypted. A tenant is dialled over loopback and can
+// read none of it for itself.
+#[derive(Debug, Clone)]
+pub struct Arrival {
+    pub server_name: Option<Arc<str>>,
+    pub peer: IpAddr,
+    pub secure: bool,
+}
+
 pub struct Router {
     routes: RwLock<Arc<RouteTable>>,
     client: Client<HttpConnector, Incoming>,
@@ -85,10 +95,10 @@ impl Router {
     pub async fn handle(
         self: Arc<Self>,
         request: Request<Incoming>,
-        server_name: Option<Arc<str>>,
+        arrival: Arrival,
     ) -> Response<ProxyBody> {
         let http2 = request.version() == hyper::Version::HTTP_2;
-        let mut response = self.route(request, server_name).await;
+        let mut response = self.route(request, arrival).await;
         if http2 {
             // Illegal over HTTP/2, and hyper logs a warning for each one it has to strip.
             response.headers_mut().remove(hyper::header::CONNECTION);
@@ -96,17 +106,14 @@ impl Router {
         response
     }
 
-    async fn route(
-        self: Arc<Self>,
-        request: Request<Incoming>,
-        server_name: Option<Arc<str>>,
-    ) -> Response<ProxyBody> {
+    async fn route(self: Arc<Self>, mut request: Request<Incoming>, arrival: Arrival) -> Response<ProxyBody> {
         let Some(hostname) = hostname_of(&request) else {
             return say(StatusCode::BAD_REQUEST, "This request names no host.\n");
         };
         // One certificate covers every app on this host, so the name in the handshake is the only
         // thing stopping a connection opened for one tenant from asking for another tenant's app.
-        if server_name
+        if arrival
+            .server_name
             .as_deref()
             .is_some_and(|name| !name.eq_ignore_ascii_case(&hostname))
         {
@@ -121,6 +128,7 @@ impl Router {
                 "No app on this host answers for that hostname.\n",
             );
         };
+        note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
         forward(&self.client, request, LOOPBACK, port.get(), true).await
     }
 }
@@ -129,14 +137,19 @@ pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Re
     let listener = TcpListener::bind(address).await?;
     tracing::info!(%address, "the proxy is listening");
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
+        let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
         let router = router.clone();
         tokio::spawn(async move {
+            let arrival = Arrival {
+                server_name: None,
+                peer: peer.ip(),
+                secure: false,
+            };
             let service = service_fn(move |request| {
-                let router = router.clone();
-                async move { Ok::<_, std::convert::Infallible>(router.handle(request, None).await) }
+                let (router, arrival) = (router.clone(), arrival.clone());
+                async move { Ok::<_, std::convert::Infallible>(router.handle(request, arrival).await) }
             });
             let _ = http1::Builder::new()
                 .timer(TokioTimer::new())
@@ -169,7 +182,7 @@ pub async fn serve_https(
         ),
     }
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
+        let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
         let router = router.clone();
@@ -178,11 +191,14 @@ pub async fn serve_https(
             let Ok(Ok(stream)) = tokio::time::timeout(GREETING_TIMEOUT, acceptor.accept(stream)).await else {
                 return;
             };
-            let server_name: Option<Arc<str>> = stream.get_ref().1.server_name().map(Arc::from);
+            let arrival = Arrival {
+                server_name: stream.get_ref().1.server_name().map(Arc::from),
+                peer: peer.ip(),
+                secure: true,
+            };
             let service = service_fn(move |request| {
-                let router = router.clone();
-                let server_name = server_name.clone();
-                async move { Ok::<_, std::convert::Infallible>(router.handle(request, server_name).await) }
+                let (router, arrival) = (router.clone(), arrival.clone());
+                async move { Ok::<_, std::convert::Infallible>(router.handle(request, arrival).await) }
             });
             let _ = auto::Builder::new(TokioExecutor::new())
                 .http1()
@@ -295,11 +311,19 @@ mod tests {
         assert!(router.routes().await.is_empty());
     }
 
-    async fn serving(router: Arc<Router>) -> u16 {
-        serving_as(router, None).await
+    fn arriving(server_name: Option<&'static str>, secure: bool) -> Arrival {
+        Arrival {
+            server_name: server_name.map(Arc::from),
+            peer: IpAddr::from([203, 0, 113, 7]),
+            secure,
+        }
     }
 
-    async fn serving_as(router: Arc<Router>, server_name: Option<&'static str>) -> u16 {
+    async fn serving(router: Arc<Router>) -> u16 {
+        serving_as(router, arriving(None, false)).await
+    }
+
+    async fn serving_as(router: Arc<Router>, arrival: Arrival) -> u16 {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
@@ -309,12 +333,11 @@ mod tests {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
                 };
-                let router = router.clone();
+                let (router, arrival) = (router.clone(), arrival.clone());
                 tokio::spawn(async move {
                     let service = service_fn(move |request| {
-                        let router = router.clone();
-                        let server_name = server_name.map(Arc::from);
-                        async move { Ok::<_, std::convert::Infallible>(router.handle(request, server_name).await) }
+                        let (router, arrival) = (router.clone(), arrival.clone());
+                        async move { Ok::<_, std::convert::Infallible>(router.handle(request, arrival).await) }
                     });
                     let _ = http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service)
@@ -423,7 +446,7 @@ mod tests {
                 |_| {},
             )])))
             .await;
-        serving_as(router, server_name).await
+        serving_as(router, arriving(server_name, false)).await
     }
 
     #[tokio::test]
@@ -452,6 +475,84 @@ mod tests {
         let port = routed_to_one_app(Some("app-1.apps.example.com")).await;
         let answered = asked(port, "GET / HTTP/1.0\r\n\r\n").await;
         assert!(answered.starts_with("HTTP/1.0 400 "), "{answered}");
+    }
+
+    async fn echoing_the_forwarded_headers(secure: bool) -> u16 {
+        let upstream = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = upstream.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let service = service_fn(|request: Request<Incoming>| async move {
+                        let read = |name: &str| {
+                            request
+                                .headers()
+                                .get(name)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or("(none)")
+                                .to_string()
+                        };
+                        let heard = format!(
+                            "for={} proto={} host={}",
+                            read("x-forwarded-for"),
+                            read("x-forwarded-proto"),
+                            read("x-forwarded-host")
+                        );
+                        Ok::<_, std::convert::Infallible>(say(StatusCode::OK, &heard))
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let router = Router::new();
+        router
+            .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
+                |record| record.host_port = host_port,
+            )])))
+            .await;
+        serving_as(router, arriving(None, secure)).await
+    }
+
+    #[tokio::test]
+    async fn a_tenant_is_told_where_the_request_came_from_and_what_it_arrived_over() {
+        let over_tls = echoing_the_forwarded_headers(true).await;
+        let answered = asked(over_tls, "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n").await;
+        assert!(
+            answered.ends_with("for=203.0.113.7 proto=https host=app-1.apps.example.com"),
+            "{answered}"
+        );
+
+        let in_the_clear = echoing_the_forwarded_headers(false).await;
+        let answered = asked(
+            in_the_clear,
+            "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n",
+        )
+        .await;
+        assert!(
+            answered.ends_with("proto=http host=app-1.apps.example.com"),
+            "{answered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_an_edge_already_wrote_down_is_added_to_rather_than_written_over() {
+        let port = echoing_the_forwarded_headers(true).await;
+        let answered = asked(
+            port,
+            "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\nx-forwarded-for: 198.51.100.9\r\nx-forwarded-proto: http\r\nx-forwarded-host: brought.example.com\r\n\r\n",
+        )
+        .await;
+        assert!(
+            answered.ends_with("for=198.51.100.9, 203.0.113.7 proto=http host=brought.example.com"),
+            "the visitor's own leg outlives the hop this proxy made: {answered}"
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+use std::net::IpAddr;
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
 
@@ -132,6 +133,34 @@ pub async fn forward(
         Err(error) => {
             tracing::warn!(%error, host, port, "an upstream would not answer");
             say(StatusCode::BAD_GATEWAY, "This app could not be reached.\n")
+        }
+    }
+}
+
+// What the visitor's own connection looked like, for a tenant that only ever sees a loopback one.
+// An edge in front of this host has already written down the leg it terminated, and that account is
+// the better one: only the hop this proxy is making gets added, and only what nobody has said yet
+// gets filled in.
+pub fn note_the_hop(headers: &mut hyper::HeaderMap, peer: IpAddr, secure: bool, hostname: &str) {
+    let travelled = match headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(already) => format!("{already}, {peer}"),
+        None => peer.to_string(),
+    };
+    if let Ok(travelled) = HeaderValue::from_str(&travelled) {
+        headers.insert(HeaderName::from_static("x-forwarded-for"), travelled);
+    }
+    if !headers.contains_key("x-forwarded-proto") {
+        headers.insert(
+            HeaderName::from_static("x-forwarded-proto"),
+            HeaderValue::from_static(if secure { "https" } else { "http" }),
+        );
+    }
+    if !headers.contains_key("x-forwarded-host") {
+        if let Ok(hostname) = HeaderValue::from_str(hostname) {
+            headers.insert(HeaderName::from_static("x-forwarded-host"), hostname);
         }
     }
 }
