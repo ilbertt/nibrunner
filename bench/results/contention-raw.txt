@@ -1,0 +1,22 @@
+### host: AX41, Ryzen 5 3600, 12 threads, 64 GB
+
+### compute: every app spinning at 100%, timing 200k sha256 rounds inside one
+apps,spin_pct,hold_mib,running,work_ms_median,work_ms_max,cpu_busy_pct,mem_used_mib,mem_per_app_mib,load1
+1,100,0,1,92.84,93.72,9,1573,88,0.74
+6,100,0,6,111.53,118.02,51,2124,110,3.66
+12,100,0,12,none,none,100,2794,111,8.27
+24,100,0,24,424.76,491.64,100,4108,110,17.50
+48,100,0,48,none,none,100,6756,110,35.57
+96,100,0,96,1644.83,1881.6,100,12027,110,79.24
+192,100,0,192,3352.34,3616.6,100,22531,109,167.65
+(the 12 and 48 rows were re-measured by hand; the sampler dropped them)
+12 apps: median 200.92 ms
+48 apps: median 930.79 ms over nine samples, worst 1011.89
+
+### memory: 128 apps, each holding HOLD_MIB it has actually touched
+apps,hold_mib,declared_mib,running,mem_used_mib,mem_per_app_mib,apps_that_would_fit,load1
+128,0,256,128,12035,82,758,64.43
+128,32,288,128,16329,116,536,24.45
+128,64,320,128,20646,150,414,11.78
+128,128,384,128,28974,215,289,9.84
+128,256,512,128,45295,342,181,9.35

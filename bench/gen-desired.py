@@ -10,9 +10,12 @@ parser.add_argument("--size", type=int, required=True)
 parser.add_argument("--object-key", default="todos")
 parser.add_argument("--memory-mib", type=int, default=256)
 parser.add_argument("--volume-mib", type=int, default=64)
+parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
 parser.add_argument("--state", default="running", choices=["running", "on-request", "stopped"])
 parser.add_argument("--out", default="desired.json")
 args = parser.parse_args()
+
+environment = dict(pair.split("=", 1) for pair in args.env)
 
 volumes, instances = [], []
 for index in range(1, args.count + 1):
@@ -25,7 +28,7 @@ for index in range(1, args.count + 1):
     })
     instances.append({
         "appId": app_id,
-        "deploymentId": f"dep-{index}",
+        "deploymentId": f"dep-{index}-{args.digest[:8]}",
         "volumeId": f"vol-{index}",
         "desiredState": args.state,
         "artifact": {
@@ -38,7 +41,7 @@ for index in range(1, args.count + 1):
             "httpPort": 3000,
             "hasExtraPublicPort": False,
             "args": [],
-            "environment": {},
+            "environment": environment,
             "resources": {"vcpuCount": 1, "memoryMib": args.memory_mib},
             "healthCheck": {
                 "path": "/health",
@@ -67,4 +70,4 @@ document = {
     "exports": [],
 }
 pathlib.Path(args.out).write_text(json.dumps(document, indent=2) + "\n")
-print(f"{args.out}: {args.count} apps at {args.memory_mib} MiB, {args.volume_mib} MiB volumes, desiredState={args.state}", file=sys.stderr)
+print(f"{args.out}: {args.count} apps at {args.memory_mib} MiB, {args.volume_mib} MiB volumes, env={environment or chr(123)+chr(125)}, desiredState={args.state}", file=sys.stderr)
