@@ -181,7 +181,12 @@ fn expand(key: &str, value: &str, runtime: &[(String, String)]) -> Result<String
 }
 
 pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError> {
-    let mut runtime: Vec<(String, String)> = Vec::new();
+    // Where the volume is mounted is this end's to know, so the host never writes it and a
+    // reference to it would otherwise resolve against nothing.
+    let mut runtime: Vec<(String, String)> = vec![(
+        format!("{RUNTIME_PREFIX}DATA_DIR"),
+        crate::paths::DATA_DIR.to_string(),
+    )];
     let mut tenant: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
         if line.is_empty() {
@@ -304,7 +309,7 @@ impl InstanceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{TenantValue, DEFAULT_HTTP_PORT, DEFAULT_RESTART_POLICY};
+    use protocol::{TenantValue, DEFAULT_HTTP_PORT, DEFAULT_RESTART_POLICY, RUNTIME_VALUE_NAMES};
 
     const PLATFORM_HOSTNAME: &str = "my-app.nibrun.app";
 
@@ -391,6 +396,31 @@ mod tests {
         assert_eq!(lines[1], "NIBRUN_HOSTNAME=my-app.nibrun.app");
         assert_eq!(lines[2], "NIBRUN_PUBLIC_IPV4=203.0.113.7");
         assert_eq!(lines[3], "NIBRUN_EXTRA_PUBLIC_PORT=22000");
+    }
+
+    #[test]
+    fn every_value_the_protocol_offers_is_one_a_reference_can_reach() {
+        let environment: TenantEnvironment = protocol::RUNTIME_VALUE_NAMES
+            .iter()
+            .map(|name| {
+                let value = TenantValue::parse(format!("<${{{name}}}>")).unwrap();
+                (name.trim_start_matches(RUNTIME_PREFIX).to_string(), value)
+            })
+            .collect();
+        let rendered = render(Overrides {
+            public_address: Some(PublicAddress {
+                ipv4: Ipv4Address::parse("203.0.113.7").unwrap(),
+                port: HostPort::new(22_000).unwrap(),
+            }),
+            environment,
+            ..Default::default()
+        });
+
+        let config = parse_instance_env(&rendered).unwrap();
+        assert_eq!(config.environment.len(), RUNTIME_VALUE_NAMES.len());
+        for (name, value) in &config.environment {
+            assert!(!value.contains('$'), "{name} was handed on unexpanded: {value}");
+        }
     }
 
     #[test]
