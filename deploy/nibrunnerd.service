@@ -16,6 +16,8 @@ RuntimeDirectoryPreserve=yes
 
 NoNewPrivileges=false
 
+LimitNOFILE=524288
+
 LogExtraFields=SOURCE=nibrunnerd
 
 [Install]
