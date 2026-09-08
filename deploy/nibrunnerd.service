@@ -18,6 +18,10 @@ NoNewPrivileges=false
 
 LimitNOFILE=524288
 
+# Nothing this daemon does stops a tenant, and neither should its death: at the memory
+# ceiling the kernel picked it over the microVMs it exists to manage.
+OOMScoreAdjust=-1000
+
 LogExtraFields=SOURCE=nibrunnerd
 
 [Install]
