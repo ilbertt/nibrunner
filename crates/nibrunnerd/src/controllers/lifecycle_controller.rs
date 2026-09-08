@@ -32,6 +32,7 @@ impl LifecycleController {
         }
         crate::domain::reconcile::network::apply_activators(&self.host).await;
         crate::run::serve_proxy(&self.host);
+        crate::run::serve_metrics(&self.host);
     }
 
     pub fn controllers(&self) -> Vec<Arc<dyn Controller>> {

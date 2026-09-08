@@ -94,6 +94,8 @@ pub struct HostConfig {
     pub proxy_tls_key: Option<PathBuf>,
     pub proxy_tls_client_ca: Option<PathBuf>,
     pub versions_file: PathBuf,
+    pub metrics_port: Option<u16>,
+    pub metrics_listen_address: std::net::IpAddr,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
 }
@@ -177,6 +179,15 @@ mod file {
         pub(super) network: Network,
         #[serde(default)]
         pub(super) exports: Exports,
+        #[serde(default)]
+        pub(super) metrics: Metrics,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Metrics {
+        pub(super) port: Option<u16>,
+        pub(super) listen_address: Option<String>,
     }
 
     #[derive(Debug, Default, Deserialize)]
@@ -312,6 +323,39 @@ impl HostConfig {
                     format!("a different port from proxy.http_port, which is also {http}"),
                 ));
             }
+        }
+
+        let metrics_port = document
+            .metrics
+            .port
+            .map(|port| listener("metrics.port", port))
+            .transpose()?;
+        for (named, field) in [
+            (document.proxy.http_port, "proxy.http_port"),
+            (document.proxy.https_port, "proxy.https_port"),
+        ] {
+            if let (Some(metrics), Some(named)) = (metrics_port, named) {
+                if metrics == named {
+                    return Err(ConfigError::invalid(
+                        "metrics.port",
+                        format!("a different port from {field}, which is also {named}"),
+                    ));
+                }
+            }
+        }
+        // A scrape surface names every app this host runs and what each is using, so it is served
+        // where an operator says and nowhere by default.
+        let metrics_listen_address = match document.metrics.listen_address.as_deref() {
+            None => std::net::IpAddr::from([127, 0, 0, 1]),
+            Some(address) => address
+                .parse()
+                .map_err(|_| ConfigError::invalid("metrics.listen_address", "an IP address to bind"))?,
+        };
+        if document.metrics.listen_address.is_some() && metrics_port.is_none() {
+            return Err(ConfigError::invalid(
+                "metrics.listen_address",
+                "bound where nothing serves metrics, which is what an absent metrics.port means",
+            ));
         }
 
         let tls_certificate = document
@@ -479,6 +523,8 @@ impl HostConfig {
             proxy_tls_certificate: tls_certificate,
             proxy_tls_key: tls_key,
             proxy_tls_client_ca: tls_client_ca,
+            metrics_port,
+            metrics_listen_address,
             export_store_url: match document.exports.store_url.as_deref() {
                 Some(url) => object_store_url("exports.store_url", url)?,
                 None => state_dir.join("export-store").display().to_string(),
@@ -517,6 +563,8 @@ impl HostConfig {
             proxy_tls_key: None,
             proxy_tls_client_ca: None,
             versions_file: root.join("state/versions.json"),
+            metrics_port: None,
+            metrics_listen_address: std::net::IpAddr::from([127, 0, 0, 1]),
             export_store_url: root.join("state/export-store").display().to_string(),
             export_staging_dir: root.join("state/exports"),
         }
@@ -948,6 +996,27 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
                 .map(|address| address.to_string()),
             Some("203.0.113.10".to_string())
         );
+    }
+
+    #[test]
+    fn a_scrape_surface_is_bound_where_it_is_asked_for_and_nowhere_otherwise() {
+        let off = parsed("");
+        assert_eq!(off.metrics_port, None);
+        assert_eq!(
+            off.metrics_listen_address,
+            std::net::IpAddr::from([127, 0, 0, 1]),
+            "loopback is what an unasked-for scrape surface binds"
+        );
+
+        let on = parsed("[metrics]\nport = 9100\nlisten_address = \"0.0.0.0\"\n");
+        assert_eq!(on.metrics_port, Some(9100));
+        assert_eq!(on.metrics_listen_address, std::net::IpAddr::from([0, 0, 0, 0]));
+
+        assert!(refused("[metrics]\nport = 21000\n").contains("a slot takes"));
+        assert!(refused("[metrics]\nlisten_address = \"127.0.0.1\"\n").contains("metrics.port"));
+        assert!(refused("[metrics]\nport = 0\n").contains("metrics.port"));
+        let clash = refused("[proxy]\nhttp_port = 9100\n\n[metrics]\nport = 9100\n");
+        assert!(clash.contains("proxy.http_port"), "{clash}");
     }
 
     #[test]

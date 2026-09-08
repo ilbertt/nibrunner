@@ -208,6 +208,67 @@ pub fn serve_proxy(host: &Arc<Host>) {
     });
 }
 
+// The scrape surface. It is a second way to read what `reported.json` already says rather than a
+// second account of it: the page is rendered from the same builder the status loop writes with, so
+// a scraper and the file can never disagree. Nothing here is an input — there is no route that
+// changes anything, which is what keeps "nothing may tell this daemon what to do except by writing
+// that document" true of a daemon that now answers a connection.
+pub fn serve_metrics(host: &Arc<Host>) {
+    let Some(port) = host.config.metrics_port else {
+        return;
+    };
+    let address = SocketAddr::new(host.config.metrics_listen_address, port);
+    let host = host.clone();
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(address).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!(%error, %address, "metrics could not be served");
+                return;
+            }
+        };
+        tracing::info!(%address, "metrics are being served");
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let host = host.clone();
+            tokio::spawn(async move {
+                let service =
+                    hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                        let host = host.clone();
+                        async move {
+                            Ok::<_, std::convert::Infallible>(
+                                answer_scrape(&host, request.uri().path()).await,
+                            )
+                        }
+                    });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+}
+
+async fn answer_scrape(host: &Arc<Host>, path: &str) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+    use http_body_util::Full;
+    if path != "/metrics" {
+        return hyper::Response::builder()
+            .status(hyper::StatusCode::NOT_FOUND)
+            .body(Full::new(bytes::Bytes::from_static(
+                b"Metrics are at /metrics.\n",
+            )))
+            .expect("a constant response is always buildable");
+    }
+    let report = crate::domain::report::writer::build(host, host_versions(host)).await;
+    let page = crate::domain::metrics::render(&report, &host.router.metrics());
+    hyper::Response::builder()
+        .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+        .body(Full::new(bytes::Bytes::from(page)))
+        .expect("a rendered page is always buildable")
+}
+
 #[cfg(test)]
 mod tests {
     use crate::controllers::converge_controller::ConvergeController;

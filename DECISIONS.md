@@ -237,6 +237,22 @@ filesystem against the manifest at startup and refuses to bring the host up when
 host that cannot vouch for the image every tenant boots from is not a host, and it says so before
 a tenant exists rather than at the first deploy.
 
+**A scrape surface is an output, not an endpoint.** "There is no start endpoint and no stop
+endpoint" is about what may command this daemon, and `metrics.port` commands nothing: there is no
+route that changes anything, and the page is rendered by the same builder that writes
+`reported.json`, so the file and a scraper cannot disagree about what the host is doing. What it
+adds is a reader that does not have to sit on the host to read the file — which is the one thing
+`reported.json` could never do for a Prometheus somewhere else. It is off unless a port is named,
+and bound to loopback unless an address is, because the page names every app on the host and what
+each is using.
+
+The request histogram is bounded by what a service function can see: it starts when the router is
+handed a request and stops when it hands a response back, so it holds the routing and the leg to
+the tenant and neither the handshake before it nor the write after. That is worth knowing, because
+the 40ms Nagle stall this daemon shipped with lived in the write and this histogram would have
+recorded those requests at under a millisecond. Measuring delivery means measuring the body as it
+drains, which is a different and larger change than counting what the router decided.
+
 ## Not done, and named as such
 
 - **Exports and the browse have never run.** Both are written and unit-tested end to end — the

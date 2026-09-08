@@ -2,6 +2,7 @@ pub mod backoff;
 pub mod exports;
 pub mod filesystem;
 pub mod health;
+pub mod metrics;
 pub mod reconcile;
 pub mod report;
 pub mod store;

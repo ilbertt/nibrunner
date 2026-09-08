@@ -14,6 +14,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use protocol::HostPort;
 use tokio::net::{TcpListener, TcpStream};
+
+use crate::domain::metrics::{Outcome, ProxyMetrics};
 use tokio::sync::RwLock;
 
 use crate::adapters::proxy::forward::{forward, hostname_of, note_the_hop, say, ProxyBody};
@@ -74,6 +76,7 @@ pub struct Arrival {
 pub struct Router {
     routes: RwLock<Arc<RouteTable>>,
     client: Client<HttpConnector, Incoming>,
+    metrics: Arc<ProxyMetrics>,
 }
 
 impl Router {
@@ -81,7 +84,12 @@ impl Router {
         Arc::new(Self {
             routes: RwLock::new(Arc::new(RouteTable::default())),
             client: crate::adapters::proxy::forward::upstream_client(),
+            metrics: Arc::new(ProxyMetrics::new()),
         })
+    }
+
+    pub fn metrics(&self) -> Arc<ProxyMetrics> {
+        self.metrics.clone()
     }
 
     pub async fn apply(&self, table: RouteTable) {
@@ -98,7 +106,10 @@ impl Router {
         arrival: Arrival,
     ) -> Response<ProxyBody> {
         let http2 = request.version() == hyper::Version::HTTP_2;
-        let mut response = self.route(request, arrival).await;
+        let started = std::time::Instant::now();
+        let metrics = self.metrics.clone();
+        let (mut response, outcome) = self.route(request, arrival).await;
+        metrics.answered(outcome, started.elapsed());
         if http2 {
             // Illegal over HTTP/2, and hyper logs a warning for each one it has to strip.
             response.headers_mut().remove(hyper::header::CONNECTION);
@@ -106,9 +117,16 @@ impl Router {
         response
     }
 
-    async fn route(self: Arc<Self>, mut request: Request<Incoming>, arrival: Arrival) -> Response<ProxyBody> {
+    async fn route(
+        self: Arc<Self>,
+        mut request: Request<Incoming>,
+        arrival: Arrival,
+    ) -> (Response<ProxyBody>, Outcome) {
         let Some(hostname) = hostname_of(&request) else {
-            return say(StatusCode::BAD_REQUEST, "This request names no host.\n");
+            return (
+                say(StatusCode::BAD_REQUEST, "This request names no host.\n"),
+                Outcome::Refused,
+            );
         };
         // One certificate covers every app on this host, so the name in the handshake is the only
         // thing stopping a connection opened for one tenant from asking for another tenant's app.
@@ -117,19 +135,28 @@ impl Router {
             .as_deref()
             .is_some_and(|name| !name.eq_ignore_ascii_case(&hostname))
         {
-            return say(
-                StatusCode::MISDIRECTED_REQUEST,
-                "This connection was opened for a different host.\n",
+            return (
+                say(
+                    StatusCode::MISDIRECTED_REQUEST,
+                    "This connection was opened for a different host.\n",
+                ),
+                Outcome::WrongHost,
             );
         }
         let Some(port) = self.routes().await.port_for(&hostname) else {
-            return say(
-                StatusCode::NOT_FOUND,
-                "No app on this host answers for that hostname.\n",
+            return (
+                say(
+                    StatusCode::NOT_FOUND,
+                    "No app on this host answers for that hostname.\n",
+                ),
+                Outcome::NoSuchHost,
             );
         };
         note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
-        forward(&self.client, request, LOOPBACK, port.get(), true).await
+        (
+            forward(&self.client, request, LOOPBACK, port.get(), true).await,
+            Outcome::Served,
+        )
     }
 }
 

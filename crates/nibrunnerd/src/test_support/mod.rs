@@ -134,6 +134,27 @@ pub fn desired_export(edit: impl FnOnce(&mut DesiredExport)) -> DesiredExport {
     value
 }
 
+pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedInstance {
+    let mut value = ReportedInstance {
+        app_id: app_id(),
+        deployment_id: deployment_id(),
+        state: InstanceState::Running,
+        host_port: None,
+        guest_ipv4: None,
+        public_ipv4: None,
+        extra_public_port: None,
+        artifact_digest: None,
+        restart_count: 0,
+        started_at: None,
+        last_healthy_at: None,
+        last_exit_code: None,
+        compute: None,
+        message: None,
+    };
+    edit(&mut value);
+    value
+}
+
 pub fn reported_volume(edit: impl FnOnce(&mut ReportedVolume)) -> ReportedVolume {
     let mut value = ReportedVolume {
         volume_id: volume_id(),

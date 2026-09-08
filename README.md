@@ -114,6 +114,8 @@ while an operator is still watching rather than on the pass that first needed th
 | `proxy.https_port` | none | With `proxy.tls_certificate` and `proxy.tls_key` |
 | `proxy.tls_client_ca` | none | A PEM trust pool. Naming one makes a caller's own certificate the price of the handshake |
 | `proxy.port_relay_public_ipv4` | none | Where an app's own public port is reached |
+| `metrics.port` | none | Serve Prometheus metrics on this port |
+| `metrics.listen_address` | `127.0.0.1` | Where to bind them, when a port is named |
 | `network.control_plane_cidrs_v4` | `[]` | Ranges a guest is denied by name |
 | `network.control_plane_cidrs_v6` | `[]` | The same, where no blanket rule covers them |
 | `exports.store_url` | `<state>/export-store` | Where a finished bundle goes |
