@@ -166,11 +166,12 @@ few seconds later. Not chased down.
 
 **An idle instance dropped from the document stayed `idle`** rather than moving to `stopped`.
 
-**The extra public port was routed but not spoken.** sharkord got slot 3, and the ruleset carried
-`tcp dport 22003 dnat to 10.201.0.14:22003` and the udp rule beside it. Nothing tested WebRTC
-through it, and a TCP connect was refused because the tenant listens on UDP. The rule is right;
-the traffic is untried. Cloudflare's proxy cannot carry it either — an extra public port needs a
-grey-cloud record.
+**The extra public port was routed but not spoken, and has since been removed.** sharkord got
+slot 3, and the ruleset carried `tcp dport 22003 dnat to 10.201.0.14:22003` and the udp rule beside
+it. Nothing tested WebRTC through it, and a TCP connect was refused because the tenant listens on
+UDP. Cloudflare's proxy could not have carried it either — that needs a grey-cloud record. The
+feature left the codebase in `75542c8` afterwards, so sharkord runs here without the half of its
+preset that wanted one.
 
 **No export was written and ZeroFS never ran.** Volumes were `local-file`, so a checkpoint is
 refused and an export with it, which is the correct answer and as far as this went. The exports

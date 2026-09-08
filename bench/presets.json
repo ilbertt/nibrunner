@@ -5,7 +5,11 @@
     "archive": "zip",
     "member": "pocketbase",
     "port": 8090,
-    "args": ["serve", "--http=0.0.0.0:8090", "--dir=./data/pb_data"],
+    "args": [
+      "serve",
+      "--http=0.0.0.0:8090",
+      "--dir=./data/pb_data"
+    ],
     "env": {}
   },
   "sharkord": {
@@ -16,7 +20,8 @@
     "env": {
       "SHARKORD_DATA_PATH": "data",
       "SHARKORD_AUTOUPDATE": "false"
-    }
+    },
+    "note": "deploy-link also gives this app a WebRTC port on the host's public address; nibrunnerd carries no extra public port, so that half of the preset is dropped here"
   },
   "boop": {
     "url": "https://github.com/chrisgreg/boop/releases/download/v1.3.0/boop_1.3.0_linux_amd64.tar.gz",
@@ -37,7 +42,9 @@
     "url": "https://github.com/ilbertt/gitea/releases/download/v1.28.0-dev-nibrun.3/gitea-nibrun-linux-amd64",
     "sha256": "f7a3b71523a60be16772b82240a74e4fead1a5e7162008d6e5cf85cdd97ceff6",
     "port": 3000,
-    "args": ["nibrun"],
+    "args": [
+      "nibrun"
+    ],
     "env": {}
   },
   "open-connector": {
