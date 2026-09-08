@@ -161,6 +161,19 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
         neighbours.contains(slot.guest_ipv4.as_str()) || neighbours.is_empty(),
         "the neighbour entry should name the guest this slot holds"
     );
+
+    network
+        .delete_tap(&slot.tap_name)
+        .await
+        .expect("the tap is taken back");
+    assert!(
+        !network.tap_names().await.contains(&slot.tap_name),
+        "a tap a persistent flag kept alive is gone once the app that held it is"
+    );
+    network
+        .delete_tap(&slot.tap_name)
+        .await
+        .expect("a tap that is already gone is the state being asked for, not a failure");
 }
 
 #[tokio::test]

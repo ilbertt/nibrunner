@@ -129,7 +129,20 @@ pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
         };
         match host.volumes.teardown(&desired.volume_id, &desired.app_id).await {
             Ok(()) => {
-                host.allocator.lock().await.release(&desired.app_id);
+                // The tap goes with the slot rather than with the microVM, because a stopped app
+                // keeps both and only an app that is leaving gives them up. Taking it here is also
+                // what stops the slot the cursor hands out next from inheriting a live device.
+                let tap_name = {
+                    let mut allocator = host.allocator.lock().await;
+                    let held = allocator.lookup(&desired.app_id).map(|slot| slot.tap_name);
+                    allocator.release(&desired.app_id);
+                    held
+                };
+                if let Some(tap_name) = tap_name {
+                    if let Err(error) = host.vms.delete_tap(&tap_name).await {
+                        tracing::warn!(%tap_name, error = %error.message(), "a tap outlived the app it was made for");
+                    }
+                }
                 let report = ReportedVolume {
                     volume_id: desired.volume_id.clone(),
                     app_id: desired.app_id.clone(),
@@ -217,6 +230,28 @@ mod tests {
         assert_eq!(snapshot.volume_reports[0].state, VolumeState::Deleted);
         assert!(snapshot.deleted_volumes.contains_key(&volume_id()));
         assert!(host.volumes.observe(&Default::default()).await.is_empty());
+        assert_eq!(
+            host.vms.removed_taps(),
+            vec!["nbr0".to_string()],
+            "the slot went back with its tap still on the host"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_app_that_never_held_a_slot_has_no_tap_to_take() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let plan = ReconcilePlan {
+            volumes: vec![VolumePlan::Teardown {
+                desired: desired_volume(|volume| volume.desired_state = protocol::DesiredPresence::Absent),
+            }],
+            ..Default::default()
+        };
+        apply_teardowns(&host, &plan).await;
+        assert!(
+            host.vms.removed_taps().is_empty(),
+            "a device nothing was ever given is not one to go looking for"
+        );
     }
 
     #[tokio::test]

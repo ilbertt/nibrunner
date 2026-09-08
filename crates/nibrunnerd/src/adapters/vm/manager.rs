@@ -306,6 +306,13 @@ impl Vmm for VmManager {
         Ok(())
     }
 
+    async fn delete_tap(&self, tap_name: &str) -> Result<(), VmError> {
+        self.network
+            .delete_tap(tap_name)
+            .await
+            .map_err(|error| VmError::Host(error.message()))
+    }
+
     async fn statuses(&self, app_ids: &[AppId]) -> std::collections::BTreeMap<AppId, VmStatus> {
         app_ids
             .iter()

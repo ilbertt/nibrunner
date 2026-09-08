@@ -36,6 +36,11 @@ pub trait HostNetwork: Send + Sync {
 
     async fn refresh_neighbour(&self, neighbour: &Neighbour) -> Result<(), NetworkError>;
 
+    // A tap outlives the process that made it, which is what lets a daemon restart leave every
+    // tenant serving. The same persistence means nothing reclaims one, so an app that leaves has
+    // to say so.
+    async fn delete_tap(&self, tap_name: &str) -> Result<(), NetworkError>;
+
     async fn tap_names(&self) -> Vec<String>;
 }
 
@@ -185,6 +190,20 @@ mod linux {
                 .execute()
                 .await
                 .map_err(|error| failed("a neighbour entry", &neighbour.tap_name, error))
+        }
+
+        async fn delete_tap(&self, tap_name: &str) -> Result<(), NetworkError> {
+            // A tap that is not there is the state being asked for, not a failure: a daemon that
+            // died between stopping an app and reclaiming its slot comes back to this line.
+            let Some(index) = self.index_of(tap_name).await else {
+                return Ok(());
+            };
+            self.handle
+                .link()
+                .del(index)
+                .execute()
+                .await
+                .map_err(|error| failed("removing a tap device", tap_name, error))
         }
 
         async fn tap_names(&self) -> Vec<String> {

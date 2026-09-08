@@ -66,6 +66,7 @@ pub fn commands_answering(
 #[derive(Clone)]
 pub struct VmmSpy {
     calls: Arc<Mutex<Vec<VmCall>>>,
+    removed_taps: Arc<Mutex<Vec<String>>>,
     status: Arc<Mutex<VmStatus>>,
     on_sleep: Arc<Mutex<Option<VmError>>>,
     on_wake: Arc<Mutex<Option<VmError>>>,
@@ -77,6 +78,7 @@ impl Default for VmmSpy {
     fn default() -> Self {
         Self {
             calls: shared(Vec::new()),
+            removed_taps: shared(Vec::new()),
             status: shared(VmStatus::default()),
             on_sleep: shared(None),
             on_wake: shared(None),
@@ -105,6 +107,10 @@ impl VmmSpy {
 
     pub fn set_verdict(&self, verdict: impl Into<String>) {
         *self.verdict.lock().expect("no panic holds this lock") = Some(verdict.into());
+    }
+
+    pub fn removed_taps(&self) -> Vec<String> {
+        held(&self.removed_taps)
     }
 
     pub fn set_adopted(&self, app_ids: Vec<AppId>) {
@@ -141,6 +147,12 @@ pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
     let calls = spy.calls.clone();
     vms.expect_discard().returning(move |_| {
         push(&calls, VmCall::Discard);
+        Ok(())
+    });
+    let (calls, removed_taps) = (spy.calls.clone(), spy.removed_taps.clone());
+    vms.expect_delete_tap().returning(move |name: &str| {
+        push(&calls, VmCall::DeleteTap);
+        push(&removed_taps, name.to_string());
         Ok(())
     });
     let status = spy.status.clone();
@@ -226,6 +238,7 @@ pub fn exports_answering(
 pub struct NetworkSpy {
     taps: Arc<Mutex<Vec<TapInterface>>>,
     neighbours: Arc<Mutex<Vec<Neighbour>>>,
+    removed: Arc<Mutex<Vec<String>>>,
 }
 
 impl NetworkSpy {
@@ -235,6 +248,10 @@ impl NetworkSpy {
 
     pub fn neighbours(&self) -> Vec<Neighbour> {
         held(&self.neighbours)
+    }
+
+    pub fn removed(&self) -> Vec<String> {
+        held(&self.removed)
     }
 }
 
@@ -254,6 +271,14 @@ pub fn network() -> (Arc<MockHostNetwork>, NetworkSpy) {
             push(&neighbours, neighbour.clone());
             Ok(())
         });
+    let (taps, removed) = (spy.taps.clone(), spy.removed.clone());
+    network.expect_delete_tap().returning(move |name: &str| {
+        push(&removed, name.to_string());
+        if let Ok(mut held) = taps.lock() {
+            held.retain(|tap| tap.tap_name != name);
+        }
+        Ok(())
+    });
     let taps = spy.taps.clone();
     network
         .expect_tap_names()
@@ -272,6 +297,7 @@ pub fn network_refusing(error: NetworkError) -> Arc<MockHostNetwork> {
         .expect_refresh_neighbour()
         .returning(move |_| Err(error.clone()));
     network.expect_tap_names().returning(Vec::new);
+    network.expect_delete_tap().returning(move |_| Ok(()));
     Arc::new(network)
 }
 
