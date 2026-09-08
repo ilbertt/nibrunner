@@ -91,7 +91,6 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         guest_image_dir: config.guest_image_dir.clone(),
         guest_image_version: guest_image_version.clone(),
         firecracker,
-        public_ipv4: config.proxy.port_relay_public_ipv4.clone(),
         processes: VmProcesses::new(config.runtime_dir.clone()),
         network,
         volumes: volumes.clone(),

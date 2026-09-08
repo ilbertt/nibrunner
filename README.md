@@ -64,7 +64,6 @@ Ten commands, and the tenth is the deploy. Everything after it is the daemon con
       },
       "config": {
         "httpPort": 3000,
-        "hasExtraPublicPort": false,
         "args": [],
         "environment": {},
         "resources": { "vcpuCount": 1, "memoryMib": 256 },
@@ -126,7 +125,6 @@ startup:
 | `[proxy.http]` | `port` | Serve plain HTTP on this port |
 | `[proxy.https]` | `port`, `certificate`, `key` | Serve TLS on this port with this material |
 | `[proxy.https.client_ca]` | `certificate` | A PEM trust pool. Naming one makes a caller's own certificate the price of the handshake |
-| `[proxy.port_relay]` | `public_ipv4` | Where an app's own public port is reached |
 | `[metrics]` | `port`, `listen_address` | Serve the Prometheus page here |
 
 ### The loops

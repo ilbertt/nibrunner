@@ -1,6 +1,10 @@
 # Lifting the 63-slot cap
 
-Not applied — this is the proposal, for review.
+Applied, and then overtaken: `SLOT_COUNT` is `1_000` written down directly, because the extra
+public port this proposal derived it from has since been removed from the codebase. What the
+number bounds is now the range of loopback ports reserved from `HOST_PORT_BASE` alone. The
+reasoning below is kept for the measurements and for the zerofs refusal it argues for, which is
+still not written.
 
 ## Why 63 is not a real limit
 

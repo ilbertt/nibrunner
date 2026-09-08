@@ -22,7 +22,6 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
         hostnames: desired.hostnames.clone(),
         host_port: slot.host_port,
         http_port: desired.config.http_port,
-        has_extra_public_port: Some(desired.config.has_extra_public_port),
         guest_ipv4: slot.guest_ipv4.clone(),
         artifact_digest: desired.artifact.digest.clone(),
         health_check: desired.config.health_check.clone(),

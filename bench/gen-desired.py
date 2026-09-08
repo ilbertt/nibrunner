@@ -39,7 +39,6 @@ for index in range(1, args.count + 1):
         },
         "config": {
             "httpPort": 3000,
-            "hasExtraPublicPort": False,
             "args": [],
             "environment": environment,
             "resources": {"vcpuCount": 1, "memoryMib": args.memory_mib},

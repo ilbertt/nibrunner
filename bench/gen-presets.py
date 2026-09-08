@@ -63,7 +63,6 @@ for slug, state in wanted.items():
     artifact = manifest[slug]
     config = {
         "httpPort": preset["port"],
-        "hasExtraPublicPort": preset["extraPublicPort"],
         "args": preset["args"],
         "environment": environment,
         "resources": {"vcpuCount": 1, "memoryMib": args.memory_mib},

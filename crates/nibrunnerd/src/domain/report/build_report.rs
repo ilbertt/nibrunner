@@ -6,21 +6,14 @@ use protocol::{
 };
 
 use crate::domain::report::InstanceRecord;
-use guest_contract::instance_env::PublicAddress;
 
-pub fn to_reported_instance(
-    record: &InstanceRecord,
-    reached_at: Option<&PublicAddress>,
-    measured: Option<&ComputeUsage>,
-) -> ReportedInstance {
+pub fn to_reported_instance(record: &InstanceRecord, measured: Option<&ComputeUsage>) -> ReportedInstance {
     ReportedInstance {
         app_id: record.app_id.clone(),
         deployment_id: record.deployment_id.clone(),
         state: record.state,
         host_port: Some(record.host_port),
         guest_ipv4: Some(record.guest_ipv4.clone()),
-        public_ipv4: reached_at.map(|address| address.ipv4.clone()),
-        extra_public_port: reached_at.map(|address| address.port),
         artifact_digest: Some(record.artifact_digest.clone()),
         restart_count: record.restart_count,
         started_at: record.started_at.clone(),
@@ -49,7 +42,6 @@ pub struct ReportInputs<'a> {
     pub allocatable: HostCapacity,
     pub versions: HostVersions,
     pub records: &'a [InstanceRecord],
-    pub reached_at: &'a BTreeMap<AppId, PublicAddress>,
     pub volumes: Vec<ReportedVolume>,
     pub volume_usage: &'a BTreeMap<AppId, FilesystemUsage>,
     pub compute_usage: &'a BTreeMap<AppId, ComputeUsage>,
@@ -76,13 +68,7 @@ pub fn build_reported_state(inputs: ReportInputs<'_>) -> HostReportedState {
         instances: inputs
             .records
             .iter()
-            .map(|record| {
-                to_reported_instance(
-                    record,
-                    inputs.reached_at.get(&record.app_id),
-                    inputs.compute_usage.get(&record.app_id),
-                )
-            })
+            .map(|record| to_reported_instance(record, inputs.compute_usage.get(&record.app_id)))
             .collect(),
         checkpoints: inputs.checkpoints,
         exports: inputs.exports,
@@ -93,7 +79,7 @@ pub fn build_reported_state(inputs: ReportInputs<'_>) -> HostReportedState {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use protocol::{HostPort, Ipv4Address, VolumeState};
+    use protocol::VolumeState;
 
     fn reported_volume() -> ReportedVolume {
         ReportedVolume {
@@ -118,7 +104,6 @@ mod tests {
 
     fn assembled(
         records: &[InstanceRecord],
-        reached_at: &BTreeMap<AppId, PublicAddress>,
         checkpoints: Vec<ReportedCheckpoint>,
         exports: Vec<ReportedExport>,
     ) -> HostReportedState {
@@ -140,7 +125,6 @@ mod tests {
                 firecracker: "v1.16.1".into(),
             },
             records,
-            reached_at,
             volumes: vec![],
             volume_usage: &BTreeMap::new(),
             compute_usage: &BTreeMap::new(),
@@ -168,7 +152,6 @@ mod tests {
                 firecracker: "v1.16.1".into(),
             },
             records: &[],
-            reached_at: &BTreeMap::new(),
             volumes: vec![reported_volume()],
             volume_usage: &volume_usage,
             compute_usage: &BTreeMap::new(),
@@ -179,41 +162,14 @@ mod tests {
 
     #[test]
     fn the_report_always_names_the_host_side_port_and_omits_what_it_does_not_know() {
-        let instance = to_reported_instance(&instance_record(|_| {}), None, None);
+        let instance = to_reported_instance(&instance_record(|_| {}), None);
         let written = serde_json::to_value(&instance).unwrap();
         assert_eq!(written["hostPort"], u32::from(instance.host_port.unwrap()));
-        for absent in [
-            "startedAt",
-            "lastHealthyAt",
-            "lastExitCode",
-            "message",
-            "publicIpv4",
-            "extraPublicPort",
-            "compute",
-        ] {
+        for absent in ["startedAt", "lastHealthyAt", "lastExitCode", "message", "compute"] {
             assert!(written.get(absent).is_none(), "{absent} should be absent");
         }
-        let exited = to_reported_instance(
-            &instance_record(|record| record.last_exit_code = Some(0)),
-            None,
-            None,
-        );
+        let exited = to_reported_instance(&instance_record(|record| record.last_exit_code = Some(0)), None);
         assert_eq!(serde_json::to_value(&exited).unwrap()["lastExitCode"], 0);
-    }
-
-    #[test]
-    fn an_app_that_asked_for_its_own_port_is_reported_with_where_it_answers() {
-        let reached = PublicAddress {
-            ipv4: Ipv4Address::parse("203.0.113.7").unwrap(),
-            port: HostPort::new(22_000).unwrap(),
-        };
-        let instance = to_reported_instance(
-            &instance_record(|record| record.has_extra_public_port = Some(true)),
-            Some(&reached),
-            None,
-        );
-        assert_eq!(instance.public_ipv4, Some(reached.ipv4));
-        assert_eq!(instance.extra_public_port, Some(reached.port));
     }
 
     #[test]
@@ -236,32 +192,9 @@ mod tests {
             cpu_share: Some(0.18),
             measured_at: observed_at(),
         };
-        let measured = to_reported_instance(&instance_record(|_| {}), None, Some(&spending));
+        let measured = to_reported_instance(&instance_record(|_| {}), Some(&spending));
         assert_eq!(measured.compute, Some(spending));
-        assert_eq!(
-            to_reported_instance(&instance_record(|_| {}), None, None).compute,
-            None
-        );
-    }
-
-    #[test]
-    fn an_address_that_belongs_to_a_neighbour_is_never_reported_against_this_app() {
-        let reached = PublicAddress {
-            ipv4: Ipv4Address::parse("203.0.113.7").unwrap(),
-            port: HostPort::new(22_000).unwrap(),
-        };
-        let neighbour = AppId::parse("app-somebody-else").unwrap();
-        let records = [instance_record(|record| {
-            record.has_extra_public_port = Some(true)
-        })];
-        let report = assembled(
-            &records,
-            &[(neighbour, reached)].into_iter().collect(),
-            vec![],
-            vec![],
-        );
-        assert_eq!(report.instances[0].public_ipv4, None);
-        assert_eq!(report.instances[0].extra_public_port, None);
+        assert_eq!(to_reported_instance(&instance_record(|_| {}), None).compute, None);
     }
 
     #[test]
@@ -270,7 +203,7 @@ mod tests {
             .iter()
             .map(|name| instance_record(|record| record.app_id = AppId::parse(*name).unwrap()))
             .collect();
-        let report = assembled(&records, &BTreeMap::new(), vec![], vec![]);
+        let report = assembled(&records, vec![], vec![]);
         assert_eq!(
             report
                 .instances
@@ -283,9 +216,7 @@ mod tests {
                 "app-three".to_string()
             ]
         );
-        assert!(assembled(&[], &BTreeMap::new(), vec![], vec![])
-            .instances
-            .is_empty());
+        assert!(assembled(&[], vec![], vec![]).instances.is_empty());
     }
 
     #[test]
@@ -308,12 +239,7 @@ mod tests {
                 "the volume would not freeze".to_string(),
             )),
         };
-        let report = assembled(
-            &[],
-            &BTreeMap::new(),
-            vec![checkpoint.clone()],
-            vec![export.clone()],
-        );
+        let report = assembled(&[], vec![checkpoint.clone()], vec![export.clone()]);
         assert_eq!(report.checkpoints, vec![checkpoint]);
         assert_eq!(report.exports, vec![export]);
     }

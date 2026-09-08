@@ -32,8 +32,6 @@ mod tests {
         let mut value = InstanceConfig {
             http_port: 3000,
             hostname: None,
-            public_ipv4: None,
-            extra_public_port: None,
             max_restarts: 5,
             initial_backoff_ms: 500,
             max_backoff_ms: 30_000,

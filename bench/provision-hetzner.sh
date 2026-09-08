@@ -37,25 +37,6 @@ git clone --depth 1 "$REPO" "$SRC"
 cd "$SRC"
 git log --oneline -1
 
-echo "== lift the slot cap =="
-# SLOT_COUNT was derived from the NBD minor count, but only the zerofs backend ever uses an
-# nbd device and this host is local-file. What genuinely bounds a slot is the port layout.
-python3 - <<'PY'
-import pathlib, re
-p = pathlib.Path("/root/nibrunner/crates/nft-render/src/slot.rs")
-s = p.read_text()
-old = "pub const SLOT_COUNT: u32 = NBD_DEVICE_COUNT - 1;"
-new = ("// Only the zerofs backend addresses an nbd minor; a local-file host never does. What\n"
-       "// bounds a slot is the port layout: host ports start at HOST_PORT_BASE and extra public\n"
-       "// ports at EXTRA_PUBLIC_PORT_BASE, so the slot at their difference would be handed a host\n"
-       "// port already spoken for as slot 0's extra public port.\n"
-       "pub const SLOT_COUNT: u32 = (EXTRA_PUBLIC_PORT_BASE - HOST_PORT_BASE) as u32;")
-assert old in s, "SLOT_COUNT definition not found — check upstream"
-p.write_text(s.replace(old, new))
-print("slot cap lifted")
-PY
-grep -A1 "pub const SLOT_COUNT" crates/nft-render/src/slot.rs | tail -1
-
 echo "== build daemon and init =="
 export SQLX_OFFLINE=true
 cargo build --release -p nibrunnerd 2>&1 | tail -3

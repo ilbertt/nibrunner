@@ -15,7 +15,6 @@ fn instance_json() -> serde_json::Value {
         },
         "config": {
             "httpPort": 3000,
-            "hasExtraPublicPort": false,
             "args": ["serve"],
             "environment": { "DSN": "postgres://u:p@h/db", "PORT_HINT": "${NIBRUN_HTTP_PORT}" },
             "resources": { "vcpuCount": 1, "memoryMib": 256 },
@@ -73,10 +72,6 @@ fn a_tenant_value_may_name_only_offered_runtime_values() {
     assert!(TenantValue::parse("$NIBRUN_HTTP_PORTS").is_err());
     assert!(TenantValue::parse("${NIBRUN_NOPE}").is_err());
     assert!(TenantValue::parse("${NIBRUN_HTTP_PORT").is_err());
-    assert!(names_extra_public_port_values(
-        "${NIBRUN_PUBLIC_IPV4}:${NIBRUN_EXTRA_PUBLIC_PORT}"
-    ));
-    assert!(!names_extra_public_port_values("${NIBRUN_HTTP_PORT}"));
 }
 
 #[test]
@@ -128,8 +123,6 @@ fn a_report_omits_what_it_does_not_know() {
         state: InstanceState::Running,
         host_port: HostPort::new(21000).ok(),
         guest_ipv4: None,
-        public_ipv4: None,
-        extra_public_port: None,
         artifact_digest: None,
         restart_count: 0,
         started_at: None,

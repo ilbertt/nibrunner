@@ -40,7 +40,6 @@ pub struct ForwardedInstance {
     pub app_id: AppId,
     pub host_port: HostPort,
     pub http_port: HttpPort,
-    pub extra_public_port: Option<HostPort>,
     pub host_ipv4: Ipv4Address,
     pub guest_ipv4: Ipv4Address,
 }
@@ -218,18 +217,6 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
             instance.host_port, instance.guest_ipv4, instance.http_port
         )
     }));
-    for instance in &state.instances {
-        let Some(port) = instance.extra_public_port else {
-            continue;
-        };
-        for protocol in ["tcp", "udp"] {
-            prerouting.push(format!(
-                "iifname != {tap} {protocol} dport {port} dnat to {}:{port}",
-                instance.guest_ipv4
-            ));
-        }
-    }
-
     let mut output = vec![format!(
         "type nat hook output priority {OUTPUT_NAT_PRIORITY}; policy accept;"
     )];
@@ -268,16 +255,8 @@ mod tests {
             app_id: AppId::parse("0198f3aa-1c2d-7e4b-9f11-a0b1c2d3e4f5").unwrap(),
             host_port: HostPort::new(21_000).unwrap(),
             http_port: HttpPort::new(3000).unwrap(),
-            extra_public_port: None,
             host_ipv4: Ipv4Address::parse("10.201.0.1").unwrap(),
             guest_ipv4: Ipv4Address::parse("10.201.0.2").unwrap(),
-        }
-    }
-
-    fn asked_for_a_port() -> ForwardedInstance {
-        ForwardedInstance {
-            extra_public_port: HostPort::new(22_000).ok(),
-            ..instance()
         }
     }
 
@@ -399,20 +378,10 @@ mod tests {
     }
 
     #[test]
-    fn the_port_an_app_asked_for_arrives_as_the_port_it_was_sent_to() {
-        let ruleset = render_ruleset(&state(vec![asked_for_a_port()], &[], &[]));
-        assert!(ruleset
-            .lines()
-            .any(|l| l.contains("tcp dport 22000") && l.contains("dnat to 10.201.0.2:22000")));
-        assert!(ruleset
-            .lines()
-            .any(|l| l.contains("udp dport 22000") && l.contains("dnat to 10.201.0.2:22000")));
-        let rules: Vec<&str> = ruleset.lines().filter(|l| l.contains("dport 22000")).collect();
-        assert_eq!(rules.len(), 2);
-        assert!(rules.iter().all(|l| l.trim().starts_with("iifname != \"nbr*\"")));
-        let without = render_ruleset(&state(vec![instance()], &[], &[]));
-        assert!(!without.contains("22000"));
-        assert!(!without.contains("udp dport"));
+    fn nothing_but_the_one_forwarded_port_is_dnatted_to_a_guest() {
+        let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
+        assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 2);
+        assert!(!ruleset.contains("udp dport"));
     }
 
     #[test]
@@ -431,8 +400,7 @@ mod tests {
         let name = app_counter_name(&instance().app_id);
         assert!(ruleset.contains(&format!("counter {name} {{")));
         assert!(!ruleset.contains(&format!("counter \"{name}\"")));
-        let both = render_ruleset(&state(vec![instance(), asked_for_a_port()], &[], &[]));
-        for rule in both.lines().filter(|l| l.contains("dnat to")) {
+        for rule in ruleset.lines().filter(|l| l.contains("dnat to")) {
             assert!(!rule.contains("counter"));
         }
         let loopback: Vec<&str> = ruleset
@@ -451,11 +419,6 @@ mod tests {
         assert_eq!(forwarded.len(), 1);
         let counted: Vec<&str> = ruleset.lines().filter(|l| l.contains("counter name")).collect();
         assert_eq!(counted.len(), 2);
-        let with_port = render_ruleset(&state(vec![asked_for_a_port()], &[], &[]));
-        assert_eq!(
-            with_port.lines().filter(|l| l.contains("counter name")).count(),
-            2
-        );
         assert!(ruleset.contains("type filter hook forward priority filter + 10;"));
         let empty = render_ruleset(&state(vec![], &[], &[]));
         assert!(!empty.contains("counter "));

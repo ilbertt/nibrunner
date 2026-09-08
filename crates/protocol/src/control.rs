@@ -104,10 +104,6 @@ pub struct ReportedInstance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_ipv4: Option<Ipv4Address>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_ipv4: Option<Ipv4Address>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_public_port: Option<HostPort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_digest: Option<Sha256Digest>,
     pub restart_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

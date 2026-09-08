@@ -96,7 +96,6 @@ mod tests {
             app_id: AppId::parse("app-1").unwrap(),
             host_port: HostPort::new(21_000).unwrap(),
             http_port: HttpPort::new(3000).unwrap(),
-            extra_public_port: None,
             host_ipv4: Ipv4Address::parse("10.201.0.1").unwrap(),
             guest_ipv4: Ipv4Address::parse("10.201.0.2").unwrap(),
         }

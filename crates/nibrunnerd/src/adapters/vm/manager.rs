@@ -18,7 +18,7 @@ use crate::json_store::{make_directory, write_json};
 use crate::ports::{BootRequest, LogSink, SuspendRequest, VmError, Vmm};
 use crate::state::SharedState;
 use guest_contract::firecracker::{render_firecracker_config, VmNetwork, VmPaths, VmVsock};
-use guest_contract::instance_env::{render_instance_env, InstanceEnvContent, PublicAddress};
+use guest_contract::instance_env::{render_instance_env, InstanceEnvContent};
 
 pub const FIRECRACKER_CONFIG_FILENAME: &str = "firecracker.json";
 pub const GUEST_KERNEL_FILENAME: &str = "vmlinux";
@@ -34,7 +34,6 @@ pub struct VmManager {
     pub guest_image_dir: PathBuf,
     pub firecracker: PathBuf,
     pub guest_image_version: String,
-    pub public_ipv4: Option<protocol::Ipv4Address>,
     pub processes: VmProcesses,
     pub network: Arc<dyn HostNetwork>,
     pub volumes: Arc<dyn VolumeBackend>,
@@ -90,20 +89,8 @@ impl VmManager {
         let working_dir = self.working_dir_for(&request.desired.app_id);
         make_directory(&working_dir, VM_DIR_MODE).map_err(|error| VmError::Host(error.to_string()))?;
 
-        let public_address = request
-            .desired
-            .config
-            .has_extra_public_port
-            .then(|| {
-                self.public_ipv4.clone().map(|ipv4| PublicAddress {
-                    ipv4,
-                    port: slot.extra_public_port,
-                })
-            })
-            .flatten();
         let rendered = render_instance_env(&InstanceEnvContent {
             http_port: request.desired.config.http_port,
-            public_address,
             hostnames: &request.desired.hostnames,
             args: &request.desired.config.args,
             environment: &request.desired.config.environment,
@@ -438,7 +425,6 @@ mod tests {
             guest_image_dir: root.join("guest"),
             firecracker: root.join("bin/firecracker"),
             guest_image_version: "6.1.180-test".into(),
-            public_ipv4: None,
             processes: VmProcesses::new(root.join("run")),
             network,
             volumes: Arc::new(LocalFileVolumes::new(
@@ -522,7 +508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_app_that_asked_for_no_public_port_is_sent_neither_half_of_one() {
+    async fn the_config_drive_carries_the_port_the_tenant_was_told_to_listen_on() {
         let fixture = fixture();
         fixture
             .manager
@@ -530,20 +516,7 @@ mod tests {
             .await
             .unwrap();
         let written = config_drive(&fixture.manager.working_dir_for(&app_id()));
-        assert!(!written.contains("NIBRUN_PUBLIC_IPV4"));
-        assert!(!written.contains("NIBRUN_EXTRA_PUBLIC_PORT"));
         assert!(written.contains("NIBRUN_HTTP_PORT=3000"));
-    }
-
-    #[tokio::test]
-    async fn an_app_that_asked_is_told_the_address_and_the_port_together() {
-        let mut fixture = fixture();
-        fixture.manager.public_ipv4 = Some(protocol::Ipv4Address::parse("203.0.113.7").unwrap());
-        let wants_a_port = desired_instance(|instance| instance.config.has_extra_public_port = true);
-        fixture.manager.stage(&boot_request(wants_a_port)).await.unwrap();
-        let written = config_drive(&fixture.manager.working_dir_for(&app_id()));
-        assert!(written.contains("NIBRUN_PUBLIC_IPV4=203.0.113.7"));
-        assert!(written.contains("NIBRUN_EXTRA_PUBLIC_PORT=22000"));
     }
 
     #[tokio::test]

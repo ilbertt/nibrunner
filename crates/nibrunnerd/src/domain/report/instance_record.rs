@@ -16,8 +16,6 @@ pub struct InstanceRecord {
     pub hostnames: Vec<AppHostname>,
     pub host_port: HostPort,
     pub http_port: HttpPort,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_extra_public_port: Option<bool>,
     pub guest_ipv4: Ipv4Address,
     pub artifact_digest: Sha256Digest,
     pub state: InstanceState,
@@ -47,7 +45,6 @@ pub struct RecordFields {
     pub hostnames: Vec<AppHostname>,
     pub host_port: HostPort,
     pub http_port: HttpPort,
-    pub has_extra_public_port: Option<bool>,
     pub guest_ipv4: Ipv4Address,
     pub artifact_digest: Sha256Digest,
     pub health_check: HealthCheck,
@@ -65,7 +62,6 @@ impl InstanceRecord {
             hostnames: fields.hostnames,
             host_port: fields.host_port,
             http_port: fields.http_port,
-            has_extra_public_port: fields.has_extra_public_port,
             guest_ipv4: fields.guest_ipv4,
             artifact_digest: fields.artifact_digest,
             state,
@@ -89,7 +85,6 @@ impl InstanceRecord {
         self.hostnames = fields.hostnames;
         self.host_port = fields.host_port;
         self.http_port = fields.http_port;
-        self.has_extra_public_port = fields.has_extra_public_port;
         self.guest_ipv4 = fields.guest_ipv4;
         self.artifact_digest = fields.artifact_digest;
         self.health_check = fields.health_check;
@@ -100,10 +95,6 @@ impl InstanceRecord {
 
     pub fn is_idle(&self) -> bool {
         self.state == InstanceState::Idle
-    }
-
-    pub fn wants_extra_public_port(&self) -> bool {
-        self.has_extra_public_port.unwrap_or(false)
     }
 
     pub fn grace_inputs(&self, now_ms: i64) -> GraceInputs<'_> {
@@ -139,7 +130,6 @@ mod tests {
         fields.hostnames = vec![];
         fields.host_port = HostPort::new(23_456).unwrap();
         fields.http_port = HttpPort::new(9_001).unwrap();
-        fields.has_extra_public_port = Some(true);
         fields.guest_ipv4 = Ipv4Address::parse("10.9.9.9").unwrap();
         fields.artifact_digest = Sha256Digest::parse("a".repeat(64)).unwrap();
         fields.resources = InstanceResources {
@@ -174,11 +164,9 @@ mod tests {
     fn a_note_that_predates_a_field_reads_as_the_no_it_meant() {
         let mut written = serde_json::to_value(instance_record(|_| {})).unwrap();
         let object = written.as_object_mut().unwrap();
-        object.remove("hasExtraPublicPort");
         object.remove("startAttempts");
         let records = read_instance_records(Some(serde_json::Value::Array(vec![written])));
         assert_eq!(records.len(), 1);
-        assert!(!records[0].wants_extra_public_port());
         assert_eq!(records[0].start_attempts, NO_START_ATTEMPTS);
     }
 
@@ -209,8 +197,6 @@ mod tests {
         assert_eq!(record.hostnames, wanted.hostnames);
         assert_eq!(record.host_port, wanted.host_port);
         assert_eq!(record.http_port, wanted.http_port);
-        assert_eq!(record.has_extra_public_port, wanted.has_extra_public_port);
-        assert!(record.wants_extra_public_port());
         assert_eq!(record.guest_ipv4, wanted.guest_ipv4);
         assert_eq!(record.artifact_digest, wanted.artifact_digest);
         assert_eq!(record.resources, wanted.resources);

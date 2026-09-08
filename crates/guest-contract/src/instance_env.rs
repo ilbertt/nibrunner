@@ -1,6 +1,5 @@
 use protocol::{
-    AppHostname, AppHostnameKind, HostPort, Hostname, HttpPort, Ipv4Address, RestartPolicy, TenantArguments,
-    TenantEnvironment,
+    AppHostname, AppHostnameKind, Hostname, HttpPort, RestartPolicy, TenantArguments, TenantEnvironment,
 };
 
 pub const INSTANCE_ENV_FILENAME: &str = "instance.env";
@@ -11,16 +10,9 @@ const TENANT_PREFIX: &str = "ENV_";
 
 const DNS_SERVERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublicAddress {
-    pub ipv4: Ipv4Address,
-    pub port: HostPort,
-}
-
 #[derive(Debug, Clone)]
 pub struct InstanceEnvContent<'a> {
     pub http_port: HttpPort,
-    pub public_address: Option<PublicAddress>,
     pub hostnames: &'a [AppHostname],
     pub args: &'a TenantArguments,
     pub environment: &'a TenantEnvironment,
@@ -56,10 +48,6 @@ pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, U
     let mut lines = vec![format!("{RUNTIME_PREFIX}HTTP_PORT={}", content.http_port)];
     if let Some(hostname) = platform_hostname(content.hostnames) {
         lines.push(format!("{RUNTIME_PREFIX}HOSTNAME={hostname}"));
-    }
-    if let Some(public) = &content.public_address {
-        lines.push(format!("{RUNTIME_PREFIX}PUBLIC_IPV4={}", public.ipv4));
-        lines.push(format!("{RUNTIME_PREFIX}EXTRA_PUBLIC_PORT={}", public.port));
     }
     let policy = content.restart_policy;
     lines.push(format!("{RUNTIME_PREFIX}MAX_RESTARTS={}", policy.max_restarts));
@@ -120,8 +108,6 @@ pub const CONFIG_MAX_BYTES: usize = 128 * 1024;
 pub struct InstanceConfig {
     pub http_port: u32,
     pub hostname: Option<String>,
-    pub public_ipv4: Option<String>,
-    pub extra_public_port: Option<u32>,
     pub max_restarts: u32,
     pub initial_backoff_ms: u32,
     pub max_backoff_ms: u32,
@@ -259,11 +245,6 @@ pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError
     Ok(InstanceConfig {
         http_port: number("NIBRUN_HTTP_PORT")?,
         hostname: named("NIBRUN_HOSTNAME").cloned(),
-        public_ipv4: named("NIBRUN_PUBLIC_IPV4").cloned(),
-        extra_public_port: match named("NIBRUN_EXTRA_PUBLIC_PORT") {
-            None => None,
-            Some(_) => Some(number("NIBRUN_EXTRA_PUBLIC_PORT")?),
-        },
         max_restarts: number("NIBRUN_MAX_RESTARTS")?,
         initial_backoff_ms: number("NIBRUN_INITIAL_BACKOFF_MS")?,
         max_backoff_ms: number("NIBRUN_MAX_BACKOFF_MS")?,
@@ -289,12 +270,6 @@ impl InstanceConfig {
         ];
         if let Some(hostname) = &self.hostname {
             owned.push(("NIBRUN_HOSTNAME".to_string(), hostname.clone()));
-        }
-        if let Some(ipv4) = &self.public_ipv4 {
-            owned.push(("NIBRUN_PUBLIC_IPV4".to_string(), ipv4.clone()));
-        }
-        if let Some(port) = self.extra_public_port {
-            owned.push(("NIBRUN_EXTRA_PUBLIC_PORT".to_string(), port.to_string()));
         }
         let platform: Vec<String> = owned.iter().map(|(name, _)| name.clone()).collect();
         for (name, value) in &self.environment {
@@ -329,7 +304,6 @@ mod tests {
 
     struct Overrides {
         http_port: HttpPort,
-        public_address: Option<PublicAddress>,
         hostnames: Vec<AppHostname>,
         args: Vec<String>,
         environment: TenantEnvironment,
@@ -339,7 +313,6 @@ mod tests {
         fn default() -> Self {
             Self {
                 http_port: DEFAULT_HTTP_PORT,
-                public_address: None,
                 hostnames: vec![hostname(PLATFORM_HOSTNAME, AppHostnameKind::Platform)],
                 args: vec![],
                 environment: TenantEnvironment::default(),
@@ -351,7 +324,6 @@ mod tests {
         let args = TenantArguments::try_from(overrides.args).unwrap();
         render_instance_env(&InstanceEnvContent {
             http_port: overrides.http_port,
-            public_address: overrides.public_address,
             hostnames: &overrides.hostnames,
             args: &args,
             environment: &overrides.environment,
@@ -381,24 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn an_app_that_asked_for_a_public_port_is_told_the_address_and_the_port_together() {
-        let without = render(Overrides::default());
-        assert!(!without.contains("NIBRUN_PUBLIC_IPV4"));
-        assert!(!without.contains("NIBRUN_EXTRA_PUBLIC_PORT"));
-        let with = render(Overrides {
-            public_address: Some(PublicAddress {
-                ipv4: Ipv4Address::parse("203.0.113.7").unwrap(),
-                port: HostPort::new(22_000).unwrap(),
-            }),
-            ..Default::default()
-        });
-        let lines: Vec<&str> = with.lines().collect();
-        assert_eq!(lines[1], "NIBRUN_HOSTNAME=my-app.nibrun.app");
-        assert_eq!(lines[2], "NIBRUN_PUBLIC_IPV4=203.0.113.7");
-        assert_eq!(lines[3], "NIBRUN_EXTRA_PUBLIC_PORT=22000");
-    }
-
-    #[test]
     fn every_value_the_protocol_offers_is_one_a_reference_can_reach() {
         let environment: TenantEnvironment = protocol::RUNTIME_VALUE_NAMES
             .iter()
@@ -408,10 +362,6 @@ mod tests {
             })
             .collect();
         let rendered = render(Overrides {
-            public_address: Some(PublicAddress {
-                ipv4: Ipv4Address::parse("203.0.113.7").unwrap(),
-                port: HostPort::new(22_000).unwrap(),
-            }),
             environment,
             ..Default::default()
         });
@@ -531,7 +481,6 @@ mod both_ends {
         }];
         render_instance_env(&InstanceEnvContent {
             http_port: DEFAULT_HTTP_PORT,
-            public_address: None,
             hostnames: &hostnames,
             args: &args,
             environment: &environment,

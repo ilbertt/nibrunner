@@ -57,7 +57,6 @@ async fn sync_desired(host: &Host, desired: &HostDesiredState) {
                 record.desired_running = wanted.desired_state != DesiredInstanceState::Stopped;
                 record.on_request = wanted.desired_state == DesiredInstanceState::OnRequest;
                 record.http_port = wanted.config.http_port;
-                record.has_extra_public_port = Some(wanted.config.has_extra_public_port);
             })
             .await;
     }
@@ -532,7 +531,6 @@ mod tests {
             state.instances = vec![desired_instance(|instance| {
                 instance.desired_state = DesiredInstanceState::OnRequest;
                 instance.hostnames = vec![app_hostname()];
-                instance.config.has_extra_public_port = true;
             })]
         });
 
@@ -542,7 +540,6 @@ mod tests {
         assert!(record.on_request);
         assert!(record.desired_running);
         assert_eq!(record.hostnames, vec![app_hostname()]);
-        assert_eq!(record.has_extra_public_port, Some(true));
     }
 
     #[tokio::test]

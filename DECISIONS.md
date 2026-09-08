@@ -21,10 +21,6 @@ restart policy.** The guest's supervisor already has that policy and applies it 
 host applies the same numbers to the microVM. Two budgets from one set of numbers is confusing to
 read, and I would give the host its own — but the field is in the protocol and the guest reads it.
 
-**`hasExtraPublicPort` is a boolean and the port is derived from the slot.** Which means an app's
-public port changes if it ever moves slot, and nothing tells its users. The alternative is a port
-in desired state, which is what I would do. It is the control plane's field to change.
-
 ## Changed
 
 **No CLI, and no local socket.** The brief asked for `hostctl` over a unix socket with

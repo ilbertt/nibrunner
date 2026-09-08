@@ -15,15 +15,7 @@ pub fn is_environment_name(name: &str) -> bool {
 
 const RUNTIME_VALUE_PREFIX: &str = "NIBRUN_";
 
-pub const RUNTIME_VALUE_NAMES: [&str; 5] = [
-    "NIBRUN_DATA_DIR",
-    "NIBRUN_EXTRA_PUBLIC_PORT",
-    "NIBRUN_HOSTNAME",
-    "NIBRUN_HTTP_PORT",
-    "NIBRUN_PUBLIC_IPV4",
-];
-
-pub const EXTRA_PUBLIC_PORT_VALUES: [&str; 2] = ["NIBRUN_EXTRA_PUBLIC_PORT", "NIBRUN_PUBLIC_IPV4"];
+pub const RUNTIME_VALUE_NAMES: [&str; 3] = ["NIBRUN_DATA_DIR", "NIBRUN_HOSTNAME", "NIBRUN_HTTP_PORT"];
 
 fn is_name_character(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
@@ -69,12 +61,6 @@ fn runtime_references(value: &str) -> Vec<(String, bool)> {
 
 pub fn names_offered_runtime_values(value: &str) -> bool {
     runtime_references(value).iter().all(|(_, allowed)| *allowed)
-}
-
-pub fn names_extra_public_port_values(value: &str) -> bool {
-    runtime_references(value)
-        .iter()
-        .any(|(name, allowed)| *allowed && EXTRA_PUBLIC_PORT_VALUES.contains(&name.as_str()))
 }
 
 pub fn interpolable_runtime_value(name: &str) -> String {
@@ -228,7 +214,6 @@ pub struct AppHostname {
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub http_port: HttpPort,
-    pub has_extra_public_port: bool,
     pub args: TenantArguments,
     pub environment: TenantEnvironment,
     pub resources: InstanceResources,

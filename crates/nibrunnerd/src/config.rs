@@ -1,8 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
-use protocol::Ipv4Address;
-
 pub const DEFAULT_CONFIG_FILE: &str = "/etc/nibrunner/config.toml";
 pub const CONFIG_FILE_VARIABLE: &str = "NIBRUNNER_CONFIG";
 
@@ -72,7 +70,6 @@ pub struct ZerofsSettings {
 pub struct ProxyConfig {
     pub http: Option<HttpListener>,
     pub https: Option<HttpsListener>,
-    pub port_relay_public_ipv4: Option<Ipv4Address>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,7 +239,6 @@ mod file {
     pub(super) struct Proxy {
         pub(super) http: Option<Http>,
         pub(super) https: Option<Https>,
-        pub(super) port_relay: Option<PortRelay>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -264,12 +260,6 @@ mod file {
     #[serde(deny_unknown_fields)]
     pub(super) struct ClientCa {
         pub(super) certificate: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub(super) struct PortRelay {
-        pub(super) public_ipv4: Option<String>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -477,19 +467,7 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
             ));
         }
     }
-    Ok(ProxyConfig {
-        http,
-        https,
-        port_relay_public_ipv4: document
-            .port_relay
-            .as_ref()
-            .map(|relay| {
-                let named = required_str("proxy.port_relay.public_ipv4", &relay.public_ipv4)?;
-                Ipv4Address::parse(named.trim().to_string())
-                    .map_err(|_| ConfigError::invalid("proxy.port_relay.public_ipv4", "an IPv4 address"))
-            })
-            .transpose()?,
-    })
+    Ok(ProxyConfig { http, https })
 }
 
 fn metrics(
@@ -557,17 +535,13 @@ fn listener(field: &str, port: u16) -> Result<u16, ConfigError> {
         ));
     }
     let last_slot = u16::try_from(nft_render::SLOT_COUNT.saturating_sub(1)).unwrap_or(u16::MAX);
-    for (base, what) in [
-        (nft_render::HOST_PORT_BASE, "an app's loopback port"),
-        (nft_render::EXTRA_PUBLIC_PORT_BASE, "an app's extra public port"),
-    ] {
-        let end = base.saturating_add(last_slot);
-        if (base..=end).contains(&port) {
-            return Err(ConfigError::invalid(
-                field,
-                format!("free, because {base}-{end} is what a slot takes for {what}"),
-            ));
-        }
+    let base = nft_render::HOST_PORT_BASE;
+    let end = base.saturating_add(last_slot);
+    if (base..=end).contains(&port) {
+        return Err(ConfigError::invalid(
+            field,
+            format!("free, because {base}-{end} is what a slot takes for an app's loopback port"),
+        ));
     }
     Ok(port)
 }
@@ -876,11 +850,7 @@ control_plane_cidrs_v6 = []
         let message = refused(&document(&[], "[proxy.http]\nport = 21000\n"));
         assert!(message.contains("proxy.http.port"), "{message}");
         assert!(message.contains("21000"), "{message}");
-        let extra = refused(&document(
-            &[],
-            "[proxy.https]\nport = 22062\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n",
-        ));
-        assert!(extra.contains("22000"), "{extra}");
+        assert!(message.contains("21999"), "{message}");
         assert_eq!(
             with("[proxy.http]\nport = 23000\n").proxy.http.unwrap().port,
             23000
@@ -934,24 +904,6 @@ control_plane_cidrs_v6 = []
         );
         let open = with("[proxy.https]\nport = 8443\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n");
         assert_eq!(open.proxy.https.unwrap().client_ca, None);
-    }
-
-    #[test]
-    fn an_address_no_packet_could_be_relayed_to_is_refused() {
-        let message = refused(&document(
-            &[],
-            "[proxy.port_relay]\npublic_ipv4 = \"not.an.address\"\n",
-        ));
-        assert!(message.contains("proxy.port_relay.public_ipv4"), "{message}");
-        assert!(refused(&document(&[], "[proxy.port_relay]\npublic_ipv4 = \"fd00::1\"\n")).contains("IPv4"));
-        assert!(refused(&document(&[], "[proxy.port_relay]\n")).contains("nothing here is optional"));
-        assert_eq!(
-            with("[proxy.port_relay]\npublic_ipv4 = \"203.0.113.10\"\n")
-                .proxy
-                .port_relay_public_ipv4
-                .map(|address| address.to_string()),
-            Some("203.0.113.10".to_string())
-        );
     }
 
     #[test]
@@ -1225,9 +1177,6 @@ key = "/etc/nibrunner/origin.key"
 [proxy.https.client_ca]
 certificate = "/etc/nibrunner/origin-pull-ca.pem"
 
-[proxy.port_relay]
-public_ipv4 = "203.0.113.10"
-
 [metrics]
 port = 9100
 listen_address = "127.0.0.1"
@@ -1246,13 +1195,6 @@ listen_address = "127.0.0.1"
                 key: PathBuf::from("/etc/nibrunner/origin.key"),
                 client_ca: Some(PathBuf::from("/etc/nibrunner/origin-pull-ca.pem")),
             })
-        );
-        assert_eq!(
-            config
-                .proxy
-                .port_relay_public_ipv4
-                .map(|address| address.to_string()),
-            Some("203.0.113.10".to_string())
         );
         assert_eq!(
             config.metrics,

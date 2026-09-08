@@ -18,13 +18,10 @@ pub const NBD_SLOT_LIMIT: u32 = NBD_DEVICE_COUNT - 1;
 
 pub const HOST_PORT_BASE: u16 = 21_000;
 
-pub const EXTRA_PUBLIC_PORT_BASE: u16 = 22_000;
-
 /// Only the zerofs backend addresses an nbd minor, so a local-file host is not bounded by how
-/// many of those exist. What bounds every host is the port layout: the slot at the distance
-/// between the two bases would be handed a host port already spoken for as slot 0's extra
-/// public port.
-pub const SLOT_COUNT: u32 = (EXTRA_PUBLIC_PORT_BASE - HOST_PORT_BASE) as u32;
+/// many of those exist. What bounds every host is the range of loopback ports reserved from
+/// `HOST_PORT_BASE`, which is this many and no more.
+pub const SLOT_COUNT: u32 = 1_000;
 
 pub const GUEST_NETWORK_CIDR: &str = "10.201.0.0/16";
 const GUEST_SUBNET_PREFIX_LENGTH: u8 = 30;
@@ -44,7 +41,6 @@ pub struct AppSlot {
     pub slot: u32,
     pub app_id: AppId,
     pub host_port: HostPort,
-    pub extra_public_port: HostPort,
     pub host_ipv4: Ipv4Address,
     pub guest_ipv4: Ipv4Address,
     pub guest_mac: String,
@@ -79,8 +75,6 @@ pub fn describe_slot(slot: u32, app_id: AppId) -> AppSlot {
         slot,
         app_id,
         host_port: HostPort::try_from(u32::from(HOST_PORT_BASE) + slot).expect("within range"),
-        extra_public_port: HostPort::try_from(u32::from(EXTRA_PUBLIC_PORT_BASE) + slot)
-            .expect("within range"),
         host_ipv4: address_at(base + HOST_ADDRESS_OFFSET),
         guest_mac: mac_for(&guest_ipv4),
         guest_ipv4,
@@ -107,7 +101,6 @@ mod tests {
     fn every_per_app_resource_comes_from_the_one_number() {
         let slot = describe_slot(0, app("0"));
         assert_eq!(slot.host_port.get(), HOST_PORT_BASE);
-        assert_eq!(slot.extra_public_port.get(), EXTRA_PUBLIC_PORT_BASE);
         assert_eq!(slot.host_ipv4.as_str(), "10.201.0.1");
         assert_eq!(slot.guest_ipv4.as_str(), "10.201.0.2");
         assert_eq!(slot.guest_mac, "02:00:0a:c9:00:02");

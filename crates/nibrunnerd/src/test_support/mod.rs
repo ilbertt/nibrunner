@@ -73,7 +73,6 @@ pub fn artifact(edit: impl FnOnce(&mut DesiredArtifact)) -> DesiredArtifact {
 pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
     let mut value = AppConfig {
         http_port: DEFAULT_HTTP_PORT,
-        has_extra_public_port: false,
         args: TenantArguments::default(),
         environment: TenantEnvironment::default(),
         resources: DEFAULT_INSTANCE_RESOURCES,
@@ -141,8 +140,6 @@ pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedIn
         state: InstanceState::Running,
         host_port: None,
         guest_ipv4: None,
-        public_ipv4: None,
-        extra_public_port: None,
         artifact_digest: None,
         restart_count: 0,
         started_at: None,
@@ -223,7 +220,6 @@ pub fn record_fields() -> RecordFields {
         hostnames: vec![app_hostname()],
         host_port: slot.host_port,
         http_port: DEFAULT_HTTP_PORT,
-        has_extra_public_port: Some(false),
         guest_ipv4: slot.guest_ipv4,
         artifact_digest: Sha256Digest::parse(ARTIFACT_DIGEST).unwrap(),
         health_check: DEFAULT_HEALTH_CHECK,

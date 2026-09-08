@@ -20,7 +20,6 @@ pub async fn forwarded_instances(host: &Host) -> Vec<ForwardedInstance> {
             app_id: record.app_id.clone(),
             host_port: slot.host_port,
             http_port: record.http_port,
-            extra_public_port: record.wants_extra_public_port().then_some(slot.extra_public_port),
             host_ipv4: slot.host_ipv4,
             guest_ipv4: slot.guest_ipv4,
         });
@@ -97,22 +96,6 @@ mod tests {
         ])
         .await;
         assert_eq!(forwarded.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn an_app_is_forwarded_the_port_it_asked_for_and_no_other() {
-        let asked = forwards_for(vec![instance_record(|record| {
-            record.has_extra_public_port = Some(true)
-        })])
-        .await;
-        assert_eq!(asked[0].extra_public_port.map(|port| port.get()), Some(22_000));
-        let did_not = forwards_for(vec![instance_record(|_| {})]).await;
-        assert_eq!(did_not[0].extra_public_port, None);
-        let older = forwards_for(vec![instance_record(|record| {
-            record.has_extra_public_port = None
-        })])
-        .await;
-        assert_eq!(older[0].extra_public_port, None);
     }
 
     #[tokio::test]

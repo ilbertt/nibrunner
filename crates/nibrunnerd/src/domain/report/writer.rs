@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use protocol::{HostCapacity, HostId, HostReportedState, HostState, HostVersions};
@@ -27,21 +26,6 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     };
     let allocatable = allocatable_capacity(&capacity, &committed_resources(&records), space.available_bytes);
 
-    let mut reached_at = BTreeMap::new();
-    if let Some(ipv4) = &host.config.proxy.port_relay_public_ipv4 {
-        for record in records.iter().filter(|record| record.wants_extra_public_port()) {
-            if let Some(slot) = host.slot_of(&record.app_id).await {
-                reached_at.insert(
-                    record.app_id.clone(),
-                    guest_contract::instance_env::PublicAddress {
-                        ipv4: ipv4.clone(),
-                        port: slot.extra_public_port,
-                    },
-                );
-            }
-        }
-    }
-
     build_reported_state(ReportInputs {
         host_id: host_id_of(host).await,
         reported_at: now_timestamp(),
@@ -54,7 +38,6 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
         allocatable,
         versions,
         records: &records,
-        reached_at: &reached_at,
         volumes: snapshot.volume_reports.clone(),
         volume_usage: &snapshot.volume_usage,
         compute_usage: &snapshot.compute_usage,
@@ -77,22 +60,10 @@ pub fn reported_state_file(host: &Host) -> std::path::PathBuf {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use protocol::{InstanceState, Ipv4Address};
-
-    const RELAY_IPV4: &str = "203.0.113.10";
+    use protocol::InstanceState;
 
     fn versions() -> HostVersions {
         crate::domain::report::versions::compiled_versions("v1.16.1", "6.1.180-test")
-    }
-
-    async fn host_relaying() -> TestHost {
-        let mut host = test_host().await;
-        std::sync::Arc::get_mut(&mut host.host)
-            .expect("the test holds the only handle on this host")
-            .config
-            .proxy
-            .port_relay_public_ipv4 = Some(Ipv4Address::parse(RELAY_IPV4).unwrap());
-        host
     }
 
     #[tokio::test]
@@ -145,65 +116,5 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         write(&path, &build(&host, versions()).await);
         assert!(path.is_dir());
-    }
-
-    #[tokio::test]
-    async fn an_app_that_asked_for_its_own_port_is_reported_with_the_address_it_answers_on() {
-        let host = host_relaying().await;
-        let slot = host.slot_for(&app_id()).await.unwrap();
-        host.state
-            .put_record(instance_record(|record| {
-                record.has_extra_public_port = Some(true)
-            }))
-            .await;
-
-        let report = build(&host, versions()).await;
-        assert_eq!(
-            report.instances[0].public_ipv4,
-            Some(Ipv4Address::parse(RELAY_IPV4).unwrap())
-        );
-        assert_eq!(
-            report.instances[0].extra_public_port,
-            Some(slot.extra_public_port)
-        );
-    }
-
-    #[tokio::test]
-    async fn an_app_that_asked_for_nothing_is_not_handed_a_public_address_it_never_wanted() {
-        let host = host_relaying().await;
-        host.slot_for(&app_id()).await.unwrap();
-        host.state.put_record(instance_record(|_| {})).await;
-
-        let report = build(&host, versions()).await;
-        assert_eq!(report.instances[0].public_ipv4, None);
-        assert_eq!(report.instances[0].extra_public_port, None);
-    }
-
-    #[tokio::test]
-    async fn an_app_with_no_slot_of_its_own_is_reported_without_an_address_rather_than_a_guessed_one() {
-        let host = host_relaying().await;
-        host.state
-            .put_record(instance_record(|record| {
-                record.has_extra_public_port = Some(true)
-            }))
-            .await;
-
-        let report = build(&host, versions()).await;
-        assert_eq!(report.instances[0].public_ipv4, None);
-        assert_eq!(report.instances[0].extra_public_port, None);
-    }
-
-    #[tokio::test]
-    async fn a_host_that_relays_no_ports_reports_no_public_address_for_an_app_that_asked() {
-        let host = test_host().await;
-        host.slot_for(&app_id()).await.unwrap();
-        host.state
-            .put_record(instance_record(|record| {
-                record.has_extra_public_port = Some(true)
-            }))
-            .await;
-
-        let report = build(&host, versions()).await;
-        assert_eq!(report.instances[0].public_ipv4, None);
     }
 }

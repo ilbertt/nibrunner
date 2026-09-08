@@ -6,8 +6,7 @@
     "member": "pocketbase",
     "port": 8090,
     "args": ["serve", "--http=0.0.0.0:8090", "--dir=./data/pb_data"],
-    "env": {},
-    "extraPublicPort": false
+    "env": {}
   },
   "sharkord": {
     "url": "https://github.com/sharkord/sharkord/releases/download/v0.0.25/sharkord-linux-x64",
@@ -16,11 +15,8 @@
     "args": [],
     "env": {
       "SHARKORD_DATA_PATH": "data",
-      "SHARKORD_AUTOUPDATE": "false",
-      "SHARKORD_WEBRTC_PORT": "${NIBRUN_EXTRA_PUBLIC_PORT}",
-      "SHARKORD_WEBRTC_ANNOUNCED_ADDRESS": "${NIBRUN_PUBLIC_IPV4}"
-    },
-    "extraPublicPort": true
+      "SHARKORD_AUTOUPDATE": "false"
+    }
   },
   "boop": {
     "url": "https://github.com/chrisgreg/boop/releases/download/v1.3.0/boop_1.3.0_linux_amd64.tar.gz",
@@ -35,16 +31,14 @@
       "BOOP_BASE_URL": "https://${NIBRUN_HOSTNAME}",
       "BOOP_ADMIN_USER": null,
       "BOOP_ADMIN_PASSWORD": null
-    },
-    "extraPublicPort": false
+    }
   },
   "gitea": {
     "url": "https://github.com/ilbertt/gitea/releases/download/v1.28.0-dev-nibrun.3/gitea-nibrun-linux-amd64",
     "sha256": "f7a3b71523a60be16772b82240a74e4fead1a5e7162008d6e5cf85cdd97ceff6",
     "port": 3000,
     "args": ["nibrun"],
-    "env": {},
-    "extraPublicPort": false
+    "env": {}
   },
   "open-connector": {
     "url": "https://github.com/oomol-lab/open-connector/releases/download/v1.5.0/open-connector-linux-x64",
@@ -59,14 +53,12 @@
       "OOMOL_CONNECT_ENCRYPTION_KEY": null,
       "OOMOL_CONNECT_ADMIN_TOKEN": null,
       "OOMOL_CONNECT_RUNTIME_TOKEN": null
-    },
-    "extraPublicPort": false
+    }
   },
   "context-use": {
     "url": "https://github.com/massimoalbarello/context-use/releases/download/nibrun-latest/context-use",
     "port": 3000,
     "args": [],
-    "env": {},
-    "extraPublicPort": false
+    "env": {}
   }
 }

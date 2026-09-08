@@ -33,7 +33,6 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
             app_id: protocol::AppId::parse("app-1").unwrap(),
             host_port: protocol::HostPort::new(21_000).unwrap(),
             http_port: protocol::HttpPort::new(3000).unwrap(),
-            extra_public_port: protocol::HostPort::new(22_000).ok(),
             host_ipv4: protocol::Ipv4Address::parse("10.201.0.1").unwrap(),
             guest_ipv4: protocol::Ipv4Address::parse("10.201.0.2").unwrap(),
         }],
