@@ -105,6 +105,40 @@ daemon's process environment, which on a machine with no instance role is a syst
 `EnvironmentFile`. Session credentials expire, and a fetch after they do will fail; a restart with
 a fresh file costs a tenant nothing.
 
+## The 40 milliseconds nobody was spending
+
+The apps felt slower than they should, so the request path was taken apart on the host. Twenty
+samples per layer, gitea, median:
+
+| Layer | Before | After |
+| --- | ---: | ---: |
+| the guest directly, app and tap | 2.0 ms | 1.4 ms |
+| its host port, adding the loopback DNAT | 1.8 ms | 1.4 ms |
+| through the proxy over HTTP | 1.8 ms | 1.3 ms |
+| through the proxy over **HTTPS** | **43.4 ms** | **4.0 ms** |
+
+**The proxy costs nothing and TLS cost 41 ms**, which is not what a handshake costs on loopback.
+Splitting the request said where it went:
+
+```
+connect=0.000093s   tls_done=0.002629s   first_byte=0.043177s
+```
+
+The handshake finished at 2.6 ms. Then forty milliseconds passed before the first byte of a reply
+the tenant had already produced. That is not work; that is Nagle waiting on an ACK the other end
+had decided to delay.
+
+A reply leaves the proxy as more than one write, and the socket the visitor arrived on came
+straight out of `accept()` with Nagle still on — `set_nodelay` appeared once in the whole proxy,
+on the connector *to the tenant*. Plain HTTP hid it, because those replies left in a single write;
+under TLS the records around them do not. And because Cloudflare reaches an origin over TLS, this
+was every real request: through the edge, the same page went from a ~280 ms first sample to a
+132 ms median.
+
+Setting it on both accept loops is the whole fix. The test that came with it asserts the thing
+that makes the bug possible — that the kernel hands the stream over with Nagle on — so the
+assertion fails if anyone removes the call.
+
 ## Cost
 
 Six apps: **2375 MiB**, load 0.57, 195 MB of artifact images, 430 MB actually occupied by 12 GiB of
