@@ -48,6 +48,12 @@ run-dev:
     echo "watching $root/desired.json, configured by $NIBRUNNER_CONFIG"
     exec cargo run -p nibrunnerd
 
+# The image a host boots: nibrun's userland pins with this repository's init as `/init`.
+# Linux, root, docker and e2fsprogs; the one in `guest/` is nibrun's stub and panics a guest.
+guest-image:
+    cargo build -p nibrunner-init --target x86_64-unknown-linux-musl --release
+    sudo guest/build-image.sh
+
 fmt:
     cargo fmt --all
 
