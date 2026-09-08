@@ -68,6 +68,18 @@ Bun.serve({
       });
     }
 
+    if (url.pathname === "/write") {
+      // A frozen filesystem blocks this and serves /health regardless, which is the only way
+      // to tell a frozen tenant from a healthy one from outside.
+      const started = performance.now();
+      try {
+        writeFileSync(`${dataDir}/probe`, String(Date.now()));
+        return json({ ok: true, ms: +(performance.now() - started).toFixed(2) });
+      } catch (error) {
+        return json({ ok: false, error: String(error), ms: +(performance.now() - started).toFixed(2) }, 500);
+      }
+    }
+
     if (url.pathname === "/work") {
       const n = Number(url.searchParams.get("rounds") ?? 20000);
       const started = performance.now();
