@@ -1,0 +1,38 @@
+{
+  "hourly": {
+    "apps": 180,
+    "calls": 180,
+    "p50_ms": 36.04,
+    "p95_ms": 42.8,
+    "max_ms": 1049.02,
+    "slow_over_10ms": 180,
+    "max_boots": 2
+  },
+  "minutely": {
+    "apps": 144,
+    "calls": 987,
+    "p50_ms": 1.2,
+    "p95_ms": 38.85,
+    "max_ms": 265.0,
+    "slow_over_10ms": 341,
+    "max_boots": 1
+  },
+  "busy": {
+    "apps": 64,
+    "calls": 3418,
+    "p50_ms": 0.95,
+    "p95_ms": 2.34,
+    "max_ms": 44.39,
+    "slow_over_10ms": 134,
+    "max_boots": 1
+  },
+  "hot": {
+    "apps": 12,
+    "calls": 6470,
+    "p50_ms": 0.87,
+    "p95_ms": 1.03,
+    "max_ms": 55.95,
+    "slow_over_10ms": 37,
+    "max_boots": 1
+  }
+}

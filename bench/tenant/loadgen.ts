@@ -1,8 +1,23 @@
 import { createHash } from "crypto";
+import { readFileSync, writeFileSync } from "fs";
 
 const port = Number(process.env.PORT ?? process.env.NIBRUN_HTTP_PORT ?? 3000);
 const holdMib = Number(process.env.HOLD_MIB ?? 0);
 const spinPct = Math.min(100, Math.max(0, Number(process.env.SPIN_PCT ?? 0)));
+const dataDir = process.env.DATA_DIR ?? "/app/data";
+
+// Counted on the volume, once per process start. A wake from a snapshot resumes the process
+// that was frozen, so this does not move; a cold boot does move it. That is what separates
+// the two from outside.
+const bootFile = `${dataDir}/boots`;
+let boots = 1;
+try {
+  boots = Number(readFileSync(bootFile, "utf8")) + 1;
+} catch {}
+try {
+  writeFileSync(bootFile, String(boots));
+} catch {}
+const startedAt = Date.now();
 
 // Touched, not just allocated: an untouched page costs the host nothing, which is the whole
 // reason an idle microVM shows 83 MiB whatever it declares.
@@ -48,6 +63,8 @@ Bun.serve({
         spinPct,
         rssMib: Math.round(process.memoryUsage.rss() / 1048576),
         uptimeS: Math.round(process.uptime()),
+        boots,
+        aliveMs: Date.now() - startedAt,
       });
     }
 

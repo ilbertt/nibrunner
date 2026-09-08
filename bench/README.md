@@ -10,10 +10,15 @@ than about the tenant.
 | [z1d-metal-baremetal](results/z1d-metal-baremetal.md) | z1d.metal, 48 vCPU, 377 GiB | 63 | the 63-slot cap, at 2% memory use |
 | [hetzner-ax41](results/hetzner-ax41.md) | AX41, 12 threads, 64 GB, ~€45/mo | **752** | **RAM, with 437 MiB left** |
 | [contention](results/contention.md) | the same AX41, tenants made to work | see below | what they cost each other |
+| [sleep-wake](results/sleep-wake.md) | the same AX41, 400 apps on-request | 400 exist, ~139 resident | disk, not RAM |
 
 The 752 is idle tenants. `contention.md` is what happens when they work: memory costs a flat
 82-87 MiB per microVM plus exactly what the tenant touches, so holding 128 MiB drops the host
 to ~289 apps; CPU degrades linearly with oversubscription, within 15%, with no cliff.
+
+`sleep-wake.md` puts 400 apps behind the invocation distribution Azure Functions reported and
+lets them put themselves away: the fleet costs 1.9 GB asleep and 3.1 GB under load, a wake
+costs 36 ms at the median, and the apps paying it are the ones carrying under 1% of traffic.
 
 Two defects came out of it, both invisible below a hundred apps and both now fixed: the service
 unit set no `LimitNOFILE`, and no `OOMScoreAdjust`. A third is written up but not applied —
