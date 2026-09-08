@@ -751,7 +751,14 @@ mod tests {
     #[tokio::test]
     async fn a_sleep_the_disk_cannot_hold_is_refused_before_the_microvm_is_paused() {
         let mut fixture = fixture();
-        fixture.manager.snapshot_dir = PathBuf::from("/nowhere/nibrunner/snapshots");
+        // A directory under a regular file is one nobody can make. A path that merely does not
+        // exist is no refusal at all for the root a host runs this daemon as: the measure makes
+        // the directory first, so /nowhere would simply be created, the disk would read fine, and
+        // the sleep would carry on to a microVM that is not there.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let occupied = elsewhere.path().join("occupied");
+        std::fs::write(&occupied, b"").unwrap();
+        fixture.manager.snapshot_dir = occupied.join("snapshots");
         fixture
             .state
             .put_record(instance_record(|record| record.health.ever_healthy = true))
