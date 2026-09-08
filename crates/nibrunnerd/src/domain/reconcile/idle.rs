@@ -180,12 +180,21 @@ pub async fn record_activity(host: &Host) {
         .filter(|(app_id, _)| held.contains(app_id))
         .collect();
 
-    tracing::info!(
-        measured = traffic.len(),
-        moved = next.moved.len(),
-        tracked = last_active_at_ms.len(),
-        "app activity measured"
-    );
+    // Twelve times a minute, and all but the ones where something moved say the same thing.
+    if next.moved.is_empty() {
+        tracing::debug!(
+            measured = traffic.len(),
+            tracked = last_active_at_ms.len(),
+            "app activity measured"
+        );
+    } else {
+        tracing::info!(
+            measured = traffic.len(),
+            moved = next.moved.len(),
+            tracked = last_active_at_ms.len(),
+            "app activity measured"
+        );
+    }
     host.state
         .modify(|snapshot| {
             snapshot.app_traffic = traffic;

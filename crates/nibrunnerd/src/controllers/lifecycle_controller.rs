@@ -4,6 +4,7 @@ use protocol::HostVersions;
 
 use crate::adapters::guest_measurements::VsockMeasurements;
 use crate::controllers::converge_controller::ConvergeController;
+use crate::controllers::idle_controller::IdleController;
 use crate::controllers::measurement_controller::MeasurementController;
 use crate::controllers::status_controller::StatusController;
 use crate::controllers::Controller;
@@ -44,10 +45,8 @@ impl LifecycleController {
         let held: Vec<Arc<dyn Controller>> = vec![
             ConvergeController::new(self.host.clone(), reconciler.clone()),
             StatusController::new(self.host.clone(), reconciler, reports),
-            MeasurementController::new(
-                HostIdle::new(self.host.clone()),
-                HostUsage::new(self.host.clone(), measurements),
-            ),
+            IdleController::new(HostIdle::new(self.host.clone())),
+            MeasurementController::new(HostUsage::new(self.host.clone(), measurements)),
         ];
         held
     }

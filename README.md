@@ -129,13 +129,18 @@ startup:
 
 ### The loops
 
-Three, on every host:
+Four, on every host:
 
-| Loop | What it does |
-| --- | --- |
-| converge | Watches the document and runs a reconcile pass when it moves |
-| status | Probes health, applies the ruleset and the routes, writes `reported.json` |
-| measurement | Records activity, lets quiet apps sleep, then measures every guest |
+| Loop | What it does | Every |
+| --- | --- | --- |
+| converge | Watches the document and runs a reconcile pass when it moves | the file moving |
+| status | Probes health, applies the ruleset and the routes, writes `reported.json` | 1s |
+| idle | Records what moved and lets an app that has gone quiet sleep | 5s |
+| measurement | Asks every guest what it is using | 60s |
+
+The last two were one loop, and an app slept on the first pass that noticed it — so a timeout of
+the 60-second minimum was served at up to two minutes. They want different intervals: reading the
+counters is one look at the ruleset, while measuring is a question put to every guest on the host.
 
 There is one input and it is the file. Nothing polls anything, and nothing may tell this daemon
 what to do except by writing that document.

@@ -4,24 +4,23 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::controllers::Controller;
-use crate::services::idle_service::IdleService;
 use crate::services::usage_service::UsageService;
 
+// Every guest on the host is asked what it is using, so this is the expensive half and keeps the
+// interval it always had. Letting a quiet app sleep used to ride along with it and no longer does,
+// because the two want very different intervals.
 const MEASUREMENT_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct MeasurementController {
-    idle: Arc<dyn IdleService>,
     usage: Arc<dyn UsageService>,
 }
 
 impl MeasurementController {
-    pub fn new(idle: Arc<dyn IdleService>, usage: Arc<dyn UsageService>) -> Arc<Self> {
-        Arc::new(Self { idle, usage })
+    pub fn new(usage: Arc<dyn UsageService>) -> Arc<Self> {
+        Arc::new(Self { usage })
     }
 
     pub async fn measurement_once(&self) {
-        self.idle.record_activity().await;
-        self.idle.apply_sleep().await;
         self.usage.measure().await;
     }
 }
@@ -43,29 +42,13 @@ impl Controller for MeasurementController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::idle_service::MockIdleService;
     use crate::services::usage_service::MockUsageService;
 
     #[tokio::test]
-    async fn a_measurement_sweep_measures_after_it_has_let_the_quiet_apps_go() {
-        let mut sequence = mockall::Sequence::new();
-        let mut idle = MockIdleService::new();
+    async fn a_measurement_sweep_asks_every_guest_and_decides_nothing() {
         let mut usage = MockUsageService::new();
-        idle.expect_record_activity()
-            .times(1)
-            .in_sequence(&mut sequence)
-            .returning(|| ());
-        idle.expect_apply_sleep()
-            .times(1)
-            .in_sequence(&mut sequence)
-            .returning(|| ());
-        usage
-            .expect_measure()
-            .times(1)
-            .in_sequence(&mut sequence)
-            .returning(|| ());
-
-        MeasurementController::new(Arc::new(idle), Arc::new(usage))
+        usage.expect_measure().times(1).returning(|| ());
+        MeasurementController::new(Arc::new(usage))
             .measurement_once()
             .await;
     }
