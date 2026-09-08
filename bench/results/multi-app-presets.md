@@ -145,6 +145,30 @@ Six apps: **2375 MiB**, load 0.57, 195 MB of artifact images, 430 MB actually oc
 sparse volumes. The AX41 held 752 of the benchmark tenant; these six are heavier and it is not
 noticing them.
 
+## Sleeping near the timeout that was asked for
+
+Recording what moved and measuring every guest shared a loop, so they shared its interval, and the
+interval belonged to the expensive half. An app sleeps on the first pass that finds it quiet, so
+the smallest timeout the protocol allows was served at up to twice its length: an app asking for 60
+seconds could stay resident for 120.
+
+Split into two loops — counters every 5s, guests every 60s — and measured here, six apps woken at
+once and then left alone:
+
+| app | asked for | slept after | over |
+| --- | ---: | ---: | ---: |
+| context-use | 60s | 60.4s | 0.4s |
+| boop | 60s | 64.5s | 4.5s |
+| gitea | 60s | 64.5s | 4.5s |
+
+Overshoot is now bounded by the tick rather than by the measurement, and the daemon's own cost
+went from 14 CPU ticks per minute to 15, holding six apps.
+
+**What that last figure does not establish.** The counters come from one look at the ruleset, and
+the ruleset is as big as the host has apps. Six of them is not where this gets expensive, and the
+752-app case has not been measured at the new interval. A host that big is the one that sets the
+floor under this interval, not this one.
+
 ## What this did not establish
 
 **Tap devices were never deleted, and now are.** After the host was emptied — no instances, no
