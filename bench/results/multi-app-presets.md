@@ -147,11 +147,18 @@ noticing them.
 
 ## What this did not establish
 
-**Tap devices are never deleted.** After the host was emptied — no instances, no volumes, no
-DNAT rules — `nbr0` through `nbr5` were still there, and there is no tap deletion anywhere in the
-sources. It is bounded by peak concurrency rather than by churn, since a slot's tap is reused, but
-a host that once ran 752 apps keeps 752 links forever. This box had 781 of them from an earlier
-run, which is how it was noticed.
+**Tap devices were never deleted, and now are.** After the host was emptied — no instances, no
+volumes, no DNAT rules — `nbr0` through `nbr5` were still there, and there was no tap deletion
+anywhere in the sources. The bound is churn rather than peak concurrency: slots are handed out by
+a cursor rather than lowest-free, so a delete followed by a deploy takes a fresh slot and strands
+the old device. Six apps torn down and redeployed left twelve taps behind. This box had 781 from
+the density run, which is how it was noticed.
+
+Fixed in two parts: a tap goes back when its slot is released, and every tap no slot claims is
+taken back at startup, which is the only thing that helps a host already carrying them. Measured
+here afterwards — tearing down six apps took the count from 12 to 6, and the next restart took the
+six historical orphans to 0 (`stranded=6 held=0`). Restarting under three live tenants left their
+taps alone and all three serving, which is the property that actually matters.
 
 **A request during teardown hung** rather than being refused. One observation, in the window
 between an instance being stopped and its route being withdrawn; the same request answered 404 a
