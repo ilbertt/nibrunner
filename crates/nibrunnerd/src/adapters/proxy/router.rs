@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -9,7 +10,8 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
 use protocol::HostPort;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -18,6 +20,13 @@ use crate::adapters::proxy::forward::{forward, hostname_of, say, ProxyBody};
 use crate::domain::report::routes::RouteTarget;
 
 const LOOPBACK: &str = "127.0.0.1";
+
+// Nothing otherwise bounds how long a caller may take to finish a handshake or send a request
+// line, and these listeners are open to the world: a connection opened and left unfinished is
+// held for as long as its opener likes. The header alone, and the same ten seconds nibrun's edge
+// gives, because a tenant's slow upload and its streaming response are the tenant's to take as
+// long over as their own users need.
+const GREETING_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteTable {
@@ -78,6 +87,20 @@ impl Router {
         request: Request<Incoming>,
         server_name: Option<Arc<str>>,
     ) -> Response<ProxyBody> {
+        let http2 = request.version() == hyper::Version::HTTP_2;
+        let mut response = self.route(request, server_name).await;
+        if http2 {
+            // Illegal over HTTP/2, and hyper logs a warning for each one it has to strip.
+            response.headers_mut().remove(hyper::header::CONNECTION);
+        }
+        response
+    }
+
+    async fn route(
+        self: Arc<Self>,
+        request: Request<Incoming>,
+        server_name: Option<Arc<str>>,
+    ) -> Response<ProxyBody> {
         let Some(hostname) = hostname_of(&request) else {
             return say(StatusCode::BAD_REQUEST, "This request names no host.\n");
         };
@@ -116,7 +139,10 @@ pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Re
                 async move { Ok::<_, std::convert::Infallible>(router.handle(request, None).await) }
             });
             let _ = http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(GREETING_TIMEOUT)
                 .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
                 .await;
         });
     }
@@ -149,7 +175,7 @@ pub async fn serve_https(
         let router = router.clone();
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
-            let Ok(stream) = acceptor.accept(stream).await else {
+            let Ok(Ok(stream)) = tokio::time::timeout(GREETING_TIMEOUT, acceptor.accept(stream)).await else {
                 return;
             };
             let server_name: Option<Arc<str>> = stream.get_ref().1.server_name().map(Arc::from);
@@ -158,8 +184,11 @@ pub async fn serve_https(
                 let server_name = server_name.clone();
                 async move { Ok::<_, std::convert::Infallible>(router.handle(request, server_name).await) }
             });
-            let _ = http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
+            let _ = auto::Builder::new(TokioExecutor::new())
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(GREETING_TIMEOUT)
+                .serve_connection_with_upgrades(TokioIo::new(stream), service)
                 .await;
         });
     }
@@ -198,9 +227,10 @@ pub fn tls_acceptor(
         Some(client_ca) => builder.with_client_cert_verifier(client_verifier(client_ca)?),
         None => builder.with_no_client_auth(),
     };
-    let config = builder
+    let mut config = builder
         .with_single_cert(certificates, private_key)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 

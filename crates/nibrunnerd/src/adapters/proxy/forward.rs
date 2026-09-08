@@ -2,7 +2,7 @@ use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
-use hyper::header::{HeaderName, HeaderValue};
+use hyper::header::{HeaderName, HeaderValue, CONNECTION, UPGRADE};
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -43,6 +43,65 @@ fn rewritten(uri: &Uri, host: &str, port: u16) -> Uri {
         .unwrap_or_else(|_| Uri::from_static("http://127.0.0.1/"))
 }
 
+fn upgrade_requested<B>(request: &Request<B>) -> bool {
+    request.version() == hyper::Version::HTTP_11
+        && request.headers().contains_key(UPGRADE)
+        && request
+            .headers()
+            .get_all(CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+}
+
+// A websocket is a request that stops being one. The pooled client cannot carry it, because the
+// connection leaves HTTP the moment the upstream agrees and can never be handed back to the pool,
+// so this leg dials a connection of its own and keeps it for as long as the two sides talk. The
+// headers that say what the upgrade is are the ones `strip_hop_by_hop` exists to remove, which is
+// why nothing is stripped on the way through here.
+async fn forward_upgrade(request: Request<Incoming>, host: &str, port: u16) -> Response<ProxyBody> {
+    let unreachable = || say(StatusCode::BAD_GATEWAY, "This app could not be reached.\n");
+    let (mut parts, body) = request.into_parts();
+    parts.uri = rewritten(&parts.uri, host, port);
+    let mut forwarded = Request::from_parts(parts, body);
+    let downstream = hyper::upgrade::on(&mut forwarded);
+
+    let Ok(stream) = tokio::net::TcpStream::connect((host, port)).await else {
+        return unreachable();
+    };
+    let Ok((mut sender, connection)) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)).await
+    else {
+        return unreachable();
+    };
+    tokio::spawn(async move {
+        let _ = connection.with_upgrades().await;
+    });
+    let mut answered = match sender.send_request(forwarded).await {
+        Ok(answered) => answered,
+        Err(error) => {
+            tracing::warn!(%error, host, port, "an upstream would not take an upgrade");
+            return unreachable();
+        }
+    };
+    if answered.status() == StatusCode::SWITCHING_PROTOCOLS {
+        let upstream = hyper::upgrade::on(&mut answered);
+        tokio::spawn(async move {
+            let (Ok(downstream), Ok(upstream)) = (downstream.await, upstream.await) else {
+                return;
+            };
+            let _ = tokio::io::copy_bidirectional(
+                &mut hyper_util::rt::TokioIo::new(downstream),
+                &mut hyper_util::rt::TokioIo::new(upstream),
+            )
+            .await;
+        });
+    }
+    let (parts, body) = answered.into_parts();
+    Response::from_parts(parts, body.boxed())
+}
+
 pub async fn forward(
     client: &Client<HttpConnector, Incoming>,
     request: Request<Incoming>,
@@ -50,6 +109,9 @@ pub async fn forward(
     port: u16,
     keep_alive: bool,
 ) -> Response<ProxyBody> {
+    if upgrade_requested(&request) {
+        return forward_upgrade(request, host, port).await;
+    }
     let (mut parts, body) = request.into_parts();
     parts.uri = rewritten(&parts.uri, host, port);
     strip_hop_by_hop(&mut parts.headers);
@@ -254,11 +316,127 @@ mod tests {
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .with_upgrades()
                         .await;
                 });
             }
         });
         listening_on
+    }
+
+    fn empty() -> ProxyBody {
+        Full::new(Bytes::new()).map_err(|never| match never {}).boxed()
+    }
+
+    async fn echoing_once_it_is_no_longer_http() -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(|mut request: Request<Incoming>| async move {
+                        let upgraded = hyper::upgrade::on(&mut request);
+                        tokio::spawn(async move {
+                            let Ok(upgraded) = upgraded.await else {
+                                return;
+                            };
+                            let mut io = hyper_util::rt::TokioIo::new(upgraded);
+                            let mut heard = [0u8; 64];
+                            let Ok(read) = io.read(&mut heard).await else {
+                                return;
+                            };
+                            let _ = io.write_all(&heard[..read]).await;
+                        });
+                        Ok::<_, std::convert::Infallible>(
+                            Response::builder()
+                                .status(StatusCode::SWITCHING_PROTOCOLS)
+                                .header("upgrade", "websocket")
+                                .header("connection", "Upgrade")
+                                .body(empty())
+                                .unwrap(),
+                        )
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .with_upgrades()
+                        .await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_asks_to_stop_being_http_is_carried_through_and_keeps_talking() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let patience = std::time::Duration::from_secs(10);
+        let upstream = echoing_once_it_is_no_longer_http().await;
+        let proxy = proxying("127.0.0.1", upstream, true).await;
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: app-1.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            let read = tokio::time::timeout(patience, stream.read(&mut byte))
+                .await
+                .expect("the upgrade was answered")
+                .unwrap();
+            assert_eq!(read, 1, "the proxy closed the connection instead of upgrading it");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+        assert!(head.to_ascii_lowercase().contains("upgrade: websocket"), "{head}");
+
+        stream.write_all(b"ping").await.unwrap();
+        let mut echoed = [0u8; 4];
+        tokio::time::timeout(patience, stream.read_exact(&mut echoed))
+            .await
+            .expect("the tenant answered past the proxy")
+            .unwrap();
+        assert_eq!(
+            &echoed, b"ping",
+            "the two ends are talking through a proxy that stepped aside"
+        );
+    }
+
+    #[test]
+    fn only_a_request_that_asks_for_an_upgrade_takes_the_leg_that_gives_it_one() {
+        let asking = Request::builder()
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "websocket")
+            .body(())
+            .unwrap();
+        assert!(upgrade_requested(&asking));
+
+        let ordinary = Request::builder()
+            .header("connection", "keep-alive")
+            .body(())
+            .unwrap();
+        assert!(!upgrade_requested(&ordinary));
+
+        let named_but_not_asked_for = Request::builder()
+            .header("upgrade", "websocket")
+            .body(())
+            .unwrap();
+        assert!(
+            !upgrade_requested(&named_but_not_asked_for),
+            "an upgrade nothing in the connection header asks for is not one"
+        );
     }
 
     #[tokio::test]

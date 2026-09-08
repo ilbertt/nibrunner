@@ -229,7 +229,8 @@ waiting for something to ask.
   `stat`, `read`, `write`, `mkdir`, `remove`, `move`, `usage`, `compute` — and the control plane
   only ever asks for a listing, so the rest are reachable and untested against a real guest.
 - **Usage reporting.** A non-goal for v1.
-- **ACME.** Phase 5. The proxy serves a certificate and key from disk, or plain HTTP, or nothing.
+- **ACME.** Phase 5. The proxy serves a certificate and key from disk — checking a caller's own
+  certificate against `proxy.tls_client_ca`, or admitting anyone — or plain HTTP, or nothing.
 - **The `guestImage` version in a report** is read from the manifest beside the image. The image in
   `guest/` is nibrun's own `dist/`, whose manifest says `"init_is_stub": true` — it carries a
   throwaway `/init`, not the real guest runtime. A host that has to boot a tenant needs a
