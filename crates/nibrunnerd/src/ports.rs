@@ -179,6 +179,7 @@ pub trait Vmm: Send + Sync {
     async fn stop(&self, app_id: &AppId) -> Result<(), VmError>;
     async fn discard(&self, app_id: &AppId) -> Result<(), VmError>;
     async fn delete_tap(&self, tap_name: &str) -> Result<(), VmError>;
+    async fn tap_names(&self) -> Vec<String>;
     async fn statuses(&self, app_ids: &[AppId]) -> BTreeMap<AppId, VmStatus>;
     async fn adopted_app_ids(&self) -> Vec<AppId>;
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String>;

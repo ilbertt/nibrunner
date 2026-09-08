@@ -57,6 +57,41 @@ pub async fn apply_routes(host: &Host) {
     host.router.apply(table).await;
 }
 
+// A tap is only ever made for a slot, so one no slot claims belongs to an app that is gone. That
+// is a daemon old enough to have never taken one back, or one that died between releasing a slot
+// and reclaiming its device. Read from the host rather than from anything this process remembers,
+// and run once the slots are restored and before anything is handed one.
+pub async fn reclaim_stranded_taps(host: &Host) {
+    let claimed: std::collections::BTreeSet<String> = {
+        let allocator = host.allocator.lock().await;
+        allocator
+            .assignments()
+            .iter()
+            .map(|(app_id, slot)| nft_render::describe_slot(*slot, app_id.clone()).tap_name)
+            .collect()
+    };
+    let stranded: Vec<String> = host
+        .vms
+        .tap_names()
+        .await
+        .into_iter()
+        .filter(|name| !claimed.contains(name))
+        .collect();
+    if stranded.is_empty() {
+        return;
+    }
+    tracing::info!(
+        stranded = stranded.len(),
+        held = claimed.len(),
+        "taps outlived the apps they were made for and are being taken back"
+    );
+    for name in stranded {
+        if let Err(error) = host.vms.delete_tap(&name).await {
+            tracing::warn!(tap_name = %name, error = %error.message(), "a stranded tap could not be taken back");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +105,38 @@ mod tests {
             host.state.put_record(record).await;
         }
         forwarded_instances(&host).await
+    }
+
+    #[tokio::test]
+    async fn a_tap_no_slot_claims_is_taken_back_and_one_a_slot_holds_is_left_alone() {
+        let host = test_host().await;
+        let slot = host.slot_for(&app_id()).await.unwrap();
+        host.vms.set_present_taps(vec![
+            slot.tap_name.clone(),
+            "nbr41".to_string(),
+            "nbr42".to_string(),
+        ]);
+
+        reclaim_stranded_taps(&host).await;
+
+        assert_eq!(
+            host.vms.removed_taps(),
+            vec!["nbr41".to_string(), "nbr42".to_string()],
+            "only the devices no app is holding go"
+        );
+        assert!(
+            !host.vms.removed_taps().contains(&slot.tap_name),
+            "the tap a live slot holds is not one to take"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_whose_taps_are_all_spoken_for_takes_nothing_back() {
+        let host = test_host().await;
+        let slot = host.slot_for(&app_id()).await.unwrap();
+        host.vms.set_present_taps(vec![slot.tap_name]);
+        reclaim_stranded_taps(&host).await;
+        assert!(host.vms.removed_taps().is_empty());
     }
 
     #[tokio::test]

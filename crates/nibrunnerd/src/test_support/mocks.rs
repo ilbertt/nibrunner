@@ -67,6 +67,7 @@ pub fn commands_answering(
 pub struct VmmSpy {
     calls: Arc<Mutex<Vec<VmCall>>>,
     removed_taps: Arc<Mutex<Vec<String>>>,
+    present_taps: Arc<Mutex<Vec<String>>>,
     status: Arc<Mutex<VmStatus>>,
     on_sleep: Arc<Mutex<Option<VmError>>>,
     on_wake: Arc<Mutex<Option<VmError>>>,
@@ -79,6 +80,7 @@ impl Default for VmmSpy {
         Self {
             calls: shared(Vec::new()),
             removed_taps: shared(Vec::new()),
+            present_taps: shared(Vec::new()),
             status: shared(VmStatus::default()),
             on_sleep: shared(None),
             on_wake: shared(None),
@@ -111,6 +113,10 @@ impl VmmSpy {
 
     pub fn removed_taps(&self) -> Vec<String> {
         held(&self.removed_taps)
+    }
+
+    pub fn set_present_taps(&self, names: Vec<String>) {
+        *self.present_taps.lock().expect("no panic holds this lock") = names;
     }
 
     pub fn set_adopted(&self, app_ids: Vec<AppId>) {
@@ -154,6 +160,15 @@ pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
         push(&calls, VmCall::DeleteTap);
         push(&removed_taps, name.to_string());
         Ok(())
+    });
+    let removed_taps = spy.removed_taps.clone();
+    let present = spy.present_taps.clone();
+    vms.expect_tap_names().returning(move || {
+        let gone = held(&removed_taps);
+        held(&present)
+            .into_iter()
+            .filter(|name: &String| !gone.contains(name))
+            .collect()
     });
     let status = spy.status.clone();
     vms.expect_statuses().returning(move |app_ids: &[AppId]| {

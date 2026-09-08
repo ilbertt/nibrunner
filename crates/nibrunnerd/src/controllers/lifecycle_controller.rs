@@ -30,6 +30,7 @@ impl LifecycleController {
         if !adopted.is_empty() {
             tracing::info!(adopted = adopted.len(), "microVMs from an earlier daemon adopted");
         }
+        crate::domain::reconcile::network::reclaim_stranded_taps(&self.host).await;
         crate::domain::reconcile::network::apply_activators(&self.host).await;
         crate::run::serve_proxy(&self.host);
         crate::run::serve_metrics(&self.host);

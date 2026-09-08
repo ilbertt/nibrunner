@@ -313,6 +313,10 @@ impl Vmm for VmManager {
             .map_err(|error| VmError::Host(error.message()))
     }
 
+    async fn tap_names(&self) -> Vec<String> {
+        self.network.tap_names().await
+    }
+
     async fn statuses(&self, app_ids: &[AppId]) -> std::collections::BTreeMap<AppId, VmStatus> {
         app_ids
             .iter()
