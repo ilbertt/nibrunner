@@ -1,0 +1,33 @@
+### host
+instance: m8id.large (2 vCPU, 8 GiB), eu-west-2b, CpuOptions.NestedVirtualization=enabled
+model name	: Intel(R) Xeon(R) 6975P-C
+               total        used        free      shared  buff/cache   available
+Mem:            7776        1890        4869           7        1289        5885
+
+### nibrunnerd
+{"timestamp":"2026-09-07T21:24:24.441571Z","level":"INFO","fields":{"message":"nibrunnerd starting","state_dir":"/var/lib/nibrunner","desired_state_file":"/var/lib/nibrunner/desired.json","guest_memory_mib":7136,"firecracker":"v1.16.1"},"target":"nibrunnerd"}
+
+### ramp 1: 256 MiB per microVM, cumulative
+count,converged_s,healthy,answered,mem_used_mib,mem_avail_mib,load1,note
+1,0,1,1,629,7146,0.00,ok
+2,5,2,2,684,7091,0.00,ok
+4,5,4,4,853,6923,0.00,ok
+8,5,8,8,1169,6606,0.32,ok
+16,5,16,16,1805,5970,0.94,ok
+24,5,24,24,2434,5341,1.62,ok
+32,5,32,32,3077,4698,1.73,ok
+40,240,21,21,2245,5530,0.33,FAILED:,app-5(post=503),app-6(post=503),app-7(post=503),app-8(post=503),app-11(post=503),app-13(post=503),app-14(post=503),app-15(post=503),app-18(post=503),app-21(post=503),app-22(post=503),app-23(post=503),app-24(post=503),app-31(post=503),app-35(post=503),app-36(post=503),app-37(post=503),app-39(post=503),app-40(post=503)
+
+### ramp 2: 128 MiB per microVM, clean slate each step
+count,memory_mib,converged_s,running,answered,mem_used_mib,mem_avail_mib,load1,states
+1,128,5,1,1,610,7166,0.17,running:1
+32,128,20,32,31,2972,4803,6.83,running:32
+40,128,25,40,9,3503,4272,14.74,running:40
+48,128,30,48,29,2685,5090,16.26,failed:20 running:28
+56,128,35,56,45,4319,3456,25.56,failed:8 running:48
+63,128,40,63,16,4650,3125,28.74,failed:8 running:55
+
+### kernel evidence
+OOM kills: 0
+kvm_intel VMCS errors: 36
+consoles with KVM_EXIT_FAIL_ENTRY: 46 of 63
