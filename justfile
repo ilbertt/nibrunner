@@ -21,39 +21,6 @@ test:
 integration:
     NIBRUNNER_INTEGRATION=1 cargo test -p nibrunnerd --test integration -- --test-threads 1 --nocapture
 
-# A host in one directory under ./.nibrunner-dev, watching ./.nibrunner-dev/desired.json.
-# Write a document into that file and this converges on it.
-run-dev:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    root="$PWD/.nibrunner-dev"
-    mkdir -p "$root"/{state,run,guest,artifacts}
-    cp -n guest/vmlinux guest/rootfs.ext4 guest/manifest.json "$root/guest/" 2>/dev/null || true
-    cat > "$root/config.toml" <<TOML
-    [paths]
-    state_dir = "$root/state"
-    runtime_dir = "$root/run"
-    snapshot_dir = "$root/state/snapshots"
-    guest_image_dir = "$root/guest"
-    desired_state_file = "$root/desired.json"
-
-    [artifacts]
-    store_url = "$root/artifacts"
-
-    [proxy]
-    http_port = ${NIBRUNNER_HTTP_PORT:-8080}
-    TOML
-    export NIBRUNNER_CONFIG="$root/config.toml"
-    export NIBRUNNER_LOG="${NIBRUNNER_LOG:-info}"
-    echo "watching $root/desired.json, configured by $NIBRUNNER_CONFIG"
-    exec cargo run -p nibrunnerd
-
-# The image a host boots: nibrun's userland pins with this repository's init as `/init`.
-# Linux, root, docker and e2fsprogs; the one in `guest/` is nibrun's stub and panics a guest.
-guest-image:
-    cargo build -p nibrunner-init --target x86_64-unknown-linux-musl --release
-    sudo guest/build-image.sh
-
 fmt:
     cargo fmt --all
 

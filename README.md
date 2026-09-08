@@ -42,8 +42,6 @@ sudo tee /var/lib/nibrunner/desired.json < desired.json # the document below
 
 Ten commands, and the tenth is the deploy. Everything after it is the daemon converging.
 
-Without systemd, `just run-dev` does the same under `./.nibrunner-dev`.
-
 ### The document
 
 ```json
