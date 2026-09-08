@@ -60,6 +60,8 @@ runtime_dir = "/run/nibrunner"
 snapshot_dir = "$STATE/snapshots"
 guest_image_dir = "$STATE/guest"
 desired_state_file = "$STATE/desired.json"
+api_socket = "/run/nibrunner/nibrunner.sock"
+versions_file = "$STATE/versions.json"
 
 [artifacts]
 store_url = "$STATE/artifact-store"
@@ -68,8 +70,16 @@ store_url = "$STATE/artifact-store"
 backend = "local-file"
 storage_prefix = "volumes"
 
-[proxy]
-http_port = $PROXY_PORT
+[exports]
+store_url = "$STATE/export-store"
+staging_dir = "$STATE/exports"
+
+[network]
+control_plane_cidrs_v4 = []
+control_plane_cidrs_v6 = []
+
+[proxy.http]
+port = $PROXY_PORT
 TOML
 
 echo '{"hostId":"bench-host","volumes":[],"instances":[],"checkpoints":[],"exports":[]}' > "$STATE/desired.json"

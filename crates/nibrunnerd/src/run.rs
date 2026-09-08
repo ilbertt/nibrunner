@@ -58,7 +58,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
 
     let storage_prefix = ObjectKey::parse(&config.storage_prefix)
         .map_err(|_| StartupError::Config("volumes.storage_prefix is not a key".into()))?;
-    let volumes: Arc<dyn crate::adapters::volumes::VolumeBackend> = match &config.zerofs {
+    let volumes: Arc<dyn crate::adapters::volumes::VolumeBackend> = match config.volumes.zerofs() {
         None => Arc::new(LocalFileVolumes::new(
             config.volumes_dir(),
             storage_prefix,
@@ -91,7 +91,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         guest_image_dir: config.guest_image_dir.clone(),
         guest_image_version: guest_image_version.clone(),
         firecracker,
-        public_ipv4: config.port_relay_public_ipv4.clone(),
+        public_ipv4: config.proxy.port_relay_public_ipv4.clone(),
         processes: VmProcesses::new(config.runtime_dir.clone()),
         network,
         volumes: volumes.clone(),
@@ -112,7 +112,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
     );
-    let checkpoint_servers = config.zerofs.as_ref().map(|settings| CheckpointServers {
+    let checkpoint_servers = config.volumes.zerofs().map(|settings| CheckpointServers {
         ready_timeout: crate::domain::exports::reader::DEFAULT_READY_TIMEOUT,
         binary: settings.binary.clone(),
         config_file: settings.checkpoint_config_file.clone(),
@@ -180,8 +180,8 @@ pub fn host_versions(host: &Host) -> HostVersions {
 }
 
 pub fn serve_proxy(host: &Arc<Host>) {
-    if let Some(port) = host.config.proxy_http_port {
-        let router = host.router.clone();
+    if let Some(http) = &host.config.proxy.http {
+        let (router, port) = (host.router.clone(), http.port);
         tokio::spawn(async move {
             let address = SocketAddr::from(([0, 0, 0, 0], port));
             if let Err(error) = router::serve_http(router, address).await {
@@ -189,19 +189,20 @@ pub fn serve_proxy(host: &Arc<Host>) {
             }
         });
     }
-    let Some(port) = host.config.proxy_https_port else {
+    let Some(https) = host.config.proxy.https.clone() else {
         return;
     };
-    let Some((certificate, key)) = host.config.tls_material() else {
-        tracing::warn!("an HTTPS port was named with no certificate beside it, so nothing serves TLS");
-        return;
-    };
-    let (router, certificate, key) = (host.router.clone(), certificate.to_path_buf(), key.to_path_buf());
-    let client_ca = host.config.proxy_tls_client_ca.clone();
+    let router = host.router.clone();
     tokio::spawn(async move {
-        let address = SocketAddr::from(([0, 0, 0, 0], port));
-        if let Err(error) =
-            router::serve_https(router, address, &certificate, &key, client_ca.as_deref()).await
+        let address = SocketAddr::from(([0, 0, 0, 0], https.port));
+        if let Err(error) = router::serve_https(
+            router,
+            address,
+            &https.certificate,
+            &https.key,
+            https.client_ca.as_deref(),
+        )
+        .await
         {
             tracing::error!(%error, "the proxy could not listen for TLS");
         }
@@ -214,10 +215,10 @@ pub fn serve_proxy(host: &Arc<Host>) {
 // changes anything, which is what keeps "nothing may tell this daemon what to do except by writing
 // that document" true of a daemon that now answers a connection.
 pub fn serve_metrics(host: &Arc<Host>) {
-    let Some(port) = host.config.metrics_port else {
+    let Some(metrics) = &host.config.metrics else {
         return;
     };
-    let address = SocketAddr::new(host.config.metrics_listen_address, port);
+    let address = SocketAddr::new(metrics.listen_address, metrics.port);
     let host = host.clone();
     tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(address).await {

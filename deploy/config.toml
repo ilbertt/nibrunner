@@ -4,6 +4,8 @@ runtime_dir = "/run/nibrunner"
 snapshot_dir = "/var/lib/nibrunner/snapshots"
 guest_image_dir = "/var/lib/nibrunner/guest"
 desired_state_file = "/var/lib/nibrunner/desired.json"
+api_socket = "/run/nibrunner/nibrunner.sock"
+versions_file = "/var/lib/nibrunner/versions.json"
 
 [artifacts]
 store_url = "/var/lib/nibrunner/artifact-store"
@@ -13,11 +15,8 @@ backend = "local-file"
 storage_prefix = "volumes"
 
 [exports]
+store_url = "/var/lib/nibrunner/export-store"
 staging_dir = "/var/lib/nibrunner/exports"
-
-[proxy]
-
-[metrics]
 
 [network]
 control_plane_cidrs_v4 = []

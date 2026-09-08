@@ -28,7 +28,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     let allocatable = allocatable_capacity(&capacity, &committed_resources(&records), space.available_bytes);
 
     let mut reached_at = BTreeMap::new();
-    if let Some(ipv4) = &host.config.port_relay_public_ipv4 {
+    if let Some(ipv4) = &host.config.proxy.port_relay_public_ipv4 {
         for record in records.iter().filter(|record| record.wants_extra_public_port()) {
             if let Some(slot) = host.slot_of(&record.app_id).await {
                 reached_at.insert(
@@ -90,6 +90,7 @@ mod tests {
         std::sync::Arc::get_mut(&mut host.host)
             .expect("the test holds the only handle on this host")
             .config
+            .proxy
             .port_relay_public_ipv4 = Some(Ipv4Address::parse(RELAY_IPV4).unwrap());
         host
     }

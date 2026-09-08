@@ -1,13 +1,7 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::{Path, PathBuf};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::PathBuf;
 
 use protocol::Ipv4Address;
-
-const DEFAULT_STATE_DIR: &str = "/var/lib/nibrunner";
-const DEFAULT_RUNTIME_DIR: &str = "/run/nibrunner";
-const DEFAULT_SNAPSHOT_DIR: &str = "/var/lib/nibrunner/snapshots";
-const DEFAULT_GUEST_IMAGE_DIR: &str = "/var/lib/nibrunner/guest";
-const DEFAULT_STORAGE_PREFIX: &str = "volumes";
 
 pub const DEFAULT_CONFIG_FILE: &str = "/etc/nibrunner/config.toml";
 pub const CONFIG_FILE_VARIABLE: &str = "NIBRUNNER_CONFIG";
@@ -37,17 +31,26 @@ impl ConfigError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VolumeBackendKind {
+/// Where a volume's blocks live. The settings travel with the backend that reads them, so a host
+/// cannot name a zerofs mount it will never use, nor pick zerofs and leave it unaddressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VolumeBackend {
     LocalFile,
-    Zerofs,
+    Zerofs(ZerofsSettings),
 }
 
-impl VolumeBackendKind {
-    pub fn as_str(self) -> &'static str {
+impl VolumeBackend {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::LocalFile => "local-file",
-            Self::Zerofs => "zerofs",
+            Self::Zerofs(_) => "zerofs",
+        }
+    }
+
+    pub fn zerofs(&self) -> Option<&ZerofsSettings> {
+        match self {
+            Self::LocalFile => None,
+            Self::Zerofs(settings) => Some(settings),
         }
     }
 }
@@ -63,13 +66,34 @@ pub struct ZerofsSettings {
     pub checkpoint_cache_dir: PathBuf,
 }
 
-const DEFAULT_ZEROFS_BINARY: &str = "/opt/nibrun/bin/zerofs/zerofs";
-const DEFAULT_ZEROFS_CONFIG: &str = "/etc/zerofs/config.toml";
-const DEFAULT_ZEROFS_MOUNT: &str = "/mnt/zerofs";
-const DEFAULT_ZEROFS_NBD_SOCKET: &str = "/run/zerofs/nbd.sock";
-const DEFAULT_ZEROFS_CHECKPOINT_RUNTIME_DIR: &str = "/run/zerofs-checkpoint";
-const DEFAULT_ZEROFS_CHECKPOINT_CONFIG: &str = "/etc/zerofs/checkpoint.toml";
-const DEFAULT_ZEROFS_CHECKPOINT_CACHE_DIR: &str = "/data/zerofs-checkpoint";
+/// What this host is reachable on. Each listener is a section that is either absent or complete:
+/// there is no half-configured TLS to warn about at startup because there is no way to write one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProxyConfig {
+    pub http: Option<HttpListener>,
+    pub https: Option<HttpsListener>,
+    pub port_relay_public_ipv4: Option<Ipv4Address>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpListener {
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsListener {
+    pub port: u16,
+    pub certificate: PathBuf,
+    pub key: PathBuf,
+    /// Naming a trust pool makes a caller's own certificate the price of the handshake.
+    pub client_ca: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsConfig {
+    pub port: u16,
+    pub listen_address: IpAddr,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
@@ -80,22 +104,14 @@ pub struct HostConfig {
     pub firecracker_dir: PathBuf,
     pub desired_state_file: PathBuf,
     pub api_socket: PathBuf,
+    pub versions_file: PathBuf,
     pub artifact_store_url: String,
-    pub volume_store_url: Option<String>,
     pub storage_prefix: String,
-    pub volume_backend: VolumeBackendKind,
-    pub zerofs: Option<ZerofsSettings>,
-    pub port_relay_public_ipv4: Option<Ipv4Address>,
+    pub volumes: VolumeBackend,
     pub control_plane_cidrs_v4: Vec<String>,
     pub control_plane_cidrs_v6: Vec<String>,
-    pub proxy_https_port: Option<u16>,
-    pub proxy_http_port: Option<u16>,
-    pub proxy_tls_certificate: Option<PathBuf>,
-    pub proxy_tls_key: Option<PathBuf>,
-    pub proxy_tls_client_ca: Option<PathBuf>,
-    pub versions_file: PathBuf,
-    pub metrics_port: Option<u16>,
-    pub metrics_listen_address: std::net::IpAddr,
+    pub proxy: ProxyConfig,
+    pub metrics: Option<MetricsConfig>,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
 }
@@ -152,52 +168,24 @@ impl HostConfig {
     pub fn logs_dir(&self) -> PathBuf {
         self.in_state_dir("logs")
     }
-
-    pub fn tls_material(&self) -> Option<(&Path, &Path)> {
-        match (&self.proxy_tls_certificate, &self.proxy_tls_key) {
-            (Some(certificate), Some(key)) => Some((certificate.as_path(), key.as_path())),
-            _ => None,
-        }
-    }
 }
 
 mod file {
     use serde::Deserialize;
 
-    #[derive(Debug, Default, Deserialize)]
+    #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct ConfigFile {
-        #[serde(default)]
-        pub(super) paths: Paths,
-        #[serde(default)]
-        pub(super) artifacts: Artifacts,
-        #[serde(default)]
-        pub(super) volumes: Volumes,
-        #[serde(default)]
-        pub(super) proxy: Proxy,
-        #[serde(default)]
-        pub(super) network: Network,
-        #[serde(default)]
-        pub(super) exports: Exports,
-        #[serde(default)]
-        pub(super) metrics: Metrics,
+        pub(super) paths: Option<Paths>,
+        pub(super) artifacts: Option<Artifacts>,
+        pub(super) volumes: Option<Volumes>,
+        pub(super) exports: Option<Exports>,
+        pub(super) network: Option<Network>,
+        pub(super) proxy: Option<Proxy>,
+        pub(super) metrics: Option<Metrics>,
     }
 
-    #[derive(Debug, Default, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub(super) struct Metrics {
-        pub(super) port: Option<u16>,
-        pub(super) listen_address: Option<String>,
-    }
-
-    #[derive(Debug, Default, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub(super) struct Exports {
-        pub(super) store_url: Option<String>,
-        pub(super) staging_dir: Option<String>,
-    }
-
-    #[derive(Debug, Default, Deserialize)]
+    #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Paths {
         pub(super) state_dir: Option<String>,
@@ -209,22 +197,28 @@ mod file {
         pub(super) versions_file: Option<String>,
     }
 
-    #[derive(Debug, Default, Deserialize)]
+    #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Artifacts {
         pub(super) store_url: Option<String>,
     }
 
-    #[derive(Debug, Default, Deserialize)]
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Exports {
+        pub(super) store_url: Option<String>,
+        pub(super) staging_dir: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Volumes {
         pub(super) backend: Option<String>,
-        pub(super) store_url: Option<String>,
         pub(super) storage_prefix: Option<String>,
         pub(super) zerofs: Option<Zerofs>,
     }
 
-    #[derive(Debug, Default, Deserialize)]
+    #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Zerofs {
         pub(super) binary: Option<String>,
@@ -236,46 +230,67 @@ mod file {
         pub(super) checkpoint_cache_dir: Option<String>,
     }
 
-    #[derive(Debug, Default, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub(super) struct Proxy {
-        pub(super) http_port: Option<u16>,
-        pub(super) https_port: Option<u16>,
-        pub(super) tls_certificate: Option<String>,
-        pub(super) tls_key: Option<String>,
-        pub(super) tls_client_ca: Option<String>,
-        pub(super) port_relay_public_ipv4: Option<String>,
-    }
-
-    #[derive(Debug, Default, Deserialize)]
+    #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Network {
-        #[serde(default)]
-        pub(super) control_plane_cidrs_v4: Vec<String>,
-        #[serde(default)]
-        pub(super) control_plane_cidrs_v6: Vec<String>,
+        pub(super) control_plane_cidrs_v4: Option<Vec<String>>,
+        pub(super) control_plane_cidrs_v6: Option<Vec<String>>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Proxy {
+        pub(super) http: Option<Http>,
+        pub(super) https: Option<Https>,
+        pub(super) port_relay: Option<PortRelay>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Http {
+        pub(super) port: Option<u16>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Https {
+        pub(super) port: Option<u16>,
+        pub(super) certificate: Option<String>,
+        pub(super) key: Option<String>,
+        pub(super) client_ca: Option<ClientCa>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct ClientCa {
+        pub(super) certificate: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct PortRelay {
+        pub(super) public_ipv4: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Metrics {
+        pub(super) port: Option<u16>,
+        pub(super) listen_address: Option<String>,
     }
 }
 
 impl HostConfig {
     pub fn load() -> Result<Self, ConfigError> {
-        match std::env::var(CONFIG_FILE_VARIABLE)
+        let named = std::env::var(CONFIG_FILE_VARIABLE)
             .ok()
-            .filter(|named| !named.is_empty())
-        {
-            Some(named) => Self::from_file(Path::new(&named)),
-            None => {
-                let default = Path::new(DEFAULT_CONFIG_FILE);
-                if default.exists() {
-                    Self::from_file(default)
-                } else {
-                    Self::from_document(&file::ConfigFile::default())
-                }
-            }
-        }
+            .filter(|named| !named.is_empty());
+        Self::from_file(std::path::Path::new(
+            named.as_deref().unwrap_or(DEFAULT_CONFIG_FILE),
+        ))
     }
 
-    pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
+    pub fn from_file(path: &std::path::Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|error| ConfigError::Unreadable {
             path: path.display().to_string(),
             reason: error.to_string(),
@@ -298,249 +313,108 @@ impl HostConfig {
     }
 
     fn from_document(document: &file::ConfigFile) -> Result<Self, ConfigError> {
-        let paths = &document.paths;
-        let state_dir = directory("paths.state_dir", paths.state_dir.as_deref(), DEFAULT_STATE_DIR)?;
-        let runtime_dir = directory(
+        let paths = required("paths", document.paths.as_ref())?;
+        let state_dir = absolute(
+            "paths.state_dir",
+            required_str("paths.state_dir", &paths.state_dir)?,
+        )?;
+        let runtime_dir = absolute(
             "paths.runtime_dir",
-            paths.runtime_dir.as_deref(),
-            DEFAULT_RUNTIME_DIR,
+            required_str("paths.runtime_dir", &paths.runtime_dir)?,
         )?;
 
-        let http = document
-            .proxy
-            .http_port
-            .map(|port| listener("proxy.http_port", port))
-            .transpose()?;
-        let https = document
-            .proxy
-            .https_port
-            .map(|port| listener("proxy.https_port", port))
-            .transpose()?;
-        if let (Some(http), Some(https)) = (http, https) {
-            if http == https {
-                return Err(ConfigError::invalid(
-                    "proxy.https_port",
-                    format!("a different port from proxy.http_port, which is also {http}"),
-                ));
-            }
-        }
-
-        let metrics_port = document
-            .metrics
-            .port
-            .map(|port| listener("metrics.port", port))
-            .transpose()?;
-        for (named, field) in [
-            (document.proxy.http_port, "proxy.http_port"),
-            (document.proxy.https_port, "proxy.https_port"),
-        ] {
-            if let (Some(metrics), Some(named)) = (metrics_port, named) {
-                if metrics == named {
+        let volumes = required("volumes", document.volumes.as_ref())?;
+        let backend = match required_str("volumes.backend", &volumes.backend)? {
+            "local-file" => {
+                if volumes.zerofs.is_some() {
                     return Err(ConfigError::invalid(
-                        "metrics.port",
-                        format!("a different port from {field}, which is also {named}"),
+                        "volumes.zerofs",
+                        "read by the local-file backend, which is what volumes.backend says",
                     ));
                 }
+                VolumeBackend::LocalFile
             }
-        }
-        // A scrape surface names every app this host runs and what each is using, so it is served
-        // where an operator says and nowhere by default.
-        let metrics_listen_address = match document.metrics.listen_address.as_deref() {
-            None => std::net::IpAddr::from([127, 0, 0, 1]),
-            Some(address) => address
-                .parse()
-                .map_err(|_| ConfigError::invalid("metrics.listen_address", "an IP address to bind"))?,
-        };
-        if document.metrics.listen_address.is_some() && metrics_port.is_none() {
-            return Err(ConfigError::invalid(
-                "metrics.listen_address",
-                "bound where nothing serves metrics, which is what an absent metrics.port means",
-            ));
-        }
-
-        let tls_certificate = document
-            .proxy
-            .tls_certificate
-            .as_deref()
-            .map(|path| absolute("proxy.tls_certificate", path))
-            .transpose()?;
-        let tls_key = document
-            .proxy
-            .tls_key
-            .as_deref()
-            .map(|path| absolute("proxy.tls_key", path))
-            .transpose()?;
-        let tls_client_ca = document
-            .proxy
-            .tls_client_ca
-            .as_deref()
-            .map(|path| absolute("proxy.tls_client_ca", path))
-            .transpose()?;
-        let serves_tls = tls_certificate.is_some() && tls_key.is_some();
-        if https.is_some() && !serves_tls {
-            return Err(ConfigError::invalid(
-                "proxy.https_port",
-                "served without a proxy.tls_certificate and a proxy.tls_key beside it",
-            ));
-        }
-        if tls_client_ca.is_some() && !serves_tls {
-            return Err(ConfigError::invalid(
-                "proxy.tls_client_ca",
-                "read where nothing serves TLS, which is what an absent proxy.tls_certificate or proxy.tls_key means",
-            ));
-        }
-
-        let backend = match document.volumes.backend.as_deref() {
-            None | Some("local-file") => VolumeBackendKind::LocalFile,
-            Some("zerofs") => VolumeBackendKind::Zerofs,
-            Some(named) => {
+            "zerofs" => {
+                let zerofs = required("volumes.zerofs", volumes.zerofs.as_ref())?;
+                VolumeBackend::Zerofs(ZerofsSettings {
+                    binary: path_key("volumes.zerofs.binary", &zerofs.binary)?,
+                    config_file: path_key("volumes.zerofs.config_file", &zerofs.config_file)?,
+                    mount_path: path_key("volumes.zerofs.mount_path", &zerofs.mount_path)?,
+                    nbd_socket_path: path_key("volumes.zerofs.nbd_socket_path", &zerofs.nbd_socket_path)?,
+                    checkpoint_runtime_dir: path_key(
+                        "volumes.zerofs.checkpoint_runtime_dir",
+                        &zerofs.checkpoint_runtime_dir,
+                    )?,
+                    checkpoint_config_file: path_key(
+                        "volumes.zerofs.checkpoint_config_file",
+                        &zerofs.checkpoint_config_file,
+                    )?,
+                    checkpoint_cache_dir: path_key(
+                        "volumes.zerofs.checkpoint_cache_dir",
+                        &zerofs.checkpoint_cache_dir,
+                    )?,
+                })
+            }
+            named => {
                 return Err(ConfigError::invalid(
                     "volumes.backend",
                     format!("a backend this host has, and there is no {named}"),
                 ))
             }
         };
-        if document.volumes.zerofs.is_some() && backend != VolumeBackendKind::Zerofs {
-            return Err(ConfigError::invalid(
-                "volumes.zerofs",
-                format!(
-                    "read by any backend but {}, which is what volumes.backend says",
-                    backend.as_str()
-                ),
-            ));
-        }
-        let zerofs_settings = match backend {
-            VolumeBackendKind::LocalFile => None,
-            VolumeBackendKind::Zerofs => {
-                let named = document.volumes.zerofs.as_ref();
-                Some(ZerofsSettings {
-                    binary: directory(
-                        "volumes.zerofs.binary",
-                        named.and_then(|zerofs| zerofs.binary.as_deref()),
-                        DEFAULT_ZEROFS_BINARY,
-                    )?,
-                    config_file: directory(
-                        "volumes.zerofs.config_file",
-                        named.and_then(|zerofs| zerofs.config_file.as_deref()),
-                        DEFAULT_ZEROFS_CONFIG,
-                    )?,
-                    mount_path: directory(
-                        "volumes.zerofs.mount_path",
-                        named.and_then(|zerofs| zerofs.mount_path.as_deref()),
-                        DEFAULT_ZEROFS_MOUNT,
-                    )?,
-                    nbd_socket_path: directory(
-                        "volumes.zerofs.nbd_socket_path",
-                        named.and_then(|zerofs| zerofs.nbd_socket_path.as_deref()),
-                        DEFAULT_ZEROFS_NBD_SOCKET,
-                    )?,
-                    checkpoint_runtime_dir: directory(
-                        "volumes.zerofs.checkpoint_runtime_dir",
-                        named.and_then(|zerofs| zerofs.checkpoint_runtime_dir.as_deref()),
-                        DEFAULT_ZEROFS_CHECKPOINT_RUNTIME_DIR,
-                    )?,
-                    checkpoint_config_file: directory(
-                        "volumes.zerofs.checkpoint_config_file",
-                        named.and_then(|zerofs| zerofs.checkpoint_config_file.as_deref()),
-                        DEFAULT_ZEROFS_CHECKPOINT_CONFIG,
-                    )?,
-                    checkpoint_cache_dir: directory(
-                        "volumes.zerofs.checkpoint_cache_dir",
-                        named.and_then(|zerofs| zerofs.checkpoint_cache_dir.as_deref()),
-                        DEFAULT_ZEROFS_CHECKPOINT_CACHE_DIR,
-                    )?,
-                })
-            }
-        };
+
+        let network = required("network", document.network.as_ref())?;
+        let exports = required("exports", document.exports.as_ref())?;
+        let artifacts = required("artifacts", document.artifacts.as_ref())?;
+
+        let proxy = proxy(document.proxy.as_ref())?;
+        let metrics = metrics(document.metrics.as_ref(), &proxy)?;
 
         Ok(Self {
-            snapshot_dir: directory(
-                "paths.snapshot_dir",
-                paths.snapshot_dir.as_deref(),
-                DEFAULT_SNAPSHOT_DIR,
-            )?,
-            guest_image_dir: directory(
-                "paths.guest_image_dir",
-                paths.guest_image_dir.as_deref(),
-                DEFAULT_GUEST_IMAGE_DIR,
-            )?,
+            snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
+            guest_image_dir: path_key("paths.guest_image_dir", &paths.guest_image_dir)?,
             firecracker_dir: runtime_dir.join("firecracker"),
-            desired_state_file: beneath(
-                "paths.desired_state_file",
-                paths.desired_state_file.as_deref(),
-                &state_dir,
-                "desired.json",
+            desired_state_file: path_key("paths.desired_state_file", &paths.desired_state_file)?,
+            api_socket: path_key("paths.api_socket", &paths.api_socket)?,
+            versions_file: path_key("paths.versions_file", &paths.versions_file)?,
+            artifact_store_url: object_store_url(
+                "artifacts.store_url",
+                required_str("artifacts.store_url", &artifacts.store_url)?,
             )?,
-            api_socket: beneath(
-                "paths.api_socket",
-                paths.api_socket.as_deref(),
-                &runtime_dir,
-                "nibrunner.sock",
+            storage_prefix: storage_prefix(
+                "volumes.storage_prefix",
+                required_str("volumes.storage_prefix", &volumes.storage_prefix)?,
             )?,
-            versions_file: beneath(
-                "paths.versions_file",
-                paths.versions_file.as_deref(),
-                &state_dir,
-                "versions.json",
-            )?,
-            artifact_store_url: match document.artifacts.store_url.as_deref() {
-                Some(url) => object_store_url("artifacts.store_url", url)?,
-                None => state_dir.join("artifact-store").display().to_string(),
-            },
-            volume_store_url: document
-                .volumes
-                .store_url
-                .as_deref()
-                .map(|url| object_store_url("volumes.store_url", url))
-                .transpose()?,
-            storage_prefix: match document.volumes.storage_prefix.as_deref() {
-                Some(prefix) => storage_prefix("volumes.storage_prefix", prefix)?,
-                None => DEFAULT_STORAGE_PREFIX.to_string(),
-            },
-            volume_backend: backend,
-            zerofs: zerofs_settings,
-            port_relay_public_ipv4: document
-                .proxy
-                .port_relay_public_ipv4
-                .as_deref()
-                .map(|value| {
-                    Ipv4Address::parse(value.to_string())
-                        .map_err(|_| ConfigError::invalid("proxy.port_relay_public_ipv4", "an IPv4 address"))
-                })
-                .transpose()?,
+            volumes: backend,
             control_plane_cidrs_v4: cidrs(
                 "network.control_plane_cidrs_v4",
-                &document.network.control_plane_cidrs_v4,
+                required(
+                    "network.control_plane_cidrs_v4",
+                    network.control_plane_cidrs_v4.as_ref(),
+                )?,
                 Family::V4,
             )?,
             control_plane_cidrs_v6: cidrs(
                 "network.control_plane_cidrs_v6",
-                &document.network.control_plane_cidrs_v6,
+                required(
+                    "network.control_plane_cidrs_v6",
+                    network.control_plane_cidrs_v6.as_ref(),
+                )?,
                 Family::V6,
             )?,
-            proxy_http_port: http,
-            proxy_https_port: https,
-            proxy_tls_certificate: tls_certificate,
-            proxy_tls_key: tls_key,
-            proxy_tls_client_ca: tls_client_ca,
-            metrics_port,
-            metrics_listen_address,
-            export_store_url: match document.exports.store_url.as_deref() {
-                Some(url) => object_store_url("exports.store_url", url)?,
-                None => state_dir.join("export-store").display().to_string(),
-            },
-            export_staging_dir: beneath(
-                "exports.staging_dir",
-                document.exports.staging_dir.as_deref(),
-                &state_dir,
-                "exports",
+            proxy,
+            metrics,
+            export_store_url: object_store_url(
+                "exports.store_url",
+                required_str("exports.store_url", &exports.store_url)?,
             )?,
+            export_staging_dir: path_key("exports.staging_dir", &exports.staging_dir)?,
             state_dir,
             runtime_dir,
         })
     }
 
-    pub fn under(root: &Path) -> Self {
+    pub fn under(root: &std::path::Path) -> Self {
         Self {
             state_dir: root.join("state"),
             runtime_dir: root.join("run"),
@@ -549,26 +423,115 @@ impl HostConfig {
             firecracker_dir: root.join("run/firecracker"),
             desired_state_file: root.join("state/desired.json"),
             api_socket: root.join("run/nibrunner.sock"),
+            versions_file: root.join("state/versions.json"),
             artifact_store_url: root.join("state/artifact-store").display().to_string(),
-            volume_store_url: None,
-            storage_prefix: DEFAULT_STORAGE_PREFIX.to_string(),
-            volume_backend: VolumeBackendKind::LocalFile,
-            zerofs: None,
-            port_relay_public_ipv4: None,
+            storage_prefix: "volumes".to_string(),
+            volumes: VolumeBackend::LocalFile,
             control_plane_cidrs_v4: vec![],
             control_plane_cidrs_v6: vec![],
-            proxy_https_port: None,
-            proxy_http_port: None,
-            proxy_tls_certificate: None,
-            proxy_tls_key: None,
-            proxy_tls_client_ca: None,
-            versions_file: root.join("state/versions.json"),
-            metrics_port: None,
-            metrics_listen_address: std::net::IpAddr::from([127, 0, 0, 1]),
+            proxy: ProxyConfig::default(),
+            metrics: None,
             export_store_url: root.join("state/export-store").display().to_string(),
             export_staging_dir: root.join("state/exports"),
         }
     }
+}
+
+fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
+    let Some(document) = document else {
+        return Ok(ProxyConfig::default());
+    };
+    let http = document
+        .http
+        .as_ref()
+        .map(|http| {
+            Ok::<_, ConfigError>(HttpListener {
+                port: listener("proxy.http.port", required("proxy.http.port", http.port)?)?,
+            })
+        })
+        .transpose()?;
+    let https = document
+        .https
+        .as_ref()
+        .map(|https| {
+            Ok::<_, ConfigError>(HttpsListener {
+                port: listener("proxy.https.port", required("proxy.https.port", https.port)?)?,
+                certificate: path_key("proxy.https.certificate", &https.certificate)?,
+                key: path_key("proxy.https.key", &https.key)?,
+                client_ca: https
+                    .client_ca
+                    .as_ref()
+                    .map(|pool| path_key("proxy.https.client_ca.certificate", &pool.certificate))
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+    if let (Some(http), Some(https)) = (&http, &https) {
+        if http.port == https.port {
+            return Err(ConfigError::invalid(
+                "proxy.https.port",
+                format!(
+                    "a different port from proxy.http.port, which is also {}",
+                    http.port
+                ),
+            ));
+        }
+    }
+    Ok(ProxyConfig {
+        http,
+        https,
+        port_relay_public_ipv4: document
+            .port_relay
+            .as_ref()
+            .map(|relay| {
+                let named = required_str("proxy.port_relay.public_ipv4", &relay.public_ipv4)?;
+                Ipv4Address::parse(named.trim().to_string())
+                    .map_err(|_| ConfigError::invalid("proxy.port_relay.public_ipv4", "an IPv4 address"))
+            })
+            .transpose()?,
+    })
+}
+
+fn metrics(
+    document: Option<&file::Metrics>,
+    proxy: &ProxyConfig,
+) -> Result<Option<MetricsConfig>, ConfigError> {
+    let Some(document) = document else {
+        return Ok(None);
+    };
+    let port = listener("metrics.port", required("metrics.port", document.port)?)?;
+    for (named, field) in [
+        (proxy.http.as_ref().map(|http| http.port), "proxy.http.port"),
+        (proxy.https.as_ref().map(|https| https.port), "proxy.https.port"),
+    ] {
+        if named == Some(port) {
+            return Err(ConfigError::invalid(
+                "metrics.port",
+                format!("a different port from {field}, which is also {port}"),
+            ));
+        }
+    }
+    // A scrape surface names every app this host runs and what each is using, so where it is bound
+    // is said out loud rather than guessed at.
+    let listen_address = required_str("metrics.listen_address", &document.listen_address)?
+        .trim()
+        .parse()
+        .map_err(|_| ConfigError::invalid("metrics.listen_address", "an IP address to bind"))?;
+    Ok(Some(MetricsConfig { port, listen_address }))
+}
+
+/// Nothing this daemon reads has a value it may leave out: a key that is here is a key the
+/// configuration states, so absence is never a second meaning to work out at startup.
+fn required<T>(field: &str, value: Option<T>) -> Result<T, ConfigError> {
+    value.ok_or_else(|| ConfigError::invalid(field, "specified, and nothing here is optional"))
+}
+
+fn required_str<'a>(field: &str, value: &'a Option<String>) -> Result<&'a str, ConfigError> {
+    required(field, value.as_deref())
+}
+
+fn path_key(field: &str, value: &Option<String>) -> Result<PathBuf, ConfigError> {
+    absolute(field, required_str(field, value)?)
 }
 
 fn absolute(field: &str, value: &str) -> Result<PathBuf, ConfigError> {
@@ -584,20 +547,6 @@ fn absolute(field: &str, value: &str) -> Result<PathBuf, ConfigError> {
         ));
     }
     Ok(path)
-}
-
-fn directory(field: &str, value: Option<&str>, fallback: &str) -> Result<PathBuf, ConfigError> {
-    match value {
-        Some(value) => absolute(field, value),
-        None => Ok(PathBuf::from(fallback)),
-    }
-}
-
-fn beneath(field: &str, value: Option<&str>, parent: &Path, name: &str) -> Result<PathBuf, ConfigError> {
-    match value {
-        Some(value) => absolute(field, value),
-        None => Ok(parent.join(name)),
-    }
 }
 
 fn listener(field: &str, port: u16) -> Result<u16, ConfigError> {
@@ -730,6 +679,94 @@ fn storage_prefix(field: &str, value: &str) -> Result<String, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// The smallest document this daemon accepts. Every key it reads is in here, because there is
+    /// no key it will supply for itself, so a test about one key starts from the whole document.
+    const WHOLE: &str = r#"[paths]
+state_dir = "/var/lib/nibrunner"
+runtime_dir = "/run/nibrunner"
+snapshot_dir = "/var/lib/nibrunner/snapshots"
+guest_image_dir = "/var/lib/nibrunner/guest"
+desired_state_file = "/var/lib/nibrunner/desired.json"
+api_socket = "/run/nibrunner/nibrunner.sock"
+versions_file = "/var/lib/nibrunner/versions.json"
+
+[artifacts]
+store_url = "/var/lib/nibrunner/artifact-store"
+
+[volumes]
+backend = "local-file"
+storage_prefix = "volumes"
+
+[exports]
+store_url = "/var/lib/nibrunner/export-store"
+staging_dir = "/var/lib/nibrunner/exports"
+
+[network]
+control_plane_cidrs_v4 = []
+control_plane_cidrs_v6 = []
+"#;
+
+    /// `WHOLE` with some keys written differently, and anything in `extra` appended. A field named
+    /// here that the document does not have is a typo, not a new key, so it fails loudly.
+    fn document(changes: &[(&str, &str)], extra: &str) -> String {
+        let mut section = String::new();
+        let mut seen: Vec<&str> = vec![];
+        let mut out: Vec<String> = vec![];
+        for line in WHOLE.lines() {
+            if let Some(name) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+                section = name.to_string();
+                out.push(line.to_string());
+                continue;
+            }
+            let Some((key, _)) = line.split_once(" = ") else {
+                out.push(line.to_string());
+                continue;
+            };
+            let field = format!("{section}.{key}");
+            match changes.iter().find(|(named, _)| *named == field) {
+                Some((named, value)) => {
+                    seen.push(named);
+                    out.push(format!("{key} = {value}"));
+                }
+                None => out.push(line.to_string()),
+            }
+        }
+        for (named, _) in changes {
+            assert!(seen.contains(named), "{named} is not a key this document has");
+        }
+        out.push(extra.to_string());
+        out.join("\n")
+    }
+
+    fn whole() -> String {
+        document(&[], "")
+    }
+
+    fn with(extra: &str) -> HostConfig {
+        parsed(&document(&[], extra))
+    }
+
+    /// `WHOLE` with one key struck out, which is the only way a key can now be absent.
+    fn without(field: &str) -> String {
+        let mut section = String::new();
+        let mut found = false;
+        let mut out: Vec<String> = vec![];
+        for line in WHOLE.lines() {
+            if let Some(name) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+                section = name.to_string();
+            } else if let Some((key, _)) = line.split_once(" = ") {
+                if format!("{section}.{key}") == field {
+                    found = true;
+                    continue;
+                }
+            }
+            out.push(line.to_string());
+        }
+        assert!(found, "{field} is not a key this document has");
+        out.join("\n")
+    }
 
     fn parsed(text: &str) -> HostConfig {
         HostConfig::from_toml(text).unwrap()
@@ -740,168 +777,352 @@ mod tests {
     }
 
     #[test]
-    fn a_host_that_names_nothing_still_has_somewhere_to_put_everything() {
-        let config = parsed("");
-        assert_eq!(config.state_dir, PathBuf::from(DEFAULT_STATE_DIR));
+    fn a_key_the_document_leaves_out_is_refused_rather_than_filled_in() {
+        for field in [
+            "paths.state_dir",
+            "paths.runtime_dir",
+            "paths.snapshot_dir",
+            "paths.guest_image_dir",
+            "paths.desired_state_file",
+            "paths.api_socket",
+            "paths.versions_file",
+            "artifacts.store_url",
+            "volumes.backend",
+            "volumes.storage_prefix",
+            "exports.store_url",
+            "exports.staging_dir",
+            "network.control_plane_cidrs_v4",
+            "network.control_plane_cidrs_v6",
+        ] {
+            let message = refused(&without(field));
+            assert!(message.contains(field), "{field}: {message}");
+            assert!(message.contains("nothing here is optional"), "{field}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_section_this_daemon_reads_is_refused_when_the_document_has_none() {
+        for section in ["paths", "artifacts", "volumes", "exports", "network"] {
+            let stripped: String = WHOLE
+                .split("\n\n")
+                .filter(|block| !block.starts_with(&format!("[{section}]")))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let message = refused(&stripped);
+            assert!(message.contains(section), "{section}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_host_with_no_configuration_file_does_not_start_on_guesses() {
+        let error = HostConfig::from_file(Path::new("/nonexistent/nibrunner/config.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Unreadable { .. }), "{error}");
+    }
+
+    #[test]
+    fn every_file_a_host_writes_is_under_the_directory_the_document_names() {
+        let config = parsed(&whole());
+        assert_eq!(config.state_dir, PathBuf::from("/var/lib/nibrunner"));
         assert_eq!(
             config.desired_state_file,
             PathBuf::from("/var/lib/nibrunner/desired.json")
         );
         assert_eq!(config.api_socket, PathBuf::from("/run/nibrunner/nibrunner.sock"));
+        assert_eq!(
+            config.firecracker_dir,
+            PathBuf::from("/run/nibrunner/firecracker")
+        );
         assert_eq!(config.storage_prefix, "volumes");
-        assert_eq!(config.tls_material(), None);
-    }
-
-    #[test]
-    fn what_was_not_named_follows_the_directory_it_belongs_to() {
-        let config = parsed("[paths]\nstate_dir = \"/srv/nibrunner\"\nruntime_dir = \"/run/nbr\"\n");
-        assert_eq!(
-            config.desired_state_file,
-            PathBuf::from("/srv/nibrunner/desired.json")
-        );
-        assert_eq!(
-            config.instances_file(),
-            PathBuf::from("/srv/nibrunner/instances.json")
-        );
-        assert_eq!(config.api_socket, PathBuf::from("/run/nbr/nibrunner.sock"));
-        assert_eq!(config.firecracker_dir, PathBuf::from("/run/nbr/firecracker"));
+        assert_eq!(config.proxy, ProxyConfig::default());
+        assert_eq!(config.metrics, None);
     }
 
     #[test]
     fn a_key_this_daemon_does_not_have_is_refused_by_name() {
-        let message = refused("[proxy]\nhttp_prot = 80\n");
-        assert!(message.contains("http_prot"), "{message}");
+        let message = refused(&document(&[], "[proxy.http]\nprot = 80\n"));
+        assert!(message.contains("prot"), "{message}");
     }
 
     #[test]
     fn a_section_this_daemon_does_not_have_is_refused_too() {
-        let message = refused("[zerofs]\nbinary = \"/usr/bin/zerofs\"\n");
+        let message = refused(&document(&[], "[zerofs]\nbinary = \"/usr/bin/zerofs\"\n"));
         assert!(message.contains("zerofs"), "{message}");
     }
 
     #[test]
     fn a_relative_path_is_refused_because_it_names_a_different_place_each_time() {
-        let message = refused("[paths]\nstate_dir = \"var/lib/nibrunner\"\n");
+        let message = refused(&document(&[("paths.state_dir", "\"var/lib/nibrunner\"")], ""));
         assert!(message.contains("paths.state_dir"), "{message}");
         assert!(message.contains("absolute"), "{message}");
     }
 
     #[test]
-    fn a_proxy_port_a_slot_would_take_is_refused() {
-        let message = refused("[proxy]\nhttp_port = 21000\n");
-        assert!(message.contains("proxy.http_port"), "{message}");
-        assert!(message.contains("21000"), "{message}");
-        let extra = refused("[proxy]\nhttps_port = 22062\n");
-        assert!(extra.contains("22000"), "{extra}");
+    fn a_path_that_is_only_whitespace_names_nothing_and_is_refused() {
+        let message = refused(&document(&[("paths.snapshot_dir", "\"   \"")], ""));
+        assert!(message.contains("paths.snapshot_dir"), "{message}");
+        assert!(message.contains("is not a path"), "{message}");
         assert_eq!(
-            parsed("[proxy]\nhttp_port = 23000\n").proxy_http_port,
-            Some(23000)
+            with("[proxy.https]\nport = 443\ncertificate = \"  /tls/origin.crt  \"\nkey = \"/tls/origin.key\"\n")
+                .proxy
+                .https
+                .unwrap()
+                .certificate,
+            PathBuf::from("/tls/origin.crt")
         );
     }
 
     #[test]
+    fn a_proxy_port_a_slot_would_take_is_refused() {
+        let message = refused(&document(&[], "[proxy.http]\nport = 21000\n"));
+        assert!(message.contains("proxy.http.port"), "{message}");
+        assert!(message.contains("21000"), "{message}");
+        let extra = refused(&document(
+            &[],
+            "[proxy.https]\nport = 22062\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n",
+        ));
+        assert!(extra.contains("22000"), "{extra}");
+        assert_eq!(
+            with("[proxy.http]\nport = 23000\n").proxy.http.unwrap().port,
+            23000
+        );
+    }
+
+    #[test]
+    fn a_port_the_kernel_would_pick_is_not_a_port_this_host_can_be_found_on() {
+        let message = refused(&document(&[], "[proxy.http]\nport = 0\n"));
+        assert!(message.contains("proxy.http.port"), "{message}");
+        assert!(message.contains("kernel picking one"), "{message}");
+    }
+
+    #[test]
     fn one_port_cannot_serve_both_plaintext_and_tls() {
-        let message = refused("[proxy]\nhttp_port = 8080\nhttps_port = 8080\n");
-        assert!(message.contains("proxy.https_port"), "{message}");
+        let message = refused(&document(
+            &[],
+            "[proxy.http]\nport = 8080\n\n[proxy.https]\nport = 8080\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n",
+        ));
+        assert!(message.contains("proxy.https.port"), "{message}");
+    }
+
+    #[test]
+    fn a_listener_is_named_whole_or_not_at_all() {
+        let message = refused(&document(&[], "[proxy.https]\nport = 8443\n"));
+        assert!(message.contains("proxy.https.certificate"), "{message}");
+        let half = refused(&document(
+            &[],
+            "[proxy.https]\nport = 8443\ncertificate = \"/tls/origin.crt\"\n",
+        ));
+        assert!(half.contains("proxy.https.key"), "{half}");
+        let pool = refused(&document(
+            &[],
+            "[proxy.https]\nport = 8443\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n\n[proxy.https.client_ca]\n",
+        ));
+        assert!(pool.contains("proxy.https.client_ca.certificate"), "{pool}");
+    }
+
+    #[test]
+    fn a_trust_pool_is_only_reachable_where_something_serves_tls_to_check_a_caller_against_it() {
+        let message = refused(&document(
+            &[],
+            "[proxy.https.client_ca]\ncertificate = \"/tls/origin-pull-ca.pem\"\n",
+        ));
+        assert!(message.contains("proxy.https.port"), "{message}");
+
+        let served = with("[proxy.https]\nport = 8443\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n\n[proxy.https.client_ca]\ncertificate = \"/tls/ca.pem\"\n");
+        assert_eq!(
+            served.proxy.https.as_ref().unwrap().client_ca,
+            Some(PathBuf::from("/tls/ca.pem"))
+        );
+        let open = with("[proxy.https]\nport = 8443\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n");
+        assert_eq!(open.proxy.https.unwrap().client_ca, None);
+    }
+
+    #[test]
+    fn an_address_no_packet_could_be_relayed_to_is_refused() {
+        let message = refused(&document(
+            &[],
+            "[proxy.port_relay]\npublic_ipv4 = \"not.an.address\"\n",
+        ));
+        assert!(message.contains("proxy.port_relay.public_ipv4"), "{message}");
+        assert!(refused(&document(&[], "[proxy.port_relay]\npublic_ipv4 = \"fd00::1\"\n")).contains("IPv4"));
+        assert!(refused(&document(&[], "[proxy.port_relay]\n")).contains("nothing here is optional"));
+        assert_eq!(
+            with("[proxy.port_relay]\npublic_ipv4 = \"203.0.113.10\"\n")
+                .proxy
+                .port_relay_public_ipv4
+                .map(|address| address.to_string()),
+            Some("203.0.113.10".to_string())
+        );
+    }
+
+    #[test]
+    fn a_scrape_surface_is_bound_where_the_document_says_and_nowhere_otherwise() {
+        assert_eq!(parsed(&whole()).metrics, None);
+
+        let on = with("[metrics]\nport = 9100\nlisten_address = \"0.0.0.0\"\n");
+        assert_eq!(
+            on.metrics,
+            Some(MetricsConfig {
+                port: 9100,
+                listen_address: IpAddr::from([0, 0, 0, 0]),
+            })
+        );
+
+        assert!(refused(&document(&[], "[metrics]\nport = 9100\n")).contains("metrics.listen_address"));
+        assert!(
+            refused(&document(&[], "[metrics]\nlisten_address = \"127.0.0.1\"\n")).contains("metrics.port")
+        );
+        assert!(refused(&document(
+            &[],
+            "[metrics]\nport = 21000\nlisten_address = \"127.0.0.1\"\n"
+        ))
+        .contains("a slot takes"));
+        assert!(refused(&document(
+            &[],
+            "[metrics]\nport = 9100\nlisten_address = \"here\"\n"
+        ))
+        .contains("metrics.listen_address"));
+        let clash = refused(&document(
+            &[],
+            "[proxy.http]\nport = 9100\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n",
+        ));
+        assert!(clash.contains("proxy.http.port"), "{clash}");
     }
 
     #[test]
     fn a_range_that_nft_would_reject_is_refused_before_the_ruleset_is_rendered() {
-        assert!(refused("[network]\ncontrol_plane_cidrs_v4 = [\"172.31.0.0\"]\n").contains("prefix length"));
-        assert!(refused("[network]\ncontrol_plane_cidrs_v4 = [\"172.31.0.0/33\"]\n").contains("wider"));
-        assert!(refused("[network]\ncontrol_plane_cidrs_v4 = [\"fd00::/8\"]\n").contains("IPv4"));
-        assert!(refused("[network]\ncontrol_plane_cidrs_v6 = [\"172.31.0.0/16\"]\n").contains("IPv6"));
+        let bad = |value: &str| refused(&document(&[("network.control_plane_cidrs_v4", value)], ""));
+        assert!(bad("[\"172.31.0.0\"]").contains("prefix length"));
+        assert!(bad("[\"172.31.0.0/33\"]").contains("wider"));
+        assert!(bad("[\"fd00::/8\"]").contains("IPv4"));
+        assert!(bad("[\"10.0.0.0/eight\"]").contains("not a prefix length"));
+        assert!(refused(&document(
+            &[("network.control_plane_cidrs_v6", "[\"172.31.0.0/16\"]")],
+            ""
+        ))
+        .contains("IPv6"));
+        assert!(refused(&document(
+            &[("network.control_plane_cidrs_v6", "[\"fd00::/129\"]")],
+            ""
+        ))
+        .contains("wider"));
         assert_eq!(
-            parsed("[network]\ncontrol_plane_cidrs_v4 = [\"172.31.0.0/16\"]\n").control_plane_cidrs_v4,
+            parsed(&document(
+                &[("network.control_plane_cidrs_v4", "[\"172.31.0.0/16\"]")],
+                ""
+            ))
+            .control_plane_cidrs_v4,
             vec!["172.31.0.0/16".to_string()]
+        );
+        assert_eq!(
+            parsed(&document(
+                &[("network.control_plane_cidrs_v6", "[\" fd00::/8 \"]")],
+                ""
+            ))
+            .control_plane_cidrs_v6,
+            vec!["fd00::/8".to_string()]
         );
     }
 
     #[test]
     fn a_store_this_host_has_no_backend_for_is_refused_at_startup() {
-        assert!(refused("[artifacts]\nstore_url = \"gs://bucket\"\n").contains("no gs backend"));
-        assert!(refused("[artifacts]\nstore_url = \"s3://\"\n").contains("bucket"));
+        let store = |value: &str| document(&[("artifacts.store_url", value)], "");
+        assert!(refused(&store("\"gs://bucket\"")).contains("no gs backend"));
+        assert!(refused(&store("\"s3://\"")).contains("bucket"));
+        assert!(refused(&store("\"srv/artifacts\"")).contains("absolute"));
         assert_eq!(
-            parsed("[artifacts]\nstore_url = \"s3://nibrun/artifacts\"\n").artifact_store_url,
+            parsed(&store("\"s3://nibrun/artifacts\"")).artifact_store_url,
             "s3://nibrun/artifacts"
         );
         assert_eq!(
-            parsed("[artifacts]\nstore_url = \"/srv/artifacts\"\n").artifact_store_url,
-            "/srv/artifacts"
+            parsed(&document(&[("exports.store_url", "\"s3://nibrun-exports\"")], "")).export_store_url,
+            "s3://nibrun-exports"
         );
     }
 
     #[test]
     fn a_prefix_that_would_become_a_key_nobody_can_find_is_refused() {
         for bad in ["/volumes", "volumes/", "", "volumes//app", "volumes/../etc"] {
-            let text = format!("[volumes]\nstorage_prefix = \"{bad}\"\n");
+            let text = document(&[("volumes.storage_prefix", &format!("\"{bad}\""))], "");
             assert!(
                 HostConfig::from_toml(&text).is_err(),
                 "{bad} was accepted as a storage prefix"
             );
         }
+        let too_long = "a".repeat(MAX_STORAGE_PREFIX_BYTES + 1);
+        assert!(refused(&document(
+            &[("volumes.storage_prefix", &format!("\"{too_long}\""))],
+            ""
+        ))
+        .contains("at most 512 bytes"));
+        let longest = "b".repeat(MAX_STORAGE_PREFIX_BYTES);
         assert_eq!(
-            parsed("[volumes]\nstorage_prefix = \"hosts/one/volumes\"\n").storage_prefix,
+            parsed(&document(
+                &[("volumes.storage_prefix", &format!("\"{longest}\""))],
+                ""
+            ))
+            .storage_prefix,
+            longest
+        );
+        assert_eq!(
+            parsed(&document(
+                &[("volumes.storage_prefix", "\"hosts/one/volumes\"")],
+                ""
+            ))
+            .storage_prefix,
             "hosts/one/volumes"
         );
     }
 
     #[test]
-    fn a_host_keeps_its_volumes_on_its_own_disk_unless_it_says_otherwise() {
-        assert_eq!(parsed("").volume_backend, VolumeBackendKind::LocalFile);
-        assert_eq!(parsed("").zerofs, None);
-        let zerofs = parsed("[volumes]\nbackend = \"zerofs\"\n");
-        assert_eq!(zerofs.volume_backend, VolumeBackendKind::Zerofs);
-        assert_eq!(
-            zerofs.zerofs.as_ref().map(|settings| settings.mount_path.clone()),
-            Some(PathBuf::from("/mnt/zerofs"))
-        );
-        assert!(refused("[volumes]\nbackend = \"nfs\"\n").contains("no nfs"));
+    fn a_backend_travels_with_the_settings_it_reads_and_no_others() {
+        assert_eq!(parsed(&whole()).volumes, VolumeBackend::LocalFile);
+        assert_eq!(VolumeBackend::LocalFile.as_str(), "local-file");
+        assert!(refused(&document(&[("volumes.backend", "\"nfs\"")], "")).contains("no nfs"),);
+
+        let orphaned = refused(&document(&[], ZEROFS));
+        assert!(orphaned.contains("volumes.zerofs"), "{orphaned}");
+        assert!(orphaned.contains("local-file"), "{orphaned}");
+
+        let unaddressed = refused(&document(&[("volumes.backend", "\"zerofs\"")], ""));
+        assert!(unaddressed.contains("volumes.zerofs"), "{unaddressed}");
     }
 
-    #[test]
-    fn zerofs_settings_under_a_backend_that_would_not_read_them_are_refused() {
-        let message = refused("[volumes.zerofs]\nmount_path = \"/mnt/zerofs\"\n");
-        assert!(message.contains("volumes.zerofs"), "{message}");
-        assert!(message.contains("local-file"), "{message}");
-    }
-
-    #[test]
-    fn where_this_hosts_zerofs_is_can_be_moved_whole() {
-        let zerofs = parsed(
-            r#"
-[volumes]
-backend = "zerofs"
-
-[volumes.zerofs]
+    const ZEROFS: &str = r#"[volumes.zerofs]
 binary = "/usr/local/bin/zerofs"
 config_file = "/etc/zerofs/one.toml"
 mount_path = "/srv/zerofs"
 nbd_socket_path = "/run/zerofs/one.sock"
 checkpoint_runtime_dir = "/run/zerofs-checkpoints"
-"#,
-        )
-        .zerofs
-        .unwrap();
+checkpoint_config_file = "/etc/zerofs/checkpoint.toml"
+checkpoint_cache_dir = "/data/zerofs-checkpoint"
+"#;
+
+    #[test]
+    fn where_this_hosts_zerofs_is_can_be_moved_whole() {
+        let config = parsed(&document(&[("volumes.backend", "\"zerofs\"")], ZEROFS));
+        assert_eq!(config.volumes.as_str(), "zerofs");
+        let zerofs = config.volumes.zerofs().unwrap();
         assert_eq!(zerofs.binary, PathBuf::from("/usr/local/bin/zerofs"));
         assert_eq!(
             zerofs.checkpoint_runtime_dir,
             PathBuf::from("/run/zerofs-checkpoints")
         );
-        assert!(
-            refused("[volumes]\nbackend = \"zerofs\"\n\n[volumes.zerofs]\nmount_path = \"mnt\"\n")
-                .contains("volumes.zerofs.mount_path")
-        );
+        assert!(refused(&document(
+            &[("volumes.backend", "\"zerofs\"")],
+            &ZEROFS.replace("/srv/zerofs", "srv/zerofs")
+        ))
+        .contains("volumes.zerofs.mount_path"));
+        assert!(refused(&document(
+            &[("volumes.backend", "\"zerofs\"")],
+            "[volumes.zerofs]\nbinary = \"/usr/local/bin/zerofs\"\n"
+        ))
+        .contains("volumes.zerofs.config_file"));
     }
 
     #[test]
     fn a_finished_bundle_is_never_kept_inside_the_tree_the_reap_removes() {
-        for text in [
-            "",
-            "[paths]\nstate_dir = \"/srv/nibrunner\"\n",
-            "[exports]\nstaging_dir = \"/mnt/scratch/exports\"\n",
-        ] {
-            let config = parsed(text);
+        for staging in ["\"/var/lib/nibrunner/exports\"", "\"/mnt/scratch/exports\""] {
+            let config = parsed(&document(&[("exports.staging_dir", staging)], ""));
             let store = PathBuf::from(&config.export_store_url);
             assert!(
                 !store.starts_with(&config.export_staging_dir),
@@ -910,14 +1131,6 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
                 config.export_staging_dir.display()
             );
         }
-    }
-
-    #[test]
-    fn a_certificate_without_its_key_is_not_tls_material() {
-        let config = parsed("[proxy]\ntls_certificate = \"/tls/origin.crt\"\n");
-        assert_eq!(config.tls_material(), None);
-        let both = parsed("[proxy]\ntls_certificate = \"/tls/origin.crt\"\ntls_key = \"/tls/origin.key\"\n");
-        assert!(both.tls_material().is_some());
     }
 
     #[test]
@@ -930,152 +1143,10 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
     }
 
     #[test]
-    fn a_file_that_was_named_and_is_not_there_is_an_error() {
-        let error = HostConfig::from_file(Path::new("/nonexistent/nibrunner/config.toml")).unwrap_err();
-        assert!(matches!(error, ConfigError::Unreadable { .. }), "{error}");
-    }
-
-    #[test]
     fn the_sample_this_repository_ships_is_a_configuration_this_daemon_accepts() {
         let sample = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/config.toml");
         let text = std::fs::read_to_string(sample).unwrap();
-        assert_eq!(HostConfig::from_toml(&text).unwrap(), parsed(""));
-    }
-
-    #[test]
-    fn a_port_the_kernel_would_pick_is_not_a_port_this_host_can_be_found_on() {
-        let message = refused("[proxy]\nhttp_port = 0\n");
-        assert!(message.contains("proxy.http_port"), "{message}");
-        assert!(message.contains("kernel picking one"), "{message}");
-        assert_eq!(parsed("[proxy]\nhttp_port = 443\n").proxy_http_port, Some(443));
-    }
-
-    #[test]
-    fn a_path_that_is_only_whitespace_names_nothing_and_is_refused() {
-        let message = refused("[proxy]\ntls_certificate = \"   \"\n");
-        assert!(message.contains("proxy.tls_certificate"), "{message}");
-        assert!(message.contains("is not a path"), "{message}");
-        assert_eq!(
-            parsed("[proxy]\ntls_key = \"  /tls/origin.key  \"\n").proxy_tls_key,
-            Some(PathBuf::from("/tls/origin.key"))
-        );
-    }
-
-    #[test]
-    fn a_store_named_by_a_relative_path_would_move_with_the_working_directory() {
-        let message = refused("[volumes]\nstore_url = \"srv/volumes\"\n");
-        assert!(message.contains("volumes.store_url"), "{message}");
-        assert!(message.contains("absolute"), "{message}");
-        assert_eq!(
-            parsed("[exports]\nstore_url = \"s3://nibrun-exports\"\n").export_store_url,
-            "s3://nibrun-exports"
-        );
-        assert_eq!(parsed("").volume_store_url, None);
-    }
-
-    #[test]
-    fn a_prefix_longer_than_a_key_may_be_is_refused_by_its_length() {
-        let too_long = "a".repeat(MAX_STORAGE_PREFIX_BYTES + 1);
-        let message = refused(&format!("[volumes]\nstorage_prefix = \"{too_long}\"\n"));
-        assert!(message.contains("at most 512 bytes"), "{message}");
-        let longest = "b".repeat(MAX_STORAGE_PREFIX_BYTES);
-        assert_eq!(
-            parsed(&format!("[volumes]\nstorage_prefix = \"{longest}\"\n")).storage_prefix,
-            longest
-        );
-    }
-
-    #[test]
-    fn an_address_no_packet_could_be_relayed_to_is_refused() {
-        let message = refused("[proxy]\nport_relay_public_ipv4 = \"not.an.address\"\n");
-        assert!(message.contains("proxy.port_relay_public_ipv4"), "{message}");
-        assert!(refused("[proxy]\nport_relay_public_ipv4 = \"fd00::1\"\n").contains("IPv4"));
-        assert_eq!(
-            parsed("[proxy]\nport_relay_public_ipv4 = \"203.0.113.10\"\n")
-                .port_relay_public_ipv4
-                .map(|address| address.to_string()),
-            Some("203.0.113.10".to_string())
-        );
-    }
-
-    #[test]
-    fn a_scrape_surface_is_bound_where_it_is_asked_for_and_nowhere_otherwise() {
-        let off = parsed("");
-        assert_eq!(off.metrics_port, None);
-        assert_eq!(
-            off.metrics_listen_address,
-            std::net::IpAddr::from([127, 0, 0, 1]),
-            "loopback is what an unasked-for scrape surface binds"
-        );
-
-        let on = parsed("[metrics]\nport = 9100\nlisten_address = \"0.0.0.0\"\n");
-        assert_eq!(on.metrics_port, Some(9100));
-        assert_eq!(on.metrics_listen_address, std::net::IpAddr::from([0, 0, 0, 0]));
-
-        assert!(refused("[metrics]\nport = 21000\n").contains("a slot takes"));
-        assert!(refused("[metrics]\nlisten_address = \"127.0.0.1\"\n").contains("metrics.port"));
-        assert!(refused("[metrics]\nport = 0\n").contains("metrics.port"));
-        let clash = refused("[proxy]\nhttp_port = 9100\n\n[metrics]\nport = 9100\n");
-        assert!(clash.contains("proxy.http_port"), "{clash}");
-    }
-
-    #[test]
-    fn a_host_that_names_an_https_port_and_no_certificate_is_refused_while_someone_is_watching() {
-        let message = refused("[proxy]\nhttps_port = 8443\n");
-        assert!(message.contains("proxy.https_port"), "{message}");
-        assert!(message.contains("proxy.tls_certificate"), "{message}");
-        let half = refused("[proxy]\nhttps_port = 8443\ntls_certificate = \"/tls/origin.crt\"\n");
-        assert!(half.contains("proxy.tls_key"), "{half}");
-    }
-
-    #[test]
-    fn a_trust_pool_is_refused_where_nothing_serves_tls_to_check_a_caller_against_it() {
-        let message = refused("[proxy]\ntls_client_ca = \"/tls/origin-pull-ca.pem\"\n");
-        assert!(message.contains("proxy.tls_client_ca"), "{message}");
-        assert_eq!(
-            parsed("[proxy]\ntls_certificate = \"/tls/origin.crt\"\ntls_key = \"/tls/origin.key\"\ntls_client_ca = \"/tls/ca.pem\"\n")
-                .proxy_tls_client_ca,
-            Some(PathBuf::from("/tls/ca.pem"))
-        );
-    }
-
-    #[test]
-    fn a_host_fronted_by_nothing_needs_no_key_to_say_so() {
-        let open = parsed("[proxy]\nhttps_port = 8443\ntls_certificate = \"/tls/origin.crt\"\ntls_key = \"/tls/origin.key\"\n");
-        assert_eq!(open.proxy_https_port, Some(8443));
-        assert_eq!(open.proxy_tls_client_ca, None);
-    }
-
-    #[test]
-    fn a_key_without_its_certificate_is_no_more_tls_material_than_the_other_way_round() {
-        assert_eq!(
-            parsed("[proxy]\ntls_key = \"/tls/origin.key\"\n").tls_material(),
-            None
-        );
-    }
-
-    #[test]
-    fn a_range_that_is_written_with_room_around_it_is_still_the_range_it_names() {
-        assert_eq!(
-            parsed("[network]\ncontrol_plane_cidrs_v6 = [\" fd00::/8 \"]\n").control_plane_cidrs_v6,
-            vec!["fd00::/8".to_string()]
-        );
-        assert!(refused("[network]\ncontrol_plane_cidrs_v6 = [\"fd00::/129\"]\n").contains("wider"));
-        assert!(
-            refused("[network]\ncontrol_plane_cidrs_v4 = [\"10.0.0.0/eight\"]\n")
-                .contains("not a prefix length")
-        );
-        assert!(parsed("").control_plane_cidrs_v4.is_empty());
-    }
-
-    #[test]
-    fn every_backend_this_host_has_is_named_the_way_the_configuration_spells_it() {
-        assert_eq!(VolumeBackendKind::LocalFile.as_str(), "local-file");
-        assert_eq!(VolumeBackendKind::Zerofs.as_str(), "zerofs");
-        assert_eq!(
-            parsed("[volumes]\nbackend = \"local-file\"\n").volume_backend,
-            VolumeBackendKind::LocalFile
-        );
+        assert_eq!(HostConfig::from_toml(&text).unwrap(), parsed(&whole()));
     }
 
     #[test]
@@ -1109,8 +1180,8 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
             );
         }
         assert_eq!(config.in_state_dir("anything"), root.join("state/anything"));
-        assert_eq!(config.volume_backend, VolumeBackendKind::LocalFile);
-        assert_eq!(config.tls_material(), None);
+        assert_eq!(config.volumes, VolumeBackend::LocalFile);
+        assert_eq!(config.proxy, ProxyConfig::default());
     }
 
     #[test]
@@ -1136,46 +1207,59 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
 
     #[test]
     fn a_whole_document_reads_back_as_it_was_written() {
-        let config = parsed(
-            r#"
-[paths]
-state_dir = "/srv/nibrunner"
-runtime_dir = "/run/nibrunner"
-snapshot_dir = "/mnt/cache/snapshots"
-guest_image_dir = "/srv/guest"
+        let config = parsed(&document(
+            &[
+                ("paths.state_dir", "\"/srv/nibrunner\""),
+                ("paths.snapshot_dir", "\"/mnt/cache/snapshots\""),
+                ("artifacts.store_url", "\"s3://nibrun-artifacts/prod\""),
+                ("network.control_plane_cidrs_v4", "[\"172.31.0.0/16\"]"),
+            ],
+            r#"[proxy.http]
+port = 80
 
-[artifacts]
-store_url = "s3://nibrun-artifacts/prod"
+[proxy.https]
+port = 443
+certificate = "/etc/nibrunner/origin.crt"
+key = "/etc/nibrunner/origin.key"
 
-[volumes]
-store_url = "s3://nibrun-volumes"
-storage_prefix = "volumes"
+[proxy.https.client_ca]
+certificate = "/etc/nibrunner/origin-pull-ca.pem"
 
-[proxy]
-http_port = 80
-https_port = 443
-tls_certificate = "/etc/nibrunner/origin.crt"
-tls_key = "/etc/nibrunner/origin.key"
-tls_client_ca = "/etc/nibrunner/origin-pull-ca.pem"
-port_relay_public_ipv4 = "203.0.113.10"
+[proxy.port_relay]
+public_ipv4 = "203.0.113.10"
 
-[network]
-control_plane_cidrs_v4 = ["172.31.0.0/16"]
+[metrics]
+port = 9100
+listen_address = "127.0.0.1"
 "#,
-        );
+        ));
+        assert_eq!(config.state_dir, PathBuf::from("/srv/nibrunner"));
         assert_eq!(config.snapshot_dir, PathBuf::from("/mnt/cache/snapshots"));
         assert_eq!(config.artifact_store_url, "s3://nibrun-artifacts/prod");
-        assert_eq!(config.volume_store_url, Some("s3://nibrun-volumes".to_string()));
-        assert_eq!(config.proxy_http_port, Some(80));
-        assert_eq!(config.proxy_https_port, Some(443));
-        assert!(config.tls_material().is_some());
+        assert_eq!(config.control_plane_cidrs_v4, vec!["172.31.0.0/16".to_string()]);
+        assert_eq!(config.proxy.http, Some(HttpListener { port: 80 }));
         assert_eq!(
-            config.proxy_tls_client_ca,
-            Some(PathBuf::from("/etc/nibrunner/origin-pull-ca.pem"))
+            config.proxy.https,
+            Some(HttpsListener {
+                port: 443,
+                certificate: PathBuf::from("/etc/nibrunner/origin.crt"),
+                key: PathBuf::from("/etc/nibrunner/origin.key"),
+                client_ca: Some(PathBuf::from("/etc/nibrunner/origin-pull-ca.pem")),
+            })
         );
         assert_eq!(
-            config.port_relay_public_ipv4.map(|address| address.to_string()),
+            config
+                .proxy
+                .port_relay_public_ipv4
+                .map(|address| address.to_string()),
             Some("203.0.113.10".to_string())
+        );
+        assert_eq!(
+            config.metrics,
+            Some(MetricsConfig {
+                port: 9100,
+                listen_address: IpAddr::from([127, 0, 0, 1]),
+            })
         );
     }
 }

@@ -69,6 +69,15 @@ tool, the same bound on what is left behind — the repair the failed probe trig
 which errors every queued request on that device and frees the reader. If that turns out to differ
 on a real wedged host, the change is one function.
 
+**Nothing in the configuration is optional.** Every key a section has, that section states;
+absence is refused by name rather than filled in. A default is a second copy of the answer, kept
+somewhere the operator is not looking, and the two drift: the file says what the host does until
+the day a key is dropped and the compiled-in value quietly takes over. It also removes the one
+thing a `None` was ever for here — carrying a mode. What is genuinely optional is a whole section,
+which is a host either having a thing or not: `[proxy.https]`, `[metrics]`, `[volumes.zerofs]`.
+A section that is there is filled in whole, so `https_port` with no certificate beside it is no
+longer a state the file can spell, and the startup warning that used to cover it is gone with it.
+
 **Configuration is a file, not the environment.** The brief did not say either way, and the agent
 reads environment variables. A file can refuse a setting that does not exist; an environment
 cannot, because a variable nobody set and one whose name was mistyped are the same absence. Every
@@ -242,9 +251,10 @@ endpoint" is about what may command this daemon, and `metrics.port` commands not
 route that changes anything, and the page is rendered by the same builder that writes
 `reported.json`, so the file and a scraper cannot disagree about what the host is doing. What it
 adds is a reader that does not have to sit on the host to read the file — which is the one thing
-`reported.json` could never do for a Prometheus somewhere else. It is off unless a port is named,
-and bound to loopback unless an address is, because the page names every app on the host and what
-each is using.
+`reported.json` could never do for a Prometheus somewhere else. A host without a `[metrics]`
+section serves no page at all, and one with it says both the port and the address out loud, because
+the page names every app on the host and what each is using and where that is readable from is not
+something to inherit from a default.
 
 The request histogram is bounded by what a service function can see: it starts when the router is
 handed a request and stops when it hands a response back, so it holds the routing and the leg to
@@ -267,7 +277,7 @@ drains, which is a different and larger change than counting what the router dec
   only ever asks for a listing, so the rest are reachable and untested against a real guest.
 - **Usage reporting.** A non-goal for v1.
 - **ACME.** Phase 5. The proxy serves a certificate and key from disk — checking a caller's own
-  certificate against `proxy.tls_client_ca`, or admitting anyone — or plain HTTP, or nothing.
+  certificate against `[proxy.https.client_ca]`, or admitting anyone — or plain HTTP, or nothing.
 - **A published guest image.** `guest/` carries the kernel and the pins; the root filesystem is
   built by `guest/build-image.sh` and is not committed. Nothing publishes the result yet, so a host
   builds its own. A release asset is where it should come from.

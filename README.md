@@ -86,40 +86,48 @@ it down and leaves the app reachable enough to say so.
 ## Configuration
 
 One TOML file, read once at startup and validated whole. `/etc/nibrunner/config.toml` unless
-`NIBRUNNER_CONFIG` names another — the difference being that a file named deliberately must exist,
-where the default is allowed to be absent. A host that names nothing gets a working default, so an
-empty file and no file are the same host.
+`NIBRUNNER_CONFIG` names another. There is no file this daemon will do without: a host that cannot
+say where its state lives is a host that will put it somewhere nobody looks for it.
 
-A key this daemon does not have is an error that names the key, which is the thing an environment
-could never do: a mistyped variable and one nobody set are the same absence, so the typo silently
-takes the default. The same goes for the values — a relative path, a CIDR `nft` would choke on, an
-`s3://` URL with no bucket, or a proxy port that an app slot is going to want are all refused
-while an operator is still watching rather than on the pass that first needed them.
+Nothing in it has a default. Every key a section has, that section states, and a key left out is
+refused by name — so what a running host does is what the file on that host says, with no second
+copy of the answer compiled in for absence to fall back to. A key this daemon does not have is
+refused by name too, which is the thing an environment could never do: a mistyped variable and one
+nobody set are the same absence. The same goes for the values — a relative path, a CIDR `nft` would
+choke on, an `s3://` URL with no bucket, or a proxy port that an app slot is going to want are all
+refused while an operator is still watching rather than on the pass that first needed them.
 
-`deploy/config.toml` is a copy with every key at its default. What each one is:
+`deploy/config.toml` is the smallest file this daemon accepts. What each key is:
 
-| Key | Default | What it is |
+| Key | What it is |
+| --- | --- |
+| `paths.state_dir` | Where everything this host keeps lives, `state.db` included |
+| `paths.runtime_dir` | Sockets and pidfiles that outlive the daemon |
+| `paths.snapshot_dir` | Where a sleeping app's memory goes |
+| `paths.guest_image_dir` | `vmlinux`, `rootfs.ext4`, `manifest.json` |
+| `paths.desired_state_file` | The document it watches |
+| `paths.api_socket` | Where `nibrunnerctl` reaches it |
+| `paths.versions_file` | What the installer stamped the versions it laid down into |
+| `artifacts.store_url` | A directory, or `s3://bucket/prefix` |
+| `volumes.backend` | `local-file` or `zerofs` |
+| `volumes.storage_prefix` | Prepended to every key this host writes |
+| `exports.store_url` | Where a finished bundle goes |
+| `exports.staging_dir` | Where one is assembled, and removed after |
+| `network.control_plane_cidrs_v4` | Ranges a guest is denied by name |
+| `network.control_plane_cidrs_v6` | The same, where no blanket rule covers them |
+
+Those are every host's. The rest are sections a host either has or does not, and a section that is
+there is filled in whole — which is why there is no half-configured listener to warn about at
+startup:
+
+| Section | Keys | What it is |
 | --- | --- | --- |
-| `paths.state_dir` | `/var/lib/nibrunner` | Where everything this host keeps lives, `state.db` included |
-| `paths.runtime_dir` | `/run/nibrunner` | Sockets and pidfiles that outlive the daemon |
-| `paths.desired_state_file` | `<state>/desired.json` | The document it watches |
-| `paths.guest_image_dir` | `<state>/guest` | `vmlinux`, `rootfs.ext4`, `manifest.json` |
-| `paths.snapshot_dir` | `<state>/snapshots` | Where a sleeping app's memory goes |
-| `artifacts.store_url` | `<state>/artifact-store` | A directory, or `s3://bucket/prefix` |
-| `volumes.backend` | `local-file` | `local-file` or `zerofs` |
-| `volumes.store_url` | none | Where a volume's blocks live, for an object-store backend |
-| `volumes.storage_prefix` | `volumes` | Prepended to every key this host writes |
-| `volumes.zerofs.*` | see below | Only read when the backend is `zerofs` |
-| `proxy.http_port` | none | Serve plain HTTP on this port |
-| `proxy.https_port` | none | With `proxy.tls_certificate` and `proxy.tls_key` |
-| `proxy.tls_client_ca` | none | A PEM trust pool. Naming one makes a caller's own certificate the price of the handshake |
-| `proxy.port_relay_public_ipv4` | none | Where an app's own public port is reached |
-| `metrics.port` | none | Serve Prometheus metrics on this port |
-| `metrics.listen_address` | `127.0.0.1` | Where to bind them, when a port is named |
-| `network.control_plane_cidrs_v4` | `[]` | Ranges a guest is denied by name |
-| `network.control_plane_cidrs_v6` | `[]` | The same, where no blanket rule covers them |
-| `exports.store_url` | `<state>/export-store` | Where a finished bundle goes |
-| `exports.staging_dir` | `<state>/exports` | Where one is assembled, and removed after |
+| `[volumes.zerofs]` | `binary`, `config_file`, `mount_path`, `nbd_socket_path`, `checkpoint_runtime_dir`, `checkpoint_config_file`, `checkpoint_cache_dir` | Required by `volumes.backend = "zerofs"`, and refused under any other |
+| `[proxy.http]` | `port` | Serve plain HTTP on this port |
+| `[proxy.https]` | `port`, `certificate`, `key` | Serve TLS on this port with this material |
+| `[proxy.https.client_ca]` | `certificate` | A PEM trust pool. Naming one makes a caller's own certificate the price of the handshake |
+| `[proxy.port_relay]` | `public_ipv4` | Where an app's own public port is reached |
+| `[metrics]` | `port`, `listen_address` | Serve the Prometheus page here |
 
 ### The loops
 
@@ -347,7 +355,7 @@ is what this proved.
 **What TLS has now done.** On an AX41 serving three tenants, against a self-signed CA: a real
 tenant answered over HTTPS on both HTTP/2 and HTTP/1.1, ALPN negotiated `h2` where it was offered,
 a hostname no app holds got the proxy's own 404, and a connection whose handshake named one app
-while its request named another got a 421. With `proxy.tls_client_ca` set, a caller with no
+while its request named another got a 421. With `[proxy.https.client_ca]` set, a caller with no
 certificate and a caller holding one from a CA the host was never told about were both refused
 during the handshake — `tlsv13 alert certificate required`, before any request was read — and the
 edge's own certificate was served. What that run found is the only thing the unit tests could not:
