@@ -229,13 +229,19 @@ because it is a list of hops and this is one of them. Where nothing fronts the h
 then write its own `X-Forwarded-Proto` and be believed, which is the price of reading the header at
 all and is why the posture is in the config rather than inferred.
 
+**No artifact may claim to be something it is not.** The guest image used to ship with a
+placeholder `/init` and a manifest field, `init_is_stub`, saying so. A flag that marks an artifact
+fake is a flag that permits a fake artifact to ship, and nothing read it. Both are gone: the
+placeholder image is no longer committed, and `verify_guest_image` hashes the kernel and the root
+filesystem against the manifest at startup and refuses to bring the host up when they differ. A
+host that cannot vouch for the image every tenant boots from is not a host, and it says so before
+a tenant exists rather than at the first deploy.
+
 ## Not done, and named as such
 
-- **Exports and the vsock filesystem browse.** The codecs for the filesystem channel are written
-  and tested against the C headers (`crates/guest-contract/src/filesystem.rs`); nothing calls them.
-  Exports are a checkpoint server started per checkpoint, an NBD attach against it and a read of
-  the filesystem it pins — the attach half is written (`NbdDevices::attach_checkpoint`), the
-  server and the reader are not.
+- **Exports and the browse have never run.** Both are written and unit-tested end to end — the
+  freeze, the checkpoint, the NBD attach, the `debugfs` read, the archive, the upload — and the
+  sequence has never once executed against a real guest.
 - **Usage history.** Each reading replaces the last, so the report says what a tenant is holding
   now and nothing about what it held yesterday. The raw CPU counters are kept only long enough to
   turn the next pair into a share. A table would be the place for history, and `state.db` is now
@@ -246,7 +252,6 @@ all and is why the posture is in the config rather than inferred.
 - **Usage reporting.** A non-goal for v1.
 - **ACME.** Phase 5. The proxy serves a certificate and key from disk — checking a caller's own
   certificate against `proxy.tls_client_ca`, or admitting anyone — or plain HTTP, or nothing.
-- **The `guestImage` version in a report** is read from the manifest beside the image. The image in
-  `guest/` is nibrun's own `dist/`, whose manifest says `"init_is_stub": true` — it carries a
-  throwaway `/init`, not the real guest runtime. A host that has to boot a tenant needs a
-  published image rather than this one.
+- **A published guest image.** `guest/` carries the kernel and the pins; the root filesystem is
+  built by `guest/build-image.sh` and is not committed. Nothing publishes the result yet, so a host
+  builds its own. A release asset is where it should come from.

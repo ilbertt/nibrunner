@@ -23,6 +23,7 @@ use guest_contract::instance_env::{render_instance_env, InstanceEnvContent, Publ
 pub const FIRECRACKER_CONFIG_FILENAME: &str = "firecracker.json";
 pub const GUEST_KERNEL_FILENAME: &str = "vmlinux";
 pub const GUEST_ROOTFS_FILENAME: &str = "rootfs.ext4";
+pub const GUEST_MANIFEST_FILENAME: &str = "manifest.json";
 
 const VM_DIR_MODE: u32 = 0o700;
 const FIRST_GUEST_CID: u32 = 3;
@@ -339,19 +340,70 @@ impl Vmm for VmManager {
     }
 }
 
-pub fn read_guest_image_version(guest_image_dir: &Path) -> String {
-    let manifest: Option<serde_json::Value> =
-        crate::json_store::read_json(&guest_image_dir.join("manifest.json"))
-            .ok()
-            .flatten();
-    manifest
-        .and_then(|manifest| {
-            manifest
-                .get("version")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string())
+#[derive(Debug, thiserror::Error)]
+pub enum GuestImageError {
+    #[error("{path} is not there, so this host has no guest image to boot a tenant from")]
+    Missing { path: String },
+    #[error("{name} in {directory} is {actual}, not the {expected} its manifest describes")]
+    Altered {
+        name: String,
+        directory: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("the guest image manifest in {directory} could not be read: {reason}")]
+    Unreadable { directory: String, reason: String },
+}
+
+impl GuestImageError {
+    pub fn message(&self) -> String {
+        self.to_string()
+    }
+}
+
+pub fn verify_guest_image(guest_image_dir: &Path) -> Result<String, GuestImageError> {
+    let unreadable = |reason: &str| GuestImageError::Unreadable {
+        directory: guest_image_dir.display().to_string(),
+        reason: reason.to_string(),
+    };
+    let manifest_path = guest_image_dir.join(GUEST_MANIFEST_FILENAME);
+    let manifest: serde_json::Value = crate::json_store::read_json(&manifest_path)
+        .map_err(|error| unreadable(&error.message()))?
+        .ok_or_else(|| GuestImageError::Missing {
+            path: manifest_path.display().to_string(),
+        })?;
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| unreadable("it names no version"))?
+        .to_string();
+    let described = manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| unreadable("it describes no artifacts"))?;
+
+    for name in [GUEST_KERNEL_FILENAME, GUEST_ROOTFS_FILENAME] {
+        let expected = described
+            .iter()
+            .find(|artifact| artifact.get("name").and_then(serde_json::Value::as_str) == Some(name))
+            .and_then(|artifact| artifact.get("sha256"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| unreadable(&format!("it describes no {name}")))?;
+        let path = guest_image_dir.join(name);
+        let bytes = std::fs::read(&path).map_err(|_| GuestImageError::Missing {
+            path: path.display().to_string(),
+        })?;
+        let actual = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        if actual != expected {
+            return Err(GuestImageError::Altered {
+                name: name.to_string(),
+                directory: guest_image_dir.display().to_string(),
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+    }
+    Ok(version)
 }
 
 pub fn firecracker_version() -> &'static str {
@@ -767,33 +819,87 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_image_manifest_that_names_no_version_is_not_read_as_one() {
-        let directory = tempfile::tempdir().unwrap();
-        for manifest in ["{}", r#"{"version":7}"#, "not json"] {
-            std::fs::write(directory.path().join("manifest.json"), manifest).unwrap();
-            assert_eq!(
-                read_guest_image_version(directory.path()),
-                "unknown",
-                "{manifest}"
-            );
-        }
-    }
-
-    #[test]
     fn this_build_names_the_hypervisor_it_carries() {
         assert_eq!(firecracker_version(), FIRECRACKER_VERSION);
         assert!(!firecracker_version().is_empty());
     }
 
-    #[test]
-    fn the_guest_image_names_its_own_version_and_an_absent_one_is_not_invented() {
-        let directory = tempfile::tempdir().unwrap();
-        assert_eq!(read_guest_image_version(directory.path()), "unknown");
+    fn image(directory: &Path, kernel: &[u8], rootfs: &[u8]) -> String {
+        std::fs::write(directory.join(GUEST_KERNEL_FILENAME), kernel).unwrap();
+        std::fs::write(directory.join(GUEST_ROOTFS_FILENAME), rootfs).unwrap();
+        let digest = |bytes: &[u8]| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes));
+        let manifest = serde_json::json!({
+            "version": "6.1.180-nibrunner-init",
+            "artifacts": [
+                {"name": GUEST_KERNEL_FILENAME, "sha256": digest(kernel)},
+                {"name": GUEST_ROOTFS_FILENAME, "sha256": digest(rootfs)},
+            ],
+        });
         std::fs::write(
-            directory.path().join("manifest.json"),
-            r#"{"version":"6.1.180-98db6df338f0"}"#,
+            directory.join(GUEST_MANIFEST_FILENAME),
+            serde_json::to_string(&manifest).unwrap(),
         )
         .unwrap();
-        assert_eq!(read_guest_image_version(directory.path()), "6.1.180-98db6df338f0");
+        "6.1.180-nibrunner-init".to_string()
+    }
+
+    #[test]
+    fn an_image_that_is_what_its_manifest_describes_names_its_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let version = image(directory.path(), b"a kernel", b"a root filesystem");
+        assert_eq!(verify_guest_image(directory.path()).unwrap(), version);
+    }
+
+    #[test]
+    fn a_host_with_no_guest_image_refuses_rather_than_failing_at_the_first_deploy() {
+        let directory = tempfile::tempdir().unwrap();
+        let Err(error) = verify_guest_image(directory.path()) else {
+            panic!("a host with nothing to boot a tenant from was accepted");
+        };
+        assert!(matches!(error, GuestImageError::Missing { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_kernel_that_is_not_what_the_manifest_describes_is_never_booted() {
+        let directory = tempfile::tempdir().unwrap();
+        image(directory.path(), b"a kernel", b"a root filesystem");
+        std::fs::write(directory.path().join(GUEST_KERNEL_FILENAME), b"something else").unwrap();
+
+        let Err(error) = verify_guest_image(directory.path()) else {
+            panic!("a kernel nothing vouches for was accepted");
+        };
+        assert!(matches!(error, GuestImageError::Altered { .. }), "{error}");
+        assert!(error.message().contains(GUEST_KERNEL_FILENAME), "{error}");
+    }
+
+    #[test]
+    fn a_truncated_root_filesystem_is_caught_before_a_tenant_boots_off_it() {
+        let directory = tempfile::tempdir().unwrap();
+        image(directory.path(), b"a kernel", b"a root filesystem");
+        std::fs::write(directory.path().join(GUEST_ROOTFS_FILENAME), b"a root file").unwrap();
+        assert!(verify_guest_image(directory.path()).is_err());
+    }
+
+    #[test]
+    fn a_root_filesystem_the_manifest_never_mentions_is_refused_rather_than_trusted() {
+        let directory = tempfile::tempdir().unwrap();
+        image(directory.path(), b"a kernel", b"a root filesystem");
+        let manifest = serde_json::json!({"version": "6.1.180", "artifacts": []});
+        std::fs::write(
+            directory.path().join(GUEST_MANIFEST_FILENAME),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(verify_guest_image(directory.path()).is_err());
+    }
+
+    #[test]
+    fn a_manifest_that_names_no_version_is_not_an_image_this_host_can_report() {
+        let directory = tempfile::tempdir().unwrap();
+        image(directory.path(), b"a kernel", b"a root filesystem");
+        for manifest in ["{}", r#"{"version":7}"#, "not json"] {
+            std::fs::write(directory.path().join(GUEST_MANIFEST_FILENAME), manifest).unwrap();
+            assert!(verify_guest_image(directory.path()).is_err(), "{manifest}");
+        }
     }
 }

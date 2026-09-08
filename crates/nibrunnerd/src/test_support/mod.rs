@@ -285,6 +285,7 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
     let (exports, export_spy) = mocks::exports_accepting();
     let host = Arc::new(Host {
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
+        guest_image_version: "6.1.180-test".to_string(),
         state: state.clone(),
         allocator: Arc::new(Mutex::new(SlotAllocator::empty())),
         cache: Mutex::new(DesiredStateCache::new()),

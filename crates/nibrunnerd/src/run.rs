@@ -13,7 +13,7 @@ use crate::adapters::net::firewall::HostFirewall;
 use crate::adapters::net::tap::HostNetwork;
 use crate::adapters::proxy::activator::AppActivator;
 use crate::adapters::proxy::{router, Router};
-use crate::adapters::vm::manager::{read_guest_image_version, VmManager};
+use crate::adapters::vm::manager::{verify_guest_image, VmManager};
 use crate::adapters::vm::process::{extract_firecracker, VmProcesses, FIRECRACKER_VERSION};
 use crate::adapters::volumes::local_file::LocalFileVolumes;
 use crate::adapters::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
@@ -40,6 +40,8 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         })?;
     }
 
+    let guest_image_version = verify_guest_image(&config.guest_image_dir)
+        .map_err(|error| StartupError::Unusable(error.message()))?;
     let firecracker = extract_firecracker(&config.firecracker_dir)
         .map_err(|error| StartupError::Unusable(error.to_string()))?;
     let commands: Arc<dyn crate::ports::CommandRunner> = Arc::new(HostCommands);
@@ -87,7 +89,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         vm_dir: config.vm_dir(),
         snapshot_dir: config.snapshot_dir.clone(),
         guest_image_dir: config.guest_image_dir.clone(),
-        guest_image_version: read_guest_image_version(&config.guest_image_dir),
+        guest_image_version: guest_image_version.clone(),
         firecracker,
         public_ipv4: config.port_relay_public_ipv4.clone(),
         processes: VmProcesses::new(config.runtime_dir.clone()),
@@ -120,6 +122,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
 
     let host = Arc::new(Host {
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
+        guest_image_version,
         state,
         allocator: allocator.clone(),
         repositories,
@@ -172,10 +175,7 @@ fn open_network() -> Result<Arc<dyn HostNetwork>, StartupError> {
 
 pub fn host_versions(host: &Host) -> HostVersions {
     crate::domain::report::versions::read_host_versions(&host.config.versions_file).unwrap_or_else(|_| {
-        crate::domain::report::versions::compiled_versions(
-            FIRECRACKER_VERSION,
-            &read_guest_image_version(&host.config.guest_image_dir),
-        )
+        crate::domain::report::versions::compiled_versions(FIRECRACKER_VERSION, &host.guest_image_version)
     })
 }
 
