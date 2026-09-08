@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
 use protocol::{AppId, DeploymentId, DesiredInstance, ObjectKey, Sha256Digest};
 
 use crate::adapters::vm::VmStatus;
@@ -199,6 +200,18 @@ impl ArtifactError {
     pub fn message(&self) -> String {
         self.to_string()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GuestReading {
+    pub filesystem: Option<MeasuredBytes>,
+    pub compute: Option<MeasuredCompute>,
+}
+
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
+#[async_trait]
+pub trait GuestMeasurements: Send + Sync {
+    async fn measure(&self, app_id: &AppId) -> GuestReading;
 }
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]

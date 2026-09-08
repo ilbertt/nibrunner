@@ -1,19 +1,14 @@
 use std::collections::BTreeMap;
 
-use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
+use guest_contract::filesystem::MeasuredCompute;
 use protocol::{AppId, ComputeUsage, FilesystemUsage, Timestamp};
 
 use crate::domain::report::instance_record::InstanceRecord;
+use crate::ports::GuestReading;
 
 pub const MEASUREMENT_CONCURRENCY: usize = 4;
 
 const FULLY_BUSY: f64 = 1.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct GuestReading {
-    pub filesystem: Option<MeasuredBytes>,
-    pub compute: Option<MeasuredCompute>,
-}
 
 pub fn share_between(before: Option<MeasuredCompute>, after: MeasuredCompute) -> Option<f64> {
     let before = before?;
@@ -100,6 +95,7 @@ pub fn compute_usage_after(
 mod tests {
     use super::*;
     use crate::test_support::*;
+    use guest_contract::filesystem::MeasuredBytes;
     use protocol::InstanceState;
 
     fn compute(total: u64, busy: u64) -> MeasuredCompute {

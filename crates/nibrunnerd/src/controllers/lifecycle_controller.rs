@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use protocol::HostVersions;
 
+use crate::adapters::guest_measurements::VsockMeasurements;
 use crate::controllers::converge_controller::ConvergeController;
 use crate::controllers::measurement_controller::MeasurementController;
 use crate::controllers::status_controller::StatusController;
 use crate::controllers::Controller;
 use crate::host::Host;
-use crate::services::filesystem_service::GuestFilesystems;
 use crate::services::idle_service::HostIdle;
 use crate::services::reconcile_service::HostReconciler;
 use crate::services::report_service::HostReporter;
@@ -37,14 +37,14 @@ impl LifecycleController {
     pub fn controllers(&self) -> Vec<Arc<dyn Controller>> {
         let reconciler = HostReconciler::new(self.host.clone());
         let reports = HostReporter::new(self.host.clone(), self.versions.clone());
-        let filesystems = GuestFilesystems::new(self.host.clone());
+        let measurements = VsockMeasurements::new(self.host.clone());
 
         let held: Vec<Arc<dyn Controller>> = vec![
             ConvergeController::new(self.host.clone(), reconciler.clone()),
             StatusController::new(self.host.clone(), reconciler, reports),
             MeasurementController::new(
                 HostIdle::new(self.host.clone()),
-                HostUsage::new(self.host.clone(), filesystems),
+                HostUsage::new(self.host.clone(), measurements),
             ),
         ];
         held

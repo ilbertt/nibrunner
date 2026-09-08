@@ -201,11 +201,18 @@ exists. What went with it: `ControlPlaneClient`, `SessionHolder`, the poll and f
 and `control_plane.url`. What stayed: `network.control_plane_cidrs_*`, which are firewall rules
 denying a guest those ranges and have nothing to do with polling.
 
-Two things it left behind. `host_identity` is still read by the report builder and now written by
-nothing, so every host reports as `host-local` — the desired document already carries a `host_id`,
-and taking it from there is the obvious repair. And `FilesystemService` lost its controller: the
-browse is implemented and tested end to end, but until something asks for a read, only the usage
-sweep calls it.
+It left `host_identity` behind: still read by the report builder, now written by nothing, so every
+host reports as `host-local`. The desired document already carries a `host_id`, and taking it from
+there is the obvious repair.
+
+**There is no filesystem service.** There was one, and removing the control plane showed what it
+had been all along: four methods, three of which — `served_app_ids`, `list`, `answer` — had no
+caller but the control plane, and one of which took a `FilesystemQuery` straight off that wire.
+What the usage sweep actually needs is one call into a guest, which is an outbound port and not a
+service. `ports::GuestMeasurements` is that call, `adapters::guest_measurements` makes it over
+vsock, and the usage service mocks the port. The browse itself is untouched in
+`domain/filesystem/`: the client speaks every verb the guest does and `list` is tested against it,
+waiting for something to ask.
 
 ## Not done, and named as such
 

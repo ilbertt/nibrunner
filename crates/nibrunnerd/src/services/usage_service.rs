@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use protocol::AppId;
 
-use crate::domain::usage::{compute_usage_after, volume_usage_after, GuestReading, MEASUREMENT_CONCURRENCY};
+use crate::domain::usage::{compute_usage_after, volume_usage_after, MEASUREMENT_CONCURRENCY};
 use crate::host::Host;
-use crate::services::filesystem_service::FilesystemService;
+use crate::ports::{GuestMeasurements, GuestReading};
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
@@ -15,12 +15,12 @@ pub trait UsageService: Send + Sync {
 
 pub struct HostUsage {
     host: Arc<Host>,
-    filesystems: Arc<dyn FilesystemService>,
+    measurements: Arc<dyn GuestMeasurements>,
 }
 
 impl HostUsage {
-    pub fn new(host: Arc<Host>, filesystems: Arc<dyn FilesystemService>) -> Arc<Self> {
-        Arc::new(Self { host, filesystems })
+    pub fn new(host: Arc<Host>, measurements: Arc<dyn GuestMeasurements>) -> Arc<Self> {
+        Arc::new(Self { host, measurements })
     }
 
     async fn take_readings(&self) -> Vec<(AppId, GuestReading)> {
@@ -29,7 +29,7 @@ impl HostUsage {
         for batch in slots.chunks(MEASUREMENT_CONCURRENCY) {
             let asked = batch
                 .iter()
-                .map(|slot| async { (slot.app_id.clone(), self.filesystems.measure(&slot.app_id).await) });
+                .map(|slot| async { (slot.app_id.clone(), self.measurements.measure(&slot.app_id).await) });
             taken.extend(futures::future::join_all(asked).await);
         }
         taken
@@ -64,7 +64,7 @@ impl UsageService for HostUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::filesystem_service::MockFilesystemService;
+    use crate::ports::MockGuestMeasurements;
     use crate::test_support::*;
     use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
     fn compute(total: u64, busy: u64) -> MeasuredCompute {
@@ -75,18 +75,18 @@ mod tests {
             cpu_busy_ticks: busy,
         }
     }
-    fn measuring(reading: GuestReading) -> Arc<MockFilesystemService> {
-        let mut filesystems = MockFilesystemService::new();
-        filesystems.expect_measure().returning(move |_| reading);
-        Arc::new(filesystems)
+    fn measuring(reading: GuestReading) -> Arc<MockGuestMeasurements> {
+        let mut measurements = MockGuestMeasurements::new();
+        measurements.expect_measure().returning(move |_| reading);
+        Arc::new(measurements)
     }
     #[tokio::test]
     async fn a_host_with_no_apps_on_it_asks_no_guest_anything() {
         let host = test_host().await;
-        let mut filesystems = MockFilesystemService::new();
-        filesystems.expect_measure().never();
+        let mut measurements = MockGuestMeasurements::new();
+        measurements.expect_measure().never();
 
-        HostUsage::new(host.arc().clone(), Arc::new(filesystems))
+        HostUsage::new(host.arc().clone(), Arc::new(measurements))
             .measure()
             .await;
         assert!(host.state.snapshot().await.volume_usage.is_empty());
@@ -95,14 +95,14 @@ mod tests {
     async fn every_app_with_a_slot_is_asked_exactly_once_a_sweep() {
         let host = test_host().await;
         host.slot_for(&app_id()).await.unwrap();
-        let mut filesystems = MockFilesystemService::new();
-        filesystems
+        let mut measurements = MockGuestMeasurements::new();
+        measurements
             .expect_measure()
             .times(1)
             .withf(|asked| *asked == app_id())
             .returning(|_| GuestReading::default());
 
-        HostUsage::new(host.arc().clone(), Arc::new(filesystems))
+        HostUsage::new(host.arc().clone(), Arc::new(measurements))
             .measure()
             .await;
     }
