@@ -193,6 +193,20 @@ is activity and deleted-volume rows lagging a crash by one pass, and both are ad
 what anything reads to see status: both are the interface, and moving either behind SQL would mean
 shipping the tool to read it back that this project deliberately does not have.
 
+**The control plane lives outside this daemon.** It polled an endpoint and wrote the document the
+converge loop watches, which meant a session, a token, a host registration and a second loop that
+answered filesystem reads — all of it in a daemon whose contract is one file in and one file out.
+Whatever fetches a document can write that file from outside; the daemon does not need to know it
+exists. What went with it: `ControlPlaneClient`, `SessionHolder`, the poll and filesystem loops,
+and `control_plane.url`. What stayed: `network.control_plane_cidrs_*`, which are firewall rules
+denying a guest those ranges and have nothing to do with polling.
+
+Two things it left behind. `host_identity` is still read by the report builder and now written by
+nothing, so every host reports as `host-local` — the desired document already carries a `host_id`,
+and taking it from there is the obvious repair. And `FilesystemService` lost its controller: the
+browse is implemented and tested end to end, but until something asks for a read, only the usage
+sweep calls it.
+
 ## Not done, and named as such
 
 - **Exports and the vsock filesystem browse.** The codecs for the filesystem channel are written

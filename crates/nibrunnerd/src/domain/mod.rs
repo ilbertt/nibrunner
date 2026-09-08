@@ -1,5 +1,4 @@
 pub mod backoff;
-pub mod control_plane;
 pub mod exports;
 pub mod filesystem;
 pub mod health;

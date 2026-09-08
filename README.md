@@ -20,8 +20,8 @@ plane restart are all non-events: the next read re-reads the truth.
 
 **One file in, one file out.** `desired.json` is watched; `reported.json` is written. Nothing has
 to hold a connection to this daemon to tell it something or to find out what it is doing, and a
-daemon that is not running still leaves the last thing it observed behind. A remote control plane
-is an addon that polls its endpoint and writes the same file.
+daemon that is not running still leaves the last thing it observed behind. Whatever writes
+`desired.json` is not this daemon's concern.
 
 **Nothing this daemon does stops a tenant.** Each microVM runs in a session of its own, adopted
 from a pidfile on the way back up. Restarting the daemon, or killing it, leaves every app serving.
@@ -117,25 +117,21 @@ while an operator is still watching rather than on the pass that first needed th
 | `proxy.port_relay_public_ipv4` | none | Where an app's own public port is reached |
 | `network.control_plane_cidrs_v4` | `[]` | Ranges a guest is denied by name |
 | `network.control_plane_cidrs_v6` | `[]` | The same, where no blanket rule covers them |
-| `control_plane.url` | none | The addon that polls a remote control plane |
 | `exports.store_url` | `<state>/export-store` | Where a finished bundle goes |
 | `exports.staging_dir` | `<state>/exports` | Where one is assembled, and removed after |
 
 ### The loops
 
-Three on every host, and two more where one is given a control plane:
+Three, on every host:
 
 | Loop | What it does |
 | --- | --- |
 | converge | Watches the document and runs a reconcile pass when it moves |
 | status | Probes health, applies the ruleset and the routes, writes `reported.json` |
 | measurement | Records activity, lets quiet apps sleep, then measures every guest |
-| control plane | Polls for a document and writes it into the file the converge loop watches |
-| filesystem | Collects one read of a tenant's files at a time and answers it |
 
-The last two start only when `control_plane.url` is set. A host without one runs on the file
-alone, and the reconciler has exactly one source either way — because what the control-plane loop
-writes *is* that file.
+There is one input and it is the file. Nothing polls anything, and nothing may tell this daemon
+what to do except by writing that document.
 
 `NIBRUNNER_LOG` is still an environment variable, and the only one besides `NIBRUNNER_CONFIG`: it
 is a `tracing` filter an operator changes to debug one restart, not a property of the host.

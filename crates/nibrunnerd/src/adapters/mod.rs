@@ -1,5 +1,4 @@
 pub mod artifact_store;
-pub mod control_plane;
 pub mod exec;
 pub mod logs;
 pub mod net;

@@ -1,4 +1,3 @@
-pub mod control_plane_service;
 pub mod filesystem_service;
 pub mod idle_service;
 pub mod reconcile_service;

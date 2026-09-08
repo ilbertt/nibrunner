@@ -247,25 +247,6 @@ pub trait LogSink: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DesiredStateOrigin {
-    File,
-    Socket,
-    ControlPlane,
-    Cache,
-}
-
-impl DesiredStateOrigin {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DesiredStateOrigin::File => "file",
-            DesiredStateOrigin::Socket => "socket",
-            DesiredStateOrigin::ControlPlane => "control-plane",
-            DesiredStateOrigin::Cache => "cache",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmCall {
     Boot,
     Sleep,
@@ -348,13 +329,5 @@ mod tests {
         assert_eq!(WakeOutcome::Restored.as_str(), "restored");
         assert_eq!(WakeOutcome::AlreadyRunning.as_str(), "already-running");
         assert_eq!(WakeOutcome::ColdBoot.as_str(), "cold-boot");
-    }
-
-    #[test]
-    fn every_source_a_document_can_arrive_from_has_a_name() {
-        assert_eq!(DesiredStateOrigin::File.as_str(), "file");
-        assert_eq!(DesiredStateOrigin::Socket.as_str(), "socket");
-        assert_eq!(DesiredStateOrigin::ControlPlane.as_str(), "control-plane");
-        assert_eq!(DesiredStateOrigin::Cache.as_str(), "cache");
     }
 }

@@ -92,7 +92,6 @@ pub struct HostConfig {
     pub proxy_http_port: Option<u16>,
     pub proxy_tls_certificate: Option<PathBuf>,
     pub proxy_tls_key: Option<PathBuf>,
-    pub control_plane_url: Option<String>,
     pub versions_file: PathBuf,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
@@ -176,8 +175,6 @@ mod file {
         #[serde(default)]
         pub(super) network: Network,
         #[serde(default)]
-        pub(super) control_plane: ControlPlane,
-        #[serde(default)]
         pub(super) exports: Exports,
     }
 
@@ -244,12 +241,6 @@ mod file {
         pub(super) control_plane_cidrs_v4: Vec<String>,
         #[serde(default)]
         pub(super) control_plane_cidrs_v6: Vec<String>,
-    }
-
-    #[derive(Debug, Default, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub(super) struct ControlPlane {
-        pub(super) url: Option<String>,
     }
 }
 
@@ -463,12 +454,6 @@ impl HostConfig {
                 .as_deref()
                 .map(|path| absolute("proxy.tls_key", path))
                 .transpose()?,
-            control_plane_url: document
-                .control_plane
-                .url
-                .as_deref()
-                .map(|url| control_plane_url("control_plane.url", url))
-                .transpose()?,
             export_store_url: match document.exports.store_url.as_deref() {
                 Some(url) => object_store_url("exports.store_url", url)?,
                 None => state_dir.join("export-store").display().to_string(),
@@ -505,7 +490,6 @@ impl HostConfig {
             proxy_http_port: None,
             proxy_tls_certificate: None,
             proxy_tls_key: None,
-            control_plane_url: None,
             versions_file: root.join("state/versions.json"),
             export_store_url: root.join("state/export-store").display().to_string(),
             export_staging_dir: root.join("state/exports"),
@@ -665,18 +649,6 @@ fn storage_prefix(field: &str, value: &str) -> Result<String, ConfigError> {
             field,
             "a prefix whose every segment names something",
         ));
-    }
-    Ok(value.to_string())
-}
-
-fn control_plane_url(field: &str, value: &str) -> Result<String, ConfigError> {
-    let value = value.trim().trim_end_matches('/');
-    let rest = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))
-        .ok_or_else(|| ConfigError::invalid(field, "an http:// or https:// URL"))?;
-    if rest.is_empty() {
-        return Err(ConfigError::invalid(field, "a URL with a host in it"));
     }
     Ok(value.to_string())
 }
@@ -867,15 +839,6 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
     }
 
     #[test]
-    fn a_control_plane_that_is_not_reachable_over_http_is_refused() {
-        assert!(refused("[control_plane]\nurl = \"nibrun.example.com\"\n").contains("http"));
-        assert_eq!(
-            parsed("[control_plane]\nurl = \"https://nibrun.example.com/\"\n").control_plane_url,
-            Some("https://nibrun.example.com".to_string())
-        );
-    }
-
-    #[test]
     fn a_certificate_without_its_key_is_not_tls_material() {
         let config = parsed("[proxy]\ntls_certificate = \"/tls/origin.crt\"\n");
         assert_eq!(config.tls_material(), None);
@@ -921,17 +884,6 @@ checkpoint_runtime_dir = "/run/zerofs-checkpoints"
         assert_eq!(
             parsed("[proxy]\ntls_key = \"  /tls/origin.key  \"\n").proxy_tls_key,
             Some(PathBuf::from("/tls/origin.key"))
-        );
-    }
-
-    #[test]
-    fn a_url_with_a_scheme_and_no_host_reaches_no_control_plane() {
-        let message = refused("[control_plane]\nurl = \"https://\"\n");
-        assert!(message.contains("control_plane.url"), "{message}");
-        assert!(refused("[control_plane]\nurl = \"ftp://nibrun.example.com\"\n").contains("http"));
-        assert_eq!(
-            parsed("[control_plane]\nurl = \"http://127.0.0.1:8080//\"\n").control_plane_url,
-            Some("http://127.0.0.1:8080".to_string())
         );
     }
 
@@ -1086,9 +1038,6 @@ port_relay_public_ipv4 = "203.0.113.10"
 
 [network]
 control_plane_cidrs_v4 = ["172.31.0.0/16"]
-
-[control_plane]
-url = "https://nibrun.example.com"
 "#,
         );
         assert_eq!(config.snapshot_dir, PathBuf::from("/mnt/cache/snapshots"));
