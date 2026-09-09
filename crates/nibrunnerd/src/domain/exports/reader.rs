@@ -12,6 +12,11 @@ const NBD_SOCKET_FILENAME: &str = "nbd.sock";
 const CHECKPOINT_VARIABLE: &str = "NIBRUN_CHECKPOINT";
 
 pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+// Opening a checkpoint reads it out of the object store, so how long a server takes to answer is
+// a property of the store rather than of this host.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
+const ATTACH_POLL: Duration = Duration::from_millis(500);
 const READY_POLL: Duration = Duration::from_millis(100);
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -153,13 +158,23 @@ impl<'a> ReaderDevice<'a> {
     ) -> Result<ReaderDevice<'a>, VolumeError> {
         let device_path = nft_render::export_reader_device_path();
         let _ = devices.detach(&device_path).await;
-        devices
-            .attach_checkpoint(&NbdTarget {
-                socket_path: &socket_path.display().to_string(),
-                device_path: &device_path,
-                volume_id,
-            })
-            .await?;
+        let target = NbdTarget {
+            socket_path: &socket_path.display().to_string(),
+            device_path: &device_path,
+            volume_id,
+        };
+        // The server binds its socket before it has opened the checkpoint, so a socket that is
+        // there is not a server that will answer, and the only honest test of readiness is the
+        // thing being waited for. It refuses in milliseconds while it is still opening, so this
+        // asks again rather than deciding on the first answer.
+        let deadline = tokio::time::Instant::now() + ATTACH_TIMEOUT;
+        let mut refusal = devices.attach_checkpoint(&target).await;
+        while refusal.is_err() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(ATTACH_POLL).await;
+            let _ = devices.detach(&device_path).await;
+            refusal = devices.attach_checkpoint(&target).await;
+        }
+        refusal?;
         Ok(ReaderDevice { devices, device_path })
     }
 
@@ -257,6 +272,47 @@ mod tests {
             panic!("the last run's socket was taken for this run's server");
         };
         assert!(error.message().contains("did not answer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_attach_the_server_is_not_ready_for_yet_is_asked_again() {
+        let sysfs = tempfile::tempdir().unwrap();
+        // Refuses the first attach the way a server still opening its checkpoint does, then takes
+        // it. Anything that gave up on the first answer would never reach the second.
+        let refused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let once = refused.clone();
+        let (commands, log) = mocks::commands_answering(move |request| {
+            let attaching =
+                request.executable() == "nbd-client" && request.command.iter().any(|word| word == "-N");
+            if attaching && !once.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return Err(crate::ports::CommandError::Failed {
+                    executable: "nbd-client".to_string(),
+                    code: 1,
+                    reason: ": Exiting.".to_string(),
+                });
+            }
+            Ok(crate::ports::CommandResult::succeeded())
+        });
+        let devices = NbdDevices::with_sysfs(sysfs.path().to_path_buf(), commands);
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+
+        let reader = ReaderDevice::attach(
+            &devices,
+            Path::new("/run/zerofs-checkpoint/one/nbd.sock"),
+            &volume_id,
+        )
+        .await
+        .expect("the second attach is taken");
+        assert_eq!(reader.path(), "/dev/nbd63");
+        assert!(
+            log.commands()
+                .iter()
+                .filter(|call| call[0] == "nbd-client")
+                .count()
+                >= 3,
+            "the attach was not asked again: {:?}",
+            log.commands()
+        );
     }
 
     #[tokio::test]
