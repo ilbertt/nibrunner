@@ -47,8 +47,8 @@ tmp-version:
     # pre-release tag below the same version without one. The highest cut today rather than how
     # many were, because counting the survivors of a day that lost its first release hands back a
     # number the second one is still holding.
-    last="$(git tag --list "tmp-v$today-*" | sed "s/^tmp-v$today-//" | sort -n | tail -1)"
-    echo "tmp-v$today-$(( ${last:-0} + 1 ))"
+    last="$(git tag --list "v$today-*" | sed "s/^v$today-//" | sort -n | tail -1)"
+    echo "v$today-$(( ${last:-0} + 1 ))"
 
 # Everything that needs no kernel: the planner, the codecs, the ruleset, the reconcile.
 test:
