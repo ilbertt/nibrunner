@@ -5,6 +5,12 @@ pub const DEFAULT_CONFIG_FILE: &str = "/etc/nibrunner/config.toml";
 pub const CONFIG_FILE_VARIABLE: &str = "NIBRUNNER_CONFIG";
 
 const MAX_STORAGE_PREFIX_BYTES: usize = 512;
+const MEBIBYTES_PER_GIBIBYTE: u64 = 1024;
+
+/// Where ZeroFS serves its own scrape page, on loopback. It is a constant rather than a key
+/// because it is nibrun's, and `nibrunnerd install` renders it into ZeroFS's config — but a host
+/// that also serves `[metrics]` has to be kept off it, which is why this is here and not there.
+pub const ZEROFS_PROMETHEUS_PORT: u16 = 9091;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -34,7 +40,7 @@ impl ConfigError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VolumeBackend {
     LocalFile,
-    Zerofs(ZerofsSettings),
+    Zerofs(Box<ZerofsSettings>),
 }
 
 impl VolumeBackend {
@@ -48,17 +54,31 @@ impl VolumeBackend {
     pub fn zerofs(&self) -> Option<&ZerofsSettings> {
         match self {
             Self::LocalFile => None,
-            Self::Zerofs(settings) => Some(settings),
+            Self::Zerofs(settings) => Some(settings.as_ref()),
         }
     }
 }
 
+/// Everything `nibrunnerd install` needs to lay ZeroFS down, and everything the daemon needs to
+/// talk to it once systemd has it running. The two config files this describes are rendered from
+/// here rather than written beside here, so the cache size the daemon reserves against and the
+/// cache size ZeroFS takes are one answer instead of two that drift.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZerofsSettings {
     pub binary: PathBuf,
     pub config_file: PathBuf,
     pub mount_path: PathBuf,
     pub nbd_socket_path: PathBuf,
+    pub ninep_socket_path: PathBuf,
+    pub rpc_socket_path: PathBuf,
+    pub storage_url: String,
+    pub cache_dir: PathBuf,
+    /// Held as mebibytes because that is what the rest of this daemon reserves and reports in,
+    /// but stated in the file as whole gibibytes — which is all `cache_gigabytes` can read back
+    /// out of the rendered config, so a fraction here would reserve against a number ZeroFS is
+    /// not taking.
+    pub cache_disk_mib: u64,
+    pub cache_memory_mib: u64,
     pub checkpoint_runtime_dir: PathBuf,
     pub checkpoint_config_file: PathBuf,
     pub checkpoint_cache_dir: PathBuf,
@@ -222,6 +242,12 @@ mod file {
         pub(super) config_file: Option<String>,
         pub(super) mount_path: Option<String>,
         pub(super) nbd_socket_path: Option<String>,
+        pub(super) ninep_socket_path: Option<String>,
+        pub(super) rpc_socket_path: Option<String>,
+        pub(super) storage_url: Option<String>,
+        pub(super) cache_dir: Option<String>,
+        pub(super) cache_disk_gib: Option<u64>,
+        pub(super) cache_memory_gib: Option<u64>,
         pub(super) checkpoint_runtime_dir: Option<String>,
         pub(super) checkpoint_config_file: Option<String>,
         pub(super) checkpoint_cache_dir: Option<String>,
@@ -272,12 +298,16 @@ mod file {
 
 impl HostConfig {
     pub fn load() -> Result<Self, ConfigError> {
-        let named = std::env::var(CONFIG_FILE_VARIABLE)
+        Self::from_file(&Self::configured_file())
+    }
+
+    /// The file `load` reads. Named separately because what `install` writes has to point back at
+    /// the file the values came from, and pointing at the wrong one is worse than pointing at none.
+    pub fn configured_file() -> PathBuf {
+        std::env::var(CONFIG_FILE_VARIABLE)
             .ok()
-            .filter(|named| !named.is_empty());
-        Self::from_file(std::path::Path::new(
-            named.as_deref().unwrap_or(DEFAULT_CONFIG_FILE),
-        ))
+            .filter(|named| !named.trim().is_empty())
+            .map_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE), PathBuf::from)
     }
 
     pub fn from_file(path: &std::path::Path) -> Result<Self, ConfigError> {
@@ -326,11 +356,29 @@ impl HostConfig {
             }
             "zerofs" => {
                 let zerofs = required("volumes.zerofs", volumes.zerofs.as_ref())?;
-                VolumeBackend::Zerofs(ZerofsSettings {
+                VolumeBackend::Zerofs(Box::new(ZerofsSettings {
                     binary: path_key("volumes.zerofs.binary", &zerofs.binary)?,
                     config_file: path_key("volumes.zerofs.config_file", &zerofs.config_file)?,
                     mount_path: path_key("volumes.zerofs.mount_path", &zerofs.mount_path)?,
                     nbd_socket_path: path_key("volumes.zerofs.nbd_socket_path", &zerofs.nbd_socket_path)?,
+                    ninep_socket_path: path_key(
+                        "volumes.zerofs.ninep_socket_path",
+                        &zerofs.ninep_socket_path,
+                    )?,
+                    rpc_socket_path: path_key("volumes.zerofs.rpc_socket_path", &zerofs.rpc_socket_path)?,
+                    storage_url: object_store_url(
+                        "volumes.zerofs.storage_url",
+                        required_str("volumes.zerofs.storage_url", &zerofs.storage_url)?,
+                    )?,
+                    cache_dir: path_key("volumes.zerofs.cache_dir", &zerofs.cache_dir)?,
+                    cache_disk_mib: mebibytes(
+                        "volumes.zerofs.cache_disk_gib",
+                        required("volumes.zerofs.cache_disk_gib", zerofs.cache_disk_gib)?,
+                    )?,
+                    cache_memory_mib: mebibytes(
+                        "volumes.zerofs.cache_memory_gib",
+                        required("volumes.zerofs.cache_memory_gib", zerofs.cache_memory_gib)?,
+                    )?,
                     checkpoint_runtime_dir: path_key(
                         "volumes.zerofs.checkpoint_runtime_dir",
                         &zerofs.checkpoint_runtime_dir,
@@ -343,7 +391,7 @@ impl HostConfig {
                         "volumes.zerofs.checkpoint_cache_dir",
                         &zerofs.checkpoint_cache_dir,
                     )?,
-                })
+                }))
             }
             named => {
                 return Err(ConfigError::invalid(
@@ -358,7 +406,7 @@ impl HostConfig {
         let artifacts = required("artifacts", document.artifacts.as_ref())?;
 
         let proxy = proxy(document.proxy.as_ref())?;
-        let metrics = metrics(document.metrics.as_ref(), &proxy)?;
+        let metrics = metrics(document.metrics.as_ref(), &proxy, &backend)?;
 
         Ok(Self {
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
@@ -473,6 +521,7 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
 fn metrics(
     document: Option<&file::Metrics>,
     proxy: &ProxyConfig,
+    volumes: &VolumeBackend,
 ) -> Result<Option<MetricsConfig>, ConfigError> {
     let Some(document) = document else {
         return Ok(None);
@@ -481,6 +530,12 @@ fn metrics(
     for (named, field) in [
         (proxy.http.as_ref().map(|http| http.port), "proxy.http.port"),
         (proxy.https.as_ref().map(|https| https.port), "proxy.https.port"),
+        // Rendered into ZeroFS's own config by `nibrunnerd install`, so this host does hold it
+        // even though no key here names it, and a second binding is a startup failure over there.
+        (
+            volumes.zerofs().map(|_| ZEROFS_PROMETHEUS_PORT),
+            "the port ZeroFS scrapes on",
+        ),
     ] {
         if named == Some(port) {
             return Err(ConfigError::invalid(
@@ -525,6 +580,17 @@ fn absolute(field: &str, value: &str) -> Result<PathBuf, ConfigError> {
         ));
     }
     Ok(path)
+}
+
+/// A cache of no size is a cache ZeroFS will not start on, and it is refused here rather than
+/// there — the operator is watching this file, not that one.
+fn mebibytes(field: &str, gibibytes: u64) -> Result<u64, ConfigError> {
+    if gibibytes == 0 {
+        return Err(ConfigError::invalid(field, "more than nothing"));
+    }
+    gibibytes
+        .checked_mul(MEBIBYTES_PER_GIBIBYTE)
+        .ok_or_else(|| ConfigError::invalid(field, "a size this machine could hold"))
 }
 
 fn listener(field: &str, port: u16) -> Result<u16, ConfigError> {
@@ -1044,6 +1110,12 @@ binary = "/usr/local/bin/zerofs"
 config_file = "/etc/zerofs/one.toml"
 mount_path = "/srv/zerofs"
 nbd_socket_path = "/run/zerofs/one.sock"
+ninep_socket_path = "/run/zerofs/9p.sock"
+rpc_socket_path = "/run/zerofs/rpc.sock"
+storage_url = "s3://filesystems-one/host-1"
+cache_dir = "/data/zerofs"
+cache_disk_gib = 70
+cache_memory_gib = 2
 checkpoint_runtime_dir = "/run/zerofs-checkpoints"
 checkpoint_config_file = "/etc/zerofs/checkpoint.toml"
 checkpoint_cache_dir = "/data/zerofs-checkpoint"
@@ -1069,6 +1141,42 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
             "[volumes.zerofs]\nbinary = \"/usr/local/bin/zerofs\"\n"
         ))
         .contains("volumes.zerofs.config_file"));
+    }
+
+    // The cache this host reserves against is read back out of the file `install` renders, and
+    // `cache_gigabytes` truncates to whole gibibytes — so a fraction here would hold back a number
+    // ZeroFS is not taking. Stating it in gibibytes is what makes that unspellable.
+    #[test]
+    fn a_cache_is_stated_in_the_unit_it_can_be_read_back_in() {
+        let config = parsed(&document(&[("volumes.backend", "\"zerofs\"")], ZEROFS));
+        let zerofs = config.volumes.zerofs().unwrap();
+        assert_eq!(zerofs.cache_disk_mib, 70 * 1024);
+        assert_eq!(zerofs.cache_memory_mib, 2 * 1024);
+
+        for empty in ["cache_disk_gib", "cache_memory_gib"] {
+            let zeroed = ZEROFS
+                .replace(&format!("{empty} = 70"), &format!("{empty} = 0"))
+                .replace(&format!("{empty} = 2"), &format!("{empty} = 0"));
+            let message = refused(&document(&[("volumes.backend", "\"zerofs\"")], &zeroed));
+            assert!(message.contains(empty), "{message}");
+        }
+    }
+
+    // ZeroFS binds this itself, and a second binding is a startup failure over there rather than
+    // a refusal here — so a host that serves both is stopped while an operator is still watching.
+    #[test]
+    fn a_metrics_port_zerofs_already_holds_is_refused() {
+        let clash =
+            format!("{ZEROFS}\n[metrics]\nport = {ZEROFS_PROMETHEUS_PORT}\nlisten_address = \"127.0.0.1\"\n");
+        let message = refused(&document(&[("volumes.backend", "\"zerofs\"")], &clash));
+        assert!(message.contains("metrics.port"), "{message}");
+
+        let local = format!("[metrics]\nport = {ZEROFS_PROMETHEUS_PORT}\nlisten_address = \"127.0.0.1\"\n");
+        assert_eq!(
+            parsed(&document(&[], &local)).metrics.unwrap().port,
+            ZEROFS_PROMETHEUS_PORT,
+            "a local-file host runs no zerofs, so nothing holds that port"
+        );
     }
 
     #[test]

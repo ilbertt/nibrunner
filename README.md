@@ -34,13 +34,15 @@ sudo modprobe nf_conntrack && echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
 curl -fsSL -o nibrunnerd <your build of target/x86_64-unknown-linux-musl/release/nibrunnerd>
 sudo install -m 0755 nibrunnerd /usr/local/bin/nibrunnerd
 sudo mkdir -p /var/lib/nibrunner/guest && sudo cp vmlinux rootfs.ext4 manifest.json /var/lib/nibrunner/guest/
+sudo install -m 0644 deploy/config.toml /etc/nibrunner/config.toml
 sudo install -m 0644 deploy/nibrunnerd.service /etc/systemd/system/
-sudo systemctl enable --now nibrunnerd
+sudo nibrunnerd install                                # lays the rest of the host out
+sudo systemctl daemon-reload && sudo systemctl enable --now nibrunnerd
 sudo cp my-server /var/lib/nibrunner/artifact-store/   # the binary, named by its sha256
 sudo tee /var/lib/nibrunner/desired.json < desired.json # the document below
 ```
 
-Ten commands, and the tenth is the deploy. Everything after it is the daemon converging.
+Eleven commands, and the eleventh is the deploy. Everything after it is the daemon converging.
 
 ### The document
 
@@ -121,11 +123,47 @@ startup:
 
 | Section | Keys | What it is |
 | --- | --- | --- |
-| `[volumes.zerofs]` | `binary`, `config_file`, `mount_path`, `nbd_socket_path`, `checkpoint_runtime_dir`, `checkpoint_config_file`, `checkpoint_cache_dir` | Required by `volumes.backend = "zerofs"`, and refused under any other |
+| `[volumes.zerofs]` | `binary`, `config_file`, `mount_path`, `nbd_socket_path`, `ninep_socket_path`, `rpc_socket_path`, `storage_url`, `cache_dir`, `cache_disk_gib`, `cache_memory_gib`, `checkpoint_runtime_dir`, `checkpoint_config_file`, `checkpoint_cache_dir` | Required by `volumes.backend = "zerofs"`, and refused under any other. `deploy/config.zerofs.toml` is one filled in |
 | `[proxy.http]` | `port` | Serve plain HTTP on this port |
 | `[proxy.https]` | `port`, `certificate`, `key` | Serve TLS on this port with this material |
 | `[proxy.https.client_ca]` | `certificate` | A PEM trust pool. Naming one makes a caller's own certificate the price of the handshake |
 | `[metrics]` | `port`, `listen_address` | Serve the Prometheus page here |
+
+### Laying a host out
+
+`nibrunnerd install` is the only subcommand this binary has. It reads the same `config.toml` the
+daemon does and turns it into everything a host needs beyond the packages: the directories, ZeroFS
+fetched at the version this release pins, ZeroFS's two config files, the two units that supervise
+it, a drop-in giving the daemon its environment file, and `versions.json` — which is what
+`paths.versions_file` was always for.
+
+```
+nibrunnerd install         lay this host out, then exit
+nibrunnerd install --force replace files `install` did not write
+```
+
+It refuses before it writes anything. A host missing three things is told all three at once, each
+with the command that fixes it, and nothing is laid down until none are missing — because a
+half-installed host is harder to read than an uninstalled one.
+
+Re-running it is how a host moves to a new release: a file it wrote is one it writes again, a file
+whose contents already match is left alone and said to be unchanged, and a file *somebody else*
+wrote is refused by name rather than replaced. `--force` is how that decision gets made, and it is
+made by a person rather than by a re-run.
+
+**What it never does is start ZeroFS.** There is exactly one read-write `zerofs run` per storage
+prefix, fleet-wide, and a second writer is fenced by SlateDB's epoch only after a window of
+acknowledging writes it then discards — it loses a tenant's data rather than failing to start. The
+thing that holds that lock is a single-instance unit, so this writes the unit and never becomes
+it. There is a test asserting nothing here ever runs one.
+
+**Nor does it hold a secret.** The AWS credentials and the ZeroFS encryption password go in a
+`host.env` beside the configuration, which `install` creates empty, with the names of what belongs
+in it, and never writes into again. ZeroFS's rendered config references them rather than carrying
+them, so `config.toml` stays a file that can be read over someone's shoulder.
+
+**Nor does it install packages.** `apt` is one distribution's answer, and the useful half of that
+check is the refusal that names what is absent.
 
 ### The loops
 
