@@ -41,6 +41,10 @@ impl CheckpointServers {
             .map_err(|error| VolumeError::Unusable(error.to_string()))?;
         crate::json_store::make_directory(&self.runtime_dir.join(checkpoint_id.as_str()), 0o750)
             .map_err(|error| VolumeError::Unusable(error.to_string()))?;
+        // A server that died leaves its socket behind, and readiness here is the socket appearing.
+        // Left in place, the wait below is answered by the last run's socket before this one is
+        // listening, and the attach that follows is refused by a server that is not there yet.
+        let _ = std::fs::remove_file(self.socket_path_for(checkpoint_id));
 
         let child = tokio::process::Command::new(&self.binary)
             .arg("run")
@@ -175,6 +179,23 @@ mod tests {
             .await
         else {
             panic!("a server whose socket never appeared was treated as ready");
+        };
+        assert!(error.message().contains("did not answer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_socket_the_last_server_left_behind_is_not_mistaken_for_this_one_answering() {
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint_id = CheckpointId::parse("export-one").unwrap();
+        let servers = servers_waiting(root.path(), Duration::from_millis(200));
+
+        // What a server that died leaves: its directory and its socket, with nothing listening.
+        let socket = servers.socket_path_for(&checkpoint_id);
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        std::fs::write(&socket, b"").unwrap();
+
+        let Err(error) = servers.start(&checkpoint_id).await else {
+            panic!("the last run's socket was taken for this run's server");
         };
         assert!(error.message().contains("did not answer"), "{error}");
     }
