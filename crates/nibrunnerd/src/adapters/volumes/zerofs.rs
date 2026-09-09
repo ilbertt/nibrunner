@@ -305,6 +305,13 @@ impl VolumeBackend for ZerofsVolumes {
     }
 
     async fn create_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+        // A checkpoint is named after the export that owns it, so one already under this name is
+        // the last attempt at this same export and is what a retry is retrying. Creating over it
+        // is refused rather than ignored, which would make the second attempt fail where the
+        // first merely did not finish.
+        if self.observe_checkpoints().await.contains(checkpoint_id) {
+            self.delete_checkpoint(checkpoint_id).await?;
+        }
         self.admin(&["checkpoint", "create", checkpoint_id.as_str()])
             .await
             .map(|_| ())
@@ -763,9 +770,13 @@ mod tests {
         assert_eq!(listed, vec![crate::test_support::checkpoint_id()]);
 
         let asked = log.commands();
-        assert_eq!(asked[0][1..4], ["checkpoint", "create", "chk-1"]);
+        // Creating looks first, and this store already holds the name, so the last attempt at it
+        // goes before the new one is cut.
+        assert_eq!(asked[0][1..3], ["checkpoint", "list"]);
         assert_eq!(asked[1][1..4], ["checkpoint", "delete", "chk-1"]);
-        assert_eq!(asked[2][1..3], ["checkpoint", "list"]);
+        assert_eq!(asked[2][1..4], ["checkpoint", "create", "chk-1"]);
+        assert_eq!(asked[3][1..4], ["checkpoint", "delete", "chk-1"]);
+        assert_eq!(asked[4][1..3], ["checkpoint", "list"]);
         for call in asked {
             assert_eq!(call[0], "/opt/nibrun/bin/zerofs/zerofs");
             assert_eq!(call[call.len() - 2], "-c");
