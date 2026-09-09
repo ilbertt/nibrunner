@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Write a desired.json holding the named presets, each in the state it was named with.
 
-    gen-presets.py pocketbase=running gitea=on-request boop=absent
+    gen-presets.py pocketbase=running gitea=on-request boop=absent --export pocketbase
 
 A slug left out is absent from the document entirely, which is how a host is emptied. `absent`
 keeps the volume entry and marks it for deletion, which is how one app is removed while the
 rest carry on. Secrets a preset names without a value are generated once and kept, so moving
 one app between states never rewrites another app's environment.
+
+`--export SLUG[:ID]` asks for a bundle of that app's volume. Naming the same id twice is how a
+host is told the export is still wanted; a run left out is a run withdrawn.
 """
 import argparse, hashlib, json, pathlib, secrets, sys
 
@@ -23,6 +26,7 @@ parser.add_argument("--memory-mib", type=int, default=512)
 parser.add_argument("--volume-gib", type=int, default=2)
 parser.add_argument("--idle-timeout-ms", type=int, default=120000)
 parser.add_argument("--grace-period-ms", type=int, default=120000)
+parser.add_argument("--export", action="append", default=[], metavar="SLUG[:ID]")
 parser.add_argument("--out", default="/var/lib/nibrunner/desired.json")
 args = parser.parse_args()
 
@@ -101,15 +105,33 @@ secrets_path.parent.mkdir(parents=True, exist_ok=True)
 secrets_path.write_text(json.dumps(kept, indent=2) + "\n")
 secrets_path.chmod(0o600)
 
+exports = []
+for pair in args.export:
+    slug, _, export_id = pair.partition(":")
+    if wanted.get(slug, "absent") == "absent":
+        sys.exit(f"cannot export {slug!r}: this document has no volume of its to read")
+    exports.append({
+        "exportId": export_id or f"exp-{slug}",
+        "appId": slug,
+        "volumeId": f"vol-{slug}",
+        "objectKey": f"exports/{slug}/{export_id or f'exp-{slug}'}.tar.gz",
+        # The bundle carries the binary beside the data, so an export names the same artifact the
+        # instance runs rather than a build of its own.
+        "artifact": {k: manifest[slug][k] for k in ("digest", "sizeBytes", "objectKey", "filename")},
+        "environment": next(i["config"]["environment"] for i in instances if i["appId"] == slug),
+        "desiredState": "present",
+    })
+
 document = {
     "hostId": args.host_id,
     "volumes": volumes,
     "instances": instances,
     "checkpoints": [],
-    "exports": [],
+    "exports": exports,
 }
 out = pathlib.Path(args.out)
 out.write_text(json.dumps(document, indent=2) + "\n")
 
 summary = ", ".join(f"{slug}={state}" for slug, state in wanted.items()) or "nothing"
-print(f"{out}: {len(instances)} instances, {len(volumes)} volumes — {summary}", file=sys.stderr)
+asked = f", {len(exports)} exports" if exports else ""
+print(f"{out}: {len(instances)} instances, {len(volumes)} volumes{asked} — {summary}", file=sys.stderr)
