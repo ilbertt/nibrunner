@@ -12,26 +12,42 @@ release:
     cargo zigbuild -p nibrunnerd --target x86_64-unknown-linux-musl --release
     @ls -la target/x86_64-unknown-linux-musl/release/nibrunnerd
 
-# The image the daemon boots: `crates/init` as PID 1 in a rootfs built from the pins in
-# guest/manifest.json, which the script rewrites to describe what came out — the committed one
-# names no rootfs at all, so the daemon rejects it. Linux, root, docker and e2fsprogs; from a Mac
-# this is what CI is for. `vmlinux` is not built here, it is copied from nibrun.
+# Builds guest/rootfs.ext4 and rewrites the manifest to describe it. Linux, root, docker, e2fsprogs.
 guest-image:
     cargo build -p nibrunner-init --target x86_64-unknown-linux-musl --release
     sudo guest/build-image.sh
 
-# The version the next temporary prerelease carries, as CalVer `YYYY.M.D-N` with no leading zeros.
-# Dates rather than semver because what reaches this daemon reaches it as a side effect of work
-# aimed elsewhere. The `-N` is on every release, the day's first included: semver ranks a version
-# carrying a pre-release tag below the same version without one, so a bare `2026.9.9` would sort
-# above every re-cut that day. Read off the tags you have, so fetch them first.
+# Checks the guest image the way the daemon checks it before booting anything.
+verify-guest-image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sums=$(mktemp)
+    trap 'rm -f "$sums"' EXIT
+    jq -r '.artifacts[] | select(.name == "vmlinux" or .name == "rootfs.ext4") | "\(.sha256)  \(.name)"' \
+        guest/manifest.json > "$sums"
+    # Two, because the manifest as committed describes no rootfs and would otherwise pass on none.
+    test "$(wc -l < "$sums")" -eq 2
+    cd guest && sha256sum -c "$sums"
+
+# Everything a host installs, in one directory, next to the sums it should hash to.
+stage-release dist:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{dist}}"
+    install -m 0755 target/x86_64-unknown-linux-musl/release/nibrunnerd "{{dist}}/nibrunnerd-linux-x64"
+    install -m 0644 guest/vmlinux guest/rootfs.ext4 guest/manifest.json "{{dist}}"
+    # Written from inside the directory, so it names what `sha256sum -c` will be run next to.
+    cd "{{dist}}" && sha256sum nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json > checksums.txt
+
+# The version the next temporary prerelease carries, as CalVer `YYYY.M.D-N`, read off the tags.
 tmp-version:
     #!/usr/bin/env bash
     set -euo pipefail
     today="$(date -u +%Y.%-m.%-d)"
-    # The highest cut today rather than how many were, because these are meant to be deleted once
-    # they have served their purpose, and counting the survivors of a day that lost its first
-    # release hands back a number the second one is still holding.
+    # `-N` is on every release, the day's first included: semver ranks a version carrying a
+    # pre-release tag below the same version without one. The highest cut today rather than how
+    # many were, because counting the survivors of a day that lost its first release hands back a
+    # number the second one is still holding.
     last="$(git tag --list "tmp-v$today-*" | sed "s/^tmp-v$today-//" | sort -n | tail -1)"
     echo "tmp-v$today-$(( ${last:-0} + 1 ))"
 

@@ -33,8 +33,6 @@ runs:
             ;;
         esac
 
-    # `musl-tools` links the static target, `e2fsprogs` writes the guest rootfs. Neither is
-    # needed to lint or to test, which build for the host and boot nothing.
     - name: Install the host tools
       if: inputs.prepare_for_build == 'enabled'
       shell: bash

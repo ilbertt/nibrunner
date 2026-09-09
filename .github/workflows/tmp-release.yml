@@ -3,10 +3,8 @@ name: tmp-release
 on: workflow_dispatch
 
 permissions:
-  contents: write # cut the tag and the prerelease
+  contents: write
 
-# The version is a same-day counter read off the tags, so two runs at once would both read the
-# same list and compute the same number.
 concurrency:
   group: tmp-release
   cancel-in-progress: false
@@ -18,8 +16,6 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The counter is computed from the tags already cut, which a tagless clone would compute
-          # from nothing. No history is read, so the clone itself stays shallow.
           fetch-tags: true
 
       - uses: ./.github/actions/prepare
@@ -27,53 +23,33 @@ jobs:
           cache: enabled
           prepare_for_build: enabled
 
-      # Not in the runner image, and the version the release carries is computed by a recipe.
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
       - name: Build
         run: cargo build -p nibrunnerd --release --target x86_64-unknown-linux-musl
 
-      # Built here rather than taken from the checkout because `rootfs.ext4` is in neither git nor
-      # nibrun: the script produces it, and rewrites the manifest to describe it.
       - name: Build the guest image
         run: just guest-image
 
-      # What the daemon does on the host, done while someone is still watching. The manifest as
-      # committed describes no rootfs at all, so a bundle assembled wrong fails here rather than on
-      # a tenant's first boot.
       - name: Verify the guest image
-        run: |
-          jq -r '.artifacts[] | select(.name == "vmlinux" or .name == "rootfs.ext4") | "\(.sha256)  \(.name)"' \
-            guest/manifest.json > "$RUNNER_TEMP/guest.sha256"
-          test "$(wc -l < "$RUNNER_TEMP/guest.sha256")" -eq 2
-          cd guest && sha256sum -c "$RUNNER_TEMP/guest.sha256"
+        run: just verify-guest-image
 
       - name: Name the release
         id: version
         run: echo "tag=$(just tmp-version)" >> "$GITHUB_OUTPUT"
 
       - name: Stage the assets
-        env:
-          DIST: ${{ runner.temp }}/dist
-        run: |
-          mkdir -p "$DIST"
-          install -m 0755 target/x86_64-unknown-linux-musl/release/nibrunnerd "$DIST/nibrunnerd-linux-x64"
-          install -m 0644 guest/vmlinux guest/rootfs.ext4 guest/manifest.json "$DIST"
-          # From inside the directory, so the file names what `sha256sum -c` will be run next to.
-          cd "$DIST" && sha256sum nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json > checksums.txt
+        run: just stage-release "$RUNNER_TEMP/dist"
 
       - name: Create the prerelease
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-          DIST: ${{ runner.temp }}/dist
         run: |
-          # The tag is cut here rather than pushed by hand, so it can only ever name a commit this
-          # binary was built from.
           gh release create "$TAG" \
             --title "$TAG" \
             --notes "" \
             --prerelease \
             --target "$GITHUB_SHA" \
-            "$DIST"/*
+            "$RUNNER_TEMP/dist"/*
