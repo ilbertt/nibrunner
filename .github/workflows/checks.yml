@@ -13,7 +13,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # `cargo fmt` compiles nothing, so a cargo cache here would only cost quota and time.
       - uses: ./.github/actions/prepare
+        with:
+          cache: "false"
 
       - name: Check Rust Codestyle
         run: cargo fmt --all --check
