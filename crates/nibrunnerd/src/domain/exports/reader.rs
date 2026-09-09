@@ -12,6 +12,11 @@ const NBD_SOCKET_FILENAME: &str = "nbd.sock";
 const CHECKPOINT_VARIABLE: &str = "NIBRUN_CHECKPOINT";
 
 pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+// Opening a checkpoint reads it out of the object store, so how long a server takes to answer is
+// a property of the store rather than of this host.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
+const ATTACH_POLL: Duration = Duration::from_millis(500);
 const READY_POLL: Duration = Duration::from_millis(100);
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -55,23 +60,54 @@ impl CheckpointServers {
             .env(CHECKPOINT_VARIABLE, checkpoint_id.as_str())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // Kept rather than discarded: this process is the only one that knows why a
+            // checkpoint would not open, and a server that never answers is otherwise a timeout
+            // with no reason attached to it.
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| {
                 VolumeError::Unusable(format!("no checkpoint server could be started: {error}"))
             })?;
 
-        let server = CheckpointServer {
+        let mut child = child;
+        let said = child.stderr.take();
+        let mut server = CheckpointServer {
             checkpoint_id: checkpoint_id.clone(),
             socket_path: self.socket_path_for(checkpoint_id),
             cache_dir: cache,
             child,
             ready_timeout: self.ready_timeout,
         };
-        server.wait_until_answering().await?;
+        if let Err(error) = server.wait_until_answering().await {
+            let _ = server.child.kill().await;
+            return Err(match complained(said).await {
+                Some(reason) => VolumeError::Unusable(format!("{}: {reason}", error.message())),
+                None => error,
+            });
+        }
         Ok(server)
     }
+}
+
+// What the server managed to say before it was given up on. It is killed first so the read ends,
+// and a server that said nothing leaves the timeout to speak for itself.
+async fn complained(said: Option<tokio::process::ChildStderr>) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+    let mut said = said?;
+    let mut text = String::new();
+    // Only ever on the way to an error, so it can afford to wait out a loaded machine rather
+    // than lose the one sentence that explains the failure.
+    tokio::time::timeout(Duration::from_secs(5), said.read_to_string(&mut text))
+        .await
+        .ok()?
+        .ok()?;
+    let last = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back()?;
+    Some(last.chars().take(300).collect())
 }
 
 pub struct CheckpointServer {
@@ -122,13 +158,23 @@ impl<'a> ReaderDevice<'a> {
     ) -> Result<ReaderDevice<'a>, VolumeError> {
         let device_path = nft_render::export_reader_device_path();
         let _ = devices.detach(&device_path).await;
-        devices
-            .attach_checkpoint(&NbdTarget {
-                socket_path: &socket_path.display().to_string(),
-                device_path: &device_path,
-                volume_id,
-            })
-            .await?;
+        let target = NbdTarget {
+            socket_path: &socket_path.display().to_string(),
+            device_path: &device_path,
+            volume_id,
+        };
+        // The server binds its socket before it has opened the checkpoint, so a socket that is
+        // there is not a server that will answer, and the only honest test of readiness is the
+        // thing being waited for. It refuses in milliseconds while it is still opening, so this
+        // asks again rather than deciding on the first answer.
+        let deadline = tokio::time::Instant::now() + ATTACH_TIMEOUT;
+        let mut refusal = devices.attach_checkpoint(&target).await;
+        while refusal.is_err() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(ATTACH_POLL).await;
+            let _ = devices.detach(&device_path).await;
+            refusal = devices.attach_checkpoint(&target).await;
+        }
+        refusal?;
         Ok(ReaderDevice { devices, device_path })
     }
 
@@ -184,6 +230,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_server_that_gave_up_hands_on_what_it_said_rather_than_only_that_it_was_late() {
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint_id = CheckpointId::parse("export-one").unwrap();
+        // Long enough that the server is certainly killed after it has spoken rather than before:
+        // one killed first says nothing, which is a real outcome but not the one under test.
+        let mut servers = servers_waiting(root.path(), Duration::from_secs(2));
+        // A binary that refuses out loud and never opens a socket, which is a checkpoint that is
+        // not there as far as this end can tell.
+        let refuses = root.path().join("refuses");
+        std::fs::write(
+            &refuses,
+            "#!/bin/sh\necho \"Error: Checkpoint not found\" >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&refuses, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        servers.binary = refuses;
+
+        let Err(error) = servers.start(&checkpoint_id).await else {
+            panic!("a server that refused was treated as ready");
+        };
+        assert!(error.message().contains("did not answer"), "{error}");
+        assert!(
+            error.message().contains("Checkpoint not found"),
+            "the reason the server gave is missing: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_socket_the_last_server_left_behind_is_not_mistaken_for_this_one_answering() {
         let root = tempfile::tempdir().unwrap();
         let checkpoint_id = CheckpointId::parse("export-one").unwrap();
@@ -198,6 +272,47 @@ mod tests {
             panic!("the last run's socket was taken for this run's server");
         };
         assert!(error.message().contains("did not answer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_attach_the_server_is_not_ready_for_yet_is_asked_again() {
+        let sysfs = tempfile::tempdir().unwrap();
+        // Refuses the first attach the way a server still opening its checkpoint does, then takes
+        // it. Anything that gave up on the first answer would never reach the second.
+        let refused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let once = refused.clone();
+        let (commands, log) = mocks::commands_answering(move |request| {
+            let attaching =
+                request.executable() == "nbd-client" && request.command.iter().any(|word| word == "-N");
+            if attaching && !once.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return Err(crate::ports::CommandError::Failed {
+                    executable: "nbd-client".to_string(),
+                    code: 1,
+                    reason: ": Exiting.".to_string(),
+                });
+            }
+            Ok(crate::ports::CommandResult::succeeded())
+        });
+        let devices = NbdDevices::with_sysfs(sysfs.path().to_path_buf(), commands);
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+
+        let reader = ReaderDevice::attach(
+            &devices,
+            Path::new("/run/zerofs-checkpoint/one/nbd.sock"),
+            &volume_id,
+        )
+        .await
+        .expect("the second attach is taken");
+        assert_eq!(reader.path(), "/dev/nbd63");
+        assert!(
+            log.commands()
+                .iter()
+                .filter(|call| call[0] == "nbd-client")
+                .count()
+                >= 3,
+            "the attach was not asked again: {:?}",
+            log.commands()
+        );
     }
 
     #[tokio::test]

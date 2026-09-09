@@ -32,6 +32,18 @@ no caller outside its own tests**. The only thing reaching into a guest is `meas
 So the browse half of the contract cannot be exercised from a running host at all. That is a
 sharper statement than "untried": there is nothing to try it with until something drives it.
 
+**Since driven, without putting a service back.** `every_browse_verb_answers_from_a_running_guest`
+in the integration lane dials a live guest's control socket directly and speaks the whole
+contract. Against a running pocketbase: `list`, `stat`, `read`, `write`, `mkdir`, `move`,
+`remove`, `usage` and `compute` all answer, what was written came back byte for byte, and the
+refusals answer too — a directory that still holds something is refused in a sentence, and a name
+that has been moved away from stops answering.
+
+It also settles what the root of that API is. Every path is resolved inside the volume the app
+owns, so `/` is the tenant's data directory: asking for `/app/data` asks for `/app/data/app/data`
+and is correctly told there is nothing there. The containment is the feature, and this is the
+first time anything outside a unit test has leaned on it.
+
 ## A local-file host refuses both, in a sentence
 
 Asked for a checkpoint and an export on `volumes.backend = "local-file"`:
