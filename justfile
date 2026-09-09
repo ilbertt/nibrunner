@@ -12,6 +12,21 @@ release:
     cargo zigbuild -p nibrunnerd --target x86_64-unknown-linux-musl --release
     @ls -la target/x86_64-unknown-linux-musl/release/nibrunnerd
 
+# The version the next temporary prerelease carries, as CalVer `YYYY.M.D-N` with no leading zeros.
+# Dates rather than semver because what reaches this daemon reaches it as a side effect of work
+# aimed elsewhere. The `-N` is on every release, the day's first included: semver ranks a version
+# carrying a pre-release tag below the same version without one, so a bare `2026.9.9` would sort
+# above every re-cut that day. Read off the tags you have, so fetch them first.
+tmp-version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    today="$(date -u +%Y.%-m.%-d)"
+    # The highest cut today rather than how many were, because these are meant to be deleted once
+    # they have served their purpose, and counting the survivors of a day that lost its first
+    # release hands back a number the second one is still holding.
+    last="$(git tag --list "tmp-v$today-*" | sed "s/^tmp-v$today-//" | sort -n | tail -1)"
+    echo "tmp-v$today-$(( ${last:-0} + 1 ))"
+
 # Everything that needs no kernel: the planner, the codecs, the ruleset, the reconcile.
 test:
     cargo test --workspace
