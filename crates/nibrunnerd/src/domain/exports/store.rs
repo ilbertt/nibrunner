@@ -67,6 +67,22 @@ impl ObjectExportStore {
     }
 }
 
+// A read returns what is to hand, not what was asked for, and every part of a multipart upload
+// but the last has a minimum size the store enforces. One short read is therefore a refused
+// upload rather than a slow one: S3 answered EntityTooSmall for a 2 MiB part against its 5 MiB
+// floor, which is what a single read of an 8 MiB buffer off a warm page cache returned.
+async fn fill(reader: &mut (impl AsyncReadExt + Unpin), part: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < part.len() {
+        let read = reader.read(&mut part[filled..]).await?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    Ok(filled)
+}
+
 #[async_trait]
 impl ExportStore for ObjectExportStore {
     async fn upload(&self, bundle_path: &Path, object_key: &ObjectKey) -> Result<(), ExportStoreError> {
@@ -82,14 +98,19 @@ impl ExportStore for ObjectExportStore {
 
         let mut part = vec![0u8; UPLOAD_PART_SIZE_BYTES];
         loop {
-            let read = file.read(&mut part).await.map_err(|error| transfer(&error))?;
-            if read == 0 {
+            let filled = fill(&mut file, &mut part)
+                .await
+                .map_err(|error| transfer(&error))?;
+            if filled == 0 {
                 break;
             }
             upload
-                .put_part(PutPayload::from(part[..read].to_vec()))
+                .put_part(PutPayload::from(part[..filled].to_vec()))
                 .await
                 .map_err(|error| transfer(&error))?;
+            if filled < part.len() {
+                break;
+            }
         }
         upload.complete().await.map_err(|error| transfer(&error))?;
         Ok(())
@@ -99,6 +120,45 @@ impl ExportStore for ObjectExportStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A file read off a page cache hands back what it has, so the reader here gives up a page at a
+    // time — which is what the store saw when it refused a 2 MiB part against its 5 MiB floor.
+    struct APageAtATime<'a> {
+        rest: &'a [u8],
+    }
+
+    impl tokio::io::AsyncRead for APageAtATime<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let take = self.rest.len().min(buffer.remaining()).min(4096);
+            let (head, tail) = self.rest.split_at(take);
+            buffer.put_slice(head);
+            self.rest = tail;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_part_is_filled_before_it_is_sent_however_little_a_read_hands_back() {
+        let whole = vec![7u8; UPLOAD_PART_SIZE_BYTES + 4096];
+        let mut reader = APageAtATime { rest: &whole };
+        let mut part = vec![0u8; UPLOAD_PART_SIZE_BYTES];
+
+        assert_eq!(
+            fill(&mut reader, &mut part).await.unwrap(),
+            UPLOAD_PART_SIZE_BYTES,
+            "a part the store would refuse was sent instead of a full one"
+        );
+        assert_eq!(
+            fill(&mut reader, &mut part).await.unwrap(),
+            4096,
+            "the last part is what is left"
+        );
+        assert_eq!(fill(&mut reader, &mut part).await.unwrap(), 0, "and then nothing");
+    }
 
     #[tokio::test]
     async fn a_bundle_reaches_the_store_under_the_key_the_document_named() {
