@@ -2,19 +2,18 @@ name: check-pr-title
 
 on:
   pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
 
 jobs:
   check-pr-title:
     name: check-pr-title:required
     runs-on: ubuntu-latest
     steps:
-      - name: Check PR Title
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          if ! printf '%s' "$PR_TITLE" |
-            grep -Eq '^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+'; then
-            echo "Not a conventional commit subject: $PR_TITLE"
-            exit 1
-          fi
-          echo "PR title is a conventional commit subject"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          validateSingleCommit: "true"
