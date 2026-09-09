@@ -169,8 +169,14 @@ async fn read_into_staging(
     let reader = match ReaderDevice::attach(&host.nbd, server.socket_path(), &desired.volume_id).await {
         Ok(reader) => reader,
         Err(error) => {
+            // A server that died after it began listening leaves a socket that refuses, so the
+            // refusal on this end says nothing and the reason is only ever on that one.
+            let refused = match server.complained() {
+                Some(said) => format!("{}: the checkpoint server last said: {said}", error.message()),
+                None => error.message(),
+            };
             server.stop().await;
-            return Err(error.message());
+            return Err(refused);
         }
     };
     let dumped = dump_volume(&host.commands, reader.path(), staging_dir).await;
