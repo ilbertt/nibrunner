@@ -3,24 +3,37 @@ description: Prepare the environment for the workflow
 
 inputs:
   cache:
-    description: Restore and save the cargo and firecracker caches. Off for a job that compiles nothing.
-    default: "true"
+    description: Whether to restore and save the cargo and firecracker caches. `enabled` or `disabled`.
+    required: true
 
 runs:
   using: composite
   steps:
+    - name: Check inputs
+      shell: bash
+      env:
+        CACHE: ${{ inputs.cache }}
+      run: |
+        case "$CACHE" in
+          enabled | disabled) ;;
+          *)
+            echo "prepare: cache must be 'enabled' or 'disabled', got '$CACHE'"
+            exit 1
+            ;;
+        esac
+
     - name: Install Rust toolchain
       shell: bash
       run: rustup show
 
     - name: Cargo Cache
-      if: inputs.cache == 'true'
+      if: inputs.cache == 'enabled'
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         cache-on-failure: "true"
 
     - name: Firecracker Cache
-      if: inputs.cache == 'true'
+      if: inputs.cache == 'enabled'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/nibrunner
