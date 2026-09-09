@@ -359,6 +359,7 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
         }),
     };
     let state = HostState::shared();
+    let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let (commands, command_log) = mocks::commands_succeeding();
     let (vms, vm_spy) = mocks::vmm();
     let (exports, export_spy) = mocks::exports_accepting();
@@ -383,8 +384,8 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
         nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),
         commands: commands.clone(),
         firewall: Arc::new(HostFirewall::new(commands.clone())),
-        router: Router::new(),
-        activator: AppActivator::new(state.clone(), Arc::new(NeverWoken)),
+        router: Router::new(metrics.clone()),
+        activator: AppActivator::new(state.clone(), Arc::new(NeverWoken), metrics),
         stream_activator: Some(crate::adapters::proxy::StreamActivator::new(
             state.clone(),
             Arc::new(NeverWoken),

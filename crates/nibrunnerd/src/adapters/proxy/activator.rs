@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use crate::adapters::proxy::forward::{forward, say, ProxyBody};
+use crate::domain::metrics::HostMetrics;
 use crate::ports::{WakeRefusal, Waker};
 use crate::state::SharedState;
 
@@ -58,15 +59,17 @@ pub struct AppActivator {
     waker: Arc<dyn Waker>,
     client: Client<HttpConnector, Incoming>,
     listeners: Mutex<BTreeMap<AppId, Listener>>,
+    metrics: Arc<HostMetrics>,
 }
 
 impl AppActivator {
-    pub fn new(state: SharedState, waker: Arc<dyn Waker>) -> Arc<Self> {
+    pub fn new(state: SharedState, waker: Arc<dyn Waker>, metrics: Arc<HostMetrics>) -> Arc<Self> {
         Arc::new(Self {
             state,
             waker,
             client: crate::adapters::proxy::forward::upstream_client(),
             listeners: Mutex::new(BTreeMap::new()),
+            metrics,
         })
     }
 
@@ -124,7 +127,9 @@ impl AppActivator {
                 }
             };
         }
-        let woke_ms = started.elapsed().as_millis();
+        let woke = started.elapsed();
+        self.metrics.woke(woke);
+        let woke_ms = woke.as_millis();
 
         let Some(woken) = self.state.record(&app_id).await else {
             return app_would_not_start();
@@ -280,7 +285,7 @@ mod tests {
         state
             .put_record(instance_record(|record| record.on_request = false))
             .await;
-        let activator = AppActivator::new(state, CountingWaker::allowing());
+        let activator = AppActivator::new(state, CountingWaker::allowing(), Arc::new(HostMetrics::new()));
         let host_port = serving(&activator, &app_id()).await;
         let response = get(host_port).await;
         assert_eq!(response.status(), 503);
@@ -292,7 +297,7 @@ mod tests {
         let state = HostState::shared();
         guest(&state, "served by the tenant\n").await;
         let waker = CountingWaker::allowing();
-        let activator = AppActivator::new(state, waker.clone());
+        let activator = AppActivator::new(state, waker.clone(), Arc::new(HostMetrics::new()));
         let host_port = serving(&activator, &app_id()).await;
 
         let response = get(host_port).await;
@@ -320,6 +325,7 @@ mod tests {
         let activator = AppActivator::new(
             state,
             CountingWaker::refusing(WakeRefusal::NoRoom { shortfall_mib: 256 }),
+            Arc::new(HostMetrics::new()),
         );
         let host_port = serving(&activator, &app_id()).await;
         assert!(get(host_port)
@@ -344,6 +350,7 @@ mod tests {
             CountingWaker::refusing(WakeRefusal::Failed {
                 reason: "no slots left".into(),
             }),
+            Arc::new(HostMetrics::new()),
         );
         let host_port = serving(&activator, &app_id()).await;
         assert!(get(host_port)
@@ -365,7 +372,7 @@ mod tests {
             }))
             .await;
         let waker = CountingWaker::allowing();
-        let activator = AppActivator::new(state, waker.clone());
+        let activator = AppActivator::new(state, waker.clone(), Arc::new(HostMetrics::new()));
         let host_port = serving(&activator, &app_id()).await;
         assert_eq!(get(host_port).await.status(), 503);
         assert_eq!(waker.count(), 0);
@@ -375,7 +382,7 @@ mod tests {
     async fn a_slot_the_host_no_longer_holds_stops_being_answered_for() {
         let state = HostState::shared();
         state.put_record(instance_record(|_| {})).await;
-        let activator = AppActivator::new(state, CountingWaker::allowing());
+        let activator = AppActivator::new(state, CountingWaker::allowing(), Arc::new(HostMetrics::new()));
         let host_port = serving(&activator, &app_id()).await;
         activator.serve(&[(app_id(), host_port)]).await;
         assert_eq!(activator.listening_for().await, vec![app_id()]);
@@ -411,7 +418,7 @@ mod tests {
         let state = HostState::shared();
         guest(&state, "served by the tenant\n").await;
         let waker = CountingWaker::allowing();
-        let activator = AppActivator::new(state, waker.clone());
+        let activator = AppActivator::new(state, waker.clone(), Arc::new(HostMetrics::new()));
         let host_port = serving(&activator, &app_id()).await;
 
         let answered = raw(
@@ -433,7 +440,11 @@ mod tests {
         let state = HostState::shared();
         guest(&state, "served by the tenant\n").await;
         let before = crate::clock::now_ms();
-        let activator = AppActivator::new(state.clone(), CountingWaker::allowing());
+        let activator = AppActivator::new(
+            state.clone(),
+            CountingWaker::allowing(),
+            Arc::new(HostMetrics::new()),
+        );
         let host_port = serving(&activator, &app_id()).await;
         assert_eq!(get(host_port).await.status(), 200);
         let stamped = state.snapshot().await.last_active_at_ms.get(&app_id()).copied();
@@ -446,7 +457,11 @@ mod tests {
         state
             .put_record(instance_record(|record| record.on_request = false))
             .await;
-        let activator = AppActivator::new(state.clone(), CountingWaker::allowing());
+        let activator = AppActivator::new(
+            state.clone(),
+            CountingWaker::allowing(),
+            Arc::new(HostMetrics::new()),
+        );
         let host_port = serving(&activator, &app_id()).await;
         assert_eq!(get(host_port).await.status(), 503);
         assert!(state.snapshot().await.last_active_at_ms.is_empty());
@@ -456,7 +471,7 @@ mod tests {
     async fn a_slot_that_moved_to_another_port_stops_being_answered_for_on_the_old_one() {
         let state = HostState::shared();
         state.put_record(instance_record(|_| {})).await;
-        let activator = AppActivator::new(state, CountingWaker::allowing());
+        let activator = AppActivator::new(state, CountingWaker::allowing(), Arc::new(HostMetrics::new()));
         let first = serving(&activator, &app_id()).await;
         let second = serving(&activator, &app_id()).await;
         assert_ne!(first, second);
@@ -473,7 +488,11 @@ mod tests {
             .await
             .unwrap();
         let taken = HostPort::new(held.local_addr().unwrap().port()).unwrap();
-        let activator = AppActivator::new(HostState::shared(), CountingWaker::allowing());
+        let activator = AppActivator::new(
+            HostState::shared(),
+            CountingWaker::allowing(),
+            Arc::new(HostMetrics::new()),
+        );
         activator.serve(&[(app_id(), taken)]).await;
         assert!(activator.listening_for().await.is_empty());
     }
