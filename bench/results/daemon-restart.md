@@ -64,3 +64,16 @@ the report does not say so.** The instance reads `state: failed`, `restartCount:
 `lastExitCode: -1`, and a `message` left over from its last successful boot — "starting the
 tenant as uid 65534 with data at /app/data". Nothing there tells an operator the instance is
 terminally out of restarts, and `restartCount` is not the counter the decision is made on.
+
+**Since fixed.** A refused start now carries which of the two things refused it. One waiting out
+its backoff is left alone as before; one that will not start again says so, with both numbers the
+decision was actually made on:
+
+```
+out of restarts: 6 starts attempted against a budget of 5, and this instance will not be
+started again until it is deployed afresh
+```
+
+`restartCount` still counts the starts that worked, because that is the field's meaning on the
+wire. The attempts go in the sentence instead, which is the number the startability check was
+reading all along.
