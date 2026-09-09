@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use protocol::{CheckpointId, VolumeId};
@@ -71,17 +72,18 @@ impl CheckpointServers {
             })?;
 
         let mut child = child;
-        let said = child.stderr.take();
+        let complaint = Complaint::draining(child.stderr.take());
         let mut server = CheckpointServer {
             checkpoint_id: checkpoint_id.clone(),
             socket_path: self.socket_path_for(checkpoint_id),
             cache_dir: cache,
             child,
             ready_timeout: self.ready_timeout,
+            complaint,
         };
         if let Err(error) = server.wait_until_answering().await {
             let _ = server.child.kill().await;
-            return Err(match complained(said).await {
+            return Err(match server.complained() {
                 Some(reason) => VolumeError::Unusable(format!("{}: {reason}", error.message())),
                 None => error,
             });
@@ -90,24 +92,55 @@ impl CheckpointServers {
     }
 }
 
-// What the server managed to say before it was given up on. It is killed first so the read ends,
-// and a server that said nothing leaves the timeout to speak for itself.
-async fn complained(said: Option<tokio::process::ChildStderr>) -> Option<String> {
-    use tokio::io::AsyncReadExt;
-    let mut said = said?;
-    let mut text = String::new();
-    // Only ever on the way to an error, so it can afford to wait out a loaded machine rather
-    // than lose the one sentence that explains the failure.
-    tokio::time::timeout(Duration::from_secs(5), said.read_to_string(&mut text))
-        .await
-        .ok()?
-        .ok()?;
-    let last = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back()?;
-    Some(last.chars().take(300).collect())
+// The last thing the server said, kept for as long as it runs.
+//
+// Reading only on the way to an error is what a pipe cannot survive: the read end closes as soon
+// as the reader is dropped, and this server logs on a timer, so the next line it writes ends it —
+// seconds after it began listening, leaving a bound socket with nothing behind it and a reader
+// that is refused for reasons no message explains. Draining it for the server's whole life keeps
+// that end open, keeps the pipe from filling, and still keeps the one sentence worth reporting.
+struct Complaint {
+    last: Arc<Mutex<Option<String>>>,
+    draining: Option<tokio::task::JoinHandle<()>>,
+}
+
+const COMPLAINT_LIMIT: usize = 300;
+
+impl Complaint {
+    fn draining(said: Option<tokio::process::ChildStderr>) -> Self {
+        let last = Arc::new(Mutex::new(None));
+        let Some(said) = said else {
+            return Self { last, draining: None };
+        };
+        let into = last.clone();
+        let draining = tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(said).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line = line.trim();
+                if !line.is_empty() {
+                    *into.lock().expect("no panic holds this lock") =
+                        Some(line.chars().take(COMPLAINT_LIMIT).collect());
+                }
+            }
+        });
+        Self {
+            last,
+            draining: Some(draining),
+        }
+    }
+
+    fn last(&self) -> Option<String> {
+        self.last.lock().expect("no panic holds this lock").clone()
+    }
+}
+
+impl Drop for Complaint {
+    fn drop(&mut self) {
+        if let Some(draining) = self.draining.take() {
+            draining.abort();
+        }
+    }
 }
 
 pub struct CheckpointServer {
@@ -116,6 +149,7 @@ pub struct CheckpointServer {
     cache_dir: PathBuf,
     child: tokio::process::Child,
     ready_timeout: Duration,
+    complaint: Complaint,
 }
 
 impl CheckpointServer {
@@ -136,6 +170,10 @@ impl CheckpointServer {
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    pub fn complained(&self) -> Option<String> {
+        self.complaint.last()
     }
 
     pub async fn stop(mut self) {
@@ -227,6 +265,45 @@ mod tests {
             panic!("a server whose socket never appeared was treated as ready");
         };
         assert!(error.message().contains("did not answer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_keeps_talking_after_it_is_ready_is_not_killed_by_being_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint_id = CheckpointId::parse("export-one").unwrap();
+        let mut servers = servers(root.path());
+        let socket = servers.socket_path_for(&checkpoint_id);
+        // A server in the shape of the real one: it opens, then logs on a timer for as long as it
+        // runs. More than a pipe holds, so an end that is closed or never drained stops it here.
+        let talks = root.path().join("talks");
+        std::fs::write(
+            &talks,
+            format!(
+                "#!/bin/sh\ntouch {socket}\ni=0\nwhile [ $i -lt 4000 ]; do\n  echo \"stats line $i padded out to make this worth more than one pipeful of bytes\" >&2\n  i=$((i+1))\ndone\necho 'the last thing it said' >&2\nsleep 30\n",
+                socket = socket.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&talks, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        servers.binary = talks;
+
+        let server = servers
+            .start(&checkpoint_id)
+            .await
+            .expect("a server that opened its socket was not treated as ready");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while server.complained().as_deref() != Some("the last thing it said")
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            server.complained().as_deref(),
+            Some("the last thing it said"),
+            "the server was cut off partway through talking, which is what killed it in the field"
+        );
+        server.stop().await;
     }
 
     #[tokio::test]
