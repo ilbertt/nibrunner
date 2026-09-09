@@ -1,0 +1,87 @@
+name: tmp-release
+
+on: workflow_dispatch
+
+permissions:
+  contents: write # cut the tag and the prerelease
+
+# The version is a same-day counter read off the tags, so two runs at once would both read the
+# same list and compute the same number.
+concurrency:
+  group: tmp-release
+  cancel-in-progress: false
+
+jobs:
+  tmp-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The counter is computed from the tags already cut, which a tagless clone would compute
+          # from nothing. No history is read, so the clone itself stays shallow.
+          fetch-tags: true
+
+      - uses: ./.github/actions/prepare
+        with:
+          cache: enabled
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build -p nibrunnerd --release --target x86_64-unknown-linux-musl
+
+      # CalVer `YYYY.M.D-N` with no leading zeros, as the nibrun CLI carries: what reaches this
+      # daemon reaches it as a side effect of work aimed elsewhere, and asking whether that was a
+      # feature or a fix has no answer worth the argument. The `-N` is on every release, the day's
+      # first included, because semver ranks a version carrying a pre-release tag below the same
+      # version without one — a bare `2026.9.9` would sort above every re-cut that day.
+      - name: Name the release
+        id: version
+        run: |
+          today="$(date -u +%Y.%-m.%-d)"
+          # The highest cut today rather than how many were, because these are meant to be deleted
+          # once they have served their purpose, and counting the survivors of a day that lost its
+          # first release hands back a number the second one is still holding.
+          last="$(git tag --list "tmp-v$today-*" | sed "s/^tmp-v$today-//" | sort -n | tail -1)"
+          echo "tag=tmp-v$today-$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the asset
+        env:
+          DIST: ${{ runner.temp }}/dist
+        run: |
+          mkdir -p "$DIST"
+          install -m 0755 target/x86_64-unknown-linux-musl/release/nibrunnerd "$DIST/nibrunnerd-linux-x64"
+          # From inside the directory, so the file names what `sha256sum -c` will be run next to.
+          cd "$DIST" && sha256sum nibrunnerd-linux-x64 > checksums.txt
+
+      - name: Create the prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DIST: ${{ runner.temp }}/dist
+          NOTES: ${{ runner.temp }}/notes.md
+        run: |
+          cat > "$NOTES" <<EOF
+          Built from \`$GITHUB_SHA\` on \`$GITHUB_REF_NAME\`.
+
+          Temporary. Cut by hand to put a daemon on a host, and deleted once it has done that —
+          nothing should depend on this tag still being here.
+
+          \`\`\`sh
+          curl -fsSL -o nibrunnerd https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/nibrunnerd-linux-x64
+          sudo install -m 0755 nibrunnerd /usr/local/bin/nibrunnerd
+          \`\`\`
+          EOF
+          # The tag is cut here rather than pushed by hand, so it can only ever name a commit this
+          # binary was built from.
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "$NOTES" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            "$DIST/nibrunnerd-linux-x64" \
+            "$DIST/checksums.txt"
