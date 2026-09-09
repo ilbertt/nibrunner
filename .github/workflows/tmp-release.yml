@@ -26,10 +26,10 @@ jobs:
         with:
           cache: enabled
 
-      - name: Install musl toolchain
+      - name: Install the host tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools e2fsprogs
 
       # Not in the runner image, and the version the release carries is computed by a recipe.
       - name: Install just
@@ -38,18 +38,36 @@ jobs:
       - name: Build
         run: cargo build -p nibrunnerd --release --target x86_64-unknown-linux-musl
 
+      # Built here rather than taken from the checkout because `rootfs.ext4` is in neither git nor
+      # nibrun: the script produces it, and rewrites the manifest to describe it.
+      - name: Build the guest image
+        run: just guest-image
+
+      # What the daemon does on the host, done while someone is still watching. The manifest as
+      # committed describes no rootfs at all, so a bundle assembled wrong fails here rather than on
+      # a tenant's first boot.
+      - name: Verify the guest image
+        run: |
+          jq -r '.artifacts[] | select(.name == "vmlinux" or .name == "rootfs.ext4") | "\(.sha256)  \(.name)"' \
+            guest/manifest.json > "$RUNNER_TEMP/guest.sha256"
+          test "$(wc -l < "$RUNNER_TEMP/guest.sha256")" -eq 2
+          cd guest && sha256sum -c "$RUNNER_TEMP/guest.sha256"
+
       - name: Name the release
         id: version
         run: echo "tag=$(just tmp-version)" >> "$GITHUB_OUTPUT"
 
-      - name: Stage the asset
+      - name: Stage the assets
         env:
           DIST: ${{ runner.temp }}/dist
         run: |
           mkdir -p "$DIST"
           install -m 0755 target/x86_64-unknown-linux-musl/release/nibrunnerd "$DIST/nibrunnerd-linux-x64"
+          install -m 0644 guest/vmlinux guest/rootfs.ext4 guest/manifest.json "$DIST"
+          install -m 0644 deploy/config.toml deploy/nibrunnerd.service "$DIST"
           # From inside the directory, so the file names what `sha256sum -c` will be run next to.
-          cd "$DIST" && sha256sum nibrunnerd-linux-x64 > checksums.txt
+          cd "$DIST" && sha256sum nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json \
+            config.toml nibrunnerd.service > checksums.txt
 
       - name: Create the prerelease
         env:
@@ -64,5 +82,4 @@ jobs:
             --notes "" \
             --prerelease \
             --target "$GITHUB_SHA" \
-            "$DIST/nibrunnerd-linux-x64" \
-            "$DIST/checksums.txt"
+            "$DIST"/*

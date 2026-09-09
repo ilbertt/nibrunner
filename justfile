@@ -12,6 +12,14 @@ release:
     cargo zigbuild -p nibrunnerd --target x86_64-unknown-linux-musl --release
     @ls -la target/x86_64-unknown-linux-musl/release/nibrunnerd
 
+# The image the daemon boots: `crates/init` as PID 1 in a rootfs built from the pins in
+# guest/manifest.json, which the script rewrites to describe what came out — the committed one
+# names no rootfs at all, so the daemon rejects it. Linux, root, docker and e2fsprogs; from a Mac
+# this is what CI is for. `vmlinux` is not built here, it is copied from nibrun.
+guest-image:
+    cargo build -p nibrunner-init --target x86_64-unknown-linux-musl --release
+    sudo guest/build-image.sh
+
 # The version the next temporary prerelease carries, as CalVer `YYYY.M.D-N` with no leading zeros.
 # Dates rather than semver because what reaches this daemon reaches it as a side effect of work
 # aimed elsewhere. The `-N` is on every release, the day's first included: semver ranks a version
