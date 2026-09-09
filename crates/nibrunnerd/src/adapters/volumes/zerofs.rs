@@ -196,11 +196,23 @@ pub fn cache_gigabytes(config: &str, setting: &str) -> Option<u64> {
     (gigabytes > 0).then_some(gigabytes)
 }
 
+const LISTING_HEADING: &str = "Name";
+
+fn draws_the_table(character: char) -> bool {
+    ('\u{2500}'..='\u{257f}').contains(&character)
+}
+
+// The listing is a table drawn in box characters, so a row's name is the first word of its first
+// cell and not the first word of the line: that one is the border the row opens with. A row made
+// only of border has no cell to read, and the heading names the column rather than a checkpoint.
 pub fn parse_checkpoint_names(output: &str) -> Vec<String> {
     output
         .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|name| !name.is_empty())
+        .filter_map(|line| {
+            line.split(draws_the_table)
+                .find_map(|cell| cell.split_whitespace().next())
+        })
+        .filter(|name| *name != LISTING_HEADING)
         .map(str::to_string)
         .collect()
 }
@@ -433,6 +445,36 @@ mod tests {
     fn checkpoint_names_are_the_first_word_of_each_line() {
         let listed = "one   2026-09-04\ntwo   2026-09-05\n\n";
         assert_eq!(parse_checkpoint_names(listed), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn the_names_are_read_out_of_the_table_the_cli_actually_prints() {
+        // Copied from a host: every row opens with a border, so a reading that takes the first
+        // word of the line comes back holding box characters and no checkpoint is ever seen.
+        let listed = concat!(
+            "┌──────────────┬──────────────────────────────────────┬─────────────────────┐\n",
+            "│ Name         ┆ ID                                   ┆ Created At          │\n",
+            "╞══════════════╪══════════════════════════════════════╪═════════════════════╡\n",
+            "│ export-exp-g ┆ 4eaaf567-f923-4a67-b3ff-388487cd884e ┆ 2026-09-09 16:15:37 │\n",
+            "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤\n",
+            "│ export-exp-b ┆ 426aee74-6f6c-4cb4-9e46-1ec50abdf569 ┆ 2026-09-09 16:02:34 │\n",
+            "└──────────────┴──────────────────────────────────────┴─────────────────────┘\n",
+        );
+        assert_eq!(
+            parse_checkpoint_names(listed),
+            vec!["export-exp-g", "export-exp-b"]
+        );
+    }
+
+    #[test]
+    fn a_table_holding_no_rows_names_no_checkpoints() {
+        let listed = concat!(
+            "┌──────┬────┐\n",
+            "│ Name ┆ ID │\n",
+            "╞══════╪════╡\n",
+            "└──────┴────┘\n",
+        );
+        assert!(parse_checkpoint_names(listed).is_empty(), "{listed}");
     }
 
     #[test]
