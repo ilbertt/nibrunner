@@ -101,13 +101,47 @@ fn restarted(existing: Option<&InstanceRecord>) -> bool {
     existing.is_some_and(|record| !record.stop_requested)
 }
 
-fn is_startable(existing: Option<&InstanceRecord>, now_ms: i64, desired: &DesiredInstance) -> bool {
-    let Some(existing) = existing else {
-        return true;
-    };
+// A start is refused for two very different reasons, and an instance waiting out its backoff read
+// exactly like one that is never starting again: failed, with the message from the last time it
+// worked. Only one of them is something an operator can do anything about.
+enum StartRefused {
+    OutOfRestarts { attempted: u32, allowed: u32 },
+    UntilTheBackoffIsDone,
+}
+
+fn start_refused(
+    existing: Option<&InstanceRecord>,
+    now_ms: i64,
+    desired: &DesiredInstance,
+) -> Option<StartRefused> {
+    let existing = existing?;
     let policy = &desired.config.restart_policy;
-    existing.start_attempts.attempts <= policy.max_restarts
-        && is_ready_to_retry(&existing.start_attempts, now_ms, &BackoffPolicy::from(policy))
+    if existing.start_attempts.attempts > policy.max_restarts {
+        return Some(StartRefused::OutOfRestarts {
+            attempted: existing.start_attempts.attempts,
+            allowed: policy.max_restarts,
+        });
+    }
+    (!is_ready_to_retry(&existing.start_attempts, now_ms, &BackoffPolicy::from(policy)))
+        .then_some(StartRefused::UntilTheBackoffIsDone)
+}
+
+// The attempts are what the decision is made on, and restartCount is not that number — it counts
+// the starts that worked. So the sentence carries both, because an instance out of restarts is
+// otherwise indistinguishable from one that has never been restarted at all.
+async fn say_it_is_out_of_restarts(host: &Host, app_id: &AppId, attempted: u32, allowed: u32) {
+    let said = StateMessage::new(format!(
+        "out of restarts: {attempted} starts attempted against a budget of {allowed},          and this instance will not be started again until it is deployed afresh"
+    ));
+    host.state
+        .update_record(app_id, |record| {
+            // The status loop passes every second, and a record written every second is a write
+            // per second that says what the last one did.
+            if record.message.as_ref() != Some(&said) {
+                record.message = Some(said.clone());
+            }
+        })
+        .await;
 }
 
 pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
@@ -138,7 +172,10 @@ pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
 pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     let now = now_ms();
     let existing = host.state.record(&desired.app_id).await;
-    if !is_startable(existing.as_ref(), now, desired) {
+    if let Some(refusal) = start_refused(existing.as_ref(), now, desired) {
+        if let StartRefused::OutOfRestarts { attempted, allowed } = refusal {
+            say_it_is_out_of_restarts(host, &desired.app_id, attempted, allowed).await;
+        }
         return;
     }
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
@@ -479,22 +516,70 @@ mod tests {
     #[test]
     fn a_start_is_refused_while_its_backoff_still_has_time_to_run() {
         let desired = desired_instance(|_| {});
-        assert!(is_startable(None, 0, &desired));
+        assert!(start_refused(None, 0, &desired).is_none());
         let spent = instance_record(|record| {
             record.start_attempts = crate::domain::backoff::AttemptWindow {
                 attempts: 3,
                 last_attempt_at_ms: Some(0),
             };
         });
-        assert!(!is_startable(Some(&spent), 0, &desired));
-        assert!(is_startable(Some(&spent), 10_000, &desired));
+        assert!(matches!(
+            start_refused(Some(&spent), 0, &desired),
+            Some(StartRefused::UntilTheBackoffIsDone)
+        ));
+        assert!(start_refused(Some(&spent), 10_000, &desired).is_none());
+    }
+
+    #[test]
+    fn an_instance_out_of_restarts_is_refused_for_that_and_not_for_its_backoff() {
+        let desired = desired_instance(|_| {});
+        let allowed = desired.config.restart_policy.max_restarts;
         let exhausted = instance_record(|record| {
             record.start_attempts = crate::domain::backoff::AttemptWindow {
-                attempts: desired.config.restart_policy.max_restarts + 1,
+                attempts: allowed + 1,
                 last_attempt_at_ms: Some(0),
             };
         });
-        assert!(!is_startable(Some(&exhausted), 10_000_000, &desired));
+        // Long past any backoff, so the only thing still refusing it is the budget.
+        assert!(matches!(
+            start_refused(Some(&exhausted), 10_000_000, &desired),
+            Some(StartRefused::OutOfRestarts { attempted, allowed: budget })
+                if attempted == allowed + 1 && budget == allowed
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_instance_that_will_not_start_again_says_so_rather_than_keeping_its_last_good_message() {
+        let host = test_host().await;
+        let desired = desired_instance(|_| {});
+        let allowed = desired.config.restart_policy.max_restarts;
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Failed;
+                record.start_attempts = crate::domain::backoff::AttemptWindow {
+                    attempts: allowed + 1,
+                    last_attempt_at_ms: Some(0),
+                };
+                // What the report used to carry: a sentence from the last time it worked.
+                record.message = Some(StateMessage::new("starting the tenant as uid 65534"));
+            }))
+            .await;
+
+        start_instance(&host, &desired).await;
+
+        let said = host.state.record(&app_id()).await.unwrap().message.unwrap();
+        assert!(said.as_str().contains("out of restarts"), "{}", said.as_str());
+        assert!(
+            said.as_str().contains(&format!("budget of {allowed}")),
+            "the budget the decision was made against is missing: {}",
+            said.as_str()
+        );
+        assert!(
+            said.as_str()
+                .contains(&format!("{} starts attempted", allowed + 1)),
+            "the attempts the decision was made on are missing: {}",
+            said.as_str()
+        );
     }
 
     #[test]
