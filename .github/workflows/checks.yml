@@ -1,0 +1,57 @@
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  codestyle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/prepare
+
+      - name: Check Rust Codestyle
+        run: cargo fmt --all --check
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/prepare
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/prepare
+
+      - name: Run Tests
+        # The lane that needs no kernel. `NIBRUNNER_INTEGRATION` is unset here, so the integration
+        # target compiles and every test in it returns before it asks the host for anything.
+        run: cargo test --workspace
+
+  checks-passed:
+    if: always()
+    name: checks:required
+    needs: [codestyle, lint, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" || "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "Some jobs failed or were cancelled"
+            exit 1
+          fi
+          echo "All CI jobs passed"

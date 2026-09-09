@@ -1,0 +1,24 @@
+name: Prepare
+description: Prepare the environment for the workflow
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      shell: bash
+      # rustup reads rust-toolchain.toml on its own, so the channel, the components and the musl
+      # target are pinned in one place rather than restated here.
+      run: rustup show
+
+    - name: Cargo Cache
+      # A debug `target/` for this workspace is ~2.5 GB, which is past what a plain path cache is
+      # worth saving. This one keeps the dependency artifacts and drops the workspace's own.
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+    - name: Firecracker Cache
+      # `crates/nibrunnerd/build.rs` fetches the pinned firecracker tarball into this directory and
+      # checks its hash. A miss only makes the build download it again and warn, never fail.
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/nibrunner
+        key: ${{ runner.os }}-firecracker-${{ hashFiles('crates/nibrunnerd/build.rs') }}

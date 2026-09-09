@@ -1,0 +1,21 @@
+name: check-pr-title
+
+on:
+  pull_request:
+
+jobs:
+  check-pr-title:
+    name: check-pr-title:required
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR Title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        # The types are conventional-commits', the same set commitlint's config-conventional reads.
+        run: |
+          if ! printf '%s' "$PR_TITLE" |
+            grep -Eq '^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+'; then
+            echo "Not a conventional commit subject: $PR_TITLE"
+            exit 1
+          fi
+          echo "PR title is a conventional commit subject"
