@@ -25,11 +25,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: enabled
-
-      - name: Install the host tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools e2fsprogs
+          prepare_for_build: enabled
 
       # Not in the runner image, and the version the release carries is computed by a recipe.
       - name: Install just

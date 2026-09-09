@@ -16,6 +16,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: disabled
+          prepare_for_build: disabled
 
       - name: Check Rust Codestyle
         run: cargo fmt --all --check
@@ -29,6 +30,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: enabled
+          prepare_for_build: disabled
 
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -42,6 +44,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: enabled
+          prepare_for_build: disabled
 
       - name: Run Tests
         run: cargo test --workspace

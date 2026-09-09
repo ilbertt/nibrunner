@@ -5,6 +5,9 @@ inputs:
   cache:
     description: Whether to restore and save the cargo and firecracker caches. `enabled` or `disabled`.
     required: true
+  prepare_for_build:
+    description: Whether to install the host tools that building an artifact needs. `enabled` or `disabled`.
+    required: true
 
 runs:
   using: composite
@@ -13,6 +16,7 @@ runs:
       shell: bash
       env:
         CACHE: ${{ inputs.cache }}
+        PREPARE_FOR_BUILD: ${{ inputs.prepare_for_build }}
       run: |
         case "$CACHE" in
           enabled | disabled) ;;
@@ -21,6 +25,22 @@ runs:
             exit 1
             ;;
         esac
+        case "$PREPARE_FOR_BUILD" in
+          enabled | disabled) ;;
+          *)
+            echo "prepare: prepare_for_build must be 'enabled' or 'disabled', got '$PREPARE_FOR_BUILD'"
+            exit 1
+            ;;
+        esac
+
+    # `musl-tools` links the static target, `e2fsprogs` writes the guest rootfs. Neither is
+    # needed to lint or to test, which build for the host and boot nothing.
+    - name: Install the host tools
+      if: inputs.prepare_for_build == 'enabled'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools e2fsprogs
 
     - name: Install Rust toolchain
       shell: bash
