@@ -105,6 +105,13 @@ async fn write_inner(
     let lease = frozen(&desired.app_id, &vsock_path)
         .await
         .map_err(|error| error.message())?;
+    // A checkpoint is of what the store holds, and what the store holds trails what the guest has
+    // written by however long the backend waits between flushes — thirty seconds, for zerofs. The
+    // freeze settles the guest's filesystem and nothing carried that as far as the store, so the
+    // cut could be of a moment before the freeze rather than inside it: up to half a minute of a
+    // tenant's writes missing from their own bundle, and on a volume young enough not to have been
+    // flushed yet, no device in the checkpoint to read at all.
+    host.volumes.flush().await.map_err(|error| error.message())?;
     host.volumes
         .create_checkpoint(checkpoint_id)
         .await
@@ -435,11 +442,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_store_is_flushed_before_the_cut_so_the_checkpoint_holds_the_frozen_filesystem() {
+        let mut sequence = mockall::Sequence::new();
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        volumes.expect_observe_checkpoints().returning(Vec::new);
+        volumes
+            .expect_flush()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .returning(|| Ok(()));
+        // Refused here only to end the pass: what is under test is that the flush came first.
+        volumes
+            .expect_create_checkpoint()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .returning(|_| {
+                Err(crate::adapters::volumes::VolumeError::NoCheckpoints {
+                    what: "a volume kept as a file on this host's own disk",
+                })
+            });
+        let host = host_over(volumes).await;
+        let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
+
+        apply_exports(host.arc(), &plan).await;
+
+        assert_eq!(
+            host.state.snapshot().await.export_reports[0].state,
+            ExportState::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_that_would_not_flush_is_not_checkpointed_over() {
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        volumes.expect_observe_checkpoints().returning(Vec::new);
+        volumes.expect_flush().returning(|| {
+            Err(crate::adapters::volumes::VolumeError::Unusable(
+                "the store would not flush".to_string(),
+            ))
+        });
+        // A cut over a store that would not settle is of a moment nobody asked for.
+        volumes.expect_create_checkpoint().never();
+        let host = host_over(volumes).await;
+        let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
+
+        apply_exports(host.arc(), &plan).await;
+
+        let reported = &host.state.snapshot().await.export_reports[0];
+        assert_eq!(reported.state, ExportState::Failed);
+        assert!(
+            reported
+                .message
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .contains("would not flush"),
+            "{:?}",
+            reported.message
+        );
+    }
+
+    #[tokio::test]
     async fn the_checkpoint_for_an_export_this_pass_is_writing_is_left_where_it_is() {
         let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
         volumes
             .expect_observe_checkpoints()
             .returning(|| vec![CheckpointId::parse("export-exp-1").unwrap()]);
+        volumes.expect_flush().returning(|| Ok(()));
         volumes.expect_create_checkpoint().returning(|_| {
             Err(crate::adapters::volumes::VolumeError::NoCheckpoints {
                 what: "a volume kept as a file on this host's own disk",
