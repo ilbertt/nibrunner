@@ -55,23 +55,54 @@ impl CheckpointServers {
             .env(CHECKPOINT_VARIABLE, checkpoint_id.as_str())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // Kept rather than discarded: this process is the only one that knows why a
+            // checkpoint would not open, and a server that never answers is otherwise a timeout
+            // with no reason attached to it.
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| {
                 VolumeError::Unusable(format!("no checkpoint server could be started: {error}"))
             })?;
 
-        let server = CheckpointServer {
+        let mut child = child;
+        let said = child.stderr.take();
+        let mut server = CheckpointServer {
             checkpoint_id: checkpoint_id.clone(),
             socket_path: self.socket_path_for(checkpoint_id),
             cache_dir: cache,
             child,
             ready_timeout: self.ready_timeout,
         };
-        server.wait_until_answering().await?;
+        if let Err(error) = server.wait_until_answering().await {
+            let _ = server.child.kill().await;
+            return Err(match complained(said).await {
+                Some(reason) => VolumeError::Unusable(format!("{}: {reason}", error.message())),
+                None => error,
+            });
+        }
         Ok(server)
     }
+}
+
+// What the server managed to say before it was given up on. It is killed first so the read ends,
+// and a server that said nothing leaves the timeout to speak for itself.
+async fn complained(said: Option<tokio::process::ChildStderr>) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+    let mut said = said?;
+    let mut text = String::new();
+    // Only ever on the way to an error, so it can afford to wait out a loaded machine rather
+    // than lose the one sentence that explains the failure.
+    tokio::time::timeout(Duration::from_secs(5), said.read_to_string(&mut text))
+        .await
+        .ok()?
+        .ok()?;
+    let last = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back()?;
+    Some(last.chars().take(300).collect())
 }
 
 pub struct CheckpointServer {
@@ -181,6 +212,34 @@ mod tests {
             panic!("a server whose socket never appeared was treated as ready");
         };
         assert!(error.message().contains("did not answer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_gave_up_hands_on_what_it_said_rather_than_only_that_it_was_late() {
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint_id = CheckpointId::parse("export-one").unwrap();
+        // Long enough that the server is certainly killed after it has spoken rather than before:
+        // one killed first says nothing, which is a real outcome but not the one under test.
+        let mut servers = servers_waiting(root.path(), Duration::from_secs(2));
+        // A binary that refuses out loud and never opens a socket, which is a checkpoint that is
+        // not there as far as this end can tell.
+        let refuses = root.path().join("refuses");
+        std::fs::write(
+            &refuses,
+            "#!/bin/sh\necho \"Error: Checkpoint not found\" >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&refuses, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        servers.binary = refuses;
+
+        let Err(error) = servers.start(&checkpoint_id).await else {
+            panic!("a server that refused was treated as ready");
+        };
+        assert!(error.message().contains("did not answer"), "{error}");
+        assert!(
+            error.message().contains("Checkpoint not found"),
+            "the reason the server gave is missing: {error}"
+        );
     }
 
     #[tokio::test]
