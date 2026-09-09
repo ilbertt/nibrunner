@@ -12,7 +12,11 @@ const NBD_SOCKET_FILENAME: &str = "nbd.sock";
 
 const CHECKPOINT_VARIABLE: &str = "NIBRUN_CHECKPOINT";
 
-pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(10);
+// A server opens by reading its checkpoint out of the object store, so how long it takes to get
+// as far as its socket is a property of the store and of what else is asking of it right now, not
+// of this host. It is the same wait as the one to attach, for the same reason, and ten seconds was
+// short enough that a host busy with its tenants failed every export it was asked for.
+pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 // Opening a checkpoint reads it out of the object store, so how long a server takes to answer is
 // a property of the store rather than of this host.
@@ -252,6 +256,16 @@ mod tests {
         let servers = servers(root.path());
         assert_ne!(servers.socket_path_for(&one), servers.socket_path_for(&two));
         assert!(servers.socket_path_for(&one).ends_with("export-one/nbd.sock"));
+    }
+
+    #[test]
+    fn a_server_is_given_as_long_to_open_as_it_is_given_to_answer() {
+        assert!(
+            DEFAULT_READY_TIMEOUT >= ATTACH_TIMEOUT,
+            "opening and answering are the same round trip to the store, so a server given \
+             {DEFAULT_READY_TIMEOUT:?} to open and {ATTACH_TIMEOUT:?} to answer is one that \
+             is given up on while it is still doing the slower half"
+        );
     }
 
     #[tokio::test]
