@@ -1,0 +1,55 @@
+name: tmp-release
+
+on: workflow_dispatch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tmp-release
+  cancel-in-progress: false
+
+jobs:
+  tmp-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: true
+
+      - uses: ./.github/actions/prepare
+        with:
+          cache: enabled
+          prepare_for_build: enabled
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - name: Build
+        run: cargo build -p nibrunnerd --release --target x86_64-unknown-linux-musl
+
+      - name: Build the guest image
+        run: just guest-image
+
+      - name: Verify the guest image
+        run: just verify-guest-image
+
+      - name: Name the release
+        id: version
+        run: echo "tag=$(just tmp-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the assets
+        run: just stage-release "$RUNNER_TEMP/dist"
+
+      - name: Create the prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            "$RUNNER_TEMP/dist"/*

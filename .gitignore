@@ -1,3 +1,4 @@
 /target
 *.log
 /.hostd-dev
+/guest/rootfs.ext4

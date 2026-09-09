@@ -16,7 +16,12 @@ fn main() {
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let resolved = if target_arch == "x86_64" {
-        resolve(&out_dir)
+        // Loud here rather than quiet, because the daemon a VMM-less build produces starts, reads
+        // its config, converges and serves — and only the first tenant to boot ever finds out. The
+        // warnings above this say which of the three ways it failed.
+        Some(resolve(&out_dir).expect(
+            "firecracker could not be resolved, so this build would carry no VMM; point NIBRUNNER_FIRECRACKER_BINARY at one to build without fetching it"
+        ))
     } else {
         println!(
             "cargo:warning=firecracker {FIRECRACKER_VERSION} ships for x86_64 only; this {target_arch} build carries no VMM"
@@ -29,12 +34,9 @@ fn main() {
             std::fs::write(&embedded, binary).expect("the build directory is writable");
             println!("cargo:rustc-env=NIBRUNNER_FIRECRACKER_EMBEDDED=1");
         }
-        None => {
-            std::fs::write(&embedded, []).expect("the build directory is writable");
-            println!(
-                "cargo:warning=firecracker {FIRECRACKER_VERSION} could not be fetched; this build carries no VMM and can boot nothing"
-            );
-        }
+        // `include_bytes!` wants a file whichever way this went, and an empty one is why it could
+        // never be what catches a build that fetched nothing.
+        None => std::fs::write(&embedded, []).expect("the build directory is writable"),
     }
     println!(
         "cargo:rustc-env=NIBRUNNER_FIRECRACKER_PATH={}",
