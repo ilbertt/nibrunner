@@ -64,10 +64,8 @@ jobs:
           mkdir -p "$DIST"
           install -m 0755 target/x86_64-unknown-linux-musl/release/nibrunnerd "$DIST/nibrunnerd-linux-x64"
           install -m 0644 guest/vmlinux guest/rootfs.ext4 guest/manifest.json "$DIST"
-          install -m 0644 deploy/config.toml deploy/nibrunnerd.service "$DIST"
           # From inside the directory, so the file names what `sha256sum -c` will be run next to.
-          cd "$DIST" && sha256sum nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json \
-            config.toml nibrunnerd.service > checksums.txt
+          cd "$DIST" && sha256sum nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json > checksums.txt
 
       - name: Create the prerelease
         env:
