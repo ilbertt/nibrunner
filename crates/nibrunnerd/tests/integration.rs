@@ -223,7 +223,9 @@ async fn every_browse_verb_answers_from_a_running_guest() {
         .await
         .expect("a guest answers on its control socket");
 
-    let data = GuestPath::parse("/app/data").unwrap();
+    // Every path a guest is asked for is resolved inside the volume its own app owns, so the
+    // root here is the tenant's data directory rather than the guest's filesystem.
+    let data = GuestPath::parse("/").unwrap();
     let listing = guest.list(&data).await.expect("list");
     println!("list {}: {} entries", data.as_str(), listing.entries.len());
 
@@ -233,10 +235,13 @@ async fn every_browse_verb_answers_from_a_running_guest() {
         "usage {}/{} bytes, compute {}/{} bytes",
         usage.used_bytes, usage.total_bytes, compute.memory_used_bytes, compute.memory_total_bytes
     );
-    assert!(usage.total_bytes > 0, "a volume with no size is not one a tenant has");
+    assert!(
+        usage.total_bytes > 0,
+        "a volume with no size is not one a tenant has"
+    );
 
-    let directory = GuestPath::parse("/app/data/browse-check").unwrap();
-    let file = GuestPath::parse("/app/data/browse-check/note").unwrap();
+    let directory = GuestPath::parse("/browse-check").unwrap();
+    let file = GuestPath::parse("/browse-check/note").unwrap();
     let _ = guest.remove(&file).await;
     let _ = guest.remove(&directory).await;
 
@@ -248,7 +253,10 @@ async fn every_browse_verb_answers_from_a_running_guest() {
     assert_eq!(written as usize, b"what the guest was handed".len());
 
     let read = guest.read(&file, 0, 4096).await.expect("read");
-    assert_eq!(read, b"what the guest was handed", "what came back is not what went in");
+    assert_eq!(
+        read, b"what the guest was handed",
+        "what came back is not what went in"
+    );
 
     let details = guest.stat(&file).await.expect("stat");
     assert_eq!(details.kind, FilesystemEntryKind::File);
@@ -265,13 +273,19 @@ async fn every_browse_verb_answers_from_a_running_guest() {
     assert!(refusal.is_err(), "a directory with a file in it was removed");
     println!("removing a full directory: {}", refusal.unwrap_err());
 
-    let moved = GuestPath::parse("/app/data/browse-check/moved").unwrap();
+    let moved = GuestPath::parse("/browse-check/moved").unwrap();
     guest.move_entry(&file, &moved).await.expect("move");
     assert!(guest.stat(&file).await.is_err(), "the old name still answers");
-    assert_eq!(guest.stat(&moved).await.expect("stat the new name").size_bytes, read.len() as u64);
+    assert_eq!(
+        guest.stat(&moved).await.expect("stat the new name").size_bytes,
+        read.len() as u64
+    );
 
     guest.remove(&moved).await.expect("remove the file");
-    guest.remove(&directory).await.expect("remove the empty directory");
+    guest
+        .remove(&directory)
+        .await
+        .expect("remove the empty directory");
     assert!(
         guest.stat(&directory).await.is_err(),
         "a directory that was removed still answers"
