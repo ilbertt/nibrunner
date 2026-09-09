@@ -201,7 +201,11 @@ fn read(path: &Path, offset: u64, length: u32) -> Vec<u8> {
 }
 
 fn write(path: &Path, offset: u64, content: &[u8], truncate: bool) -> Vec<u8> {
-    let file = std::fs::OpenOptions::new().write(true).create(true).open(path);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path);
     let mut file = match file {
         Ok(file) => file,
         Err(error) => return encode_refusal(status_for(&error)),
@@ -227,9 +231,9 @@ fn usage() -> Vec<u8> {
         return encode_refusal(STATUS_FAILED);
     }
     let stats = unsafe { stats.assume_init() };
-    let block = stats.f_frsize as u64;
-    let total = stats.f_blocks as u64 * block;
-    let used = total - (stats.f_bfree as u64 * block);
+    let block = stats.f_frsize;
+    let total = stats.f_blocks * block;
+    let used = total - (stats.f_bfree * block);
     encode_usage(&MeasuredBytes {
         total_bytes: total,
         used_bytes: used,
