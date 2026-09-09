@@ -196,3 +196,85 @@ async fn the_embedded_hypervisor_runs_on_this_host() {
         "it should name the version this build pins, said: {version}"
     );
 }
+
+// The browse half of the guest contract has never been driven from outside its own unit tests:
+// removing the control plane took away the only thing that asked, and DECISIONS.md leaves it
+// "waiting for something to ask". This is that, without putting a service back into the daemon —
+// point it at a running guest's control socket and it speaks every verb the contract defines.
+//
+//   NIBRUNNER_GUEST_VSOCK=/var/lib/nibrunner/vm/<app>/<socket> NIBRUNNER_INTEGRATION=1 \
+//     cargo test -p nibrunnerd --test integration -- --nocapture browse
+#[tokio::test]
+async fn every_browse_verb_answers_from_a_running_guest() {
+    if !enabled() {
+        return;
+    }
+    let Ok(socket) = std::env::var("NIBRUNNER_GUEST_VSOCK") else {
+        eprintln!("NIBRUNNER_GUEST_VSOCK names no guest, so the browse verbs are not driven");
+        return;
+    };
+    require_root();
+    use nibrunnerd::domain::filesystem::client::GuestFilesystem;
+    use protocol::{FilesystemEntryKind, GuestPath};
+
+    let app_id = protocol::AppId::parse("browse").unwrap();
+    let socket = std::path::PathBuf::from(socket);
+    let mut guest = GuestFilesystem::dial(&app_id, &socket)
+        .await
+        .expect("a guest answers on its control socket");
+
+    let data = GuestPath::parse("/app/data").unwrap();
+    let listing = guest.list(&data).await.expect("list");
+    println!("list {}: {} entries", data.as_str(), listing.entries.len());
+
+    let usage = guest.usage().await.expect("usage");
+    let compute = guest.compute().await.expect("compute");
+    println!(
+        "usage {}/{} bytes, compute {}/{} bytes",
+        usage.used_bytes, usage.total_bytes, compute.memory_used_bytes, compute.memory_total_bytes
+    );
+    assert!(usage.total_bytes > 0, "a volume with no size is not one a tenant has");
+
+    let directory = GuestPath::parse("/app/data/browse-check").unwrap();
+    let file = GuestPath::parse("/app/data/browse-check/note").unwrap();
+    let _ = guest.remove(&file).await;
+    let _ = guest.remove(&directory).await;
+
+    guest.make_directory(&directory).await.expect("mkdir");
+    let written = guest
+        .write(&file, 0, b"what the guest was handed".to_vec(), true)
+        .await
+        .expect("write");
+    assert_eq!(written as usize, b"what the guest was handed".len());
+
+    let read = guest.read(&file, 0, 4096).await.expect("read");
+    assert_eq!(read, b"what the guest was handed", "what came back is not what went in");
+
+    let details = guest.stat(&file).await.expect("stat");
+    assert_eq!(details.kind, FilesystemEntryKind::File);
+    assert_eq!(details.size_bytes, read.len() as u64);
+
+    let listed = guest.list(&directory).await.expect("list the new directory");
+    assert!(
+        listed.entries.iter().any(|entry| entry.name == "note"),
+        "a file just written is not in its own directory"
+    );
+
+    // A directory that still holds something is refused rather than emptied.
+    let refusal = guest.remove(&directory).await;
+    assert!(refusal.is_err(), "a directory with a file in it was removed");
+    println!("removing a full directory: {}", refusal.unwrap_err());
+
+    let moved = GuestPath::parse("/app/data/browse-check/moved").unwrap();
+    guest.move_entry(&file, &moved).await.expect("move");
+    assert!(guest.stat(&file).await.is_err(), "the old name still answers");
+    assert_eq!(guest.stat(&moved).await.expect("stat the new name").size_bytes, read.len() as u64);
+
+    guest.remove(&moved).await.expect("remove the file");
+    guest.remove(&directory).await.expect("remove the empty directory");
+    assert!(
+        guest.stat(&directory).await.is_err(),
+        "a directory that was removed still answers"
+    );
+    println!("every verb answered");
+}
