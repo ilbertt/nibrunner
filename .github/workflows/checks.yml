@@ -13,7 +13,6 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # `cargo fmt` compiles nothing, so a cargo cache here would only cost quota and time.
       - uses: ./.github/actions/prepare
         with:
           cache: "false"
@@ -41,8 +40,6 @@ jobs:
       - uses: ./.github/actions/prepare
 
       - name: Run Tests
-        # The lane that needs no kernel. `NIBRUNNER_INTEGRATION` is unset here, so the integration
-        # target compiles and every test in it returns before it asks the host for anything.
         run: cargo test --workspace
 
   checks-passed:

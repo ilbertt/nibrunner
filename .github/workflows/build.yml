@@ -17,12 +17,9 @@ jobs:
       - uses: ./.github/actions/prepare
 
       - name: Install musl toolchain
-        # `ring` and `libsqlite3-sys` build C, and cc reaches for musl-gcc on this target.
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
       - name: Build
-        # The one static binary a host runs. `just release` goes through cargo-zigbuild because it
-        # assumes you are cross-compiling; this runner is already x86_64 Linux and does not need it.
         run: cargo build -p nibrunnerd --release --target x86_64-unknown-linux-musl

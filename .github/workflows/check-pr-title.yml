@@ -11,7 +11,6 @@ jobs:
       - name: Check PR Title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        # The types are conventional-commits', the same set commitlint's config-conventional reads.
         run: |
           if ! printf '%s' "$PR_TITLE" |
             grep -Eq '^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+'; then
