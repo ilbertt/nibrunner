@@ -113,7 +113,7 @@ Every way in is a section under `[proxy]`, and each is absent or complete.
 | `[proxy.http]` | `port` | the one HTTP listener |
 | `[proxy.http.tls]` | `certificate`, `key` | serve that port encrypted, with this material |
 | `[proxy.http.tls.client_ca]` | `certificate` | a PEM trust pool |
-| `[proxy.tcp]` | `max_ports_per_app` | how many raw TCP ports an app may name **beside** its HTTP one |
+| `[proxy.tcp]` | `max_extra_ports_per_app` | how many raw TCP ports an app may name **beside** its HTTP one |
 
 **One HTTP listener, not a plain one and a TLS one.** Nothing here redirects, so two would serve
 every app unencrypted and encrypted at once, forever, with nothing moving a visitor from the first
@@ -138,7 +138,7 @@ the only thing standing between two tenants that share a certificate.
 
 **`[proxy.tcp]` is the way in for a protocol this host does not read** — ssh, in practice. Such a
 port carries bytes and nothing else, so nothing can route it by name and it is reached at a port
-of its own. `max_ports_per_app` is bounded by what a slot reserves beside the HTTP port, which is
+of its own. `max_extra_ports_per_app` is bounded by what a slot reserves beside the HTTP port, which is
 seven. Absent offers none.
 
 **A document asking for what this host does not serve is refused by name**, and the instance is

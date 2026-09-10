@@ -128,7 +128,7 @@ pub struct TlsMaterial {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpListeners {
     /// How many, beside the HTTP one. Bounded by what a slot reserves past its first port.
-    pub max_ports_per_app: usize,
+    pub max_extra_ports_per_app: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,7 +311,7 @@ mod file {
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Tcp {
-        pub(super) max_ports_per_app: Option<usize>,
+        pub(super) max_extra_ports_per_app: Option<usize>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -541,15 +541,15 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
         .tcp
         .as_ref()
         .map(|tcp| {
-            let named = required("proxy.tcp.max_ports_per_app", tcp.max_ports_per_app)?;
+            let named = required("proxy.tcp.max_extra_ports_per_app", tcp.max_extra_ports_per_app)?;
             if named == 0 || named > MAX_PORTS_PER_APP {
                 return Err(ConfigError::invalid(
-                    "proxy.tcp.max_ports_per_app",
+                    "proxy.tcp.max_extra_ports_per_app",
                     format!("between 1 and {MAX_PORTS_PER_APP}, which is what a slot reserves beside the HTTP port"),
                 ));
             }
             Ok(TcpListeners {
-                max_ports_per_app: named,
+                max_extra_ports_per_app: named,
             })
         })
         .transpose()?;
@@ -1004,7 +1004,7 @@ control_plane_cidrs_v6 = []
     fn a_listener_that_binds_nowhere_is_refused_rather_than_bound_everywhere() {
         let message = refused(&document(&[], "[proxy.http]\nport = 8080\n"));
         assert!(message.contains("proxy.listen_address"), "{message}");
-        let streaming = refused(&document(&[], "[proxy.tcp]\nmax_ports_per_app = 1\n"));
+        let streaming = refused(&document(&[], "[proxy.tcp]\nmax_extra_ports_per_app = 1\n"));
         assert!(streaming.contains("proxy.listen_address"), "{streaming}");
         // A host that offers no way in is not asked where it would have bound one.
         assert_eq!(parsed(&whole()).proxy, ProxyConfig::default());
@@ -1062,28 +1062,30 @@ control_plane_cidrs_v6 = []
     #[test]
     fn how_many_ports_an_app_may_name_is_the_hosts_to_say_and_is_bounded_by_the_slot() {
         assert_eq!(
-            with(&bound("[proxy.tcp]\nmax_ports_per_app = 1\n"))
+            with(&bound("[proxy.tcp]\nmax_extra_ports_per_app = 1\n"))
                 .proxy
                 .tcp
                 .unwrap()
-                .max_ports_per_app,
+                .max_extra_ports_per_app,
             1
         );
         for refused_count in ["0", &(MAX_PORTS_PER_APP + 1).to_string()] {
             let message = refused(&document(
                 &[],
-                &bound(&format!("[proxy.tcp]\nmax_ports_per_app = {refused_count}\n")),
+                &bound(&format!(
+                    "[proxy.tcp]\nmax_extra_ports_per_app = {refused_count}\n"
+                )),
             ));
-            assert!(message.contains("proxy.tcp.max_ports_per_app"), "{message}");
+            assert!(message.contains("proxy.tcp.max_extra_ports_per_app"), "{message}");
         }
         assert_eq!(
             with(&bound(&format!(
-                "[proxy.tcp]\nmax_ports_per_app = {MAX_PORTS_PER_APP}\n"
+                "[proxy.tcp]\nmax_extra_ports_per_app = {MAX_PORTS_PER_APP}\n"
             )))
             .proxy
             .tcp
             .unwrap()
-            .max_ports_per_app,
+            .max_extra_ports_per_app,
             MAX_PORTS_PER_APP
         );
     }
@@ -1404,7 +1406,7 @@ key = "/etc/nibrunner/origin.key"
 certificate = "/etc/nibrunner/origin-pull-ca.pem"
 
 [proxy.tcp]
-max_ports_per_app = 1
+max_extra_ports_per_app = 1
 
 [metrics]
 port = 9100
@@ -1427,7 +1429,12 @@ listen_address = "127.0.0.1"
                 }),
             })
         );
-        assert_eq!(config.proxy.tcp, Some(TcpListeners { max_ports_per_app: 1 }));
+        assert_eq!(
+            config.proxy.tcp,
+            Some(TcpListeners {
+                max_extra_ports_per_app: 1
+            })
+        );
         assert_eq!(
             config.metrics,
             Some(MetricsConfig {

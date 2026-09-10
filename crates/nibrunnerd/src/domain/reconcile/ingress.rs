@@ -21,7 +21,11 @@ pub fn ingress_refusal(desired: &DesiredInstance, config: &HostConfig) -> Option
     }
 
     let named = desired.config.ports.len();
-    let allowed = config.proxy.tcp.as_ref().map_or(0, |tcp| tcp.max_ports_per_app);
+    let allowed = config
+        .proxy
+        .tcp
+        .as_ref()
+        .map_or(0, |tcp| tcp.max_extra_ports_per_app);
     if named > allowed {
         return Some(match allowed {
             0 => format!(
@@ -78,7 +82,9 @@ mod tests {
     /// The same host, with one port an app may name beside its HTTP one.
     fn and_one_more() -> ProxyConfig {
         ProxyConfig {
-            tcp: Some(TcpListeners { max_ports_per_app: 1 }),
+            tcp: Some(TcpListeners {
+                max_extra_ports_per_app: 1,
+            }),
             ..serving_http()
         }
     }
@@ -133,7 +139,9 @@ mod tests {
 
         // The same document on a host that allows two is not a document to refuse.
         let roomier = ProxyConfig {
-            tcp: Some(TcpListeners { max_ports_per_app: 2 }),
+            tcp: Some(TcpListeners {
+                max_extra_ports_per_app: 2,
+            }),
             ..serving_http()
         };
         assert_eq!(ingress_refusal(&greedy, &config_with(roomier)), None);

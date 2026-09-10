@@ -73,7 +73,7 @@ certificate = "/etc/nibrunner/tls/origin-pull-ca.pem"
 # Absent offers none, and a document asking for one is refused. A slot reserves seven past its
 # first, so this may be raised without moving anything.
 [proxy.tcp]
-max_ports_per_app = 1
+max_extra_ports_per_app = 1
 
 # Not 9091: ZeroFS holds that one on this host, and a second binding is a startup failure.
 [metrics]
