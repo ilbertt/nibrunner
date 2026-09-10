@@ -26,42 +26,35 @@ daemon that is not running still leaves the last thing it observed behind. Whate
 **Nothing this daemon does stops a tenant.** Each microVM runs in a session of its own, adopted
 from a pidfile on the way back up. Restarting the daemon, or killing it, leaves every app serving.
 
-## From a fresh Ubuntu machine to a served app
+## From a fresh machine to a served app
 
 ```bash
-sudo apt-get install -y nftables e2fsprogs                     # the only two host tools
-curl -fsSL -o nibrunnerd <your build of target/x86_64-unknown-linux-musl/release/nibrunnerd>
-sudo install -m 0755 nibrunnerd /usr/local/bin/nibrunnerd
-sudo install -m 0644 deploy/config.toml /etc/nibrunner/config.toml
-sudo nibrunnerd install --from <the release>           # lays the rest of the host out
-sudo systemctl daemon-reload && sudo systemctl enable --now nibrunnerd
-sudo cp my-server /var/lib/nibrunner/artifact-store/   # the binary, named by its sha256
-sudo tee /var/lib/nibrunner/desired.json < desired.json # the document below
+curl -fsSL https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/install.sh | sh
 ```
 
-Eight commands, and the eighth is the deploy. Everything after it is the daemon converging.
+That is the install. It refuses a machine that cannot host one, puts the packages on, takes the
+newest release and checks the binary against the digests it publishes, and hands over to
+`nibrunnerd install` — which fetches the guest image, sets the kernel settings this host serves
+nothing without, creates the account ZeroFS runs under, renders its two configuration files and
+every unit, and stamps what it laid down into `versions.json`.
 
-### The same thing, from somewhere else
+A host with no configuration is given the smallest one this daemon accepts and told to make it its
+own. That is the one thing nothing can do for you, because it is where this host's storage,
+hostnames and certificates are: **[docs/config.md](docs/config.md) is every key in it.** Then
 
 ```bash
-ssh root@HOST 'curl -fsSL https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/install.sh | sh'
+nibrunnerd install
 ```
 
-`deploy/install.sh` knows one thing: where a release is. It refuses a machine that cannot host,
-installs the packages, resolves the newest release, checks the binary against the `checksums.txt`
-it publishes, and hands over to `nibrunnerd install --from <that release>`.
+again, and it says what is left — the secrets, which only you hold, and the units to enable.
 
-Everything else is the daemon's, because everything else is in `config.toml`: where the guest image
-goes, which units this host has, what is rendered, and what is left for a person. A host with no
-configuration is given the smallest one this daemon accepts and told to make it its own;
-[docs/config.md](docs/config.md) is what every key in it means.
+Deploying is two files after that: the binary into `artifacts.store_url` under the key its digest
+names, and the document below into `paths.desired_state_file`. Everything past that is the daemon
+converging.
 
-`NIBRUNNER_VERSION` pins a release rather than taking the newest. The whole script is one function
-called on its last line, so a download that stops half way runs nothing.
-
-Nothing has to be repeated after a reboot: the units are enabled, and the kernel settings `install`
-wrote are in `/etc/sysctl.d`, `/etc/modules-load.d` and `/etc/modprobe.d`, where the boot reads
-them.
+`NIBRUNNER_VERSION` pins a release rather than taking the newest, and `NIBRUNNER_CONFIG` names a
+configuration somewhere other than `/etc/nibrunner/config.toml`. Nothing has to be repeated after a
+reboot: the units are enabled and the kernel settings are written where the boot reads them.
 
 ### The document
 
@@ -153,15 +146,19 @@ startup:
 ### Laying a host out
 
 `nibrunnerd install` is the only subcommand this binary has. It reads the same `config.toml` the
-daemon does and turns it into everything a host needs beyond the packages: the directories, ZeroFS
-fetched at the version this release pins, ZeroFS's two config files, the two units that supervise
-it, a drop-in giving the daemon its environment file, and `versions.json` — which is what
+daemon does and turns it into everything a host needs beyond the packages: the kernel settings,
+the directories, the guest image, the account ZeroFS runs under, ZeroFS itself at the version this
+release pins, its two config files, every unit, and `versions.json` — which is what
 `paths.versions_file` was always for.
 
 ```
-nibrunnerd install         lay this host out, then exit
-nibrunnerd install --force replace files `install` did not write
+nibrunnerd install            lay this host out, then exit
+nibrunnerd install --force    replace files `install` did not write
+nibrunnerd install --from URL take the guest image from a release at this URL
 ```
+
+`--from` is the one thing `deploy/install.sh` passes it. That script knows where a release is;
+everything about where the files in it go is read from the configuration rather than told twice.
 
 It refuses before it writes anything. A host missing three things is told all three at once, each
 with the command that fixes it, and nothing is laid down until none are missing — because a
