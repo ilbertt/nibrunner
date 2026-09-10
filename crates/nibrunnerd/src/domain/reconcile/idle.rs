@@ -4,6 +4,10 @@ use crate::domain::report::InstanceRecord;
 
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
 
+// What `IdleController` runs this pass at. Only the meters read it, and only to decide how
+// much of a late pass is time this host actually watched.
+pub const ACTIVITY_INTERVAL_MS: u64 = 5_000;
+
 const SLEEPABLE_STATES: [InstanceState; 1] = [InstanceState::Running];
 
 pub fn has_gone_quiet(
@@ -197,6 +201,20 @@ pub async fn record_activity(host: &Host) {
     }
     host.state
         .modify(|snapshot| {
+            // Under the write lock rather than off the reading above, because the measurement pass
+            // accumulates into the same meters from a task of its own and whichever of them wrote
+            // second would otherwise carry away a copy taken before the other had added anything.
+            // Metered off the counters this pass is about to store, so what is billed and what is
+            // read as activity are the same reading.
+            let metered = crate::domain::meters::metered_after(
+                &snapshot.meters,
+                &snapshot.records,
+                &snapshot.app_traffic,
+                &traffic,
+                crate::domain::meters::elapsed_since(snapshot.metered_at_ms, now, ACTIVITY_INTERVAL_MS),
+            );
+            snapshot.meters = metered;
+            snapshot.metered_at_ms = Some(now);
             snapshot.app_traffic = traffic;
             snapshot.last_active_at_ms = last_active_at_ms;
         })
@@ -355,6 +373,48 @@ mod activity_tests {
         let snapshot = host.state.snapshot().await;
         assert!(snapshot.last_active_at_ms.contains_key(&app_id()));
         assert!(!snapshot.last_active_at_ms.contains_key(&other()));
+    }
+
+    #[tokio::test]
+    async fn a_pass_meters_the_stretch_since_the_last_one_against_what_the_app_was_holding() {
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(instance_record(|_| {})).await;
+        host.state
+            .modify(|snapshot| {
+                snapshot.metered_at_ms = Some(crate::clock::now_ms() - ACTIVITY_INTERVAL_MS as i64);
+            })
+            .await;
+
+        record_activity(&host).await;
+
+        let metered = host.state.snapshot().await.meters;
+        let held = metered.get(&app_id()).copied().unwrap_or_default();
+        assert!(
+            held.running_ms >= ACTIVITY_INTERVAL_MS,
+            "a running app was metered {} ms of the {ACTIVITY_INTERVAL_MS} it was up for",
+            held.running_ms
+        );
+        assert_eq!(held.idle_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn the_first_pass_a_daemon_makes_bills_nothing_for_the_time_it_was_not_watching() {
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(instance_record(|_| {})).await;
+
+        record_activity(&host).await;
+
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(
+            snapshot.meters.get(&app_id()).copied().unwrap_or_default(),
+            protocol::UsageMeters::default()
+        );
+        assert!(
+            snapshot.metered_at_ms.is_some(),
+            "and the pass after it has somewhere to measure from"
+        );
     }
 
     #[tokio::test]

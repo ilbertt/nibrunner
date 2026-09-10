@@ -45,6 +45,24 @@ create table activity (
     last_active_at_ms integer not null
 ) strict;
 
+-- What each app has used since this host first saw it, accumulated rather than sampled. Every
+-- number here only ever goes up, so a report nobody read and a scrape nobody took are both
+-- non-events: whoever is counting subtracts the last figure it saw from this one.
+--
+-- The counters these are derived from do go down — nftables forgets on a reload and a guest
+-- forgets on a reboot — so a reading below the one before it is read as a reset and counted from
+-- zero rather than as a number that went backwards.
+--
+-- Nothing here is priced. What holds memory and what holds only disk are metered apart because
+-- they are worth different amounts, and which of them costs what is the control plane's to say.
+create table meters (
+    app_id     text    primary key,
+    running_ms integer not null,
+    idle_ms    integer not null,
+    cpu_ms     integer not null,
+    rx_bytes   integer not null
+) strict;
+
 -- Deletions this host carried out that whatever reads the report has not yet acknowledged.
 --
 -- Kept because the removal is not re-derivable: the volume is gone, so the next observation sees

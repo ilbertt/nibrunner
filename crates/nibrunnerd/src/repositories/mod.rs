@@ -2,6 +2,7 @@ pub mod activity_repository;
 pub mod deleted_volumes_repository;
 pub mod host_identity_repository;
 pub mod instances_repository;
+pub mod meters_repository;
 pub mod slots_repository;
 
 use std::sync::Arc;
@@ -12,12 +13,14 @@ use crate::repositories::activity_repository::{ActivityRepository, SqliteActivit
 use crate::repositories::deleted_volumes_repository::{DeletedVolumeRepository, SqliteDeletedVolumes};
 use crate::repositories::host_identity_repository::{HostIdentityRepository, SqliteHostIdentity};
 use crate::repositories::instances_repository::{InstanceRepository, SqliteInstances};
+use crate::repositories::meters_repository::{MeterRepository, SqliteMeters};
 use crate::repositories::slots_repository::{SlotRepository, SqliteSlots};
 
 pub struct Repositories {
     pub instances: Arc<dyn InstanceRepository>,
     pub slots: Arc<dyn SlotRepository>,
     pub activity: Arc<dyn ActivityRepository>,
+    pub meters: Arc<dyn MeterRepository>,
     pub deleted_volumes: Arc<dyn DeletedVolumeRepository>,
     pub identity: Arc<dyn HostIdentityRepository>,
 }
@@ -28,6 +31,7 @@ impl Repositories {
             instances: Arc::new(SqliteInstances::new(pool.clone())),
             slots: Arc::new(SqliteSlots::new(pool.clone())),
             activity: Arc::new(SqliteActivity::new(pool.clone())),
+            meters: Arc::new(SqliteMeters::new(pool.clone())),
             deleted_volumes: Arc::new(SqliteDeletedVolumes::new(pool.clone())),
             identity: Arc::new(SqliteHostIdentity::new(pool)),
         }
@@ -68,6 +72,7 @@ mod tests {
             "deleted_volumes",
             "host_identity",
             "instances",
+            "meters",
             "slot_cursor",
             "slots",
         ] {

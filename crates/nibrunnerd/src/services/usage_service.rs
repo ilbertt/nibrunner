@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use protocol::AppId;
 
+use crate::domain::meters::cpu_metered_after;
 use crate::domain::usage::{compute_usage_after, volume_usage_after, MEASUREMENT_CONCURRENCY};
 use crate::host::Host;
 use crate::ports::{GuestMeasurements, GuestReading};
@@ -53,6 +54,11 @@ impl UsageService for HostUsage {
         self.host
             .state
             .modify(move |snapshot| {
+                // Under the write lock, and off the ticks this pass is about to replace: the
+                // activity pass accumulates into the same meters from a task of its own, and what
+                // a guest spent is the distance from the last reading to this one.
+                let metered = cpu_metered_after(&snapshot.meters, &snapshot.compute_ticks, &taken);
+                snapshot.meters = metered;
                 snapshot.volume_usage = volumes;
                 snapshot.compute_usage = compute.usage;
                 snapshot.compute_ticks = compute.ticks;
@@ -129,6 +135,40 @@ mod tests {
             Some(500)
         );
         assert_eq!(snapshot.compute_ticks.get(&app_id()), Some(&compute(2_000, 600)));
+    }
+
+    #[tokio::test]
+    async fn what_a_guest_has_spent_since_the_last_sweep_is_added_to_what_it_had_already_spent() {
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(instance_record(|_| {})).await;
+        host.state
+            .modify(|snapshot| {
+                snapshot.compute_ticks.insert(app_id(), compute(1_000, 100));
+                snapshot.meters.insert(
+                    app_id(),
+                    protocol::UsageMeters {
+                        cpu_ms: 1_000,
+                        ..Default::default()
+                    },
+                );
+            })
+            .await;
+        let reading = GuestReading {
+            filesystem: None,
+            compute: Some(compute(2_000, 400)),
+        };
+
+        HostUsage::new(host.arc().clone(), measuring(reading))
+            .measure()
+            .await;
+
+        let metered = host.state.snapshot().await.meters;
+        assert_eq!(
+            metered.get(&app_id()).map(|meter| meter.cpu_ms),
+            Some(1_000 + 3_000),
+            "300 busy ticks of 10ms each, on top of the second already spent"
+        );
     }
     #[tokio::test]
     async fn a_share_appears_on_the_second_sweep_because_the_first_has_no_interval_behind_it() {

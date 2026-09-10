@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "select app_id, running_ms, idle_ms, cpu_ms, rx_bytes from meters",
+  "describe": {
+    "columns": [
+      {
+        "name": "app_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "running_ms",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "idle_ms",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cpu_ms",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "rx_bytes",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9c41016089f9da3ad38c5286754d7bc8650c5f91beb9d604a39d3ad647d7946e"
+}

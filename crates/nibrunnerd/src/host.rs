@@ -83,6 +83,7 @@ impl Host {
             .activity
             .replace_all(&snapshot.last_active_at_ms)
             .await?;
+        self.repositories.meters.replace_all(&snapshot.meters).await?;
         self.repositories
             .deleted_volumes
             .replace_all(&snapshot.deleted_volumes)
@@ -92,6 +93,7 @@ impl Host {
     pub async fn load(&self) {
         let records = self.repositories.instances.all().await.unwrap_or_default();
         let last_active = self.repositories.activity.all().await.unwrap_or_default();
+        let meters = self.repositories.meters.all().await.unwrap_or_default();
         let deleted = self.repositories.deleted_volumes.all().await.unwrap_or_default();
         let assignments = self.repositories.slots.all().await.unwrap_or_default();
         let cursor = self.repositories.slots.cursor().await.unwrap_or_default();
@@ -105,6 +107,7 @@ impl Host {
                     .map(|record| (record.app_id.clone(), record))
                     .collect();
                 snapshot.last_active_at_ms = last_active;
+                snapshot.meters = meters;
                 snapshot.deleted_volumes = deleted;
             })
             .await;
@@ -133,6 +136,7 @@ mod tests {
     use crate::repositories::deleted_volumes_repository::MockDeletedVolumeRepository;
     use crate::repositories::host_identity_repository::MockHostIdentityRepository;
     use crate::repositories::instances_repository::MockInstanceRepository;
+    use crate::repositories::meters_repository::MockMeterRepository;
     use crate::repositories::slots_repository::MockSlotRepository;
     use crate::repositories::Repositories;
     use crate::test_support::*;
@@ -153,6 +157,14 @@ mod tests {
         )
     }
 
+    // Nothing a test of the other repositories asserts about, so it answers and counts nothing.
+    fn quiet_meters() -> MockMeterRepository {
+        let mut meters = MockMeterRepository::new();
+        meters.expect_all().returning(|| Ok(Default::default()));
+        meters.expect_replace_all().returning(|_| Ok(()));
+        meters
+    }
+
     fn bundle(
         instances: MockInstanceRepository,
         slots: MockSlotRepository,
@@ -164,6 +176,7 @@ mod tests {
             instances: Arc::new(instances),
             slots: Arc::new(slots),
             activity: Arc::new(activity),
+            meters: Arc::new(quiet_meters()),
             deleted_volumes: Arc::new(deleted_volumes),
             identity: Arc::new(identity),
         }
