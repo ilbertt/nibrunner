@@ -59,19 +59,19 @@ pub async fn run(
     config: &HostConfig,
     config_file: &Path,
     force: bool,
-    release: Option<&str>,
+    release: Option<&Path>,
 ) -> Result<Laid, InstallError> {
     let mut laid = Laid { steps: Vec::new() };
 
     // Before the checks rather than after them, because the guest image is one of the things they
     // refuse a host for — and a release was named precisely so this host would not have to have it
     // already.
-    if let Some(base) = release {
-        match guest_image::ensure(&config.guest_image_dir, base).await? {
+    if let Some(release) = release {
+        match guest_image::ensure(&config.guest_image_dir, release)? {
             guest_image::Laid::AlreadyThere(version) => {
                 laid.note(format!("guest image {version} already there"))
             }
-            guest_image::Laid::Fetched(version) => laid.note(format!("guest image {version} fetched")),
+            guest_image::Laid::Taken(version) => laid.note(format!("guest image {version} laid down")),
         }
     }
     refuse_unready(config)?;

@@ -9,7 +9,10 @@ use nibrunnerd::{install, run};
 #[derive(Debug)]
 enum Command {
     Serve,
-    Install { force: bool, release: Option<String> },
+    Install {
+        force: bool,
+        release: Option<std::path::PathBuf>,
+    },
 }
 
 const USAGE: &str = "\
@@ -18,11 +21,12 @@ nibrunnerd — one binary that turns a Linux machine into an app host.
     nibrunnerd                 serve this host, reading /etc/nibrunner/config.toml
     nibrunnerd install         lay this host out from that same file, then exit
     nibrunnerd install --force replace files `install` did not write
-    nibrunnerd install --from <url>
-                               take the guest image from a release at this URL
+    nibrunnerd install --from <dir>
+                               take the guest image from a release unpacked here
 
-`--from` is what `deploy/install.sh` passes: it names where a release is, and everything
-about where the files in it go is read from the configuration rather than told twice.
+`--from` is what `deploy/install.sh` passes: it downloads a release and names the directory,
+and everything about where the files in it go is read from the configuration rather than
+told twice. The digests the release publishes are checked against either way.
 
 NIBRUNNER_CONFIG names another configuration file. NIBRUNNER_LOG is a tracing filter.
 ";
@@ -36,8 +40,10 @@ impl Command {
             match argument.as_str() {
                 "--force" => force = true,
                 "--from" => {
-                    release = Some(rest.next().cloned().ok_or_else(|| {
-                        format!("nibrunnerd install: --from takes the URL of a release\n\n{USAGE}")
+                    release = Some(rest.next().map(std::path::PathBuf::from).ok_or_else(|| {
+                        format!(
+                            "nibrunnerd install: --from takes the directory a release was unpacked into\n\n{USAGE}"
+                        )
                     })?);
                 }
                 unknown => {
@@ -111,7 +117,7 @@ enum Started {
 async fn lay_out(
     config: HostConfig,
     force: bool,
-    release: Option<String>,
+    release: Option<std::path::PathBuf>,
     started: Started,
 ) -> std::process::ExitCode {
     let config_file = HostConfig::configured_file();
@@ -251,18 +257,17 @@ mod tests {
     // about where the files in it go is read from the configuration instead.
     #[test]
     fn a_release_is_taken_as_the_url_after_the_flag() {
-        let Ok(Command::Install { release, force }) = parse(&["install", "--from", "https://example.test/r"])
-        else {
+        let Ok(Command::Install { release, force }) = parse(&["install", "--from", "/tmp/release"]) else {
             panic!("--from names a release");
         };
-        assert_eq!(release.as_deref(), Some("https://example.test/r"));
+        assert_eq!(release.as_deref(), Some(std::path::Path::new("/tmp/release")));
         assert!(!force);
     }
 
     #[test]
     fn a_release_flag_with_nothing_after_it_is_refused_rather_than_taken_as_none() {
         let refused = parse(&["install", "--from"]).unwrap_err();
-        assert!(refused.contains("--from takes the URL"), "{refused}");
+        assert!(refused.contains("--from takes the directory"), "{refused}");
     }
 
     #[test]

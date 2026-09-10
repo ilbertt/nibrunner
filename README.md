@@ -13,10 +13,10 @@ Just write the desired configuration in the JSON file nibrunner watches.
 curl -fsSL https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/install.sh | sh
 ```
 
-That is the whole install: the packages, the newest release checked against the digests it
-publishes, and `nibrunnerd install` — which writes a configuration if this host has none, fetches
-the guest image, sets the kernel settings, creates the account ZeroFS runs as, and renders every
-config file and every unit.
+That is the whole install: the packages, the release downloaded and checked against the digests it
+publishes, and `nibrunnerd install` — which writes a configuration if this host has none, lays the
+guest image down wherever that file says, sets the kernel settings, creates the account ZeroFS runs
+as, and renders every config file and every unit.
 
 It ends by telling you the only things it cannot do for you:
 

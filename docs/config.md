@@ -36,7 +36,7 @@ proxy.http.port is not free, because 21000-21999 is what a slot takes for an app
 | `paths.state_dir` | string | absolute path — everything this host keeps, `state.db` included |
 | `paths.runtime_dir` | string | absolute path — sockets and pidfiles that outlive the daemon |
 | `paths.snapshot_dir` | string | absolute path — where a sleeping app's memory goes |
-| `paths.guest_image_dir` | string | absolute path — `vmlinux`, `rootfs.ext4`, `manifest.json` |
+| `paths.guest_image_dir` | string | absolute path — `vmlinux`, `rootfs.ext4`, `manifest.json`, put there by `install` |
 | `paths.desired_state_file` | string | absolute path — the document it watches |
 | `paths.api_socket` | string | absolute path |
 | `paths.versions_file` | string | absolute path — what `install` stamped what it laid down into |

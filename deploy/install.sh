@@ -48,20 +48,20 @@ newest_release() {
         head -1
 }
 
-# Only the binary. The guest image is in the same release and goes wherever the configuration says,
-# which is why `nibrunnerd install` fetches that one rather than this.
-fetch_the_binary() {
+# The whole release, checked against the digests it publishes. Both things that come out of it go
+# somewhere: this binary to a path a shell has to know to be able to run it, and the guest image to
+# wherever the configuration says — which is why the second one is handed to `nibrunnerd install`
+# as a directory rather than put somewhere by this.
+fetch_release() {
     base=$1
-    work=$(mktemp -d)
-    trap 'rm -rf "$work"' EXIT INT TERM
-
-    for asset in nibrunnerd-linux-x64 checksums.txt; do
-        curl -fsSL --retry 3 -o "$work/$asset" "$base/$asset" || die "$asset is not in this release"
+    into=$2
+    for asset in nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json checksums.txt; do
+        curl -fsSL --retry 3 -o "$into/$asset" "$base/$asset" || die "$asset is not in this release"
     done
     say "checksums"
-    (cd "$work" && grep ' nibrunnerd-linux-x64$' checksums.txt | sha256sum -c - >/dev/null) ||
+    (cd "$into" && sha256sum -c checksums.txt >/dev/null) ||
         die "the release did not hash to what it publishes — refusing to install it"
-    install -m 0755 "$work/nibrunnerd-linux-x64" "$BINARY"
+    install -m 0755 "$into/nibrunnerd-linux-x64" "$BINARY"
     say "$BINARY"
 }
 
@@ -72,11 +72,16 @@ main() {
     say "release $version"
 
     packages
-    base="https://github.com/$REPO/releases/download/$version"
-    fetch_the_binary "$base"
+
+    # Not exec'd below, so that this runs: the release is 170 MB in /tmp, on a host whose disk is
+    # the thing every tenant's cache will live on.
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT INT TERM
+
+    fetch_release "https://github.com/$REPO/releases/download/$version" "$work"
 
     say "nibrunnerd install"
-    exec "$BINARY" install --from "$base"
+    "$BINARY" install --from "$work"
 }
 
 main "$@"
