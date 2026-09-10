@@ -123,10 +123,17 @@ keys are declared with `deny_unknown_fields` and nothing else can disagree with 
 ### Laying a host out
 
 `nibrunnerd install` is the only subcommand this binary has. It reads the same `config.toml` the
-daemon does and turns it into everything a host needs beyond the packages: the kernel settings,
-the directories, the guest image, the account ZeroFS runs under, ZeroFS itself at the version this
-release pins, its two config files, every unit, and `versions.json` — which is what
-`paths.versions_file` was always for.
+daemon does and writes everything else a host needs:
+
+| What | Where it goes |
+| --- | --- |
+| The kernel settings, applied now and at every boot | `/etc/sysctl.d`, `/etc/modules-load.d`, `/etc/modprobe.d` |
+| The guest image, fetched and verified | `paths.guest_image_dir` |
+| ZeroFS, and the account it runs as | `volumes.zerofs.binary` |
+| ZeroFS's live and checkpoint configuration | `volumes.zerofs.config_file`, `…checkpoint_config_file` |
+| The daemon's unit, ZeroFS's two, and a drop-in | `/etc/systemd/system` |
+| An empty `host.env`, for the secrets it must not hold | beside `config.toml` |
+| What it laid down, by version | `paths.versions_file` |
 
 ```
 nibrunnerd install            lay this host out, then exit
@@ -134,31 +141,37 @@ nibrunnerd install --force    replace files `install` did not write
 nibrunnerd install --from URL take the guest image from a release at this URL
 ```
 
-`--from` is the one thing `deploy/install.sh` passes it. That script knows where a release is;
-everything about where the files in it go is read from the configuration rather than told twice.
+**It refuses before it writes anything**, and names everything at once rather than stopping at the
+first thing wrong:
 
-It refuses before it writes anything. A host missing three things is told all three at once, each
-with the command that fixes it, and nothing is laid down until none are missing — because a
-half-installed host is harder to read than an uninstalled one.
+```
+$ nibrunnerd install
+this host is not ready:
+  /dev/kvm is missing — a machine with hardware virtualisation; a microVM cannot be booted without it
+  nft is missing — install the nftables and e2fsprogs packages
+  modprobe is missing — install the kmod package
+  guest image is missing — /var/lib/nibrunner/guest/manifest.json is not there, so this host has
+    no guest image to boot a tenant from
+```
 
-Re-running it is how a host moves to a new release: a file it wrote is one it writes again, a file
-whose contents already match is left alone and said to be unchanged, and a file *somebody else*
-wrote is refused by name rather than replaced. `--force` is how that decision gets made, and it is
-made by a person rather than by a re-run.
+A half-installed host is harder to read than an uninstalled one. What it refuses for is only what
+it cannot put right itself: the machine, the tools, the image. The kernel settings used to be in
+that list and are not any more — those it sets.
+
+**Re-running it is how a host moves to a new release.** A file it wrote is one it writes again; a
+file whose contents already match is left alone and said to be `unchanged`; a file *somebody else*
+wrote is refused by name. `--force` is how that gets overruled, and it is a person's decision
+rather than a re-run's.
 
 **What it never does is start ZeroFS.** There is exactly one read-write `zerofs run` per storage
 prefix, fleet-wide, and a second writer is fenced by SlateDB's epoch only after a window of
-acknowledging writes it then discards — it loses a tenant's data rather than failing to start. The
-thing that holds that lock is a single-instance unit, so this writes the unit and never becomes
-it. There is a test asserting nothing here ever runs one.
+acknowledging writes it then discards — it loses a tenant's data rather than failing to start. A
+single-instance unit is what holds that lock, so this writes the unit and never becomes it. There
+is a test asserting nothing here ever runs one.
 
-**Nor does it hold a secret.** The AWS credentials and the ZeroFS encryption password go in a
-`host.env` beside the configuration, which `install` creates empty, with the names of what belongs
-in it, and never writes into again. ZeroFS's rendered config references them rather than carrying
-them, so `config.toml` stays a file that can be read over someone's shoulder.
-
-**Nor does it install packages.** `apt` is one distribution's answer, and the useful half of that
-check is the refusal that names what is absent.
+It holds no secret either — `host.env` is created empty, named in the units, and never written
+into again — and it installs no packages, because `apt` is one distribution's answer and the
+useful half of that check is the refusal that names what is absent.
 
 ### The loops
 
