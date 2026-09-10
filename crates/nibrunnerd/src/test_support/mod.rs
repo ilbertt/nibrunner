@@ -330,9 +330,7 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
             port: 8080,
             tls: None,
         }),
-        tcp: Some(crate::config::TcpListeners {
-            max_extra_ports_per_app: 1,
-        }),
+        forward: Some(crate::config::ForwardBudget { max_ports_per_app: 1 }),
     };
     let state = HostState::shared();
     let (commands, command_log) = mocks::commands_succeeding();

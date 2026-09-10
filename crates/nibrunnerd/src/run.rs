@@ -106,21 +106,20 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             waker: waker_slot.clone(),
         }),
     );
-    let stream_activator =
-        config
-            .proxy
-            .tcp
-            .as_ref()
-            .zip(config.proxy.listen_address)
-            .map(|(_, listen_address)| {
-                crate::adapters::proxy::StreamActivator::new(
-                    state.clone(),
-                    Arc::new(DeferredWaker {
-                        waker: waker_slot.clone(),
-                    }),
-                    listen_address,
-                )
-            });
+    let stream_activator = config
+        .proxy
+        .forward
+        .as_ref()
+        .zip(config.proxy.listen_address)
+        .map(|(_, listen_address)| {
+            crate::adapters::proxy::StreamActivator::new(
+                state.clone(),
+                Arc::new(DeferredWaker {
+                    waker: waker_slot.clone(),
+                }),
+                listen_address,
+            )
+        });
 
     let exports: Arc<dyn crate::domain::exports::store::ExportStore> = Arc::new(
         crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)

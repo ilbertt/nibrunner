@@ -89,14 +89,14 @@ pub struct ZerofsSettings {
 /// Every way in is a section under here, and each is absent or complete: there is no
 /// half-configured listener to warn about at startup because there is no way to write one. What
 /// separates them is whether this host reads the protocol to know whose connection it is — HTTP
-/// carries a hostname to route on, a byte pipe carries nothing — so a `tcp` port is reached at a
-/// port of its own rather than by name.
+/// carries a hostname to route on, a forwarded one carries nothing — so a forwarded port is
+/// reached at a port of its own rather than by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProxyConfig {
     /// Where every listener under here binds. `None` only on a host that offers no way in.
     pub listen_address: Option<IpAddr>,
     pub http: Option<HttpListener>,
-    pub tcp: Option<TcpListeners>,
+    pub forward: Option<ForwardBudget>,
 }
 
 /// The one HTTP listener.
@@ -126,9 +126,9 @@ pub struct TlsMaterial {
 /// more. Absent is a host that offers none, and a document asking one of those for such a port
 /// is refused rather than quietly left unreachable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TcpListeners {
+pub struct ForwardBudget {
     /// How many, beside the HTTP one. Bounded by what a slot reserves past its first port.
-    pub max_extra_ports_per_app: usize,
+    pub max_ports_per_app: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,7 +290,7 @@ mod file {
     pub(super) struct Proxy {
         pub(super) listen_address: Option<String>,
         pub(super) http: Option<Http>,
-        pub(super) tcp: Option<Tcp>,
+        pub(super) forward: Option<Forwarded>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -310,8 +310,8 @@ mod file {
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct Tcp {
-        pub(super) max_extra_ports_per_app: Option<usize>,
+    pub(super) struct Forwarded {
+        pub(super) max_ports_per_app: Option<usize>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -537,26 +537,26 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
             })
         })
         .transpose()?;
-    let tcp = document
-        .tcp
+    let forward = document
+        .forward
         .as_ref()
-        .map(|tcp| {
-            let named = required("proxy.tcp.max_extra_ports_per_app", tcp.max_extra_ports_per_app)?;
-            if named == 0 || named > MAX_PORTS_PER_APP {
+        .map(|forward| {
+            let named = required("proxy.forward.max_ports_per_app", forward.max_ports_per_app)?;
+            if named == 0 || named > MAX_FORWARDED_PORTS {
                 return Err(ConfigError::invalid(
-                    "proxy.tcp.max_extra_ports_per_app",
-                    format!("between 1 and {MAX_PORTS_PER_APP}, which is what a slot reserves beside the HTTP port"),
+                    "proxy.forward.max_ports_per_app",
+                    format!("between 1 and {MAX_FORWARDED_PORTS}, which is what a slot reserves beside the HTTP port"),
                 ));
             }
-            Ok(TcpListeners {
-                max_extra_ports_per_app: named,
+            Ok(ForwardBudget {
+                max_ports_per_app: named,
             })
         })
         .transpose()?;
 
     // Everything under here binds somewhere, and where is said out loud rather than guessed at:
     // the host ports a stream listener takes are laid out in a range anybody could guess.
-    let listen_address = match (&http, &tcp) {
+    let listen_address = match (&http, &forward) {
         (None, None) => None,
         _ => Some(
             required_str("proxy.listen_address", &document.listen_address)?
@@ -569,12 +569,12 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
     Ok(ProxyConfig {
         listen_address,
         http,
-        tcp,
+        forward,
     })
 }
 
 /// What a slot has left over for an app once its HTTP port is taken.
-pub const MAX_PORTS_PER_APP: usize = nft_render::PORTS_PER_SLOT as usize - 1;
+pub const MAX_FORWARDED_PORTS: usize = nft_render::PORTS_PER_SLOT as usize - 1;
 
 fn metrics(
     document: Option<&file::Metrics>,
@@ -1004,7 +1004,7 @@ control_plane_cidrs_v6 = []
     fn a_listener_that_binds_nowhere_is_refused_rather_than_bound_everywhere() {
         let message = refused(&document(&[], "[proxy.http]\nport = 8080\n"));
         assert!(message.contains("proxy.listen_address"), "{message}");
-        let streaming = refused(&document(&[], "[proxy.tcp]\nmax_extra_ports_per_app = 1\n"));
+        let streaming = refused(&document(&[], "[proxy.forward]\nmax_ports_per_app = 1\n"));
         assert!(streaming.contains("proxy.listen_address"), "{streaming}");
         // A host that offers no way in is not asked where it would have bound one.
         assert_eq!(parsed(&whole()).proxy, ProxyConfig::default());
@@ -1062,31 +1062,29 @@ control_plane_cidrs_v6 = []
     #[test]
     fn how_many_ports_an_app_may_name_is_the_hosts_to_say_and_is_bounded_by_the_slot() {
         assert_eq!(
-            with(&bound("[proxy.tcp]\nmax_extra_ports_per_app = 1\n"))
+            with(&bound("[proxy.forward]\nmax_ports_per_app = 1\n"))
                 .proxy
-                .tcp
+                .forward
                 .unwrap()
-                .max_extra_ports_per_app,
+                .max_ports_per_app,
             1
         );
-        for refused_count in ["0", &(MAX_PORTS_PER_APP + 1).to_string()] {
+        for refused_count in ["0", &(MAX_FORWARDED_PORTS + 1).to_string()] {
             let message = refused(&document(
                 &[],
-                &bound(&format!(
-                    "[proxy.tcp]\nmax_extra_ports_per_app = {refused_count}\n"
-                )),
+                &bound(&format!("[proxy.forward]\nmax_ports_per_app = {refused_count}\n")),
             ));
-            assert!(message.contains("proxy.tcp.max_extra_ports_per_app"), "{message}");
+            assert!(message.contains("proxy.forward.max_ports_per_app"), "{message}");
         }
         assert_eq!(
             with(&bound(&format!(
-                "[proxy.tcp]\nmax_extra_ports_per_app = {MAX_PORTS_PER_APP}\n"
+                "[proxy.forward]\nmax_ports_per_app = {MAX_FORWARDED_PORTS}\n"
             )))
             .proxy
-            .tcp
+            .forward
             .unwrap()
-            .max_extra_ports_per_app,
-            MAX_PORTS_PER_APP
+            .max_ports_per_app,
+            MAX_FORWARDED_PORTS
         );
     }
 
@@ -1405,8 +1403,8 @@ key = "/etc/nibrunner/origin.key"
 [proxy.http.tls.client_ca]
 certificate = "/etc/nibrunner/origin-pull-ca.pem"
 
-[proxy.tcp]
-max_extra_ports_per_app = 1
+[proxy.forward]
+max_ports_per_app = 1
 
 [metrics]
 port = 9100
@@ -1429,12 +1427,7 @@ listen_address = "127.0.0.1"
                 }),
             })
         );
-        assert_eq!(
-            config.proxy.tcp,
-            Some(TcpListeners {
-                max_extra_ports_per_app: 1
-            })
-        );
+        assert_eq!(config.proxy.forward, Some(ForwardBudget { max_ports_per_app: 1 }));
         assert_eq!(
             config.metrics,
             Some(MetricsConfig {
