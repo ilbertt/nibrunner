@@ -106,6 +106,16 @@ pub struct HttpsListener {
     pub client_ca: Option<PathBuf>,
 }
 
+/// Where a port that is not the proxy's is put within reach.
+///
+/// A `tcp` port carries a protocol this host does not read, so nothing can route it by name and
+/// it is reached at an address of its own. Absent is a host that offers no such port, and a
+/// document that asks for one on such a host is refused rather than quietly left unreachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngressConfig {
+    pub listen_address: IpAddr,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetricsConfig {
     pub port: u16,
@@ -129,6 +139,7 @@ pub struct HostConfig {
     pub control_plane_cidrs_v6: Vec<String>,
     pub proxy: ProxyConfig,
     pub metrics: Option<MetricsConfig>,
+    pub ingress: Option<IngressConfig>,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
 }
@@ -200,6 +211,7 @@ mod file {
         pub(super) network: Option<Network>,
         pub(super) proxy: Option<Proxy>,
         pub(super) metrics: Option<Metrics>,
+        pub(super) ingress: Option<Ingress>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -292,6 +304,12 @@ mod file {
     #[serde(deny_unknown_fields)]
     pub(super) struct Metrics {
         pub(super) port: Option<u16>,
+        pub(super) listen_address: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Ingress {
         pub(super) listen_address: Option<String>,
     }
 }
@@ -407,6 +425,7 @@ impl HostConfig {
 
         let proxy = proxy(document.proxy.as_ref())?;
         let metrics = metrics(document.metrics.as_ref(), &proxy, &backend)?;
+        let ingress = ingress(document.ingress.as_ref())?;
 
         Ok(Self {
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
@@ -442,6 +461,7 @@ impl HostConfig {
             )?,
             proxy,
             metrics,
+            ingress,
             export_store_url: object_store_url(
                 "exports.store_url",
                 required_str("exports.store_url", &exports.store_url)?,
@@ -468,6 +488,7 @@ impl HostConfig {
             control_plane_cidrs_v4: vec![],
             control_plane_cidrs_v6: vec![],
             proxy: ProxyConfig::default(),
+            ingress: None,
             metrics: None,
             export_store_url: root.join("state/export-store").display().to_string(),
             export_staging_dir: root.join("state/exports"),
@@ -553,6 +574,19 @@ fn metrics(
     Ok(Some(MetricsConfig { port, listen_address }))
 }
 
+fn ingress(document: Option<&file::Ingress>) -> Result<Option<IngressConfig>, ConfigError> {
+    let Some(document) = document else {
+        return Ok(None);
+    };
+    // A stream port is open to whoever can reach the address, and the host ports behind it are
+    // laid out in a range anyone could guess, so where it binds is said out loud.
+    let listen_address = required_str("ingress.listen_address", &document.listen_address)?
+        .trim()
+        .parse()
+        .map_err(|_| ConfigError::invalid("ingress.listen_address", "an IP address to bind"))?;
+    Ok(Some(IngressConfig { listen_address }))
+}
+
 /// Nothing this daemon reads has a value it may leave out: a key that is here is a key the
 /// configuration states, so absence is never a second meaning to work out at startup.
 fn required<T>(field: &str, value: Option<T>) -> Result<T, ConfigError> {
@@ -600,9 +634,7 @@ fn listener(field: &str, port: u16) -> Result<u16, ConfigError> {
             "a port, and 0 is the kernel picking one",
         ));
     }
-    let last_slot = u16::try_from(nft_render::SLOT_COUNT.saturating_sub(1)).unwrap_or(u16::MAX);
-    let base = nft_render::HOST_PORT_BASE;
-    let end = base.saturating_add(last_slot);
+    let (base, end) = nft_render::reserved_port_range();
     if (base..=end).contains(&port) {
         return Err(ConfigError::invalid(
             field,
@@ -916,10 +948,12 @@ control_plane_cidrs_v6 = []
         let message = refused(&document(&[], "[proxy.http]\nport = 21000\n"));
         assert!(message.contains("proxy.http.port"), "{message}");
         assert!(message.contains("21000"), "{message}");
-        assert!(message.contains("21999"), "{message}");
+        assert!(message.contains("28999"), "{message}");
+        // The whole stride is reserved, not just the port each slot's first app answers on.
+        assert!(refused(&document(&[], "[proxy.http]\nport = 23000\n")).contains("proxy.http.port"));
         assert_eq!(
-            with("[proxy.http]\nport = 23000\n").proxy.http.unwrap().port,
-            23000
+            with("[proxy.http]\nport = 29000\n").proxy.http.unwrap().port,
+            29000
         );
     }
 

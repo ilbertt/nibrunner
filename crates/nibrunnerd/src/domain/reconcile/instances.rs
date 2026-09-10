@@ -14,6 +14,30 @@ use crate::domain::report::instance_record::{InstanceRecord, RecordFields};
 use crate::host::Host;
 use crate::ports::{BootRequest, SuspendRequest, VmError, WakeOutcome};
 
+/// The host ports a slot hands this app's extra ports, in the order the document named them.
+///
+/// Index 0 of the slot is the HTTP port, so these start at 1. A port the slot has no room for is
+/// left out rather than folded onto another app's: the document is refused before it reaches here.
+fn record_ports(
+    desired: &DesiredInstance,
+    slot: &nft_render::AppSlot,
+) -> Vec<crate::domain::report::instance_record::RecordPort> {
+    desired
+        .config
+        .ports
+        .iter()
+        .enumerate()
+        .filter_map(|(index, port)| {
+            Some(crate::domain::report::instance_record::RecordPort {
+                name: port.name.clone(),
+                host_port: slot.host_port_at(u32::try_from(index).ok()? + 1)?,
+                guest_port: port.guest_port,
+                ingress: port.ingress,
+            })
+        })
+        .collect()
+}
+
 fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> RecordFields {
     RecordFields {
         app_id: desired.app_id.clone(),
@@ -22,6 +46,7 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
         hostnames: desired.hostnames.clone(),
         host_port: slot.host_port,
         http_port: desired.config.http_port,
+        ports: record_ports(desired, slot),
         guest_ipv4: slot.guest_ipv4.clone(),
         artifact_digest: desired.artifact.digest.clone(),
         health_check: desired.config.health_check.clone(),
@@ -207,6 +232,19 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     attempted.stop_requested = false;
     host.state.put_record(attempted.clone()).await;
     host.state.mark_active(&desired.app_id, now).await;
+
+    // Before anything is fetched or attached: a microVM this host could not have put within
+    // reach is a cost paid for an app nobody could have reached.
+    if let Some(refusal) = crate::domain::reconcile::ingress::ingress_refusal(desired, &host.config) {
+        host.state
+            .update_record(&desired.app_id, |record| {
+                record.state = InstanceState::Failed;
+                record.message = Some(StateMessage::new(refusal.clone()));
+            })
+            .await;
+        tracing::error!(app_id = %desired.app_id, refusal, "instance refused before it was started");
+        return;
+    }
 
     let artifact = crate::adapters::vm::artifacts::ensure_artifact_image(
         &host.artifacts,

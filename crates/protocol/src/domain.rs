@@ -210,16 +210,97 @@ pub struct AppHostname {
     pub kind: AppHostnameKind,
 }
 
+/// How the host puts a guest port within reach of the world.
+///
+/// `tcp` is a byte pipe and nothing more: the host reads none of what crosses it, which is what
+/// lets a protocol this host does not speak — ssh among them — arrive at all. The HTTP port is
+/// not one of these, because the proxy has to read a request to know whose hostname it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortIngress {
+    Tcp,
+}
+
+/// A port an app answers on beyond its HTTP one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstancePort {
+    pub name: PortName,
+    pub guest_port: GuestPort,
+    pub ingress: PortIngress,
+}
+
+/// The HTTP port and this many minus one beside it.
+///
+/// Two is what a served app plus a way in takes, and a way in is enough to reach the rest: an
+/// `ssh -L` carries every other port a tenant could have asked for. Raising this moves nobody's
+/// ports, because a slot reserves `nft_render::PORTS_PER_SLOT` of them whatever this says.
+pub const MAX_INSTANCE_PORTS: usize = 2;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub http_port: HttpPort,
+    /// What this app answers on besides `http_port`. Absent is the shape every document had
+    /// before there was anything to put here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<InstancePort>,
     pub args: TenantArguments,
     pub environment: TenantEnvironment,
     pub resources: InstanceResources,
     pub health_check: HealthCheck,
     pub restart_policy: RestartPolicy,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PortsInvalid {
+    #[error("an app may answer on {MAX_INSTANCE_PORTS} ports at most, and this one names {named}")]
+    TooMany { named: usize },
+    #[error("{name} is named twice, and each port is reached by its own name")]
+    DuplicateName { name: String },
+    #[error("guest port {port} is claimed twice, and one port cannot answer two ways")]
+    DuplicateGuestPort { port: u16 },
+}
+
+impl AppConfig {
+    /// Every port this app answers on, the HTTP one first.
+    ///
+    /// The order is the one the slot's host ports are handed out in, so an app that keeps its
+    /// list keeps its ports across a restart.
+    pub fn all_ports(&self) -> Vec<InstancePort> {
+        let http = InstancePort {
+            name: PortName::parse(HTTP_PORT_NAME).expect("a constant this crate wrote"),
+            guest_port: GuestPort::new(self.http_port.get()).expect("a port is never zero"),
+            ingress: PortIngress::Tcp,
+        };
+        std::iter::once(http).chain(self.ports.iter().cloned()).collect()
+    }
+
+    pub fn validate_ports(&self) -> Result<(), PortsInvalid> {
+        let named = self.ports.len() + 1;
+        if named > MAX_INSTANCE_PORTS {
+            return Err(PortsInvalid::TooMany { named });
+        }
+        let mut names = std::collections::BTreeSet::new();
+        let mut guest_ports = std::collections::BTreeSet::new();
+        for port in self.all_ports() {
+            if !names.insert(port.name.as_str().to_string()) {
+                return Err(PortsInvalid::DuplicateName {
+                    name: port.name.as_str().to_string(),
+                });
+            }
+            if !guest_ports.insert(port.guest_port.get()) {
+                return Err(PortsInvalid::DuplicateGuestPort {
+                    port: port.guest_port.get(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What the HTTP port is called wherever ports are named together.
+pub const HTTP_PORT_NAME: &str = "http";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

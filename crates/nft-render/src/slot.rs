@@ -18,10 +18,28 @@ pub const NBD_SLOT_LIMIT: u32 = NBD_DEVICE_COUNT - 1;
 
 pub const HOST_PORT_BASE: u16 = 21_000;
 
+/// How many host ports a slot reserves, whether or not an app asks for them.
+///
+/// A host port is derived from the slot rather than stored, so this stride is what an app's ports
+/// are *at*: changing it moves every app on the host at once, which is the one thing the slot
+/// table exists to prevent. So it is set wide enough to outlast the number of ports an app is
+/// allowed to declare — `protocol::MAX_INSTANCE_PORTS` today — and raising that limit later costs
+/// nothing. A reserved port is not an open one: nothing binds or forwards a port no document named.
+pub const PORTS_PER_SLOT: u32 = 8;
+
 /// Only the zerofs backend addresses an nbd minor, so a local-file host is not bounded by how
 /// many of those exist. What bounds every host is the range of loopback ports reserved from
-/// `HOST_PORT_BASE`, which is this many and no more.
+/// `HOST_PORT_BASE`, which is this many slots' worth and no more.
 pub const SLOT_COUNT: u32 = 1_000;
+
+/// The host ports no listener of an operator's may take, first and last inclusive.
+pub fn reserved_port_range() -> (u16, u16) {
+    let last = u32::from(HOST_PORT_BASE) + SLOT_COUNT * PORTS_PER_SLOT - 1;
+    (
+        HOST_PORT_BASE,
+        u16::try_from(last).expect("the slot range is laid out to fit a port"),
+    )
+}
 
 pub const GUEST_NETWORK_CIDR: &str = "10.201.0.0/16";
 const GUEST_SUBNET_PREFIX_LENGTH: u8 = 30;
@@ -68,19 +86,34 @@ fn mac_for(address: &Ipv4Address) -> String {
     format!("{MAC_PREFIX}:{octets}")
 }
 
+/// The `index`th host port of a slot, or nothing when the slot reserves no such port.
+pub fn host_port_at(slot: u32, index: u32) -> Option<HostPort> {
+    if index >= PORTS_PER_SLOT {
+        return None;
+    }
+    HostPort::try_from(u32::from(HOST_PORT_BASE) + slot * PORTS_PER_SLOT + index).ok()
+}
+
 pub fn describe_slot(slot: u32, app_id: AppId) -> AppSlot {
     let base = slot * ADDRESSES_PER_SLOT;
     let guest_ipv4 = address_at(base + GUEST_ADDRESS_OFFSET);
     AppSlot {
         slot,
         app_id,
-        host_port: HostPort::try_from(u32::from(HOST_PORT_BASE) + slot).expect("within range"),
+        host_port: host_port_at(slot, 0).expect("the first port of a slot is always in range"),
         host_ipv4: address_at(base + HOST_ADDRESS_OFFSET),
         guest_mac: mac_for(&guest_ipv4),
         guest_ipv4,
         tap_name: format!("{TAP_NAME_PREFIX}{slot}"),
         nbd_device_path: nbd_device_path(slot),
         subnet_prefix_length: GUEST_SUBNET_PREFIX_LENGTH,
+    }
+}
+
+impl AppSlot {
+    /// The `index`th host port this slot reserves. Index 0 is [`AppSlot::host_port`].
+    pub fn host_port_at(&self, index: u32) -> Option<HostPort> {
+        host_port_at(self.slot, index)
     }
 }
 
@@ -115,10 +148,39 @@ mod tests {
         let second = describe_slot(1, app("1"));
         assert_eq!(second.host_ipv4.as_str(), "10.201.0.5");
         assert_eq!(second.guest_ipv4.as_str(), "10.201.0.6");
-        assert_eq!(second.host_port.get(), first.host_port.get() + 1);
+        assert_eq!(
+            second.host_port.get(),
+            first.host_port.get() + u16::try_from(PORTS_PER_SLOT).unwrap(),
+            "a slot's ports are its own, so the next slot starts past the whole stride"
+        );
         assert_eq!(describe_slot(64, app("64")).guest_ipv4.as_str(), "10.201.1.2");
         assert_eq!(export_reader_device_path(), "/dev/nbd63");
         assert_eq!(SLOT_COUNT, 1_000);
+    }
+
+    #[test]
+    fn a_slot_reaches_every_port_it_reserves_and_never_the_next_slots() {
+        let first = describe_slot(0, app("0"));
+        let second = describe_slot(1, app("1"));
+        assert_eq!(first.host_port_at(0), Some(first.host_port));
+        assert_eq!(
+            first.host_port_at(PORTS_PER_SLOT - 1).unwrap().get(),
+            second.host_port.get() - 1
+        );
+        assert_eq!(
+            first.host_port_at(PORTS_PER_SLOT),
+            None,
+            "the port after the last one this slot reserves belongs to the next slot"
+        );
+        assert!(protocol::MAX_INSTANCE_PORTS <= PORTS_PER_SLOT as usize);
+    }
+
+    #[test]
+    fn the_reserved_range_covers_every_port_every_slot_could_hand_out() {
+        let (base, end) = reserved_port_range();
+        assert_eq!(base, HOST_PORT_BASE);
+        let last = describe_slot(SLOT_COUNT - 1, app("last"));
+        assert_eq!(last.host_port_at(PORTS_PER_SLOT - 1).unwrap().get(), end);
     }
 
     #[test]

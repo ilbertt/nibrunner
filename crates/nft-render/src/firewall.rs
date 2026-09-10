@@ -1,4 +1,4 @@
-use protocol::{AppId, HostPort, HttpPort, Ipv4Address};
+use protocol::{AppId, GuestPort, HostPort, Ipv4Address};
 
 use crate::slot::{GUEST_NETWORK_CIDR, TAP_NAME_PREFIX};
 
@@ -35,11 +35,17 @@ pub fn app_counter_name(app_id: &AppId) -> String {
 
 pub const APP_COUNTER_PREFIX: &str = "app_";
 
+/// One host port carried to one guest port. Nothing forwards a port no document named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardedPort {
+    pub host_port: HostPort,
+    pub guest_port: GuestPort,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardedInstance {
     pub app_id: AppId,
-    pub host_port: HostPort,
-    pub http_port: HttpPort,
+    pub ports: Vec<ForwardedPort>,
     pub host_ipv4: Ipv4Address,
     pub guest_ipv4: Ipv4Address,
 }
@@ -119,9 +125,8 @@ fn traffic_chains_v4(state: &FirewallState) -> Vec<String> {
     let mut output_rules = vec!["type filter hook output priority filter; policy accept;".to_string()];
     output_rules.extend(state.instances.iter().map(|instance| {
         format!(
-            "ip saddr 127.0.0.0/8 ip daddr {} tcp dport {} counter name {}",
+            "ip saddr 127.0.0.0/8 ip daddr {} counter name {}",
             instance.guest_ipv4,
-            instance.http_port,
             app_counter_name(&instance.app_id)
         )
     }));
@@ -211,20 +216,25 @@ fn input_chain_v6() -> Vec<String> {
 fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
     let tap = tap_match();
     let mut prerouting = vec!["type nat hook prerouting priority dstnat; policy accept;".to_string()];
-    prerouting.extend(state.instances.iter().map(|instance| {
-        format!(
-            "iifname != {tap} tcp dport {} dnat to {}:{}",
-            instance.host_port, instance.guest_ipv4, instance.http_port
-        )
+    prerouting.extend(state.instances.iter().flat_map(|instance| {
+        let tap = tap.clone();
+        instance.ports.iter().map(move |port| {
+            format!(
+                "iifname != {tap} tcp dport {} dnat to {}:{}",
+                port.host_port, instance.guest_ipv4, port.guest_port
+            )
+        })
     }));
     let mut output = vec![format!(
         "type nat hook output priority {OUTPUT_NAT_PRIORITY}; policy accept;"
     )];
-    output.extend(state.instances.iter().map(|instance| {
-        format!(
-            "ip daddr 127.0.0.1 tcp dport {} dnat to {}:{}",
-            instance.host_port, instance.guest_ipv4, instance.http_port
-        )
+    output.extend(state.instances.iter().flat_map(|instance| {
+        instance.ports.iter().map(move |port| {
+            format!(
+                "ip daddr 127.0.0.1 tcp dport {} dnat to {}:{}",
+                port.host_port, instance.guest_ipv4, port.guest_port
+            )
+        })
     }));
 
     let mut postrouting = vec!["type nat hook postrouting priority srcnat; policy accept;".to_string()];
@@ -250,13 +260,26 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn forwarded(host_port: u16, guest_port: u16) -> ForwardedPort {
+        ForwardedPort {
+            host_port: HostPort::new(host_port).unwrap(),
+            guest_port: GuestPort::new(guest_port).unwrap(),
+        }
+    }
+
     fn instance() -> ForwardedInstance {
         ForwardedInstance {
             app_id: AppId::parse("0198f3aa-1c2d-7e4b-9f11-a0b1c2d3e4f5").unwrap(),
-            host_port: HostPort::new(21_000).unwrap(),
-            http_port: HttpPort::new(3000).unwrap(),
+            ports: vec![forwarded(21_000, 3000)],
             host_ipv4: Ipv4Address::parse("10.201.0.1").unwrap(),
             guest_ipv4: Ipv4Address::parse("10.201.0.2").unwrap(),
+        }
+    }
+
+    fn with_ssh() -> ForwardedInstance {
+        ForwardedInstance {
+            ports: vec![forwarded(21_000, 3000), forwarded(21_001, 22)],
+            ..instance()
         }
     }
 
@@ -378,10 +401,45 @@ mod tests {
     }
 
     #[test]
-    fn nothing_but_the_one_forwarded_port_is_dnatted_to_a_guest() {
+    fn nothing_but_the_forwarded_ports_are_dnatted_to_a_guest() {
         let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
         assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 2);
         assert!(!ruleset.contains("udp dport"));
+    }
+
+    #[test]
+    fn a_second_port_is_carried_to_the_guest_port_it_names_and_no_other() {
+        let ruleset = render_ruleset(&state(vec![with_ssh()], &[], &[]));
+        // Two chains dnat, prerouting for the world and output for the proxy's own loopback.
+        assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 4);
+        for chain in ["iifname != \"nbr*\" tcp dport", "ip daddr 127.0.0.1 tcp dport"] {
+            assert!(
+                ruleset.lines().map(str::trim).any(|l| l.starts_with(chain)
+                    && l.contains("21001")
+                    && l.ends_with("dnat to 10.201.0.2:22")),
+                "{chain} carries nothing to ssh:\n{ruleset}"
+            );
+        }
+        assert!(
+            !ruleset.contains("21002"),
+            "a slot reserves eight ports and forwards only what was named"
+        );
+    }
+
+    #[test]
+    fn an_app_is_counted_on_every_port_rather_than_only_its_http_one() {
+        let ruleset = render_ruleset(&state(vec![with_ssh()], &[], &[]));
+        let loopback: Vec<&str> = ruleset
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains("ip saddr 127.0.0.0/8") && l.contains("counter name"))
+            .collect();
+        assert_eq!(loopback.len(), 1, "one counter for the app, not one per port");
+        assert!(
+            !loopback[0].contains("dport"),
+            "a counter that named a port would read an ssh session as an app gone quiet: {}",
+            loopback[0]
+        );
     }
 
     #[test]

@@ -79,6 +79,29 @@ below into `paths.desired_state_file`. Everything past that is the daemon conver
 `on-request` brings it up for the first deploy and lets it sleep between visitors, `stopped` takes
 it down and leaves the app reachable enough to say so.
 
+### A port beside the HTTP one
+
+`httpPort` is what the proxy sends this app's hostnames to. An app may name one more, and one more
+is the limit — an `ssh -L` carries every other port a tenant could have wanted:
+
+```json
+"config": {
+  "httpPort": 3000,
+  "ports": [{ "name": "ssh", "guestPort": 22, "ingress": "tcp" }],
+  ...
+}
+```
+
+A `tcp` port is a byte pipe: the host reads none of what crosses it, which is what lets a protocol
+this daemon does not speak arrive at all. It is reached at `<ingress.listen_address>:<host port>`
+rather than by name, because ssh sends no hostname to route on. While the app sleeps, the first
+connection wakes it and is spliced through once it answers, so a client sees a slow banner rather
+than a closed socket.
+
+The host must name an `[ingress]` section to bind such a port, and a proxy to serve a hostname.
+A document that asks for either from a host configured for neither is refused by name and the
+instance is reported `failed` saying so.
+
 ## Testing
 
 ```bash

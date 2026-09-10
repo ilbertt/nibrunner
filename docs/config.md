@@ -127,6 +127,24 @@ cannot reach it yourself without one, so turn it on after the plain path is prov
 A connection whose handshake named one app and whose request names another gets a **421**. That is
 the only thing standing between two tenants that share a certificate.
 
+## Ports beside the proxy's
+
+| Section | Key | What |
+| --- | --- | --- |
+| `[ingress]` | `listen_address` | an IP address to bind stream ports on |
+
+Optional, like `[metrics]`. An app may name one port beside its HTTP one — `ssh`, in practice —
+and that port carries a protocol this host does not read. Nothing can route it by name, so it is
+reached at an address and a port of its own rather than through the proxy.
+
+**A document that asks for such a port on a host with no `[ingress]` is refused by name**, and the
+instance is reported `failed` saying so, rather than started somewhere nothing could reach it.
+The same goes for an app that answers for a hostname on a host that runs no proxy.
+
+**Where it binds is said out loud** because the host ports behind it are laid out in a range
+anybody could guess. `127.0.0.1` reaches nothing from outside; a stream port meant for the world
+needs the address the world arrives on.
+
 ## Metrics
 
 | Key | Type | Must be |
@@ -142,9 +160,11 @@ becoming a startup failure over there.
 
 ## Ports, across every section
 
-**21000–21999 is refused everywhere.** That range is what a slot takes for an app's loopback port,
-and a listener inside it would be taken out from under you by the next app deployed. `0` is refused
-separately: that is the kernel picking one, and a host should say what it serves on.
+**21000–28999 is refused everywhere.** Each slot reserves eight consecutive ports from 21000, and
+a listener inside that range would be taken out from under you by the next app deployed. A slot
+hands out only as many as the document asked for — one, or two — and the rest are reserve, so that
+raising the limit later moves nobody's ports. `0` is refused separately: that is the kernel picking
+one, and a host should say what it serves on.
 
 `proxy.https.port` must also differ from `proxy.http.port`, and `metrics.port` from both.
 

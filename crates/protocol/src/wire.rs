@@ -86,6 +86,19 @@ macro_rules! validated_string {
     };
 }
 
+pub const MAX_PORT_NAME_LENGTH: usize = 16;
+
+pub fn is_port_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    !value.is_empty()
+        && value.len() <= MAX_PORT_NAME_LENGTH
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 const MAX_IDENTIFIER_LENGTH: usize = 63;
 
 pub fn is_identifier(value: &str) -> bool {
@@ -123,6 +136,13 @@ fn is_sha256_hex(value: &str) -> bool {
 }
 
 validated_string!(Sha256Digest, "digest", "a lowercase hex sha-256", is_sha256_hex);
+
+validated_string!(
+    PortName,
+    "port name",
+    "lowercase letters, digits and dashes, starting with a letter",
+    is_port_name
+);
 
 const MAX_TIMESTAMP_LENGTH: usize = 35;
 
@@ -369,6 +389,7 @@ macro_rules! port {
 
 port!(HttpPort);
 port!(HostPort);
+port!(GuestPort);
 
 pub const DEFAULT_HTTP_PORT: HttpPort = HttpPort(3000);
 

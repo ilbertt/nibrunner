@@ -106,6 +106,15 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             waker: waker_slot.clone(),
         }),
     );
+    let stream_activator = config.ingress.as_ref().map(|ingress| {
+        crate::adapters::proxy::StreamActivator::new(
+            state.clone(),
+            Arc::new(DeferredWaker {
+                waker: waker_slot.clone(),
+            }),
+            ingress.listen_address,
+        )
+    });
 
     let exports: Arc<dyn crate::domain::exports::store::ExportStore> = Arc::new(
         crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)
@@ -136,6 +145,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         firewall: Arc::new(HostFirewall::new(commands)),
         router: Router::new(),
         activator,
+        stream_activator,
         config,
     });
     let _ = waker_slot.set(AppWaker::new(host.clone()));
