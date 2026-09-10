@@ -7,6 +7,7 @@
 //! epoch only after a window of acknowledging writes it then discards, and the thing that holds
 //! that lock is a single-instance unit. So this writes the unit and never becomes it.
 
+pub mod kernel;
 pub mod prerequisites;
 pub mod render;
 pub mod service_user;
@@ -58,6 +59,13 @@ pub async fn run(config: &HostConfig, config_file: &Path, force: bool) -> Result
 
     let mut laid = Laid { steps: Vec::new() };
     let environment_file = environment_file(config_file);
+
+    // Written before they are applied, so a host that has to reboot to finish reboots into the
+    // settings rather than back out of them.
+    for (path, rendered) in kernel::files(config, config_file) {
+        write_generated(&path, &rendered, force, &mut laid)?;
+    }
+    kernel::apply(config, &mut laid)?;
 
     for directory in directories(config) {
         make_directory(&directory, DIRECTORY_MODE).map_err(|error| {
@@ -158,6 +166,9 @@ fn directories(config: &HostConfig) -> Vec<PathBuf> {
     directories
 }
 
+/// What this command cannot put right: a machine without hardware virtualisation, a tool it does
+/// not install, a guest image nobody laid down. The kernel settings used to be in here and are not
+/// any more — those it sets.
 fn refuse_unready(config: &HostConfig) -> Result<(), InstallError> {
     let checks = prerequisites::check(config);
     let missing: Vec<String> = checks

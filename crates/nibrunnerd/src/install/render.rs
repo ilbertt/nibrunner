@@ -26,7 +26,7 @@ pub const REGION_VARIABLE: &str = "AWS_REGION";
 const CHECKPOINT_CACHE_DISK_GB: &str = "4.0";
 const CHECKPOINT_CACHE_MEMORY_GB: &str = "0.25";
 
-fn header(purpose: &str, config_file: &Path) -> String {
+pub(super) fn header(purpose: &str, config_file: &Path) -> String {
     format!(
         "{GENERATED_MARKER}.\n\
          # {purpose}\n\

@@ -26,26 +26,16 @@ impl Check {
 /// Every check, in one pass. All of them run even after one fails: a host missing three things
 /// should be told three times, not three times over.
 pub fn check(config: &HostConfig) -> Vec<Check> {
-    let mut checks = vec![
-        Check::new(
-            "/dev/kvm",
-            Path::new("/dev/kvm").exists(),
-            "a machine with hardware virtualisation; a microVM cannot be booted without it",
-        ),
-        Check::new(
-            "ip_forward",
-            reads_one("/proc/sys/net/ipv4/ip_forward"),
-            "echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-nibrunner.conf && sysctl -w net.ipv4.ip_forward=1",
-        ),
-        Check::new(
-            "nf_conntrack",
-            Path::new("/proc/sys/net/netfilter/nf_conntrack_max").exists(),
-            "echo nf_conntrack > /etc/modules-load.d/nibrunner.conf && modprobe nf_conntrack",
-        ),
-    ];
+    let mut checks = vec![Check::new(
+        "/dev/kvm",
+        Path::new("/dev/kvm").exists(),
+        "a machine with hardware virtualisation; a microVM cannot be booted without it",
+    )];
     for tool in ["nft", "mke2fs"] {
         checks.push(binary(tool, "install the nftables and e2fsprogs packages"));
     }
+    // What sets this host's kernel settings, which `install` does rather than asks for.
+    checks.push(binary("modprobe", "install the kmod package"));
 
     match &config.volumes {
         VolumeBackend::LocalFile => {}
@@ -68,14 +58,6 @@ pub fn check(config: &HostConfig) -> Vec<Check> {
             ] {
                 checks.push(binary(tool, remedy));
             }
-            // Slot N takes /dev/nbdN and the export reader holds the last of them, so a host whose
-            // module allocated fewer minors than that cannot read an export however it is asked.
-            let reader = nft_render::export_reader_device_path();
-            checks.push(Check::new(
-                reader.clone(),
-                Path::new(&reader).exists(),
-                "echo 'options nbd nbds_max=1024' > /etc/modprobe.d/nbd.conf && modprobe -r nbd; modprobe nbd nbds_max=1024",
-            ));
         }
     }
 
@@ -101,10 +83,6 @@ fn binary(name: &str, remedy: &str) -> Check {
     Check::new(name, on_path(name).is_some(), remedy)
 }
 
-fn reads_one(path: &str) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|text| text.trim() == "1")
-}
-
 pub fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -126,17 +104,6 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_setting_is_only_met_when_it_reads_exactly_one() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("flag");
-        std::fs::write(&path, "1\n").unwrap();
-        assert!(reads_one(&path.display().to_string()));
-        std::fs::write(&path, "0\n").unwrap();
-        assert!(!reads_one(&path.display().to_string()));
-        assert!(!reads_one(&directory.path().join("absent").display().to_string()));
-    }
 
     #[test]
     fn a_tool_is_found_by_walking_the_path_it_would_actually_be_run_from() {
