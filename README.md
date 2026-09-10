@@ -86,24 +86,30 @@ it down and leaves the app reachable enough to say so.
 
 ### A port beside the HTTP one
 
-`httpPort` is what the proxy sends this app's hostnames to. An app may name one more, and one more
-is the limit — an `ssh -L` carries every other port a tenant could have wanted:
+`httpPort` is what the proxy sends this app's hostnames to. An app may name ports beside it:
 
 ```json
 "config": {
   "httpPort": 3000,
-  "ports": [{ "name": "ssh", "guestPort": 22, "ingress": "tcp" }],
+  "ports": [
+    { "name": "ssh", "guestPort": 22 },
+    { "name": "dns", "guestPort": 53 }
+  ],
   ...
 }
 ```
 
-A `tcp` port is a byte pipe: the host reads none of what crosses it, which is what lets a protocol
-this daemon does not speak arrive at all. It is reached at `<proxy.raw.listen_address>:<host port>`
-rather than by name, because ssh sends no hostname to route on — and that address is the one a
-relay reaches this host on, not the world: a port a tenant publishes to its users is published by
-definition, and that is a machine of its own. While the app sleeps, the first
-connection wakes it and is spliced through once it answers, so a client sees a slow banner rather
-than a closed socket.
+A port is a port: it carries whatever arrives on it, tcp or udp, the way a firewall rule for one
+would. The host reads none of what crosses it, which is what lets a protocol this daemon does not
+speak arrive at all. Such a port is reached at `<proxy.raw.listen_address>:<host
+port>` rather than by name, because ssh sends no hostname to route on — and that address is the
+one a relay reaches this host on, not the world: a port a tenant publishes to its users is
+published by definition, and that is a machine of its own.
+
+While the app sleeps, the first arrival wakes it, whichever way it came. A connection is accepted
+and held, then spliced once the guest answers, so a client sees a slow banner rather than a closed
+socket. A
+datagram has no connection to hold, so the datagram itself is kept and delivered after the wake.
 
 The host must name a `[proxy.raw]` section to bind such a port, and a `[proxy.http]` one to
 serve a hostname. A document that asks for what this host does not serve is refused by name and

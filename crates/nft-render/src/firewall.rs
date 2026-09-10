@@ -40,6 +40,19 @@ pub const APP_COUNTER_PREFIX: &str = "app_";
 pub struct ForwardedPort {
     pub host_port: HostPort,
     pub guest_port: GuestPort,
+    /// A raw port carries whatever arrives, tcp or udp. The HTTP port is the proxy's and carries
+    /// tcp, because that is what the proxy speaks.
+    pub raw: bool,
+}
+
+impl ForwardedPort {
+    fn dport_match(&self) -> &'static str {
+        if self.raw {
+            "meta l4proto { tcp, udp } th dport"
+        } else {
+            "tcp dport"
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,8 +233,11 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
         let tap = tap.clone();
         instance.ports.iter().map(move |port| {
             format!(
-                "iifname != {tap} tcp dport {} dnat to {}:{}",
-                port.host_port, instance.guest_ipv4, port.guest_port
+                "iifname != {tap} {} {} dnat to {}:{}",
+                port.dport_match(),
+                port.host_port,
+                instance.guest_ipv4,
+                port.guest_port
             )
         })
     }));
@@ -231,8 +247,11 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
     output.extend(state.instances.iter().flat_map(|instance| {
         instance.ports.iter().map(move |port| {
             format!(
-                "ip daddr 127.0.0.1 tcp dport {} dnat to {}:{}",
-                port.host_port, instance.guest_ipv4, port.guest_port
+                "ip daddr 127.0.0.1 {} {} dnat to {}:{}",
+                port.dport_match(),
+                port.host_port,
+                instance.guest_ipv4,
+                port.guest_port
             )
         })
     }));
@@ -264,6 +283,14 @@ mod tests {
         ForwardedPort {
             host_port: HostPort::new(host_port).unwrap(),
             guest_port: GuestPort::new(guest_port).unwrap(),
+            raw: false,
+        }
+    }
+
+    fn raw(host_port: u16, guest_port: u16) -> ForwardedPort {
+        ForwardedPort {
+            raw: true,
+            ..forwarded(host_port, guest_port)
         }
     }
 
@@ -278,7 +305,7 @@ mod tests {
 
     fn with_ssh() -> ForwardedInstance {
         ForwardedInstance {
-            ports: vec![forwarded(21_000, 3000), forwarded(21_001, 22)],
+            ports: vec![forwarded(21_000, 3000), raw(21_001, 22)],
             ..instance()
         }
     }
@@ -404,20 +431,30 @@ mod tests {
     fn nothing_but_the_forwarded_ports_are_dnatted_to_a_guest() {
         let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
         assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 2);
-        assert!(!ruleset.contains("udp dport"));
+        assert!(
+            !ruleset.contains("udp"),
+            "the HTTP port is the proxy's, and the proxy speaks tcp"
+        );
     }
 
     #[test]
-    fn a_second_port_is_carried_to_the_guest_port_it_names_and_no_other() {
+    fn a_raw_port_is_carried_whatever_arrives_on_it_and_the_http_port_is_not() {
         let ruleset = render_ruleset(&state(vec![with_ssh()], &[], &[]));
         // Two chains dnat, prerouting for the world and output for the proxy's own loopback.
         assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 4);
-        for chain in ["iifname != \"nbr*\" tcp dport", "ip daddr 127.0.0.1 tcp dport"] {
+        for chain in ["iifname != \"nbr*\"", "ip daddr 127.0.0.1"] {
             assert!(
                 ruleset.lines().map(str::trim).any(|l| l.starts_with(chain)
-                    && l.contains("21001")
+                    && l.contains("meta l4proto { tcp, udp } th dport 21001")
                     && l.ends_with("dnat to 10.201.0.2:22")),
-                "{chain} carries nothing to ssh:\n{ruleset}"
+                "{chain} does not carry both transports to ssh:\n{ruleset}"
+            );
+            assert!(
+                ruleset.lines().map(str::trim).any(|l| l.starts_with(chain)
+                    && l.contains("tcp dport 21000")
+                    && !l.contains("udp")
+                    && l.ends_with("dnat to 10.201.0.2:3000")),
+                "{chain} carries the HTTP port on something other than tcp alone:\n{ruleset}"
             );
         }
         assert!(

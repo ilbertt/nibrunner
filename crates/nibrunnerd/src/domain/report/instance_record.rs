@@ -1,6 +1,6 @@
 use protocol::{
     AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort, InstanceResources,
-    InstanceState, Ipv4Address, PortIngress, PortName, Sha256Digest, StateMessage, Timestamp, VolumeId,
+    InstanceState, Ipv4Address, PortName, Sha256Digest, StateMessage, Timestamp, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,6 @@ pub struct RecordPort {
     pub name: PortName,
     pub host_port: HostPort,
     pub guest_port: GuestPort,
-    pub ingress: PortIngress,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

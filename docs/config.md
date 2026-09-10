@@ -142,9 +142,9 @@ second.
 
 **`[proxy.raw]` is the way in for a protocol this host does not read** — ssh, DNS, WireGuard.
 Such a port carries bytes and nothing else, so nothing can route it by name and it is reached at
-a port of its own. Which protocol carries each, `tcp` or `udp`, is the document's to name, port by
-port; `max_ports_per_guest` is how many, bounded by what a slot reserves past the HTTP port, which
-is seven. Absent carries nothing raw.
+a port of its own. It carries whatever arrives, tcp or udp — a port is a port, and the relay in
+front of this host forwards both for every one in its range. `max_ports_per_guest` is how many,
+bounded by what a slot reserves past the HTTP port, which is seven. Absent carries nothing raw.
 
 **A raw port is never published from this host.** An address a tenant hands to its own users is
 published by definition, and publishing this host's would put every guest on it in front of one

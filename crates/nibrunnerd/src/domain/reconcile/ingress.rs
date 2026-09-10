@@ -41,13 +41,12 @@ mod tests {
     use super::*;
     use crate::config::{HttpListener, ProxyConfig, RawPorts};
     use crate::test_support::*;
-    use protocol::{GuestPort, InstancePort, PortIngress, PortName};
+    use protocol::{GuestPort, InstancePort, PortName};
 
     fn ssh_port() -> InstancePort {
         InstancePort {
             name: PortName::parse("ssh").unwrap(),
             guest_port: GuestPort::new(22).unwrap(),
-            ingress: PortIngress::Tcp,
         }
     }
 
@@ -152,7 +151,6 @@ mod tests {
             instance.config.ports = vec![InstancePort {
                 name: PortName::parse("again").unwrap(),
                 guest_port: GuestPort::new(instance.config.http_port.get()).unwrap(),
-                ingress: PortIngress::Tcp,
             }];
         });
         let refusal = ingress_refusal(&shadowing_http, &config_with(and_one_more()))

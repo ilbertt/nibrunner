@@ -32,7 +32,6 @@ fn record_ports(
                 name: port.name.clone(),
                 host_port: slot.host_port_at(u32::try_from(index).ok()? + 1)?,
                 guest_port: port.guest_port,
-                ingress: port.ingress,
             })
         })
         .collect()

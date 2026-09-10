@@ -210,24 +210,16 @@ pub struct AppHostname {
     pub kind: AppHostnameKind,
 }
 
-/// How the host puts a guest port within reach of the world.
+/// A port a guest answers on beside its HTTP one, carried to it unread.
 ///
-/// `tcp` is a byte pipe and nothing more: the host reads none of what crosses it, which is what
-/// lets a protocol this host does not speak — ssh among them — arrive at all. The HTTP port is
-/// not one of these, because the proxy has to read a request to know whose hostname it names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PortIngress {
-    Tcp,
-}
-
-/// A port an app answers on beyond its HTTP one.
+/// It carries whatever arrives, tcp or udp: a port is a port, the relay in front of a host
+/// forwards both for every one in its range, and a guest that listens on only one of them
+/// answers the other with a port-unreachable the way any host would.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstancePort {
     pub name: PortName,
     pub guest_port: GuestPort,
-    pub ingress: PortIngress,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -264,7 +256,6 @@ impl AppConfig {
         let http = InstancePort {
             name: PortName::parse(HTTP_PORT_NAME).expect("a constant this crate wrote"),
             guest_port: GuestPort::new(self.http_port.get()).expect("a port is never zero"),
-            ingress: PortIngress::Tcp,
         };
         std::iter::once(http).chain(self.ports.iter().cloned()).collect()
     }
