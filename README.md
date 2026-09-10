@@ -110,38 +110,15 @@ nobody set are the same absence. The same goes for the values — a relative pat
 choke on, an `s3://` URL with no bucket, or a proxy port that an app slot is going to want are all
 refused while an operator is still watching rather than on the pass that first needed them.
 
-[docs/config.md](docs/config.md) is the whole of it, key by key, with the rule behind each
-refusal. `deploy/config.toml` is the smallest file this daemon accepts, and
-`deploy/config.zerofs.toml` one filled in. What each key is:
+What a host either has or does not is a whole *section* — `[volumes.zerofs]`, `[proxy.http]`,
+`[proxy.https]`, `[proxy.https.client_ca]`, `[metrics]` — and a section that is there is filled in
+whole. That is why there is no half-configured listener to warn about at startup: there is no way
+to write one.
 
-| Key | What it is |
-| --- | --- |
-| `paths.state_dir` | Where everything this host keeps lives, `state.db` included |
-| `paths.runtime_dir` | Sockets and pidfiles that outlive the daemon |
-| `paths.snapshot_dir` | Where a sleeping app's memory goes |
-| `paths.guest_image_dir` | `vmlinux`, `rootfs.ext4`, `manifest.json` |
-| `paths.desired_state_file` | The document it watches |
-| `paths.api_socket` | Where `nibrunnerctl` reaches it |
-| `paths.versions_file` | What the installer stamped the versions it laid down into |
-| `artifacts.store_url` | A directory, or `s3://bucket/prefix` |
-| `volumes.backend` | `local-file` or `zerofs` |
-| `volumes.storage_prefix` | Prepended to every key this host writes |
-| `exports.store_url` | Where a finished bundle goes |
-| `exports.staging_dir` | Where one is assembled, and removed after |
-| `network.control_plane_cidrs_v4` | Ranges a guest is denied by name |
-| `network.control_plane_cidrs_v6` | The same, where no blanket rule covers them |
-
-Those are every host's. The rest are sections a host either has or does not, and a section that is
-there is filled in whole — which is why there is no half-configured listener to warn about at
-startup:
-
-| Section | Keys | What it is |
-| --- | --- | --- |
-| `[volumes.zerofs]` | `binary`, `config_file`, `mount_path`, `nbd_socket_path`, `ninep_socket_path`, `rpc_socket_path`, `storage_url`, `cache_dir`, `cache_disk_gib`, `cache_memory_gib`, `checkpoint_runtime_dir`, `checkpoint_config_file`, `checkpoint_cache_dir` | Required by `volumes.backend = "zerofs"`, and refused under any other. `deploy/config.zerofs.toml` is one filled in |
-| `[proxy.http]` | `port` | Serve plain HTTP on this port |
-| `[proxy.https]` | `port`, `certificate`, `key` | Serve TLS on this port with this material |
-| `[proxy.https.client_ca]` | `certificate` | A PEM trust pool. Naming one makes a caller's own certificate the price of the handshake |
-| `[metrics]` | `port`, `listen_address` | Serve the Prometheus page here |
+**[docs/config.md](docs/config.md) is every key, its type, and the rule behind each refusal.**
+`deploy/config.toml` is the smallest file this daemon accepts and `deploy/config.zerofs.toml` one
+filled in; the authority for both is `mod file` in `crates/nibrunnerd/src/config.rs`, where the
+keys are declared with `deny_unknown_fields` and nothing else can disagree with them.
 
 ### Laying a host out
 
