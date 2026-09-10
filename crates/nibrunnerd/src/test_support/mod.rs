@@ -17,6 +17,30 @@ pub const HOST_STORAGE_PREFIX: &str = "filesystems/host-1";
 pub const ARTIFACT_BYTES: &[u8] = b"#!/usr/bin/env fake-binary\n";
 pub const ARTIFACT_DIGEST: &str = "8eacc8ea7f20363ff4eeb79bc80edf5926effee2e7e13207a198ce341a0326f5";
 
+/// A zerofs host laid out the way `nibrunnerd install` lays one out, so a test that is about one
+/// field says only that field.
+pub fn zerofs_settings(
+    with: impl FnOnce(&mut crate::config::ZerofsSettings),
+) -> crate::config::ZerofsSettings {
+    let mut settings = crate::config::ZerofsSettings {
+        binary: "/opt/nibrunner/bin/zerofs".into(),
+        config_file: "/etc/zerofs/config.toml".into(),
+        mount_path: "/mnt/zerofs".into(),
+        nbd_socket_path: "/run/zerofs/nbd.sock".into(),
+        ninep_socket_path: "/run/zerofs/9p.sock".into(),
+        rpc_socket_path: "/run/zerofs/rpc.sock".into(),
+        storage_url: "s3://filesystems/host-1".to_string(),
+        cache_dir: "/data/zerofs".into(),
+        cache_disk_mib: 70 * 1024,
+        cache_memory_mib: 2 * 1024,
+        checkpoint_runtime_dir: "/run/zerofs-checkpoint".into(),
+        checkpoint_config_file: "/etc/zerofs/checkpoint.toml".into(),
+        checkpoint_cache_dir: "/data/zerofs-checkpoint".into(),
+    };
+    with(&mut settings);
+    settings
+}
+
 pub fn app_id() -> AppId {
     AppId::parse("app-1").unwrap()
 }

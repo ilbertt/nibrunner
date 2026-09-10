@@ -8,9 +8,9 @@ use protocol::{CheckpointId, VolumeId};
 use crate::adapters::volumes::nbd::{NbdDevices, NbdTarget};
 use crate::adapters::volumes::VolumeError;
 
-const NBD_SOCKET_FILENAME: &str = "nbd.sock";
+pub const NBD_SOCKET_FILENAME: &str = "nbd.sock";
 
-const CHECKPOINT_VARIABLE: &str = "NIBRUN_CHECKPOINT";
+pub const CHECKPOINT_VARIABLE: &str = "NIBRUN_CHECKPOINT";
 
 // A server opens by reading its checkpoint out of the object store, so how long it takes to get
 // as far as its socket is a property of the store and of what else is asking of it right now, not

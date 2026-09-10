@@ -1,0 +1,66 @@
+# A host whose volumes outlive it: blocks in an object store, reached from the guest over NBD.
+# `nibrunnerd install` reads this and lays the rest of the host out from it — ZeroFS's own two
+# config files and the two units that supervise it are rendered from the values below rather than
+# written beside them.
+#
+# Nothing here is a secret. The AWS credentials and the ZeroFS encryption password live in
+# host.env beside this file, which `install` creates empty and never writes into.
+
+[paths]
+state_dir = "/var/lib/nibrunner"
+runtime_dir = "/run/nibrunner"
+snapshot_dir = "/data/nibrunner-vm"
+guest_image_dir = "/var/lib/nibrunner/guest"
+desired_state_file = "/var/lib/nibrunner/desired.json"
+api_socket = "/run/nibrunner/nibrunner.sock"
+versions_file = "/var/lib/nibrunner/versions.json"
+
+[artifacts]
+store_url = "s3://nibrunner-artifacts-eu-west-2-123456789012/artifacts"
+
+[volumes]
+backend = "zerofs"
+storage_prefix = "hetzner-1"
+
+[volumes.zerofs]
+binary = "/opt/nibrunner/bin/zerofs"
+config_file = "/etc/zerofs/config.toml"
+mount_path = "/mnt/zerofs"
+nbd_socket_path = "/run/zerofs/nbd.sock"
+ninep_socket_path = "/run/zerofs/9p.sock"
+rpc_socket_path = "/run/zerofs/rpc.sock"
+# One prefix is one host, not one app: every tenant placed here shares it, and deleting it
+# destroys all of them.
+storage_url = "s3://nibrunner-filesystems-eu-west-2-123456789012/hetzner-1"
+cache_dir = "/data/zerofs"
+# Whole gibibytes, and the disk one has to be sized against the disk it is on: this is a cache of
+# the object store, and the snapshots in paths.snapshot_dir share the same disk with it.
+cache_disk_gib = 200
+cache_memory_gib = 2
+checkpoint_runtime_dir = "/run/zerofs-checkpoint"
+checkpoint_config_file = "/etc/zerofs/checkpoint.toml"
+checkpoint_cache_dir = "/data/zerofs-checkpoint"
+
+[exports]
+store_url = "s3://nibrunner-exports-eu-west-2-123456789012/exports"
+staging_dir = "/var/lib/nibrunner/exports"
+
+[network]
+control_plane_cidrs_v4 = []
+control_plane_cidrs_v6 = []
+
+# One certificate covers every app on this host, so it is a wildcard one. Naming a client_ca makes
+# a caller's own certificate the price of the handshake, which is what keeps an origin whose IP is
+# discoverable reachable only through the edge.
+[proxy.https]
+port = 443
+certificate = "/etc/nibrunner/tls/origin.crt"
+key = "/etc/nibrunner/tls/origin.key"
+
+[proxy.https.client_ca]
+certificate = "/etc/nibrunner/tls/origin-pull-ca.pem"
+
+# Not 9091: ZeroFS holds that one on this host, and a second binding is a startup failure.
+[metrics]
+port = 9100
+listen_address = "127.0.0.1"

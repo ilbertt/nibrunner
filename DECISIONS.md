@@ -43,6 +43,16 @@ and it means a host that loses the control plane goes on converging on the last 
 given rather than on nothing. `crates/nibrunnerd/src/control.rs` holds the client and the poll;
 the session renewal, the report upload and the filesystem-query channel are the part still to write.
 
+**ZeroFS is fetched by `nibrunnerd install`, not carried inside the binary.** The hypervisor is
+carried: `build.rs` pulls a pinned Firecracker tarball, checks its digest and `include_bytes!`es
+the member, and the daemon writes it out at startup. Doing the same for ZeroFS would work and is
+deliberately not done. It is AGPL where Firecracker is Apache-2.0, and the argument below — that
+the licence question does not arise because nothing here is derived from it and the interface is a
+command line — gets weaker the more the two are fused into one distributable file. Its release is
+also 130 MB against this binary's 22, and embedding it would couple a ZeroFS security fix to a
+nibrunner release. So the installer fetches it, pins it, verifies it, and stamps the version it
+laid down into `versions.json`; what version a host runs stays a property of the host.
+
 **ZeroFS is spawned, not linked.** The brief said not to link it: AGPL, and a private server
 API. Reading nibrun's own agent shows it does not link it either. ZeroFS is a long-running service
 the agent never starts and only ever talks to over its admin CLI — `zerofs flush`, `zerofs
