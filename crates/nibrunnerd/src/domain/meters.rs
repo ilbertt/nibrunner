@@ -64,8 +64,9 @@ pub fn metered_after(
                 meter.idle_ms += elapsed_ms;
             }
             if let Some(after) = traffic_after.get(app_id) {
-                meter.rx_bytes +=
-                    advanced(traffic_before.get(app_id).map(|before| before.bytes), after.bytes);
+                let before = traffic_before.get(app_id);
+                meter.rx_bytes += advanced(before.map(|before| before.received.bytes), after.received.bytes);
+                meter.tx_bytes += advanced(before.map(|before| before.sent.bytes), after.sent.bytes);
             }
             (app_id.clone(), meter)
         })
@@ -98,6 +99,7 @@ pub fn cpu_metered_after(
 mod tests {
     use super::*;
     use crate::test_support::*;
+    use nft_render::Counted;
     use protocol::INSTANCE_STATES;
 
     const TICK_MS: u64 = 5_000;
@@ -111,8 +113,20 @@ mod tests {
         }
     }
 
-    fn traffic(bytes: u64) -> BTreeMap<AppId, AppTraffic> {
-        BTreeMap::from([(app_id(), AppTraffic { packets: 1, bytes })])
+    fn traffic(received: u64, sent: u64) -> BTreeMap<AppId, AppTraffic> {
+        BTreeMap::from([(
+            app_id(),
+            AppTraffic {
+                received: Counted {
+                    packets: 1,
+                    bytes: received,
+                },
+                sent: Counted {
+                    packets: 1,
+                    bytes: sent,
+                },
+            },
+        )])
     }
 
     fn records(state: InstanceState) -> BTreeMap<AppId, InstanceRecord> {
@@ -209,18 +223,20 @@ mod tests {
             UsageMeters {
                 running_ms: 60_000,
                 rx_bytes: 4_096,
+                tx_bytes: 8_192,
                 ..UsageMeters::default()
             },
         )]);
         let after = metered_after(
             &before,
             &records(InstanceState::Running),
-            &traffic(1_000),
-            &traffic(1_500),
+            &traffic(1_000, 20_000),
+            &traffic(1_500, 90_000),
             TICK_MS,
         );
         assert_eq!(held(&after).running_ms, 60_000 + TICK_MS);
         assert_eq!(held(&after).rx_bytes, 4_096 + 500);
+        assert_eq!(held(&after).tx_bytes, 8_192 + 70_000);
     }
 
     #[test]
@@ -235,7 +251,7 @@ mod tests {
         let after = metered_after(
             &before,
             &records(InstanceState::Running),
-            &traffic(1_000),
+            &traffic(1_000, 1_000),
             &BTreeMap::new(),
             TICK_MS,
         );
@@ -255,7 +271,7 @@ mod tests {
             &before,
             &BTreeMap::new(),
             &BTreeMap::new(),
-            &traffic(9_999),
+            &traffic(9_999, 9_999),
             TICK_MS,
         );
         assert!(after.is_empty());

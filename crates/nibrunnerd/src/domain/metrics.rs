@@ -251,15 +251,17 @@ pub fn render(report: &HostReportedState, proxy: &ProxyMetrics) -> String {
 
     page.metric(
         "nibrunner_instance_network_bytes_total",
-        "What has reached an app's guest. Nothing counts what it sent back yet.",
+        "What has crossed an app's tap, by which way it went. Only what was let out is counted as sent.",
         "counter",
     );
     for instance in &report.instances {
-        page.value(
-            "nibrunner_instance_network_bytes_total",
-            &[("app", instance.app_id.as_str()), ("direction", "rx")],
-            instance.meters.rx_bytes,
-        );
+        for (direction, bytes) in [("rx", instance.meters.rx_bytes), ("tx", instance.meters.tx_bytes)] {
+            page.value(
+                "nibrunner_instance_network_bytes_total",
+                &[("app", instance.app_id.as_str()), ("direction", direction)],
+                bytes,
+            );
+        }
     }
 
     page.metric(
@@ -426,6 +428,7 @@ mod tests {
                 idle_ms: 1_500,
                 cpu_ms: 42_150,
                 rx_bytes: 1_073_741_824,
+                tx_bytes: 2_147_483_648,
             };
         })];
         let page = render(&state, &ProxyMetrics::new());
@@ -439,10 +442,14 @@ mod tests {
             .iter()
             .any(|line| line.contains("holding=\"idle\"") && line.ends_with(" 1.500")));
         assert!(lines_for(&page, "nibrunner_instance_cpu_seconds_total")[0].ends_with(" 42.150"));
-        assert!(
-            lines_for(&page, "nibrunner_instance_network_bytes_total")[0].ends_with(" 1073741824"),
-            "bytes are counted as bytes"
-        );
+        let network = lines_for(&page, "nibrunner_instance_network_bytes_total");
+        assert_eq!(network.len(), 2, "each way is counted apart: {network:?}");
+        assert!(network
+            .iter()
+            .any(|line| line.contains("direction=\"rx\"") && line.ends_with(" 1073741824")));
+        assert!(network
+            .iter()
+            .any(|line| line.contains("direction=\"tx\"") && line.ends_with(" 2147483648")));
     }
 
     #[test]

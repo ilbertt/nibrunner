@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into meters (app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes) values (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "3be61a106f02fe50917aab446b4654c4f706303c8a3ff51665b3d164f29accb9"
+}

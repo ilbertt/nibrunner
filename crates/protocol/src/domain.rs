@@ -442,8 +442,10 @@ pub struct UsageMeters {
     /// Summed across the vCPUs the app was given, so a two-vCPU app that stayed busy for a second
     /// spent two seconds of it.
     pub cpu_ms: u64,
-    /// Toward the guest only. Nothing counts what a guest sent back yet.
+    /// What reached the guest, and what it put back on the wire. Only what was let out is
+    /// counted as sent: a packet the ruleset rejected never left, so nobody is charged for it.
     pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

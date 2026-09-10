@@ -139,7 +139,10 @@ pub fn activity_after(
     for (app_id, after) in taken {
         let before = previous_traffic.get(&app_id);
         let recorded = previous_moments.get(&app_id).copied();
-        if before.is_some_and(|before| after.bytes > before.bytes) {
+        // Inbound only. What a guest sends of its own accord — a poll outward, a heartbeat to
+        // something else — is metered but is not somebody asking for the app, and reading it as
+        // activity would keep an app that talks to itself awake for ever.
+        if before.is_some_and(|before| after.received.bytes > before.received.bytes) {
             moved.insert(app_id.clone());
         }
         let moment = if moved.contains(&app_id) {
@@ -279,6 +282,7 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
 mod activity_tests {
     use super::*;
     use crate::test_support::*;
+    use nft_render::Counted;
 
     const EARLIER: i64 = 1_000;
     const NOW: i64 = 60_000;
@@ -287,13 +291,20 @@ mod activity_tests {
         AppId::parse("app-2").unwrap()
     }
 
+    fn inbound(bytes: u64) -> AppTraffic {
+        AppTraffic {
+            received: Counted { packets: 1, bytes },
+            sent: Counted::default(),
+        }
+    }
+
     fn reading(bytes: u64) -> BTreeMap<AppId, AppTraffic> {
-        BTreeMap::from([(app_id(), AppTraffic { packets: 1, bytes })])
+        BTreeMap::from([(app_id(), inbound(bytes))])
     }
 
     fn previously(bytes: u64, at: i64) -> (BTreeMap<AppId, AppTraffic>, BTreeMap<AppId, i64>) {
         (
-            BTreeMap::from([(app_id(), AppTraffic { packets: 1, bytes })]),
+            BTreeMap::from([(app_id(), inbound(bytes))]),
             BTreeMap::from([(app_id(), at)]),
         )
     }
@@ -314,7 +325,7 @@ mod activity_tests {
     fn a_first_reading_is_not_an_app_that_was_just_used() {
         let after = activity_after(reading(4096), &BTreeMap::new(), &BTreeMap::new(), NOW);
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&NOW));
-        assert_eq!(after.traffic.get(&app_id()).map(|t| t.bytes), Some(4096));
+        assert_eq!(after.traffic.get(&app_id()).map(|t| t.received.bytes), Some(4096));
         assert!(!after.moved.contains(&app_id()));
     }
 
@@ -324,7 +335,7 @@ mod activity_tests {
         let after = activity_after(reading(16), &traffic, &moments, NOW);
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
         assert!(!after.moved.contains(&app_id()));
-        assert_eq!(after.traffic.get(&app_id()).map(|t| t.bytes), Some(16));
+        assert_eq!(after.traffic.get(&app_id()).map(|t| t.received.bytes), Some(16));
     }
 
     #[test]
@@ -337,22 +348,7 @@ mod activity_tests {
 
     #[test]
     fn every_app_in_the_table_is_read_not_just_the_first() {
-        let taken = BTreeMap::from([
-            (
-                app_id(),
-                AppTraffic {
-                    packets: 1,
-                    bytes: 10,
-                },
-            ),
-            (
-                other(),
-                AppTraffic {
-                    packets: 1,
-                    bytes: 20,
-                },
-            ),
-        ]);
+        let taken = BTreeMap::from([(app_id(), inbound(10)), (other(), inbound(20))]);
         let after = activity_after(taken, &BTreeMap::new(), &BTreeMap::new(), NOW);
         assert_eq!(after.traffic.len(), 2);
     }

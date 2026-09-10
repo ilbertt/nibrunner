@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "select app_id, running_ms, idle_ms, cpu_ms, rx_bytes from meters",
+  "query": "select app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes from meters",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,11 @@
         "name": "rx_bytes",
         "ordinal": 4,
         "type_info": "Integer"
+      },
+      {
+        "name": "tx_bytes",
+        "ordinal": 5,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
@@ -37,8 +42,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "9c41016089f9da3ad38c5286754d7bc8650c5f91beb9d604a39d3ad647d7946e"
+  "hash": "9e03f9767712072db70e622e14032f8d97c8d434ede432751376b86f63af9049"
 }

@@ -225,6 +225,7 @@ mod tests {
             idle_ms: 900_000,
             cpu_ms: 42_150,
             rx_bytes: 1_073_741_824,
+            tx_bytes: 4_294_967_296,
         };
         let reported = to_reported_instance(&instance_record(|_| {}), None, Some(&metered));
         assert_eq!(reported.meters, metered);

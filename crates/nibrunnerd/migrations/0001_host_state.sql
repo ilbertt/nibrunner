@@ -60,7 +60,8 @@ create table meters (
     running_ms integer not null,
     idle_ms    integer not null,
     cpu_ms     integer not null,
-    rx_bytes   integer not null
+    rx_bytes   integer not null,
+    tx_bytes   integer not null
 ) strict;
 
 -- Deletions this host carried out that whatever reads the report has not yet acknowledged.

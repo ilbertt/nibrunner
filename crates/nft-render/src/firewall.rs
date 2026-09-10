@@ -29,11 +29,18 @@ const RULE_INDENT: &str = "    ";
 
 const DENY: &str = "reject";
 
-pub fn app_counter_name(app_id: &AppId) -> String {
-    format!("app_{app_id}")
+pub fn app_received_counter_name(app_id: &AppId) -> String {
+    format!("{APP_RECEIVED_COUNTER_PREFIX}{app_id}")
 }
 
-pub const APP_COUNTER_PREFIX: &str = "app_";
+pub fn app_sent_counter_name(app_id: &AppId) -> String {
+    format!("{APP_SENT_COUNTER_PREFIX}{app_id}")
+}
+
+// Which way a counter faces is in its name rather than in where it is used, because what reads
+// them back is handed a flat list of counters and their names are all it has to go on.
+pub const APP_RECEIVED_COUNTER_PREFIX: &str = "rx_";
+pub const APP_SENT_COUNTER_PREFIX: &str = "tx_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardedInstance {
@@ -65,7 +72,13 @@ fn counter_objects(state: &FirewallState) -> Vec<String> {
         .iter()
         .flat_map(|instance| {
             [
-                format!("{CHAIN_INDENT}counter {} {{", app_counter_name(&instance.app_id)),
+                app_received_counter_name(&instance.app_id),
+                app_sent_counter_name(&instance.app_id),
+            ]
+        })
+        .flat_map(|name| {
+            [
+                format!("{CHAIN_INDENT}counter {name} {{"),
                 format!("{CHAIN_INDENT}}}"),
                 String::new(),
             ]
@@ -122,20 +135,49 @@ fn traffic_chains_v4(state: &FirewallState) -> Vec<String> {
             "ip saddr 127.0.0.0/8 ip daddr {} tcp dport {} counter name {}",
             instance.guest_ipv4,
             instance.http_port,
-            app_counter_name(&instance.app_id)
+            app_received_counter_name(&instance.app_id)
         )
     }));
+
+    // What a guest answers the proxy with is addressed to this host, so it is never forwarded and
+    // the chain below would never see it. It arrives on a connection the input chain has already
+    // accepted as established — and an accept ends a chain rather than the hook, so this one is
+    // still reached.
+    let mut input_rules = vec![format!(
+        "type filter hook input priority {TRAFFIC_CHAIN_PRIORITY}; policy accept;"
+    )];
+    input_rules.extend(state.instances.iter().map(|instance| {
+        format!(
+            "iifname {tap} ip saddr {} counter name {}",
+            instance.guest_ipv4,
+            app_sent_counter_name(&instance.app_id)
+        )
+    }));
+
     let mut forward_rules = vec![format!(
         "type filter hook forward priority {TRAFFIC_CHAIN_PRIORITY}; policy accept;"
     )];
-    forward_rules.extend(state.instances.iter().map(|instance| {
-        format!(
-            "iifname != {tap} oifname {tap} ip daddr {} counter name {}",
-            instance.guest_ipv4,
-            app_counter_name(&instance.app_id)
-        )
+    forward_rules.extend(state.instances.iter().flat_map(|instance| {
+        [
+            format!(
+                "iifname != {tap} oifname {tap} ip daddr {} counter name {}",
+                instance.guest_ipv4,
+                app_received_counter_name(&instance.app_id)
+            ),
+            // Only what was let out. The forward chain at the priority above this one rejects a
+            // guest reaching another guest, the control plane, or a private destination, and a
+            // packet it rejected never arrives here to be counted against anybody.
+            format!(
+                "iifname {tap} oifname != {tap} ip saddr {} counter name {}",
+                instance.guest_ipv4,
+                app_sent_counter_name(&instance.app_id)
+            ),
+        ]
     }));
+
     let mut lines = chain("traffic_output {", &output_rules);
+    lines.push(String::new());
+    lines.extend(chain("traffic_input {", &input_rules));
     lines.push(String::new());
     lines.extend(chain("traffic_forward {", &forward_rules));
     lines
@@ -397,9 +439,11 @@ mod tests {
     #[test]
     fn an_app_is_counted_wherever_it_is_reached_and_nowhere_it_is_forwarded() {
         let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
-        let name = app_counter_name(&instance().app_id);
-        assert!(ruleset.contains(&format!("counter {name} {{")));
-        assert!(!ruleset.contains(&format!("counter \"{name}\"")));
+        let received = app_received_counter_name(&instance().app_id);
+        for name in [&received, &app_sent_counter_name(&instance().app_id)] {
+            assert!(ruleset.contains(&format!("counter {name} {{")));
+            assert!(!ruleset.contains(&format!("counter \"{name}\"")));
+        }
         for rule in ruleset.lines().filter(|l| l.contains("dnat to")) {
             assert!(!rule.contains("counter"));
         }
@@ -410,18 +454,58 @@ mod tests {
             .collect();
         assert_eq!(loopback.len(), 1);
         assert!(loopback[0].contains("ip daddr 10.201.0.2"));
-        assert!(loopback[0].contains(&name));
+        assert!(loopback[0].contains(&received));
         let forwarded: Vec<&str> = ruleset
             .lines()
             .map(str::trim)
             .filter(|l| l.contains("oifname \"nbr*\" ip daddr") && l.contains("counter name"))
             .collect();
         assert_eq!(forwarded.len(), 1);
-        let counted: Vec<&str> = ruleset.lines().filter(|l| l.contains("counter name")).collect();
-        assert_eq!(counted.len(), 2);
         assert!(ruleset.contains("type filter hook forward priority filter + 10;"));
         let empty = render_ruleset(&state(vec![], &[], &[]));
         assert!(!empty.contains("counter "));
         assert!(!empty.contains("traffic_"));
+    }
+
+    #[test]
+    fn what_a_guest_sends_is_counted_both_where_it_is_forwarded_and_where_it_answers_this_host() {
+        let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
+        let sent = app_sent_counter_name(&instance().app_id);
+        let by_source: Vec<&str> = ruleset
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains("ip saddr 10.201.0.2") && l.contains(&sent))
+            .collect();
+        assert_eq!(
+            by_source.len(),
+            2,
+            "one for what it forwarded, one for what it answered this host with: {by_source:?}"
+        );
+        assert!(by_source
+            .iter()
+            .any(|rule| rule.starts_with("iifname \"nbr*\" oifname != \"nbr*\"")));
+        assert!(by_source
+            .iter()
+            .any(|rule| rule.starts_with("iifname \"nbr*\" ip saddr")));
+        assert!(ruleset.contains("type filter hook input priority filter + 10;"));
+
+        // What the guest is sent and what it sends are never added into one figure.
+        let counted: Vec<&str> = ruleset.lines().filter(|l| l.contains("counter name")).collect();
+        assert_eq!(counted.len(), 4);
+        let received = app_received_counter_name(&instance().app_id);
+        assert_eq!(
+            counted.iter().filter(|l| l.contains(&received)).count(),
+            2,
+            "the proxy dialling it, and what is forwarded to it"
+        );
+        assert_eq!(counted.iter().filter(|l| l.contains(&sent)).count(), 2);
+    }
+
+    #[test]
+    fn a_counter_names_which_way_it_faces_so_a_flat_listing_can_be_read_back() {
+        let app = instance().app_id;
+        assert!(app_received_counter_name(&app).starts_with(APP_RECEIVED_COUNTER_PREFIX));
+        assert!(app_sent_counter_name(&app).starts_with(APP_SENT_COUNTER_PREFIX));
+        assert_ne!(app_received_counter_name(&app), app_sent_counter_name(&app));
     }
 }

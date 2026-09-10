@@ -36,7 +36,7 @@ fn as_counted(value: i64) -> u64 {
 #[async_trait]
 impl MeterRepository for SqliteMeters {
     async fn all(&self) -> Result<BTreeMap<AppId, UsageMeters>, StoreError> {
-        let rows = sqlx::query!("select app_id, running_ms, idle_ms, cpu_ms, rx_bytes from meters")
+        let rows = sqlx::query!("select app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes from meters")
             .fetch_all(&self.pool)
             .await
             .map_err(StoreError::read)?;
@@ -50,6 +50,7 @@ impl MeterRepository for SqliteMeters {
                         idle_ms: as_counted(row.idle_ms),
                         cpu_ms: as_counted(row.cpu_ms),
                         rx_bytes: as_counted(row.rx_bytes),
+                        tx_bytes: as_counted(row.tx_bytes),
                     },
                 ))
             })
@@ -68,13 +69,15 @@ impl MeterRepository for SqliteMeters {
             let idle_ms = as_stored(meter.idle_ms);
             let cpu_ms = as_stored(meter.cpu_ms);
             let rx_bytes = as_stored(meter.rx_bytes);
+            let tx_bytes = as_stored(meter.tx_bytes);
             sqlx::query!(
-                "insert into meters (app_id, running_ms, idle_ms, cpu_ms, rx_bytes) values (?, ?, ?, ?, ?)",
+                "insert into meters (app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes) values (?, ?, ?, ?, ?, ?)",
                 app_id,
                 running_ms,
                 idle_ms,
                 cpu_ms,
-                rx_bytes
+                rx_bytes,
+                tx_bytes
             )
             .execute(&mut *tx)
             .await
@@ -100,6 +103,7 @@ mod tests {
             idle_ms: 900_000,
             cpu_ms: 42_150,
             rx_bytes: 1_073_741_824,
+            tx_bytes: 4_294_967_296,
         }
     }
 
