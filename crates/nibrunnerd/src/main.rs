@@ -9,7 +9,7 @@ use nibrunnerd::{install, run};
 #[derive(Debug)]
 enum Command {
     Serve,
-    Install { force: bool },
+    Install { force: bool, release: Option<String> },
 }
 
 const USAGE: &str = "\
@@ -18,25 +18,43 @@ nibrunnerd — one binary that turns a Linux machine into an app host.
     nibrunnerd                 serve this host, reading /etc/nibrunner/config.toml
     nibrunnerd install         lay this host out from that same file, then exit
     nibrunnerd install --force replace files `install` did not write
+    nibrunnerd install --from <url>
+                               take the guest image from a release at this URL
+
+`--from` is what `deploy/install.sh` passes: it names where a release is, and everything
+about where the files in it go is read from the configuration rather than told twice.
 
 NIBRUNNER_CONFIG names another configuration file. NIBRUNNER_LOG is a tracing filter.
 ";
 
 impl Command {
+    fn install(arguments: &[String]) -> Result<Self, String> {
+        let mut force = false;
+        let mut release = None;
+        let mut rest = arguments.iter();
+        while let Some(argument) = rest.next() {
+            match argument.as_str() {
+                "--force" => force = true,
+                "--from" => {
+                    release = Some(rest.next().cloned().ok_or_else(|| {
+                        format!("nibrunnerd install: --from takes the URL of a release\n\n{USAGE}")
+                    })?);
+                }
+                unknown => {
+                    return Err(format!(
+                        "nibrunnerd install: {unknown} is not an argument it takes\n\n{USAGE}"
+                    ))
+                }
+            }
+        }
+        Ok(Self::Install { force, release })
+    }
+
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Self, String> {
         let arguments: Vec<String> = arguments.collect();
         match arguments.split_first() {
             None => Ok(Self::Serve),
-            Some((first, rest)) if first == "install" => {
-                match rest.iter().find(|argument| *argument != "--force") {
-                    Some(unknown) => Err(format!(
-                        "nibrunnerd install: {unknown} is not an argument it takes\n\n{USAGE}"
-                    )),
-                    None => Ok(Self::Install {
-                        force: rest.iter().any(|argument| argument == "--force"),
-                    }),
-                }
-            }
+            Some((first, rest)) if first == "install" => Self::install(rest),
             Some((first, _)) if first == "--help" || first == "-h" || first == "help" => {
                 Err(USAGE.to_string())
             }
@@ -67,7 +85,7 @@ fn main() -> std::process::ExitCode {
         Err(error) => {
             match command {
                 Command::Serve => tracing::error!(error = %error.message(), "this host is not configured"),
-                Command::Install { .. } => eprintln!("this host is not configured: {}", error.message()),
+                Command::Install { .. } => return no_configuration(&error),
             }
             return std::process::ExitCode::FAILURE;
         }
@@ -83,27 +101,43 @@ fn main() -> std::process::ExitCode {
 
     match command {
         Command::Serve => runtime.block_on(serve(config)),
-        Command::Install { force } => runtime.block_on(lay_out(config, force)),
+        Command::Install { force, release } => runtime.block_on(lay_out(config, force, release)),
     }
 }
 
-async fn lay_out(config: HostConfig, force: bool) -> std::process::ExitCode {
+async fn lay_out(config: HostConfig, force: bool, release: Option<String>) -> std::process::ExitCode {
     let config_file = HostConfig::configured_file();
-    match install::run(&config, &config_file, force).await {
+    match install::run(&config, &config_file, force, release.as_deref()).await {
         Ok(laid) => {
             for step in laid.steps {
                 println!("  {step}");
             }
-            println!("\nThis host is laid out. What is left:");
-            println!("  systemctl daemon-reload");
-            if config.volumes.zerofs().is_some() {
-                println!(
-                    "  systemctl enable --now {} {}",
-                    install::render::ZEROFS_UNIT,
-                    install::render::MOUNT_UNIT
-                );
-            }
-            println!("  systemctl enable --now nibrunnerd");
+            print!("{}", install::what_is_left(&config, &config_file));
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{}", error.message());
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// A host with no configuration is given one to start from rather than a refusal it has to go and
+/// find the answer to. A host whose configuration is *there and wrong* is never overwritten.
+fn no_configuration(error: &nibrunnerd::config::ConfigError) -> std::process::ExitCode {
+    let path = HostConfig::configured_file();
+    if path.exists() {
+        eprintln!("this host is not configured: {}", error.message());
+        return std::process::ExitCode::FAILURE;
+    }
+    match install::write_starter_configuration(&path) {
+        Ok(()) => {
+            println!("  {} written as a starting point", path.display());
+            println!(
+                "\nThis host had no configuration, so it has one now: volumes as files on its own\n\
+                 disk, no proxy, no object store. Read it, make it this host's, and run\n\
+                 `nibrunnerd install` again."
+            );
             std::process::ExitCode::SUCCESS
         }
         Err(error) => {
@@ -195,15 +229,39 @@ mod tests {
         assert!(matches!(parse(&[]), Ok(Command::Serve)));
     }
 
+    // Where a release is, is the one thing the script that bootstraps this passes in: everything
+    // about where the files in it go is read from the configuration instead.
+    #[test]
+    fn a_release_is_taken_as_the_url_after_the_flag() {
+        let Ok(Command::Install { release, force }) = parse(&["install", "--from", "https://example.test/r"])
+        else {
+            panic!("--from names a release");
+        };
+        assert_eq!(release.as_deref(), Some("https://example.test/r"));
+        assert!(!force);
+    }
+
+    #[test]
+    fn a_release_flag_with_nothing_after_it_is_refused_rather_than_taken_as_none() {
+        let refused = parse(&["install", "--from"]).unwrap_err();
+        assert!(refused.contains("--from takes the URL"), "{refused}");
+    }
+
     #[test]
     fn install_is_the_only_command_and_force_the_only_flag() {
         assert!(matches!(
             parse(&["install"]),
-            Ok(Command::Install { force: false })
+            Ok(Command::Install {
+                force: false,
+                release: None
+            })
         ));
         assert!(matches!(
             parse(&["install", "--force"]),
-            Ok(Command::Install { force: true })
+            Ok(Command::Install {
+                force: true,
+                release: None
+            })
         ));
     }
 

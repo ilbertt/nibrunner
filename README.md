@@ -32,16 +32,14 @@ from a pidfile on the way back up. Restarting the daemon, or killing it, leaves 
 sudo apt-get install -y nftables e2fsprogs                     # the only two host tools
 curl -fsSL -o nibrunnerd <your build of target/x86_64-unknown-linux-musl/release/nibrunnerd>
 sudo install -m 0755 nibrunnerd /usr/local/bin/nibrunnerd
-sudo mkdir -p /var/lib/nibrunner/guest && sudo cp vmlinux rootfs.ext4 manifest.json /var/lib/nibrunner/guest/
 sudo install -m 0644 deploy/config.toml /etc/nibrunner/config.toml
-sudo install -m 0644 deploy/nibrunnerd.service /etc/systemd/system/
-sudo nibrunnerd install                                # lays the rest of the host out
+sudo nibrunnerd install --from <the release>           # lays the rest of the host out
 sudo systemctl daemon-reload && sudo systemctl enable --now nibrunnerd
 sudo cp my-server /var/lib/nibrunner/artifact-store/   # the binary, named by its sha256
 sudo tee /var/lib/nibrunner/desired.json < desired.json # the document below
 ```
 
-Ten commands, and the tenth is the deploy. Everything after it is the daemon converging.
+Eight commands, and the eighth is the deploy. Everything after it is the daemon converging.
 
 ### The same thing, from somewhere else
 
@@ -49,28 +47,21 @@ Ten commands, and the tenth is the deploy. Everything after it is the daemon con
 ssh root@HOST 'curl -fsSL https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/install.sh | sh'
 ```
 
-`deploy/install.sh` is the eleven commands above, in the order they have to happen: it refuses a
-machine that cannot host — not root, not Linux, not x86_64, no `/dev/kvm` — installs the packages,
-resolves the newest release and checks every asset against the `checksums.txt` it publishes, lays
-the binary and the guest image down, fetches the unit from the release's own tag rather than from
-the default branch, and then hands over to `nibrunnerd install`.
+`deploy/install.sh` knows one thing: where a release is. It refuses a machine that cannot host,
+installs the packages, resolves the newest release, checks the binary against the `checksums.txt`
+it publishes, and hands over to `nibrunnerd install --from <that release>`.
 
-It decides nothing that `config.toml` says. A host that has one is laid out from it; a host that
-does not gets `deploy/config.toml` copied in as a starting point and is told to make it its own.
-Either way the last two steps are yours, because both are secrets or a decision:
+Everything else is the daemon's, because everything else is in `config.toml`: where the guest image
+goes, which units this host has, what is rendered, and what is left for a person. A host with no
+configuration is given the smallest one this daemon accepts and told to make it its own;
+[docs/config.md](docs/config.md) is what every key in it means.
 
-```bash
-ssh root@HOST 'cat >> /etc/nibrunner/host.env'   # AWS credentials, and the encryption password
-ssh root@HOST 'systemctl daemon-reload && systemctl enable --now nibrunnerd'
-```
-
-`NIBRUNNER_VERSION` pins a release rather than taking the newest, and `NIBRUNNER_CONFIG` names a
-configuration somewhere other than `/etc/nibrunner/config.toml`. The whole script is one function
+`NIBRUNNER_VERSION` pins a release rather than taking the newest. The whole script is one function
 called on its last line, so a download that stops half way runs nothing.
 
-Nothing has to be repeated after a reboot: the units are enabled and the kernel settings
-`nibrunnerd install` wrote are in `/etc/sysctl.d`, `/etc/modules-load.d` and `/etc/modprobe.d`,
-where the boot reads them.
+Nothing has to be repeated after a reboot: the units are enabled, and the kernel settings `install`
+wrote are in `/etc/sysctl.d`, `/etc/modules-load.d` and `/etc/modprobe.d`, where the boot reads
+them.
 
 ### The document
 
@@ -126,7 +117,9 @@ nobody set are the same absence. The same goes for the values — a relative pat
 choke on, an `s3://` URL with no bucket, or a proxy port that an app slot is going to want are all
 refused while an operator is still watching rather than on the pass that first needed them.
 
-`deploy/config.toml` is the smallest file this daemon accepts. What each key is:
+[docs/config.md](docs/config.md) is the whole of it, key by key, with the rule behind each
+refusal. `deploy/config.toml` is the smallest file this daemon accepts, and
+`deploy/config.zerofs.toml` one filled in. What each key is:
 
 | Key | What it is |
 | --- | --- |

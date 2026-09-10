@@ -257,7 +257,23 @@ pub fn mount_unit(settings: &ZerofsSettings, config_file: &Path) -> String {
     )
 }
 
+pub const DAEMON_UNIT: &str = "nibrunnerd.service";
 pub const DAEMON_DROP_IN: &str = "nibrunnerd.service.d/install.conf";
+
+/// The daemon's own unit, from the one copy of it in this repository, with the path it is started
+/// from replaced by the path this binary is actually at — so a host that put it somewhere other
+/// than `/usr/local/bin` gets a unit that names where its binary really is.
+pub fn daemon_unit(config_file: &Path, binary: &Path) -> String {
+    const UNIT: &str = include_str!("../../../../deploy/nibrunnerd.service");
+    let started = UNIT.replace(
+        "ExecStart=/usr/local/bin/nibrunnerd",
+        &format!("ExecStart={}", binary.display()),
+    );
+    format!(
+        "{}\n{started}",
+        header("What supervises this daemon.", config_file)
+    )
+}
 
 /// The daemon reads the same environment file, and for two reasons rather than one: its artifact
 /// and export stores resolve AWS credentials from their own process environment, and the

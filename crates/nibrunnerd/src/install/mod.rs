@@ -7,6 +7,7 @@
 //! epoch only after a window of acknowledging writes it then discards, and the thing that holds
 //! that lock is a single-instance unit. So this writes the unit and never becomes it.
 
+pub mod guest_image;
 pub mod kernel;
 pub mod prerequisites;
 pub mod render;
@@ -54,10 +55,27 @@ impl Laid {
     }
 }
 
-pub async fn run(config: &HostConfig, config_file: &Path, force: bool) -> Result<Laid, InstallError> {
+pub async fn run(
+    config: &HostConfig,
+    config_file: &Path,
+    force: bool,
+    release: Option<&str>,
+) -> Result<Laid, InstallError> {
+    let mut laid = Laid { steps: Vec::new() };
+
+    // Before the checks rather than after them, because the guest image is one of the things they
+    // refuse a host for — and a release was named precisely so this host would not have to have it
+    // already.
+    if let Some(base) = release {
+        match guest_image::ensure(&config.guest_image_dir, base).await? {
+            guest_image::Laid::AlreadyThere(version) => {
+                laid.note(format!("guest image {version} already there"))
+            }
+            guest_image::Laid::Fetched(version) => laid.note(format!("guest image {version} fetched")),
+        }
+    }
     refuse_unready(config)?;
 
-    let mut laid = Laid { steps: Vec::new() };
     let environment_file = environment_file(config_file);
 
     // Written before they are applied, so a host that has to reboot to finish reboots into the
@@ -129,6 +147,14 @@ pub async fn run(config: &HostConfig, config_file: &Path, force: bool) -> Result
         )?;
     }
 
+    if let Ok(binary) = std::env::current_exe() {
+        write_generated(
+            &Path::new(SYSTEMD_DIR).join(render::DAEMON_UNIT),
+            &render::daemon_unit(config_file, &binary),
+            force,
+            &mut laid,
+        )?;
+    }
     write_generated(
         &Path::new(SYSTEMD_DIR).join(render::DAEMON_DROP_IN),
         &render::daemon_drop_in(config, config_file, &environment_file),
@@ -146,6 +172,36 @@ pub async fn run(config: &HostConfig, config_file: &Path, force: bool) -> Result
     stamp_versions(config)?;
     laid.note(format!("{} stamped", config.versions_file.display()));
     Ok(laid)
+}
+
+/// What a person still has to do, said by the thing that knows: which units this host has, where
+/// its environment file is, and whether anything needs to go in it at all. Nothing that bootstraps
+/// this binary should be repeating any of it.
+pub fn what_is_left(config: &HostConfig, config_file: &Path) -> String {
+    let environment_file = environment_file(config_file);
+    let mut said = String::from("\nThis host is laid out. What is left:\n");
+    if reaches_an_object_store(config) || matches!(config.volumes, VolumeBackend::Zerofs(_)) {
+        said.push_str(&format!(
+            "  the secrets in {}, which nothing but you holds\n",
+            environment_file.display()
+        ));
+    }
+    said.push_str("  systemctl daemon-reload\n");
+    if config.volumes.zerofs().is_some() {
+        said.push_str(&format!(
+            "  systemctl enable --now {} {}\n",
+            render::ZEROFS_UNIT,
+            render::MOUNT_UNIT
+        ));
+    }
+    said.push_str("  systemctl enable --now nibrunnerd\n");
+    said
+}
+
+/// The smallest configuration this daemon accepts, from the one copy of it in this repository.
+pub fn write_starter_configuration(path: &Path) -> Result<(), crate::json_store::StoreError> {
+    const STARTER: &str = include_str!("../../../../deploy/config.toml");
+    write_text(path, STARTER, READABLE_FILE_MODE)
 }
 
 /// Every directory this host writes into that is not created on the way past. `runtime_dir` is
@@ -218,21 +274,28 @@ fn environment_file(config_file: &Path) -> PathBuf {
 /// Made, never filled. What belongs in it is a password whose loss destroys every tenant disk on
 /// this host and a credential that reaches an account this daemon has no business creating things
 /// in — so it is written once by whoever holds them, and a re-run never touches it again.
+///
+/// It is made even when this host needs nothing in it: the drop-in names it with a bare
+/// `EnvironmentFile=`, and systemd fails a unit whose environment file is not there.
 fn ensure_environment_file(path: &Path, config: &HostConfig) -> Result<bool, InstallError> {
     if path.exists() {
         return Ok(false);
     }
-    let mut lines = format!(
-        "# Read by nibrunnerd and, on a zerofs host, by ZeroFS's own units. Not written by\n\
-         # `nibrunnerd install`: everything here is a secret it has no way to know.\n\
-         #\n\
-         # {}=\n\
-         # {}=\n\
-         # {}=\n",
-        render::REGION_VARIABLE,
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-    );
+    let mut lines = "# Read by nibrunnerd and, on a zerofs host, by ZeroFS's own units. Not written by\n\
+                     # `nibrunnerd install`: everything here is a secret it has no way to know.\n"
+        .to_string();
+    if reaches_an_object_store(config) {
+        lines.push_str(&format!(
+            "#\n\
+             # This host reaches an object store, and resolves credentials from this environment.\n\
+             # {REGION}=\n\
+             # {KEY}=\n\
+             # {SECRET}=\n",
+            REGION = render::REGION_VARIABLE,
+            KEY = "AWS_ACCESS_KEY_ID",
+            SECRET = "AWS_SECRET_ACCESS_KEY",
+        ));
+    }
     if matches!(config.volumes, VolumeBackend::Zerofs(_)) {
         lines.push_str(&format!(
             "#\n\
@@ -242,8 +305,28 @@ fn ensure_environment_file(path: &Path, config: &HostConfig) -> Result<bool, Ins
             render::PASSWORD_VARIABLE
         ));
     }
+    if lines.lines().all(|line| !line.ends_with('=')) {
+        lines.push_str(
+            "#\n\
+             # Nothing on this host needs a secret: its volumes are files on its own disk and its\n\
+             # stores are directories on it. This file is here because the unit names it.\n",
+        );
+    }
     write_text(path, &lines, SECRET_FILE_MODE).map_err(|error| InstallError::Refused(error.message()))?;
     Ok(true)
+}
+
+/// Whether anything this host is configured to reach is an object store rather than a directory.
+/// A host whose artifacts, exports and volumes are all local needs no credential, and naming one
+/// in its environment file would be telling it to go and find something it does not have.
+fn reaches_an_object_store(config: &HostConfig) -> bool {
+    let remote = |url: &str| url.starts_with("s3://");
+    remote(&config.artifact_store_url)
+        || remote(&config.export_store_url)
+        || config
+            .volumes
+            .zerofs()
+            .is_some_and(|settings| remote(&settings.storage_url))
 }
 
 /// The file `paths.versions_file` was always for: what the installer laid down, read back by the
@@ -357,25 +440,61 @@ mod tests {
         }
     }
 
+    // Its volumes are files on its own disk and its stores are directories on it, so there is no
+    // account for it to reach and nothing to encrypt. Naming either would send an operator looking
+    // for a credential this host has no use for.
     #[test]
-    fn a_local_file_host_is_told_about_no_password_it_will_never_use() {
+    fn a_host_that_reaches_nothing_remote_is_asked_for_no_secret_at_all() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("host.env");
         ensure_environment_file(&path, &HostConfig::under(Path::new("/srv/nibrunner"))).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains(render::PASSWORD_VARIABLE), "{written}");
-        assert!(written.contains(render::REGION_VARIABLE), "{written}");
+        assert!(!written.contains(render::REGION_VARIABLE), "{written}");
+        assert!(!written.contains("AWS_ACCESS_KEY_ID"), "{written}");
+        assert!(
+            written.contains("Nothing on this host needs a secret"),
+            "{written}"
+        );
+    }
+
+    // The file is made whether or not it holds anything, because the drop-in names it with a bare
+    // EnvironmentFile= and systemd fails a unit whose environment file is not there.
+    #[test]
+    fn a_host_that_needs_no_secret_still_gets_the_file_its_unit_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("host.env");
+        assert!(ensure_environment_file(&path, &HostConfig::under(Path::new("/srv/nibrunner"))).unwrap());
+        assert!(path.exists());
     }
 
     #[test]
-    fn a_zerofs_host_is_told_what_the_password_costs_to_lose() {
+    fn a_local_file_host_whose_artifacts_are_in_a_bucket_is_asked_for_the_credential() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("host.env");
         let mut config = HostConfig::under(Path::new("/srv/nibrunner"));
-        config.volumes = VolumeBackend::Zerofs(Box::new(crate::test_support::zerofs_settings(|_| {})));
+        config.artifact_store_url = "s3://nibrunner-artifacts/artifacts".to_string();
         ensure_environment_file(&path, &config).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains(render::PASSWORD_VARIABLE), "{written}");
+        assert!(written.contains("AWS_ACCESS_KEY_ID"), "{written}");
+        // Its volumes are still files on its own disk, so there is still nothing to encrypt.
+        assert!(!written.contains(render::PASSWORD_VARIABLE), "{written}");
+    }
+
+    #[test]
+    fn every_store_a_host_could_reach_remotely_is_looked_at() {
+        let local = HostConfig::under(Path::new("/srv/nibrunner"));
+        assert!(!reaches_an_object_store(&local));
+
+        let mut exports = HostConfig::under(Path::new("/srv/nibrunner"));
+        exports.export_store_url = "s3://nibrunner-exports/exports".to_string();
+        assert!(reaches_an_object_store(&exports));
+
+        let mut volumes = HostConfig::under(Path::new("/srv/nibrunner"));
+        volumes.volumes = VolumeBackend::Zerofs(Box::new(crate::test_support::zerofs_settings(|settings| {
+            settings.storage_url = "s3://nibrunner-filesystems/hetzner-1".to_string();
+        })));
+        assert!(reaches_an_object_store(&volumes));
     }
 
     #[test]

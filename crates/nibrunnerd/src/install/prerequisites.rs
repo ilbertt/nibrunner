@@ -76,7 +76,13 @@ pub fn check(config: &HostConfig) -> Vec<Check> {
 }
 
 pub fn guest_image(config: &HostConfig) -> Result<String, String> {
-    crate::adapters::vm::manager::verify_guest_image(&config.guest_image_dir).map_err(|error| error.message())
+    verify(&config.guest_image_dir)
+}
+
+/// The same check the daemon makes before it boots anything: the manifest read, and both artifacts
+/// hashed against what it says they are.
+pub fn verify(directory: &Path) -> Result<String, String> {
+    crate::adapters::vm::manager::verify_guest_image(directory).map_err(|error| error.message())
 }
 
 fn binary(name: &str, remedy: &str) -> Check {
@@ -84,8 +90,13 @@ fn binary(name: &str, remedy: &str) -> Check {
 }
 
 pub fn on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    on_path_in(&std::env::var_os("PATH")?, name)
+}
+
+/// Taking the search path rather than reading it, so a test can ask about a directory it made
+/// without setting a variable every other thread in the process is also reading.
+fn on_path_in(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
         .map(|directory| directory.join(name))
         .find(|candidate| is_executable(candidate))
 }
@@ -115,10 +126,9 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        temp_env_path(directory.path(), || {
-            assert_eq!(on_path("nibrunner-test-tool"), Some(tool.clone()));
-            assert_eq!(on_path("nibrunner-test-absent"), None);
-        });
+        let path = directory.path().as_os_str();
+        assert_eq!(on_path_in(path, "nibrunner-test-tool"), Some(tool.clone()));
+        assert_eq!(on_path_in(path, "nibrunner-test-absent"), None);
     }
 
     // A file that is on PATH but not executable is not a tool this host can run, and reporting it
@@ -127,19 +137,10 @@ mod tests {
     fn something_on_the_path_that_cannot_be_run_is_not_a_tool() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("nibrunner-test-data"), "not a program").unwrap();
-        temp_env_path(directory.path(), || {
-            assert_eq!(on_path("nibrunner-test-data"), None);
-        });
-    }
-
-    fn temp_env_path(directory: &Path, body: impl FnOnce()) {
-        let restore = std::env::var_os("PATH");
-        std::env::set_var("PATH", directory);
-        body();
-        match restore {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
+        assert_eq!(
+            on_path_in(directory.path().as_os_str(), "nibrunner-test-data"),
+            None
+        );
     }
 
     #[test]
