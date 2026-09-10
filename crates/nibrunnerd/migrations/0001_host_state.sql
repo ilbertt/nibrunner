@@ -53,15 +53,21 @@ create table activity (
 -- forgets on a reboot — so a reading below the one before it is read as a reset and counted from
 -- zero rather than as a number that went backwards.
 --
--- Nothing here is priced. What holds memory and what holds only disk are metered apart because
--- they are worth different amounts, and which of them costs what is the control plane's to say.
+-- Nothing here is priced. What holds memory and what holds only disk are metered apart, and so
+-- are the disk an app was given and the disk it filled, because they are worth different amounts
+-- and which of them costs what is the control plane's to say.
+--
+-- The disk pair is in mebibyte-seconds rather than bytes: what a volume holds is a level and not
+-- a flow, so what accumulates is that level multiplied by how long it was held for.
 create table meters (
     app_id     text    primary key,
     running_ms integer not null,
     idle_ms    integer not null,
     cpu_ms     integer not null,
     rx_bytes   integer not null,
-    tx_bytes   integer not null
+    tx_bytes   integer not null,
+    disk_provisioned_mib_seconds integer not null,
+    disk_used_mib_seconds        integer not null
 ) strict;
 
 -- Deletions this host carried out that whatever reads the report has not yet acknowledged.

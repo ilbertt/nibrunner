@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use guest_contract::filesystem::MeasuredCompute;
 use nft_render::AppTraffic;
-use protocol::{AppId, InstanceState, UsageMeters};
+use protocol::{AppId, FilesystemUsage, InstanceState, ReportedVolume, UsageMeters, VolumeState};
 
 use crate::domain::report::InstanceRecord;
 use crate::ports::GuestReading;
@@ -45,28 +45,84 @@ pub fn elapsed_since(before: Option<i64>, now_ms: i64, interval_ms: u64) -> u64 
         .min(interval_ms * LATE_PASS_ALLOWANCE)
 }
 
-/// The pass that meters wall time and what arrived at each guest. Both are the host's own
-/// observations, so this holds for a guest that answers nothing at all.
+// A volume that is holding bytes on the backend. Ready is attached to a guest and Detached is not,
+// and the difference costs nothing to store: what was written is still written either way. Pending
+// has nothing yet, Failed never got it, and Deleted has given it back.
+const STORES_BYTES: [VolumeState; 2] = [VolumeState::Ready, VolumeState::Detached];
+
+const BYTES_PER_MIB: u64 = 1_048_576;
+const MILLIS_PER_SECOND: u64 = 1_000;
+
+/// What holding a level for a stretch comes to.
+///
+/// Disk is not a flow the way transferred bytes and spent ticks are, and the difference between
+/// two readings of it is not usage: eight gibibytes now and eight gibibytes in an hour is an app
+/// that held eight gibibytes for an hour, not one that used nothing. So what accumulates is the
+/// level multiplied by the time it was held for, and never a subtraction.
+///
+/// Counted in mebibyte-seconds because byte-milliseconds do not fit: eight gibibytes held for a
+/// month already outruns a `u64`, where these leave a terabyte a decade's headroom. Rounding is
+/// down and under a mebibyte-second a pass, which is nobody's bill.
+fn held_for(bytes: u64, elapsed_ms: u64) -> u64 {
+    (bytes / BYTES_PER_MIB).saturating_mul(elapsed_ms) / MILLIS_PER_SECOND
+}
+
+fn provisioned_bytes(volumes: &[ReportedVolume], app_id: &AppId) -> u64 {
+    volumes
+        .iter()
+        .filter(|volume| &volume.app_id == app_id && STORES_BYTES.contains(&volume.state))
+        .map(|volume| volume.size_bytes)
+        .sum()
+}
+
+pub struct MeterInputs<'a> {
+    pub records: &'a BTreeMap<AppId, InstanceRecord>,
+    pub traffic_before: &'a BTreeMap<AppId, AppTraffic>,
+    pub traffic_after: &'a BTreeMap<AppId, AppTraffic>,
+    pub volumes: &'a [ReportedVolume],
+    pub volume_usage: &'a BTreeMap<AppId, FilesystemUsage>,
+    pub elapsed_ms: u64,
+}
+
+/// The pass that meters wall time, what arrived at each guest, and what each app is holding on
+/// disk. All of it is the host's own observation bar the last, so most of this holds for a guest
+/// that answers nothing at all.
+///
+/// Over every app this host holds a record of *or* is storing bytes for, because a volume kept
+/// after its instance went away is still a volume somebody is paying to keep.
 pub fn metered_after(
     previous: &BTreeMap<AppId, UsageMeters>,
-    records: &BTreeMap<AppId, InstanceRecord>,
-    traffic_before: &BTreeMap<AppId, AppTraffic>,
-    traffic_after: &BTreeMap<AppId, AppTraffic>,
-    elapsed_ms: u64,
+    inputs: &MeterInputs<'_>,
 ) -> BTreeMap<AppId, UsageMeters> {
-    records
+    let stored = inputs
+        .volumes
         .iter()
-        .map(|(app_id, record)| {
+        .filter(|volume| STORES_BYTES.contains(&volume.state))
+        .map(|volume| &volume.app_id);
+    let apps: BTreeSet<&AppId> = inputs.records.keys().chain(stored).collect();
+
+    apps.into_iter()
+        .map(|app_id| {
             let mut meter = previous.get(app_id).copied().unwrap_or_default();
-            if HOLDS_MEMORY.contains(&record.state) {
-                meter.running_ms += elapsed_ms;
-            } else if record.is_idle() {
-                meter.idle_ms += elapsed_ms;
+            if let Some(record) = inputs.records.get(app_id) {
+                if HOLDS_MEMORY.contains(&record.state) {
+                    meter.running_ms += inputs.elapsed_ms;
+                } else if record.is_idle() {
+                    meter.idle_ms += inputs.elapsed_ms;
+                }
             }
-            if let Some(after) = traffic_after.get(app_id) {
-                let before = traffic_before.get(app_id);
+            if let Some(after) = inputs.traffic_after.get(app_id) {
+                let before = inputs.traffic_before.get(app_id);
                 meter.rx_bytes += advanced(before.map(|before| before.received.bytes), after.received.bytes);
                 meter.tx_bytes += advanced(before.map(|before| before.sent.bytes), after.sent.bytes);
+            }
+            meter.disk_provisioned_mib_seconds +=
+                held_for(provisioned_bytes(inputs.volumes, app_id), inputs.elapsed_ms);
+            // Kept while an app sleeps, unlike everything a guest has to be awake to answer: the
+            // last reading stands until a running guest replaces it, because the bytes are still
+            // on the disk whether or not there is anything up to be asked about them.
+            if let Some(usage) = inputs.volume_usage.get(app_id) {
+                meter.disk_used_mib_seconds += held_for(usage.used_bytes, inputs.elapsed_ms);
             }
             (app_id.clone(), meter)
         })
@@ -137,6 +193,49 @@ mod tests {
         metered.get(&app_id()).copied().unwrap_or_default()
     }
 
+    const GIB: u64 = 1_073_741_824;
+
+    #[derive(Default)]
+    struct Inputs {
+        records: BTreeMap<AppId, InstanceRecord>,
+        traffic_before: BTreeMap<AppId, AppTraffic>,
+        traffic_after: BTreeMap<AppId, AppTraffic>,
+        volumes: Vec<ReportedVolume>,
+        volume_usage: BTreeMap<AppId, FilesystemUsage>,
+    }
+
+    fn metered(previous: &BTreeMap<AppId, UsageMeters>, given: Inputs) -> BTreeMap<AppId, UsageMeters> {
+        metered_after(
+            previous,
+            &MeterInputs {
+                records: &given.records,
+                traffic_before: &given.traffic_before,
+                traffic_after: &given.traffic_after,
+                volumes: &given.volumes,
+                volume_usage: &given.volume_usage,
+                elapsed_ms: TICK_MS,
+            },
+        )
+    }
+
+    fn volume(state: VolumeState, size_bytes: u64) -> Vec<ReportedVolume> {
+        vec![crate::test_support::reported_volume(|volume| {
+            volume.state = state;
+            volume.size_bytes = size_bytes;
+        })]
+    }
+
+    fn filled(used_bytes: u64) -> BTreeMap<AppId, FilesystemUsage> {
+        BTreeMap::from([(
+            app_id(),
+            FilesystemUsage {
+                total_bytes: 8 * GIB,
+                used_bytes,
+                measured_at: observed_at(),
+            },
+        )])
+    }
+
     #[test]
     fn a_counter_that_grew_is_metered_by_what_it_grew_by() {
         assert_eq!(advanced(Some(1_000), 1_500), 500);
@@ -175,22 +274,22 @@ mod tests {
 
     #[test]
     fn time_is_metered_against_what_the_app_was_holding_while_it_passed() {
-        let running = metered_after(
+        let running = metered(
             &BTreeMap::new(),
-            &records(InstanceState::Running),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            TICK_MS,
+            Inputs {
+                records: records(InstanceState::Running),
+                ..Default::default()
+            },
         );
         assert_eq!(held(&running).running_ms, TICK_MS);
         assert_eq!(held(&running).idle_ms, 0);
 
-        let idle = metered_after(
+        let idle = metered(
             &BTreeMap::new(),
-            &records(InstanceState::Idle),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            TICK_MS,
+            Inputs {
+                records: records(InstanceState::Idle),
+                ..Default::default()
+            },
         );
         assert_eq!(idle.get(&app_id()).map(|meter| meter.idle_ms), Some(TICK_MS));
         assert_eq!(held(&idle).running_ms, 0);
@@ -199,20 +298,20 @@ mod tests {
     #[test]
     fn every_state_meters_against_exactly_one_of_the_two_or_neither() {
         for state in INSTANCE_STATES {
-            let metered = metered_after(
+            let counted = metered(
                 &BTreeMap::new(),
-                &records(state),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                TICK_MS,
+                Inputs {
+                    records: records(state),
+                    ..Default::default()
+                },
             );
-            let meter = held(&metered);
+            let meter = held(&counted);
             assert!(
                 meter.running_ms == 0 || meter.idle_ms == 0,
                 "{state:?} was metered as holding memory and as asleep at once"
             );
-            let counted = meter.running_ms + meter.idle_ms;
-            assert!(counted == 0 || counted == TICK_MS, "{state:?} billed {counted}");
+            let billed = meter.running_ms + meter.idle_ms;
+            assert!(billed == 0 || billed == TICK_MS, "{state:?} billed {billed}");
         }
     }
 
@@ -227,12 +326,14 @@ mod tests {
                 ..UsageMeters::default()
             },
         )]);
-        let after = metered_after(
+        let after = metered(
             &before,
-            &records(InstanceState::Running),
-            &traffic(1_000, 20_000),
-            &traffic(1_500, 90_000),
-            TICK_MS,
+            Inputs {
+                records: records(InstanceState::Running),
+                traffic_before: traffic(1_000, 20_000),
+                traffic_after: traffic(1_500, 90_000),
+                ..Default::default()
+            },
         );
         assert_eq!(held(&after).running_ms, 60_000 + TICK_MS);
         assert_eq!(held(&after).rx_bytes, 4_096 + 500);
@@ -248,12 +349,13 @@ mod tests {
                 ..UsageMeters::default()
             },
         )]);
-        let after = metered_after(
+        let after = metered(
             &before,
-            &records(InstanceState::Running),
-            &traffic(1_000, 1_000),
-            &BTreeMap::new(),
-            TICK_MS,
+            Inputs {
+                records: records(InstanceState::Running),
+                traffic_before: traffic(1_000, 1_000),
+                ..Default::default()
+            },
         );
         assert_eq!(held(&after).rx_bytes, 4_096);
     }
@@ -267,14 +369,119 @@ mod tests {
                 ..UsageMeters::default()
             },
         )]);
-        let after = metered_after(
+        let after = metered(
             &before,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &traffic(9_999, 9_999),
-            TICK_MS,
+            Inputs {
+                traffic_after: traffic(9_999, 9_999),
+                ..Default::default()
+            },
         );
         assert!(after.is_empty());
+    }
+
+    #[test]
+    fn disk_is_metered_as_what_was_held_multiplied_by_how_long_it_was_held_for() {
+        let after = metered(
+            &BTreeMap::new(),
+            Inputs {
+                records: records(InstanceState::Running),
+                volumes: volume(VolumeState::Ready, 8 * GIB),
+                volume_usage: filled(2 * GIB),
+                ..Default::default()
+            },
+        );
+        // 8 GiB and 2 GiB, each held for the five seconds this pass covered.
+        assert_eq!(held(&after).disk_provisioned_mib_seconds, 8 * 1024 * 5);
+        assert_eq!(held(&after).disk_used_mib_seconds, 2 * 1024 * 5);
+    }
+
+    #[test]
+    fn a_volume_that_did_not_change_is_still_disk_that_was_held_rather_than_disk_nobody_used() {
+        let steady = || Inputs {
+            records: records(InstanceState::Running),
+            volumes: volume(VolumeState::Ready, 8 * GIB),
+            volume_usage: filled(2 * GIB),
+            ..Default::default()
+        };
+        let once = metered(&BTreeMap::new(), steady());
+        let twice = metered(&once, steady());
+        assert_eq!(
+            held(&twice).disk_used_mib_seconds,
+            held(&once).disk_used_mib_seconds * 2,
+            "two readings that said the same thing are two passes of holding it"
+        );
+    }
+
+    #[test]
+    fn an_app_asleep_is_still_holding_the_disk_it_filled() {
+        let after = metered(
+            &BTreeMap::new(),
+            Inputs {
+                records: records(InstanceState::Idle),
+                volumes: volume(VolumeState::Ready, 8 * GIB),
+                volume_usage: filled(2 * GIB),
+                ..Default::default()
+            },
+        );
+        assert_eq!(held(&after).idle_ms, TICK_MS);
+        assert_eq!(held(&after).cpu_ms, 0, "an asleep guest spends nothing");
+        assert_eq!(held(&after).disk_used_mib_seconds, 2 * 1024 * 5);
+        assert_eq!(held(&after).disk_provisioned_mib_seconds, 8 * 1024 * 5);
+    }
+
+    #[test]
+    fn a_volume_kept_after_its_instance_went_away_is_still_metered() {
+        let after = metered(
+            &BTreeMap::new(),
+            Inputs {
+                volumes: volume(VolumeState::Detached, 8 * GIB),
+                volume_usage: filled(2 * GIB),
+                ..Default::default()
+            },
+        );
+        assert_eq!(held(&after).disk_provisioned_mib_seconds, 8 * 1024 * 5);
+        assert_eq!(held(&after).running_ms, 0);
+    }
+
+    #[test]
+    fn a_volume_holding_nothing_yet_or_nothing_any_more_is_metered_as_nothing() {
+        for state in [VolumeState::Pending, VolumeState::Deleted, VolumeState::Failed] {
+            let after = metered(
+                &BTreeMap::new(),
+                Inputs {
+                    volumes: volume(state, 8 * GIB),
+                    ..Default::default()
+                },
+            );
+            assert!(after.is_empty(), "{state:?} was billed for storage");
+        }
+    }
+
+    #[test]
+    fn a_volume_this_host_never_measured_is_metered_for_what_it_was_given_and_no_more() {
+        let after = metered(
+            &BTreeMap::new(),
+            Inputs {
+                records: records(InstanceState::Running),
+                volumes: volume(VolumeState::Ready, 8 * GIB),
+                ..Default::default()
+            },
+        );
+        assert_eq!(held(&after).disk_provisioned_mib_seconds, 8 * 1024 * 5);
+        assert_eq!(
+            held(&after).disk_used_mib_seconds,
+            0,
+            "a guest that has said nothing is not a guest that filled nothing, and is not billed as if it had"
+        );
+    }
+
+    #[test]
+    fn a_level_held_for_no_time_at_all_comes_to_nothing() {
+        assert_eq!(held_for(8 * GIB, 0), 0);
+        assert_eq!(held_for(0, TICK_MS), 0);
+        // A terabyte for a decade, well inside what the counter carries.
+        assert_eq!(held_for(1024 * GIB, 1_000), 1_048_576);
+        assert!(held_for(1024 * GIB, 1_000) * 315_360_000 < u64::MAX / 1_000);
     }
 
     #[test]

@@ -36,7 +36,7 @@ fn as_counted(value: i64) -> u64 {
 #[async_trait]
 impl MeterRepository for SqliteMeters {
     async fn all(&self) -> Result<BTreeMap<AppId, UsageMeters>, StoreError> {
-        let rows = sqlx::query!("select app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes from meters")
+        let rows = sqlx::query!("select app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes, disk_provisioned_mib_seconds, disk_used_mib_seconds from meters")
             .fetch_all(&self.pool)
             .await
             .map_err(StoreError::read)?;
@@ -51,6 +51,8 @@ impl MeterRepository for SqliteMeters {
                         cpu_ms: as_counted(row.cpu_ms),
                         rx_bytes: as_counted(row.rx_bytes),
                         tx_bytes: as_counted(row.tx_bytes),
+                        disk_provisioned_mib_seconds: as_counted(row.disk_provisioned_mib_seconds),
+                        disk_used_mib_seconds: as_counted(row.disk_used_mib_seconds),
                     },
                 ))
             })
@@ -70,14 +72,18 @@ impl MeterRepository for SqliteMeters {
             let cpu_ms = as_stored(meter.cpu_ms);
             let rx_bytes = as_stored(meter.rx_bytes);
             let tx_bytes = as_stored(meter.tx_bytes);
+            let disk_provisioned = as_stored(meter.disk_provisioned_mib_seconds);
+            let disk_used = as_stored(meter.disk_used_mib_seconds);
             sqlx::query!(
-                "insert into meters (app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes) values (?, ?, ?, ?, ?, ?)",
+                "insert into meters (app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes, disk_provisioned_mib_seconds, disk_used_mib_seconds) values (?, ?, ?, ?, ?, ?, ?, ?)",
                 app_id,
                 running_ms,
                 idle_ms,
                 cpu_ms,
                 rx_bytes,
-                tx_bytes
+                tx_bytes,
+                disk_provisioned,
+                disk_used
             )
             .execute(&mut *tx)
             .await
@@ -104,6 +110,8 @@ mod tests {
             cpu_ms: 42_150,
             rx_bytes: 1_073_741_824,
             tx_bytes: 4_294_967_296,
+            disk_provisioned_mib_seconds: 29_491_200,
+            disk_used_mib_seconds: 5_242_880,
         }
     }
 

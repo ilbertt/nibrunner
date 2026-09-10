@@ -264,6 +264,27 @@ pub fn render(report: &HostReportedState, proxy: &ProxyMetrics) -> String {
         }
     }
 
+    // Mebibyte-seconds rather than bytes, and named for it: what a volume holds is a level, so
+    // what accumulates is that level multiplied by how long it was held, and the byte-milliseconds
+    // that would be the base-unit form of it outrun a 64-bit counter on a large volume.
+    page.metric(
+        "nibrunner_instance_disk_mib_seconds_total",
+        "What an app has held on disk over time: what was set aside for it, and what its guest reported filling.",
+        "counter",
+    );
+    for instance in &report.instances {
+        for (disk, held) in [
+            ("provisioned", instance.meters.disk_provisioned_mib_seconds),
+            ("used", instance.meters.disk_used_mib_seconds),
+        ] {
+            page.value(
+                "nibrunner_instance_disk_mib_seconds_total",
+                &[("app", instance.app_id.as_str()), ("disk", disk)],
+                held,
+            );
+        }
+    }
+
     page.metric(
         "nibrunner_proxy_requests_total",
         "Requests this proxy answered, by what it answered with.",
@@ -429,6 +450,8 @@ mod tests {
                 cpu_ms: 42_150,
                 rx_bytes: 1_073_741_824,
                 tx_bytes: 2_147_483_648,
+                disk_provisioned_mib_seconds: 29_491_200,
+                disk_used_mib_seconds: 5_242_880,
             };
         })];
         let page = render(&state, &ProxyMetrics::new());
@@ -461,6 +484,7 @@ mod tests {
             "nibrunner_instance_time_seconds_total",
             "nibrunner_instance_cpu_seconds_total",
             "nibrunner_instance_network_bytes_total",
+            "nibrunner_instance_disk_mib_seconds_total",
         ] {
             assert!(!lines_for(&page, name).is_empty(), "{name} is missing");
         }

@@ -211,10 +211,18 @@ pub async fn record_activity(host: &Host) {
             // read as activity are the same reading.
             let metered = crate::domain::meters::metered_after(
                 &snapshot.meters,
-                &snapshot.records,
-                &snapshot.app_traffic,
-                &traffic,
-                crate::domain::meters::elapsed_since(snapshot.metered_at_ms, now, ACTIVITY_INTERVAL_MS),
+                &crate::domain::meters::MeterInputs {
+                    records: &snapshot.records,
+                    traffic_before: &snapshot.app_traffic,
+                    traffic_after: &traffic,
+                    volumes: &snapshot.volume_reports,
+                    volume_usage: &snapshot.volume_usage,
+                    elapsed_ms: crate::domain::meters::elapsed_since(
+                        snapshot.metered_at_ms,
+                        now,
+                        ACTIVITY_INTERVAL_MS,
+                    ),
+                },
             );
             snapshot.meters = metered;
             snapshot.metered_at_ms = Some(now);

@@ -446,6 +446,11 @@ pub struct UsageMeters {
     /// counted as sent: a packet the ruleset rejected never left, so nobody is charged for it.
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    /// Disk is a level rather than a flow, so what is metered is the level multiplied by the time
+    /// it was held: what was set aside for the app, and what its guest reported having filled.
+    /// Mebibyte-seconds, because byte-milliseconds of a large volume outrun a `u64` in months.
+    pub disk_provisioned_mib_seconds: u64,
+    pub disk_used_mib_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
