@@ -2,12 +2,16 @@ use std::collections::BTreeMap;
 
 use protocol::{
     AppId, ComputeUsage, FilesystemUsage, HostCapacity, HostId, HostReportedState, HostState, HostVersions,
-    ReportedCheckpoint, ReportedExport, ReportedInstance, ReportedVolume, Timestamp,
+    ReportedCheckpoint, ReportedExport, ReportedInstance, ReportedVolume, Timestamp, UsageMeters,
 };
 
 use crate::domain::report::InstanceRecord;
 
-pub fn to_reported_instance(record: &InstanceRecord, measured: Option<&ComputeUsage>) -> ReportedInstance {
+pub fn to_reported_instance(
+    record: &InstanceRecord,
+    measured: Option<&ComputeUsage>,
+    metered: Option<&UsageMeters>,
+) -> ReportedInstance {
     ReportedInstance {
         app_id: record.app_id.clone(),
         deployment_id: record.deployment_id.clone(),
@@ -20,6 +24,7 @@ pub fn to_reported_instance(record: &InstanceRecord, measured: Option<&ComputeUs
         last_healthy_at: record.health.last_healthy_at.clone(),
         last_exit_code: record.last_exit_code,
         compute: measured.cloned(),
+        meters: metered.copied().unwrap_or_default(),
         message: record.message.clone(),
     }
 }
@@ -45,6 +50,7 @@ pub struct ReportInputs<'a> {
     pub volumes: Vec<ReportedVolume>,
     pub volume_usage: &'a BTreeMap<AppId, FilesystemUsage>,
     pub compute_usage: &'a BTreeMap<AppId, ComputeUsage>,
+    pub meters: &'a BTreeMap<AppId, UsageMeters>,
     pub checkpoints: Vec<ReportedCheckpoint>,
     pub exports: Vec<ReportedExport>,
 }
@@ -68,7 +74,13 @@ pub fn build_reported_state(inputs: ReportInputs<'_>) -> HostReportedState {
         instances: inputs
             .records
             .iter()
-            .map(|record| to_reported_instance(record, inputs.compute_usage.get(&record.app_id)))
+            .map(|record| {
+                to_reported_instance(
+                    record,
+                    inputs.compute_usage.get(&record.app_id),
+                    inputs.meters.get(&record.app_id),
+                )
+            })
             .collect(),
         checkpoints: inputs.checkpoints,
         exports: inputs.exports,
@@ -128,6 +140,7 @@ mod tests {
             volumes: vec![],
             volume_usage: &BTreeMap::new(),
             compute_usage: &BTreeMap::new(),
+            meters: &BTreeMap::new(),
             checkpoints,
             exports,
         })
@@ -155,6 +168,7 @@ mod tests {
             volumes: vec![reported_volume()],
             volume_usage: &volume_usage,
             compute_usage: &BTreeMap::new(),
+            meters: &BTreeMap::new(),
             checkpoints: vec![],
             exports: vec![],
         })
@@ -162,13 +176,17 @@ mod tests {
 
     #[test]
     fn the_report_always_names_the_host_side_port_and_omits_what_it_does_not_know() {
-        let instance = to_reported_instance(&instance_record(|_| {}), None);
+        let instance = to_reported_instance(&instance_record(|_| {}), None, None);
         let written = serde_json::to_value(&instance).unwrap();
         assert_eq!(written["hostPort"], u32::from(instance.host_port.unwrap()));
         for absent in ["startedAt", "lastHealthyAt", "lastExitCode", "message", "compute"] {
             assert!(written.get(absent).is_none(), "{absent} should be absent");
         }
-        let exited = to_reported_instance(&instance_record(|record| record.last_exit_code = Some(0)), None);
+        let exited = to_reported_instance(
+            &instance_record(|record| record.last_exit_code = Some(0)),
+            None,
+            None,
+        );
         assert_eq!(serde_json::to_value(&exited).unwrap()["lastExitCode"], 0);
     }
 
@@ -192,9 +210,31 @@ mod tests {
             cpu_share: Some(0.18),
             measured_at: observed_at(),
         };
-        let measured = to_reported_instance(&instance_record(|_| {}), Some(&spending));
+        let measured = to_reported_instance(&instance_record(|_| {}), Some(&spending), None);
         assert_eq!(measured.compute, Some(spending));
-        assert_eq!(to_reported_instance(&instance_record(|_| {}), None).compute, None);
+        assert_eq!(
+            to_reported_instance(&instance_record(|_| {}), None, None).compute,
+            None
+        );
+    }
+
+    #[test]
+    fn an_instance_carries_what_it_has_used_rather_than_what_it_was_last_seen_using() {
+        let metered = protocol::UsageMeters {
+            running_ms: 3_600_000,
+            idle_ms: 900_000,
+            cpu_ms: 42_150,
+            rx_bytes: 1_073_741_824,
+        };
+        let reported = to_reported_instance(&instance_record(|_| {}), None, Some(&metered));
+        assert_eq!(reported.meters, metered);
+
+        let never = to_reported_instance(&instance_record(|_| {}), None, None);
+        assert_eq!(
+            never.meters,
+            protocol::UsageMeters::default(),
+            "an app nothing has been metered about has used nothing"
+        );
     }
 
     #[test]

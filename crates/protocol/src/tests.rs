@@ -129,6 +129,7 @@ fn a_report_omits_what_it_does_not_know() {
         last_healthy_at: None,
         last_exit_code: Some(0),
         compute: None,
+        meters: UsageMeters::default(),
         message: None,
     };
     let written = serde_json::to_value(&instance).unwrap();
@@ -136,6 +137,21 @@ fn a_report_omits_what_it_does_not_know() {
     assert!(written.get("startedAt").is_none());
     assert!(written.get("message").is_none());
     assert_eq!(written["hostPort"], 21000);
+    // An app that has used nothing has used nothing, which is a figure and not an absence.
+    assert_eq!(written["meters"]["runningMs"], 0);
+    assert_eq!(written["meters"]["rxBytes"], 0);
+}
+
+#[test]
+fn a_report_written_before_anything_was_metered_still_reads_back() {
+    let older = serde_json::json!({
+        "appId": "app-1",
+        "deploymentId": "dep-1",
+        "state": "running",
+        "restartCount": 0
+    });
+    let read: ReportedInstance = serde_json::from_value(older).unwrap();
+    assert_eq!(read.meters, UsageMeters::default());
 }
 
 #[test]
