@@ -23,16 +23,16 @@ pub fn ingress_refusal(desired: &DesiredInstance, config: &HostConfig) -> Option
     let named = desired.config.ports.len();
     let allowed = config
         .proxy
-        .forward
+        .passthrough
         .as_ref()
         .map_or(0, |tcp| tcp.max_ports_per_app);
     if named > allowed {
         return Some(match allowed {
             0 => format!(
-                "it asks for {named} port beside its HTTP one and this host names no [proxy.forward] to bind them on"
+                "it asks for {named} port beside its HTTP one and this host names no [proxy.passthrough] to bind them on"
             ),
             allowed => format!(
-                "it asks for {named} ports beside its HTTP one and [proxy.forward] allows {allowed}"
+                "it asks for {named} ports beside its HTTP one and [proxy.passthrough] allows {allowed}"
             ),
         });
     }
@@ -43,7 +43,7 @@ pub fn ingress_refusal(desired: &DesiredInstance, config: &HostConfig) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ForwardBudget, HttpListener, ProxyConfig};
+    use crate::config::{HttpListener, PassthroughBudget, ProxyConfig};
     use crate::test_support::*;
     use protocol::{GuestPort, InstancePort, PortIngress, PortName};
 
@@ -75,14 +75,14 @@ mod tests {
                 port: 8080,
                 tls: None,
             }),
-            forward: None,
+            passthrough: None,
         }
     }
 
     /// The same host, with one port an app may name beside its HTTP one.
     fn and_one_more() -> ProxyConfig {
         ProxyConfig {
-            forward: Some(ForwardBudget { max_ports_per_app: 1 }),
+            passthrough: Some(PassthroughBudget { max_ports_per_app: 1 }),
             ..serving_http()
         }
     }
@@ -120,7 +120,7 @@ mod tests {
         let wanting = desired_instance(|instance| instance.config.ports = vec![ssh_port()]);
         let refusal =
             ingress_refusal(&wanting, &config_with(serving_http())).expect("nothing would have bound it");
-        assert!(refusal.contains("[proxy.forward]"), "{refusal}");
+        assert!(refusal.contains("[proxy.passthrough]"), "{refusal}");
         assert_eq!(ingress_refusal(&wanting, &config_with(and_one_more())), None);
     }
 
@@ -137,7 +137,7 @@ mod tests {
 
         // The same document on a host that allows two is not a document to refuse.
         let roomier = ProxyConfig {
-            forward: Some(ForwardBudget { max_ports_per_app: 2 }),
+            passthrough: Some(PassthroughBudget { max_ports_per_app: 2 }),
             ..serving_http()
         };
         assert_eq!(ingress_refusal(&greedy, &config_with(roomier)), None);

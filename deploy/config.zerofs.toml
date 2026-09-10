@@ -69,11 +69,11 @@ key = "/etc/nibrunner/tls/origin.key"
 [proxy.http.tls.client_ca]
 certificate = "/etc/nibrunner/tls/origin-pull-ca.pem"
 
-# How many ports may be carried to an app unread. The HTTP listener above is read rather than
-# forwarded, so it is not one of these. Which protocol carries each is the document's to name.
-# Absent forwards none, and a document asking for one is refused. A slot reserves seven past the
-# port its HTTP listener takes, so this may be raised without moving anything.
-[proxy.forward]
+# How many ports may reach an app unread. The HTTP listener above is read rather than passed
+# through, so it is not one of these. Which protocol carries each is the document's to name.
+# Absent passes nothing through, and a document asking for one is refused. A slot reserves seven
+# past the port its HTTP listener takes, so this may be raised without moving anything.
+[proxy.passthrough]
 max_ports_per_app = 1
 
 # Not 9091: ZeroFS holds that one on this host, and a second binding is a startup failure.

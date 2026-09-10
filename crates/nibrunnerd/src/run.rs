@@ -108,7 +108,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     );
     let stream_activator = config
         .proxy
-        .forward
+        .passthrough
         .as_ref()
         .zip(config.proxy.listen_address)
         .map(|(_, listen_address)| {

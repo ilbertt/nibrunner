@@ -23,7 +23,7 @@ pub const HOST_PORT_BASE: u16 = 21_000;
 /// A host port is derived from the slot rather than stored, so this stride is what an app's ports
 /// are *at*: changing it moves every app on the host at once, which is the one thing the slot
 /// table exists to prevent. So it is set wide enough to outlast the number of ports a host allows
-/// an app to declare — `proxy.forward.max_ports_per_app`, which this bounds — and raising that limit is an
+/// an app to declare — `proxy.passthrough.max_ports_per_app`, which this bounds — and raising that limit is an
 /// edit rather than a migration. A reserved port is not an open one: nothing binds or forwards a
 /// port no document named.
 pub const PORTS_PER_SLOT: u32 = 8;

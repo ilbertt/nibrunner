@@ -98,7 +98,7 @@ rather than by name, because ssh sends no hostname to route on. While the app sl
 connection wakes it and is spliced through once it answers, so a client sees a slow banner rather
 than a closed socket.
 
-The host must name a `[proxy.forward]` section to bind such a port, and a `[proxy.http]` one to
+The host must name a `[proxy.passthrough]` section to bind such a port, and a `[proxy.http]` one to
 serve a hostname. A document that asks for what this host does not serve is refused by name and
 the instance is reported `failed` saying so.
 
