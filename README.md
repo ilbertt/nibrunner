@@ -13,29 +13,31 @@ Just write the desired configuration in the JSON file nibrunner watches.
 curl -fsSL https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/install.sh | sh
 ```
 
-That is the install. It refuses a machine that cannot host one, puts the packages on, takes the
-newest release and checks the binary against the digests it publishes, and hands over to
-`nibrunnerd install` — which fetches the guest image, sets the kernel settings this host serves
-nothing without, creates the account ZeroFS runs under, renders its two configuration files and
-every unit, and stamps what it laid down into `versions.json`.
+That is the whole install: the packages, the newest release checked against the digests it
+publishes, and `nibrunnerd install` — which writes a configuration if this host has none, fetches
+the guest image, sets the kernel settings, creates the account ZeroFS runs as, and renders every
+config file and every unit.
 
-A host with no configuration is given the smallest one this daemon accepts and told to make it its
-own. That is the one thing nothing can do for you, because it is where this host's storage,
-hostnames and certificates are: **[docs/config.md](docs/config.md) is every key in it.** Then
+It ends by telling you the only things it cannot do for you:
 
-```bash
-nibrunnerd install
+```
+This host is laid out. What is left:
+  systemctl daemon-reload
+  systemctl enable --now nibrunnerd
+
+It is running the configuration this binary carries: volumes as files on its own disk,
+no proxy, no object store. To make it this host's —
+
+  edit /etc/nibrunner/config.toml
+  then `nibrunnerd install` again, and `systemctl restart nibrunnerd`
 ```
 
-again, and it says what is left — the secrets, which only you hold, and the units to enable.
+**[docs/config.md](docs/config.md) is every key in that file.** Give a host its configuration up
+front instead — `deploy/config.zerofs.toml` is one for volumes in an object store and TLS behind an
+edge — and all that is left is the secrets and the units.
 
-Deploying is two files after that: the binary into `artifacts.store_url` under the key its digest
-names, and the document below into `paths.desired_state_file`. Everything past that is the daemon
-converging.
-
-`NIBRUNNER_VERSION` pins a release rather than taking the newest, and `NIBRUNNER_CONFIG` names a
-configuration somewhere other than `/etc/nibrunner/config.toml`. Nothing has to be repeated after a
-reboot: the units are enabled and the kernel settings are written where the boot reads them.
+Then deploy: the binary into `artifacts.store_url` under the key its digest names, and the document
+below into `paths.desired_state_file`. Everything past that is the daemon converging.
 
 ### The document
 

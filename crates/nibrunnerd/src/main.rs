@@ -80,15 +80,9 @@ fn main() -> std::process::ExitCode {
         install_logger();
     }
 
-    let config = match HostConfig::load() {
+    let (config, started) = match configuration(&command) {
         Ok(config) => config,
-        Err(error) => {
-            match command {
-                Command::Serve => tracing::error!(error = %error.message(), "this host is not configured"),
-                Command::Install { .. } => return no_configuration(&error),
-            }
-            return std::process::ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
 
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -101,11 +95,25 @@ fn main() -> std::process::ExitCode {
 
     match command {
         Command::Serve => runtime.block_on(serve(config)),
-        Command::Install { force, release } => runtime.block_on(lay_out(config, force, release)),
+        Command::Install { force, release } => runtime.block_on(lay_out(config, force, release, started)),
     }
 }
 
-async fn lay_out(config: HostConfig, force: bool, release: Option<String>) -> std::process::ExitCode {
+/// Whether this host was laid out from a configuration somebody wrote, or from the starting point
+/// this binary carries — which is the difference between having nothing left to decide and having
+/// every decision still ahead of you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Started {
+    FromItsOwn,
+    FromTheOneThisBinaryCarries,
+}
+
+async fn lay_out(
+    config: HostConfig,
+    force: bool,
+    release: Option<String>,
+    started: Started,
+) -> std::process::ExitCode {
     let config_file = HostConfig::configured_file();
     match install::run(&config, &config_file, force, release.as_deref()).await {
         Ok(laid) => {
@@ -113,6 +121,9 @@ async fn lay_out(config: HostConfig, force: bool, release: Option<String>) -> st
                 println!("  {step}");
             }
             print!("{}", install::what_is_left(&config, &config_file));
+            if started == Started::FromTheOneThisBinaryCarries {
+                print!("{}", install::what_is_still_yours(&config_file));
+            }
             std::process::ExitCode::SUCCESS
         }
         Err(error) => {
@@ -122,28 +133,35 @@ async fn lay_out(config: HostConfig, force: bool, release: Option<String>) -> st
     }
 }
 
-/// A host with no configuration is given one to start from rather than a refusal it has to go and
-/// find the answer to. A host whose configuration is *there and wrong* is never overwritten.
-fn no_configuration(error: &nibrunnerd::config::ConfigError) -> std::process::ExitCode {
+/// A host with no configuration at all is given the smallest one this daemon accepts and laid out
+/// from it in the same run — so what bootstraps this binary ends with a host that is laid out,
+/// rather than one that is half way and waiting to be told to finish.
+///
+/// A configuration that is *there and wrong* is never written over: that is somebody's file, and
+/// the only useful thing to do with it is say which key is wrong.
+fn configuration(command: &Command) -> Result<(HostConfig, Started), std::process::ExitCode> {
+    let refused = |error: &nibrunnerd::config::ConfigError| {
+        match command {
+            Command::Serve => tracing::error!(error = %error.message(), "this host is not configured"),
+            Command::Install { .. } => eprintln!("this host is not configured: {}", error.message()),
+        }
+        std::process::ExitCode::FAILURE
+    };
+
     let path = HostConfig::configured_file();
-    if path.exists() {
-        eprintln!("this host is not configured: {}", error.message());
-        return std::process::ExitCode::FAILURE;
-    }
-    match install::write_starter_configuration(&path) {
-        Ok(()) => {
-            println!("  {} written as a starting point", path.display());
-            println!(
-                "\nThis host had no configuration, so it has one now: volumes as files on its own\n\
-                 disk, no proxy, no object store. Read it, make it this host's, and run\n\
-                 `nibrunnerd install` again."
-            );
-            std::process::ExitCode::SUCCESS
+    match HostConfig::load() {
+        Ok(config) => Ok((config, Started::FromItsOwn)),
+        Err(_) if matches!(command, Command::Install { .. }) && !path.exists() => {
+            install::write_starter_configuration(&path).map_err(|error| {
+                eprintln!("{}", error.message());
+                std::process::ExitCode::FAILURE
+            })?;
+            println!("  {} written, because this host had none", path.display());
+            HostConfig::load()
+                .map(|config| (config, Started::FromTheOneThisBinaryCarries))
+                .map_err(|error| refused(&error))
         }
-        Err(error) => {
-            eprintln!("{}", error.message());
-            std::process::ExitCode::FAILURE
-        }
+        Err(error) => Err(refused(&error)),
     }
 }
 

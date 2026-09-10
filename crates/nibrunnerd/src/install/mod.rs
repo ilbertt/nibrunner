@@ -198,6 +198,21 @@ pub fn what_is_left(config: &HostConfig, config_file: &Path) -> String {
     said
 }
 
+/// Said only to a host laid out from the starting point this binary carries: it is serving, and
+/// every choice about what it serves and where its storage is is still ahead of whoever ran this.
+pub fn what_is_still_yours(config_file: &Path) -> String {
+    format!(
+        "\nIt is running the configuration this binary carries: volumes as files on its own disk,\n\
+         no proxy, no object store. To make it this host's —\n\
+         \n  \
+         edit {}\n  \
+         then `nibrunnerd install` again, and `systemctl restart nibrunnerd`\n\
+         \n\
+         docs/config.md is every key in it.\n",
+        config_file.display()
+    )
+}
+
 /// The smallest configuration this daemon accepts, from the one copy of it in this repository.
 pub fn write_starter_configuration(path: &Path) -> Result<(), crate::json_store::StoreError> {
     const STARTER: &str = include_str!("../../../../deploy/config.toml");
@@ -351,6 +366,17 @@ mod tests {
 
     fn laid() -> Laid {
         Laid { steps: Vec::new() }
+    }
+
+    // It is written to a host that then has to load it. A starting point this daemon refuses is
+    // one that leaves a fresh machine no better off than having no configuration at all.
+    #[test]
+    fn the_configuration_this_binary_carries_is_one_it_would_accept() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        write_starter_configuration(&path).unwrap();
+        let config = HostConfig::from_file(&path).expect("the starting configuration must load");
+        assert!(matches!(config.volumes, VolumeBackend::LocalFile));
     }
 
     #[test]
