@@ -9,6 +9,7 @@
 
 pub mod prerequisites;
 pub mod render;
+pub mod service_user;
 pub mod zerofs;
 
 use std::path::{Path, PathBuf};
@@ -66,6 +67,29 @@ pub async fn run(config: &HostConfig, config_file: &Path, force: bool) -> Result
     laid.note("directories");
 
     if let Some(settings) = config.volumes.zerofs() {
+        match service_user::ensure(service_user::ZEROFS_USER)? {
+            service_user::Made::AlreadyThere => {
+                laid.note(format!("{} account already there", service_user::ZEROFS_USER))
+            }
+            service_user::Made::Created => {
+                laid.note(format!("{} account created", service_user::ZEROFS_USER))
+            }
+        }
+        // The cache is the one thing the live server writes that systemd does not create for it,
+        // so it is the one thing whose ownership has to be handed over.
+        let owner = service_user::ids(service_user::ZEROFS_USER).ok_or_else(|| {
+            InstallError::Refused(format!(
+                "the {} account could not be read",
+                service_user::ZEROFS_USER
+            ))
+        })?;
+        service_user::own(&settings.cache_dir, owner)?;
+        laid.note(format!(
+            "{} owned by {}",
+            settings.cache_dir.display(),
+            service_user::ZEROFS_USER
+        ));
+
         match zerofs::ensure(&settings.binary).await? {
             zerofs::Laid::AlreadyThere => laid.note(format!("zerofs {} already installed", zerofs::VERSION)),
             zerofs::Laid::Fetched => laid.note(format!("zerofs {} fetched", zerofs::VERSION)),

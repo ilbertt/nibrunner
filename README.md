@@ -44,6 +44,57 @@ sudo tee /var/lib/nibrunner/desired.json < desired.json # the document below
 
 Eleven commands, and the eleventh is the deploy. Everything after it is the daemon converging.
 
+### The same thing, from somewhere else
+
+What a fresh machine costs from your own, in four steps. The packages and the two kernel settings
+come first because `install` refuses a host that has not had them — it names all of what is
+missing at once rather than stopping at the first.
+
+```bash
+ssh root@HOST 'bash -euo pipefail -s' <<'SH'
+apt-get update -qq
+apt-get install -y -qq nftables e2fsprogs nbd-client fuse3 passwd curl
+echo nf_conntrack > /etc/modules-load.d/nibrunner.conf && modprobe nf_conntrack
+echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-nibrunner.conf && sysctl -qw net.ipv4.ip_forward=1
+echo 'options nbd nbds_max=1024' > /etc/modprobe.d/nbd.conf
+echo nbd > /etc/modules-load.d/nbd.conf && modprobe -r nbd 2>/dev/null; modprobe nbd nbds_max=1024
+SH
+```
+
+```bash
+ssh root@HOST 'bash -euo pipefail -s' <<'SH'
+T=<the release tag>
+B=https://github.com/ilbertt/nibrunner/releases/download/$T
+mkdir -p /var/lib/nibrunner/guest /tmp/nib && cd /tmp/nib
+for f in nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json checksums.txt; do curl -fsSL -O $B/$f; done
+sha256sum -c checksums.txt
+install -m 0755 nibrunnerd-linux-x64 /usr/local/bin/nibrunnerd
+install -m 0644 vmlinux rootfs.ext4 manifest.json /var/lib/nibrunner/guest/
+curl -fsSL -o /etc/systemd/system/nibrunnerd.service https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/nibrunnerd.service
+SH
+```
+
+Then the one file that is yours, and the secrets that never belong in it:
+
+```bash
+scp deploy/config.zerofs.toml root@HOST:/etc/nibrunner/config.toml
+ssh root@HOST 'nibrunnerd install'            # creates /etc/nibrunner/host.env, empty
+ssh root@HOST 'cat >> /etc/nibrunner/host.env'  # paste AWS_*, and the encryption password
+```
+
+```bash
+ssh root@HOST 'systemctl daemon-reload && systemctl enable --now nibrunner-zerofs nibrunner-zerofs-mount nibrunnerd'
+```
+
+`install` is idempotent, so running it again after the secrets are in place is how a host is
+brought up to a new release: it re-renders what it wrote, leaves what it did not alone, and says
+which was which. Nothing here has to be repeated after a reboot — the units are enabled and both
+kernel settings are written where the boot reads them.
+
+On a `local-file` host, drop `nbd-client`, `fuse3` and `passwd` from the packages, drop the two
+`nbd` lines, and enable `nibrunnerd` alone: there is no ZeroFS to install, no account to create,
+and no unit to start.
+
 ### The document
 
 ```json

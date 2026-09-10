@@ -50,11 +50,23 @@ pub fn check(config: &HostConfig) -> Vec<Check> {
     match &config.volumes {
         VolumeBackend::LocalFile => {}
         VolumeBackend::Zerofs(_) => {
-            for tool in ["nbd-client", "debugfs", "fusermount3"] {
-                checks.push(binary(
-                    tool,
+            for (tool, remedy) in [
+                (
+                    "nbd-client",
                     "install the nbd-client, e2fsprogs and fuse3 packages",
-                ));
+                ),
+                ("debugfs", "install the nbd-client, e2fsprogs and fuse3 packages"),
+                (
+                    "fusermount3",
+                    "install the nbd-client, e2fsprogs and fuse3 packages",
+                ),
+                // ZeroFS does not run as root, and this is what creates the account it does run as.
+                (
+                    "useradd",
+                    "install the passwd package, or create the zerofs account by hand",
+                ),
+            ] {
+                checks.push(binary(tool, remedy));
             }
             // Slot N takes /dev/nbdN and the export reader holds the last of them, so a host whose
             // module allocated fewer minors than that cannot read an export however it is asked.

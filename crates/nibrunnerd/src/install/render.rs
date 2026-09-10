@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::config::{HostConfig, ZerofsSettings, ZEROFS_PROMETHEUS_PORT};
 use crate::domain::exports::reader::{CHECKPOINT_VARIABLE, NBD_SOCKET_FILENAME};
+use crate::install::service_user::ZEROFS_USER;
 
 /// The first line of everything this module writes. A file carrying it is one `install` may
 /// replace; a file without it was written by somebody, and replacing it is a decision they make
@@ -164,6 +165,10 @@ pub fn zerofs_unit(settings: &ZerofsSettings, config_file: &Path, environment_fi
          \n\
          [Service]\n\
          Type=exec\n\
+         # Not root. This process holds the object-store credentials and the key every tenant's\n\
+         # blocks are encrypted under, and `nibrunnerd install` creates the account for it.\n\
+         User={ZEROFS_USER}\n\
+         Group={ZEROFS_USER}\n\
          ExecStart={} run --config {}\n\
          EnvironmentFile={}\n\
          \n\
@@ -390,6 +395,16 @@ mod tests {
             mount.contains(&format!("[ -S {} ]", settings.ninep_socket_path.display())),
             "the mount must wait for the socket rather than race it: {mount}"
         );
+    }
+
+    // It holds this host's object-store credentials and the key every tenant's blocks are
+    // encrypted under, so the one thing this unit must never say is nothing about who runs it.
+    #[test]
+    fn the_one_writer_does_not_run_as_root() {
+        let unit = zerofs_unit(&settings(), config_file(), environment_file());
+        assert!(unit.contains(&format!("User={ZEROFS_USER}")), "{unit}");
+        assert!(unit.contains(&format!("Group={ZEROFS_USER}")), "{unit}");
+        assert!(unit.contains("NoNewPrivileges=true"), "{unit}");
     }
 
     #[test]
