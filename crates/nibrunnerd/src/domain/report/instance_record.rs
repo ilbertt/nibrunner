@@ -1,6 +1,6 @@
 use protocol::{
     AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort, InstanceResources,
-    InstanceState, Ipv4Address, PortName, Sha256Digest, StateMessage, Timestamp, VolumeId,
+    InstanceState, Ipv4Address, PortName, ReadinessPolicy, Sha256Digest, StateMessage, Timestamp, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,10 @@ pub struct InstanceRecord {
     pub resources: InstanceResources,
     pub desired_running: bool,
     pub on_request: bool,
+    // Every record written before this field existed belongs to an instance that answers a port,
+    // which is what the default reads as.
+    #[serde(default)]
+    pub readiness: ReadinessPolicy,
     #[serde(default)]
     pub start_attempts: AttemptWindow,
     pub restart_count: u32,
@@ -63,6 +67,7 @@ pub struct RecordFields {
     pub artifact_digest: Sha256Digest,
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
+    pub readiness: ReadinessPolicy,
     pub desired_running: bool,
     pub on_request: bool,
 }
@@ -83,6 +88,7 @@ impl InstanceRecord {
             health,
             health_check: fields.health_check,
             resources: fields.resources,
+            readiness: fields.readiness,
             desired_running: fields.desired_running,
             on_request: fields.on_request,
             start_attempts: NO_START_ATTEMPTS,
@@ -105,6 +111,7 @@ impl InstanceRecord {
         self.artifact_digest = fields.artifact_digest;
         self.health_check = fields.health_check;
         self.resources = fields.resources;
+        self.readiness = fields.readiness;
         self.desired_running = fields.desired_running;
         self.on_request = fields.on_request;
     }

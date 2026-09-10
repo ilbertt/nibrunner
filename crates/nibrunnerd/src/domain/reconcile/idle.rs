@@ -1,119 +1,14 @@
-use protocol::InstanceState;
-
-use crate::domain::report::InstanceRecord;
-
-pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
-
-const SLEEPABLE_STATES: [InstanceState; 1] = [InstanceState::Running];
-
-pub fn has_gone_quiet(
-    record: &InstanceRecord,
-    timeout_ms: Option<u64>,
-    last_active_at_ms: Option<i64>,
-    now_ms: i64,
-) -> bool {
-    let (Some(timeout_ms), Some(last_active_at_ms)) = (timeout_ms, last_active_at_ms) else {
-        return false;
-    };
-    record.on_request
-        && record.desired_running
-        && SLEEPABLE_STATES.contains(&record.state)
-        && now_ms - last_active_at_ms >= timeout_ms as i64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::instance_record;
-    use protocol::INSTANCE_STATES;
-
-    const TIMEOUT_MS: u64 = 900_000;
-    const NOW_MS: i64 = 10_000_000;
-    const QUIET_SINCE_MS: i64 = NOW_MS - TIMEOUT_MS as i64;
-    const BUSY_SINCE_MS: i64 = QUIET_SINCE_MS + 1;
-
-    fn quiet(record: &InstanceRecord, timeout_ms: Option<u64>, last_active_at_ms: Option<i64>) -> bool {
-        has_gone_quiet(record, timeout_ms, last_active_at_ms, NOW_MS)
-    }
-
-    fn on_request(state: InstanceState) -> InstanceRecord {
-        instance_record(|record| {
-            record.on_request = true;
-            record.state = state;
-        })
-    }
-
-    #[test]
-    fn a_quiet_serving_app_has_gone_quiet_and_one_asked_for_a_moment_ago_has_not() {
-        assert!(quiet(
-            &on_request(InstanceState::Running),
-            Some(TIMEOUT_MS),
-            Some(QUIET_SINCE_MS)
-        ));
-        assert!(!quiet(
-            &on_request(InstanceState::Running),
-            Some(TIMEOUT_MS),
-            Some(BUSY_SINCE_MS)
-        ));
-    }
-
-    #[test]
-    fn an_unhealthy_app_is_not_a_quiet_one_however_long_nobody_has_asked_for_it() {
-        assert!(!quiet(
-            &on_request(InstanceState::Unhealthy),
-            Some(TIMEOUT_MS),
-            Some(QUIET_SINCE_MS)
-        ));
-    }
-
-    #[test]
-    fn an_app_that_is_kept_up_or_suspended_is_never_let_go() {
-        let always_up = instance_record(|record| {
-            record.on_request = false;
-            record.state = InstanceState::Running;
-        });
-        assert!(!quiet(&always_up, Some(TIMEOUT_MS), Some(QUIET_SINCE_MS)));
-        let suspended = instance_record(|record| {
-            record.on_request = true;
-            record.state = InstanceState::Running;
-            record.desired_running = false;
-        });
-        assert!(!quiet(&suspended, Some(TIMEOUT_MS), Some(QUIET_SINCE_MS)));
-    }
-
-    #[test]
-    fn every_other_state_has_no_microvm_to_stop() {
-        for state in INSTANCE_STATES
-            .iter()
-            .filter(|state| **state != InstanceState::Running && **state != InstanceState::Unhealthy)
-        {
-            assert!(
-                !quiet(&on_request(*state), Some(TIMEOUT_MS), Some(QUIET_SINCE_MS)),
-                "{state:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_app_nothing_has_been_observed_about_is_left_alone() {
-        assert!(!quiet(
-            &on_request(InstanceState::Running),
-            Some(TIMEOUT_MS),
-            None
-        ));
-        assert!(!quiet(
-            &on_request(InstanceState::Running),
-            None,
-            Some(QUIET_SINCE_MS)
-        ));
-    }
-}
+// What decides that an instance should sleep now lives in `domain::activation`, which reads a
+// policy rather than a timeout. The constant stays reachable from here because it is the default
+// this pass applies to a document that named none.
+pub use protocol::DEFAULT_IDLE_TIMEOUT_MS;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nft_render::AppTraffic;
-use protocol::AppId;
+use protocol::{AppId, Timestamp};
 
+use crate::domain::activation::{should_sleep, ActivitySignals, SleepReason};
 use crate::host::Host;
 
 pub struct Activity {
@@ -204,7 +99,7 @@ pub async fn record_activity(host: &Host) {
 }
 
 pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
-    let timeouts: BTreeMap<AppId, u64> = {
+    let policies: BTreeMap<AppId, protocol::ActivationPolicy> = {
         let cache = host.cache.lock().await;
         cache
             .latest()
@@ -212,15 +107,7 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
                 desired
                     .instances
                     .iter()
-                    .filter(|instance| instance.desired_state == protocol::DesiredInstanceState::OnRequest)
-                    .map(|instance| {
-                        (
-                            instance.app_id.clone(),
-                            instance
-                                .idle_timeout_ms
-                                .map_or(DEFAULT_IDLE_TIMEOUT_MS, |timeout| timeout.get()),
-                        )
-                    })
+                    .map(|instance| (instance.app_id.clone(), instance.activation()))
                     .collect()
             })
             .unwrap_or_default()
@@ -228,31 +115,34 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
     let snapshot = host.state.snapshot().await;
     let now = crate::clock::now_ms();
 
-    let quiet: Vec<_> = snapshot
+    let letting_go: Vec<_> = snapshot
         .records
         .values()
-        .filter(|record| {
-            has_gone_quiet(
-                record,
-                timeouts.get(&record.app_id).copied(),
-                snapshot.last_active_at_ms.get(&record.app_id).copied(),
-                now,
-            )
+        .filter_map(|record| {
+            let policy = policies.get(&record.app_id)?;
+            let signals = ActivitySignals {
+                last_active_at_ms: snapshot.last_active_at_ms.get(&record.app_id).copied(),
+                started_at_ms: record.started_at.as_ref().map(Timestamp::epoch_ms),
+            };
+            let reason = should_sleep(policy, record, &signals, now)?;
+            Some((record.clone(), signals, reason))
         })
-        .cloned()
         .collect();
-    if quiet.is_empty() {
+    if letting_go.is_empty() {
         return;
     }
-    for record in quiet {
-        let quiet_for_ms = now
-            - snapshot
-                .last_active_at_ms
-                .get(&record.app_id)
-                .copied()
-                .unwrap_or(now);
-        tracing::info!(app_id = %record.app_id, quiet_for_ms, "app has gone quiet; letting it sleep");
-        crate::domain::reconcile::instances::suspend_instance(host, &record.app_id, "idle").await;
+    for (record, signals, reason) in letting_go {
+        let since = match reason {
+            SleepReason::Quiet => signals.last_active_at_ms,
+            SleepReason::LivedLongEnough => signals.started_at_ms,
+        };
+        tracing::info!(
+            app_id = %record.app_id,
+            reason = reason.as_str(),
+            for_ms = now - since.unwrap_or(now),
+            "letting an app sleep"
+        );
+        crate::domain::reconcile::instances::suspend_instance(host, &record.app_id, reason.as_str()).await;
     }
     crate::domain::reconcile::network::apply_network(host).await;
 }
@@ -489,6 +379,89 @@ mod sleep_tests {
     #[tokio::test]
     async fn an_app_nothing_has_been_measured_about_is_left_up_rather_than_read_as_quiet() {
         let host = on_request_host(None).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+    }
+
+    async fn host_under(policy: protocol::ActivationPolicy) -> TestHost {
+        let host = test_host().await;
+        host.cache.lock().await.accept(desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.desired_state = DesiredInstanceState::OnRequest;
+                instance.activation = Some(policy);
+            })]
+        }));
+        host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(quiet_record()).await;
+        host
+    }
+
+    fn max_lifetime(ttl_ms: u64) -> protocol::ActivationPolicy {
+        protocol::ActivationPolicy {
+            sleep_when: protocol::SleepPolicy::MaxLifetime {
+                ttl_ms: protocol::MaxLifetimeMs::try_from(ttl_ms).unwrap(),
+            },
+            ready_when: protocol::ReadinessPolicy::PortAnswers,
+        }
+    }
+
+    async fn started(host: &TestHost, ms_ago: i64) {
+        let moment = protocol::Timestamp::from_epoch_ms(crate::clock::now_ms() - ms_ago);
+        host.state
+            .update_record(&app_id(), |record| record.started_at = Some(moment.clone()))
+            .await;
+    }
+
+    const TTL_MS: u64 = 3_600_000;
+
+    #[tokio::test]
+    async fn an_app_that_has_lived_its_lifetime_sleeps_though_it_was_asked_for_a_moment_ago() {
+        let host = host_under(max_lifetime(TTL_MS)).await;
+        started(&host, TTL_MS as i64 + 1).await;
+        last_reached(&host, 0).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn an_app_still_inside_its_lifetime_is_left_up_however_quiet_it_has_been() {
+        let host = host_under(max_lifetime(TTL_MS)).await;
+        started(&host, TTL_MS as i64 - 1).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_app_told_never_to_sleep_is_kept_up_where_a_timeout_would_have_let_it_go() {
+        let never = protocol::ActivationPolicy {
+            sleep_when: protocol::SleepPolicy::Never,
+            ready_when: protocol::ReadinessPolicy::PortAnswers,
+        };
+        let host = host_under(never).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_app_that_has_never_started_has_no_lifetime_to_have_run_out() {
+        let host = host_under(max_lifetime(protocol::MIN_MAX_LIFETIME_MS)).await;
+        host.state
+            .update_record(&app_id(), |record| record.started_at = None)
+            .await;
 
         apply_sleep(host.arc()).await;
 
