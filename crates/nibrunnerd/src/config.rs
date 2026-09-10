@@ -84,36 +84,49 @@ pub struct ZerofsSettings {
     pub checkpoint_cache_dir: PathBuf,
 }
 
-/// What this host is reachable on. Each listener is a section that is either absent or complete:
-/// there is no half-configured TLS to warn about at startup because there is no way to write one.
+/// Where the world reaches an app on this host.
+///
+/// Every way in is a section under here, and each is absent or complete: there is no
+/// half-configured listener to warn about at startup because there is no way to write one. What
+/// separates them is whether this host reads the protocol to know whose connection it is — HTTP
+/// carries a hostname to route on, a byte pipe carries nothing — so a `tcp` port is reached at a
+/// port of its own rather than by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProxyConfig {
+    /// Where every listener under here binds. `None` only on a host that offers no way in.
+    pub listen_address: Option<IpAddr>,
     pub http: Option<HttpListener>,
-    pub https: Option<HttpsListener>,
+    pub tcp: Option<TcpListeners>,
 }
 
+/// The one HTTP listener.
+///
+/// One rather than a plain port beside a TLS port, because nothing here redirects: two would
+/// serve every app unencrypted and encrypted at once, forever, with nothing moving a visitor
+/// from the first to the second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpListener {
     pub port: u16,
+    /// Absent serves plain HTTP, which is what a host behind an edge that terminates TLS wants.
+    pub tls: Option<TlsMaterial>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpsListener {
-    pub port: u16,
+pub struct TlsMaterial {
     pub certificate: PathBuf,
     pub key: PathBuf,
     /// Naming a trust pool makes a caller's own certificate the price of the handshake.
     pub client_ca: Option<PathBuf>,
 }
 
-/// Where a port that is not the proxy's is put within reach.
+/// The ports an app may answer on beside the HTTP one.
 ///
-/// A `tcp` port carries a protocol this host does not read, so nothing can route it by name and
-/// it is reached at an address of its own. Absent is a host that offers no such port, and a
-/// document that asks for one on such a host is refused rather than quietly left unreachable.
+/// Absent is a host that offers none, and a document asking one of those for a stream port is
+/// refused rather than quietly left unreachable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IngressConfig {
-    pub listen_address: IpAddr,
+pub struct TcpListeners {
+    /// How many an app may name. Bounded by what a slot reserves.
+    pub ports_per_app: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +152,6 @@ pub struct HostConfig {
     pub control_plane_cidrs_v6: Vec<String>,
     pub proxy: ProxyConfig,
     pub metrics: Option<MetricsConfig>,
-    pub ingress: Option<IngressConfig>,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
 }
@@ -211,7 +223,6 @@ mod file {
         pub(super) network: Option<Network>,
         pub(super) proxy: Option<Proxy>,
         pub(super) metrics: Option<Metrics>,
-        pub(super) ingress: Option<Ingress>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -275,23 +286,30 @@ mod file {
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Proxy {
+        pub(super) listen_address: Option<String>,
         pub(super) http: Option<Http>,
-        pub(super) https: Option<Https>,
+        pub(super) tcp: Option<Tcp>,
     }
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Http {
         pub(super) port: Option<u16>,
+        pub(super) tls: Option<Tls>,
     }
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct Https {
-        pub(super) port: Option<u16>,
+    pub(super) struct Tls {
         pub(super) certificate: Option<String>,
         pub(super) key: Option<String>,
         pub(super) client_ca: Option<ClientCa>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Tcp {
+        pub(super) ports_per_app: Option<usize>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -304,12 +322,6 @@ mod file {
     #[serde(deny_unknown_fields)]
     pub(super) struct Metrics {
         pub(super) port: Option<u16>,
-        pub(super) listen_address: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub(super) struct Ingress {
         pub(super) listen_address: Option<String>,
     }
 }
@@ -425,7 +437,6 @@ impl HostConfig {
 
         let proxy = proxy(document.proxy.as_ref())?;
         let metrics = metrics(document.metrics.as_ref(), &proxy, &backend)?;
-        let ingress = ingress(document.ingress.as_ref())?;
 
         Ok(Self {
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
@@ -461,7 +472,6 @@ impl HostConfig {
             )?,
             proxy,
             metrics,
-            ingress,
             export_store_url: object_store_url(
                 "exports.store_url",
                 required_str("exports.store_url", &exports.store_url)?,
@@ -488,7 +498,6 @@ impl HostConfig {
             control_plane_cidrs_v4: vec![],
             control_plane_cidrs_v6: vec![],
             proxy: ProxyConfig::default(),
-            ingress: None,
             metrics: None,
             export_store_url: root.join("state/export-store").display().to_string(),
             export_staging_dir: root.join("state/exports"),
@@ -506,38 +515,64 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
         .map(|http| {
             Ok::<_, ConfigError>(HttpListener {
                 port: listener("proxy.http.port", required("proxy.http.port", http.port)?)?,
-            })
-        })
-        .transpose()?;
-    let https = document
-        .https
-        .as_ref()
-        .map(|https| {
-            Ok::<_, ConfigError>(HttpsListener {
-                port: listener("proxy.https.port", required("proxy.https.port", https.port)?)?,
-                certificate: path_key("proxy.https.certificate", &https.certificate)?,
-                key: path_key("proxy.https.key", &https.key)?,
-                client_ca: https
-                    .client_ca
+                tls: http
+                    .tls
                     .as_ref()
-                    .map(|pool| path_key("proxy.https.client_ca.certificate", &pool.certificate))
+                    .map(|tls| {
+                        Ok::<_, ConfigError>(TlsMaterial {
+                            certificate: path_key("proxy.http.tls.certificate", &tls.certificate)?,
+                            key: path_key("proxy.http.tls.key", &tls.key)?,
+                            client_ca: tls
+                                .client_ca
+                                .as_ref()
+                                .map(|pool| {
+                                    path_key("proxy.http.tls.client_ca.certificate", &pool.certificate)
+                                })
+                                .transpose()?,
+                        })
+                    })
                     .transpose()?,
             })
         })
         .transpose()?;
-    if let (Some(http), Some(https)) = (&http, &https) {
-        if http.port == https.port {
-            return Err(ConfigError::invalid(
-                "proxy.https.port",
-                format!(
-                    "a different port from proxy.http.port, which is also {}",
-                    http.port
-                ),
-            ));
-        }
-    }
-    Ok(ProxyConfig { http, https })
+    let tcp = document
+        .tcp
+        .as_ref()
+        .map(|tcp| {
+            let named = required("proxy.tcp.ports_per_app", tcp.ports_per_app)?;
+            if named == 0 || named > MAX_PORTS_PER_APP {
+                return Err(ConfigError::invalid(
+                    "proxy.tcp.ports_per_app",
+                    format!("between 1 and {MAX_PORTS_PER_APP}, which is what a slot reserves beside the HTTP port"),
+                ));
+            }
+            Ok(TcpListeners {
+                ports_per_app: named,
+            })
+        })
+        .transpose()?;
+
+    // Everything under here binds somewhere, and where is said out loud rather than guessed at:
+    // the host ports a stream listener takes are laid out in a range anybody could guess.
+    let listen_address = match (&http, &tcp) {
+        (None, None) => None,
+        _ => Some(
+            required_str("proxy.listen_address", &document.listen_address)?
+                .trim()
+                .parse()
+                .map_err(|_| ConfigError::invalid("proxy.listen_address", "an IP address to bind"))?,
+        ),
+    };
+
+    Ok(ProxyConfig {
+        listen_address,
+        http,
+        tcp,
+    })
 }
+
+/// What a slot has left over for an app once its HTTP port is taken.
+pub const MAX_PORTS_PER_APP: usize = nft_render::PORTS_PER_SLOT as usize - 1;
 
 fn metrics(
     document: Option<&file::Metrics>,
@@ -550,7 +585,6 @@ fn metrics(
     let port = listener("metrics.port", required("metrics.port", document.port)?)?;
     for (named, field) in [
         (proxy.http.as_ref().map(|http| http.port), "proxy.http.port"),
-        (proxy.https.as_ref().map(|https| https.port), "proxy.https.port"),
         // Rendered into ZeroFS's own config by `nibrunnerd install`, so this host does hold it
         // even though no key here names it, and a second binding is a startup failure over there.
         (
@@ -572,19 +606,6 @@ fn metrics(
         .parse()
         .map_err(|_| ConfigError::invalid("metrics.listen_address", "an IP address to bind"))?;
     Ok(Some(MetricsConfig { port, listen_address }))
-}
-
-fn ingress(document: Option<&file::Ingress>) -> Result<Option<IngressConfig>, ConfigError> {
-    let Some(document) = document else {
-        return Ok(None);
-    };
-    // A stream port is open to whoever can reach the address, and the host ports behind it are
-    // laid out in a range anyone could guess, so where it binds is said out loud.
-    let listen_address = required_str("ingress.listen_address", &document.listen_address)?
-        .trim()
-        .parse()
-        .map_err(|_| ConfigError::invalid("ingress.listen_address", "an IP address to bind"))?;
-    Ok(Some(IngressConfig { listen_address }))
 }
 
 /// Nothing this daemon reads has a value it may leave out: a key that is here is a key the
@@ -820,6 +841,11 @@ control_plane_cidrs_v6 = []
         parsed(&document(&[], extra))
     }
 
+    /// Every listener binds somewhere, so a document naming one names that too.
+    fn bound(listeners: &str) -> String {
+        format!("[proxy]\nlisten_address = \"0.0.0.0\"\n\n{listeners}")
+    }
+
     /// `WHOLE` with one key struck out, which is the only way a key can now be absent.
     fn without(field: &str) -> String {
         let mut section = String::new();
@@ -934,76 +960,130 @@ control_plane_cidrs_v6 = []
         assert!(message.contains("paths.snapshot_dir"), "{message}");
         assert!(message.contains("is not a path"), "{message}");
         assert_eq!(
-            with("[proxy.https]\nport = 443\ncertificate = \"  /tls/origin.crt  \"\nkey = \"/tls/origin.key\"\n")
-                .proxy
-                .https
-                .unwrap()
-                .certificate,
+            with(&bound(
+                "[proxy.http]\nport = 443\n\n[proxy.http.tls]\ncertificate = \"  /tls/origin.crt  \"\nkey = \"/tls/origin.key\"\n"
+            ))
+            .proxy
+            .http
+            .unwrap()
+            .tls
+            .unwrap()
+            .certificate,
             PathBuf::from("/tls/origin.crt")
         );
     }
 
     #[test]
     fn a_proxy_port_a_slot_would_take_is_refused() {
-        let message = refused(&document(&[], "[proxy.http]\nport = 21000\n"));
+        let message = refused(&document(&[], &bound("[proxy.http]\nport = 21000\n")));
         assert!(message.contains("proxy.http.port"), "{message}");
         assert!(message.contains("21000"), "{message}");
         assert!(message.contains("28999"), "{message}");
         // The whole stride is reserved, not just the port each slot's first app answers on.
-        assert!(refused(&document(&[], "[proxy.http]\nport = 23000\n")).contains("proxy.http.port"));
+        assert!(refused(&document(&[], &bound("[proxy.http]\nport = 23000\n"))).contains("proxy.http.port"));
         assert_eq!(
-            with("[proxy.http]\nport = 29000\n").proxy.http.unwrap().port,
+            with(&bound("[proxy.http]\nport = 29000\n"))
+                .proxy
+                .http
+                .unwrap()
+                .port,
             29000
         );
     }
 
     #[test]
     fn a_port_the_kernel_would_pick_is_not_a_port_this_host_can_be_found_on() {
-        let message = refused(&document(&[], "[proxy.http]\nport = 0\n"));
+        let message = refused(&document(&[], &bound("[proxy.http]\nport = 0\n")));
         assert!(message.contains("proxy.http.port"), "{message}");
         assert!(message.contains("kernel picking one"), "{message}");
     }
 
     #[test]
-    fn one_port_cannot_serve_both_plaintext_and_tls() {
-        let message = refused(&document(
-            &[],
-            "[proxy.http]\nport = 8080\n\n[proxy.https]\nport = 8080\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n",
+    fn a_listener_that_binds_nowhere_is_refused_rather_than_bound_everywhere() {
+        let message = refused(&document(&[], "[proxy.http]\nport = 8080\n"));
+        assert!(message.contains("proxy.listen_address"), "{message}");
+        let streaming = refused(&document(&[], "[proxy.tcp]\nports_per_app = 1\n"));
+        assert!(streaming.contains("proxy.listen_address"), "{streaming}");
+        // A host that offers no way in is not asked where it would have bound one.
+        assert_eq!(parsed(&whole()).proxy, ProxyConfig::default());
+    }
+
+    #[test]
+    fn tls_is_a_property_of_the_one_listener_rather_than_a_second_one() {
+        let plain = with(&bound("[proxy.http]\nport = 8080\n"));
+        let listener = plain.proxy.http.unwrap();
+        assert_eq!(listener.port, 8080);
+        assert_eq!(listener.tls, None, "no material is plain HTTP, not a refusal");
+
+        let secure = with(&bound(
+            "[proxy.http]\nport = 8443\n\n[proxy.http.tls]\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n",
         ));
-        assert!(message.contains("proxy.https.port"), "{message}");
+        assert_eq!(secure.proxy.http.unwrap().port, 8443);
+
+        // The listener it would have belonged to is gone, so there is nowhere to write a second.
+        let second = refused(&document(&[], &bound("[proxy.https]\nport = 8443\n")));
+        assert!(second.contains("https"), "{second}");
     }
 
     #[test]
     fn a_listener_is_named_whole_or_not_at_all() {
-        let message = refused(&document(&[], "[proxy.https]\nport = 8443\n"));
-        assert!(message.contains("proxy.https.certificate"), "{message}");
+        let message = refused(&document(
+            &[],
+            &bound("[proxy.http]\nport = 8443\n\n[proxy.http.tls]\n"),
+        ));
+        assert!(message.contains("proxy.http.tls.certificate"), "{message}");
         let half = refused(&document(
             &[],
-            "[proxy.https]\nport = 8443\ncertificate = \"/tls/origin.crt\"\n",
+            &bound("[proxy.http]\nport = 8443\n\n[proxy.http.tls]\ncertificate = \"/tls/origin.crt\"\n"),
         ));
-        assert!(half.contains("proxy.https.key"), "{half}");
+        assert!(half.contains("proxy.http.tls.key"), "{half}");
         let pool = refused(&document(
             &[],
-            "[proxy.https]\nport = 8443\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n\n[proxy.https.client_ca]\n",
+            &bound("[proxy.http]\nport = 8443\n\n[proxy.http.tls]\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n\n[proxy.http.tls.client_ca]\n"),
         ));
-        assert!(pool.contains("proxy.https.client_ca.certificate"), "{pool}");
+        assert!(pool.contains("proxy.http.tls.client_ca.certificate"), "{pool}");
     }
 
     #[test]
     fn a_trust_pool_is_only_reachable_where_something_serves_tls_to_check_a_caller_against_it() {
-        let message = refused(&document(
-            &[],
-            "[proxy.https.client_ca]\ncertificate = \"/tls/origin-pull-ca.pem\"\n",
-        ));
-        assert!(message.contains("proxy.https.port"), "{message}");
-
-        let served = with("[proxy.https]\nport = 8443\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n\n[proxy.https.client_ca]\ncertificate = \"/tls/ca.pem\"\n");
+        let served = with(&bound("[proxy.http]\nport = 8443\n\n[proxy.http.tls]\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n\n[proxy.http.tls.client_ca]\ncertificate = \"/tls/ca.pem\"\n"));
         assert_eq!(
-            served.proxy.https.as_ref().unwrap().client_ca,
+            served.proxy.http.unwrap().tls.unwrap().client_ca,
             Some(PathBuf::from("/tls/ca.pem"))
         );
-        let open = with("[proxy.https]\nport = 8443\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n");
-        assert_eq!(open.proxy.https.unwrap().client_ca, None);
+        let open = with(&bound(
+            "[proxy.http]\nport = 8443\n\n[proxy.http.tls]\ncertificate = \"/tls/c\"\nkey = \"/tls/k\"\n",
+        ));
+        assert_eq!(open.proxy.http.unwrap().tls.unwrap().client_ca, None);
+    }
+
+    #[test]
+    fn how_many_ports_an_app_may_name_is_the_hosts_to_say_and_is_bounded_by_the_slot() {
+        assert_eq!(
+            with(&bound("[proxy.tcp]\nports_per_app = 1\n"))
+                .proxy
+                .tcp
+                .unwrap()
+                .ports_per_app,
+            1
+        );
+        for refused_count in ["0", &(MAX_PORTS_PER_APP + 1).to_string()] {
+            let message = refused(&document(
+                &[],
+                &bound(&format!("[proxy.tcp]\nports_per_app = {refused_count}\n")),
+            ));
+            assert!(message.contains("proxy.tcp.ports_per_app"), "{message}");
+        }
+        assert_eq!(
+            with(&bound(&format!(
+                "[proxy.tcp]\nports_per_app = {MAX_PORTS_PER_APP}\n"
+            )))
+            .proxy
+            .tcp
+            .unwrap()
+            .ports_per_app,
+            MAX_PORTS_PER_APP
+        );
     }
 
     #[test]
@@ -1035,7 +1115,7 @@ control_plane_cidrs_v6 = []
         .contains("metrics.listen_address"));
         let clash = refused(&document(
             &[],
-            "[proxy.http]\nport = 9100\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n",
+            &bound("[proxy.http]\nport = 9100\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n"),
         ));
         assert!(clash.contains("proxy.http.port"), "{clash}");
     }
@@ -1308,16 +1388,21 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
                 ("artifacts.store_url", "\"s3://nibrun-artifacts/prod\""),
                 ("network.control_plane_cidrs_v4", "[\"172.31.0.0/16\"]"),
             ],
-            r#"[proxy.http]
-port = 80
+            r#"[proxy]
+listen_address = "0.0.0.0"
 
-[proxy.https]
+[proxy.http]
 port = 443
+
+[proxy.http.tls]
 certificate = "/etc/nibrunner/origin.crt"
 key = "/etc/nibrunner/origin.key"
 
-[proxy.https.client_ca]
+[proxy.http.tls.client_ca]
 certificate = "/etc/nibrunner/origin-pull-ca.pem"
+
+[proxy.tcp]
+ports_per_app = 1
 
 [metrics]
 port = 9100
@@ -1328,16 +1413,19 @@ listen_address = "127.0.0.1"
         assert_eq!(config.snapshot_dir, PathBuf::from("/mnt/cache/snapshots"));
         assert_eq!(config.artifact_store_url, "s3://nibrun-artifacts/prod");
         assert_eq!(config.control_plane_cidrs_v4, vec!["172.31.0.0/16".to_string()]);
-        assert_eq!(config.proxy.http, Some(HttpListener { port: 80 }));
+        assert_eq!(config.proxy.listen_address, Some(IpAddr::from([0, 0, 0, 0])));
         assert_eq!(
-            config.proxy.https,
-            Some(HttpsListener {
+            config.proxy.http,
+            Some(HttpListener {
                 port: 443,
-                certificate: PathBuf::from("/etc/nibrunner/origin.crt"),
-                key: PathBuf::from("/etc/nibrunner/origin.key"),
-                client_ca: Some(PathBuf::from("/etc/nibrunner/origin-pull-ca.pem")),
+                tls: Some(TlsMaterial {
+                    certificate: PathBuf::from("/etc/nibrunner/origin.crt"),
+                    key: PathBuf::from("/etc/nibrunner/origin.key"),
+                    client_ca: Some(PathBuf::from("/etc/nibrunner/origin-pull-ca.pem")),
+                }),
             })
         );
+        assert_eq!(config.proxy.tcp, Some(TcpListeners { ports_per_app: 1 }));
         assert_eq!(
             config.metrics,
             Some(MetricsConfig {

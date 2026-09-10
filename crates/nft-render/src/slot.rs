@@ -22,10 +22,16 @@ pub const HOST_PORT_BASE: u16 = 21_000;
 ///
 /// A host port is derived from the slot rather than stored, so this stride is what an app's ports
 /// are *at*: changing it moves every app on the host at once, which is the one thing the slot
-/// table exists to prevent. So it is set wide enough to outlast the number of ports an app is
-/// allowed to declare — `protocol::MAX_INSTANCE_PORTS` today — and raising that limit later costs
-/// nothing. A reserved port is not an open one: nothing binds or forwards a port no document named.
+/// table exists to prevent. So it is set wide enough to outlast the number of ports a host allows
+/// an app to declare — `proxy.tcp.ports_per_app`, which this bounds — and raising that limit is an
+/// edit rather than a migration. A reserved port is not an open one: nothing binds or forwards a
+/// port no document named.
 pub const PORTS_PER_SLOT: u32 = 8;
+
+const _: () = assert!(
+    PORTS_PER_SLOT > 1,
+    "a slot with no room beside the HTTP port could offer no way in"
+);
 
 /// Only the zerofs backend addresses an nbd minor, so a local-file host is not bounded by how
 /// many of those exist. What bounds every host is the range of loopback ports reserved from
@@ -172,7 +178,6 @@ mod tests {
             None,
             "the port after the last one this slot reserves belongs to the next slot"
         );
-        assert!(protocol::MAX_INSTANCE_PORTS <= PORTS_PER_SLOT as usize);
     }
 
     #[test]

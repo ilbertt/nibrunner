@@ -230,13 +230,6 @@ pub struct InstancePort {
     pub ingress: PortIngress,
 }
 
-/// The HTTP port and this many minus one beside it.
-///
-/// Two is what a served app plus a way in takes, and a way in is enough to reach the rest: an
-/// `ssh -L` carries every other port a tenant could have asked for. Raising this moves nobody's
-/// ports, because a slot reserves `nft_render::PORTS_PER_SLOT` of them whatever this says.
-pub const MAX_INSTANCE_PORTS: usize = 2;
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -252,10 +245,10 @@ pub struct AppConfig {
     pub restart_policy: RestartPolicy,
 }
 
+/// How many ports an app may name is the host's to say — `proxy.tcp.ports_per_app` — so what is
+/// wrong here is only ever the shape of the list, never its length.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PortsInvalid {
-    #[error("an app may answer on {MAX_INSTANCE_PORTS} ports at most, and this one names {named}")]
-    TooMany { named: usize },
     #[error("{name} is named twice, and each port is reached by its own name")]
     DuplicateName { name: String },
     #[error("guest port {port} is claimed twice, and one port cannot answer two ways")]
@@ -277,10 +270,6 @@ impl AppConfig {
     }
 
     pub fn validate_ports(&self) -> Result<(), PortsInvalid> {
-        let named = self.ports.len() + 1;
-        if named > MAX_INSTANCE_PORTS {
-            return Err(PortsInvalid::TooMany { named });
-        }
         let mut names = std::collections::BTreeSet::new();
         let mut guest_ports = std::collections::BTreeSet::new();
         for port in self.all_ports() {

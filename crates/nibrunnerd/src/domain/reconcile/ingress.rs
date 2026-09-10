@@ -13,19 +13,24 @@ pub fn ingress_refusal(desired: &DesiredInstance, config: &HostConfig) -> Option
         return Some(invalid.to_string());
     }
 
-    let serves_http = config.proxy.http.is_some() || config.proxy.https.is_some();
-    if !desired.hostnames.is_empty() && !serves_http {
+    if !desired.hostnames.is_empty() && config.proxy.http.is_none() {
         return Some(format!(
             "it answers for {} but this host runs no proxy, so nothing would reach it",
             desired.hostnames.len()
         ));
     }
 
-    let streams = desired.config.ports.len();
-    if streams > 0 && config.ingress.is_none() {
-        return Some(format!(
-            "it asks for {streams} port beside its HTTP one and this host names no [ingress] to bind them on"
-        ));
+    let named = desired.config.ports.len();
+    let allowed = config.proxy.tcp.as_ref().map_or(0, |tcp| tcp.ports_per_app);
+    if named > allowed {
+        return Some(match allowed {
+            0 => format!(
+                "it asks for {named} port beside its HTTP one and this host names no [proxy.tcp] to bind them on"
+            ),
+            allowed => format!(
+                "it asks for {named} ports beside its HTTP one and [proxy.tcp] allows {allowed}"
+            ),
+        });
     }
 
     None
@@ -34,7 +39,7 @@ pub fn ingress_refusal(desired: &DesiredInstance, config: &HostConfig) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{HttpListener, IngressConfig, ProxyConfig};
+    use crate::config::{HttpListener, ProxyConfig, TcpListeners};
     use crate::test_support::*;
     use protocol::{GuestPort, InstancePort, PortIngress, PortName};
 
@@ -46,26 +51,40 @@ mod tests {
         }
     }
 
-    fn config_with(proxy: ProxyConfig, ingress: Option<IngressConfig>) -> HostConfig {
+    fn config_with(proxy: ProxyConfig) -> HostConfig {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let mut config = HostConfig::under(directory.path());
         config.proxy = proxy;
-        config.ingress = ingress;
         std::mem::forget(directory);
         config
     }
 
+    fn listening() -> Option<std::net::IpAddr> {
+        Some(std::net::Ipv4Addr::LOCALHOST.into())
+    }
+
+    /// A host that serves HTTP and offers no port beside it.
     fn serving_http() -> ProxyConfig {
         ProxyConfig {
-            http: Some(HttpListener { port: 8080 }),
-            https: None,
+            listen_address: listening(),
+            http: Some(HttpListener {
+                port: 8080,
+                tls: None,
+            }),
+            tcp: None,
         }
     }
 
-    fn binding() -> Option<IngressConfig> {
-        Some(IngressConfig {
-            listen_address: std::net::Ipv4Addr::LOCALHOST.into(),
-        })
+    /// The same host, with one port an app may name beside its HTTP one.
+    fn and_one_more() -> ProxyConfig {
+        ProxyConfig {
+            tcp: Some(TcpListeners { ports_per_app: 1 }),
+            ..serving_http()
+        }
+    }
+
+    fn serving_nothing() -> ProxyConfig {
+        ProxyConfig::default()
     }
 
     fn answering_for_a_name() -> protocol::DesiredInstance {
@@ -74,56 +93,57 @@ mod tests {
 
     #[test]
     fn an_app_with_a_hostname_on_a_host_that_runs_no_proxy_is_refused_by_name() {
-        let refusal = ingress_refusal(
-            &answering_for_a_name(),
-            &config_with(ProxyConfig::default(), None),
-        )
-        .expect("nothing would have reached it");
+        let refusal = ingress_refusal(&answering_for_a_name(), &config_with(serving_nothing()))
+            .expect("nothing would have reached it");
         assert!(refusal.contains("no proxy"), "{refusal}");
 
         assert_eq!(
             ingress_refusal(
                 &desired_instance(|instance| instance.hostnames = vec![]),
-                &config_with(ProxyConfig::default(), None),
+                &config_with(serving_nothing()),
             ),
             None,
             "an app that answers for no name asks the proxy for nothing"
         );
         assert_eq!(
-            ingress_refusal(&answering_for_a_name(), &config_with(serving_http(), None)),
+            ingress_refusal(&answering_for_a_name(), &config_with(serving_http())),
             None
         );
     }
 
     #[test]
-    fn a_stream_port_on_a_host_that_names_no_ingress_is_refused_by_name() {
+    fn a_stream_port_on_a_host_that_offers_none_is_refused_by_name() {
         let wanting = desired_instance(|instance| instance.config.ports = vec![ssh_port()]);
-        let refusal = ingress_refusal(&wanting, &config_with(serving_http(), None))
-            .expect("nothing would have bound it");
-        assert!(refusal.contains("[ingress]"), "{refusal}");
-        assert_eq!(
-            ingress_refusal(&wanting, &config_with(serving_http(), binding())),
-            None
-        );
+        let refusal =
+            ingress_refusal(&wanting, &config_with(serving_http())).expect("nothing would have bound it");
+        assert!(refusal.contains("[proxy.tcp]"), "{refusal}");
+        assert_eq!(ingress_refusal(&wanting, &config_with(and_one_more())), None);
     }
 
     #[test]
-    fn a_document_naming_more_ports_than_an_app_may_have_is_refused_before_either_check() {
+    fn a_document_naming_more_ports_than_the_host_allows_is_refused_and_told_how_many() {
         let mut second = ssh_port();
         second.name = PortName::parse("other").unwrap();
         second.guest_port = GuestPort::new(9000).unwrap();
         let greedy = desired_instance(|instance| instance.config.ports = vec![ssh_port(), second]);
 
-        let refusal = ingress_refusal(&greedy, &config_with(serving_http(), binding()))
-            .expect("three ports is one more than an app may answer on");
-        assert!(refusal.contains("at most"), "{refusal}");
+        let refusal = ingress_refusal(&greedy, &config_with(and_one_more()))
+            .expect("two ports beside the HTTP one is one more than this host allows");
+        assert!(refusal.contains("allows 1"), "{refusal}");
+
+        // The same document on a host that allows two is not a document to refuse.
+        let roomier = ProxyConfig {
+            tcp: Some(TcpListeners { ports_per_app: 2 }),
+            ..serving_http()
+        };
+        assert_eq!(ingress_refusal(&greedy, &config_with(roomier)), None);
     }
 
     #[test]
     fn a_port_named_or_numbered_twice_is_refused() {
         let duplicate_name =
             desired_instance(|instance| instance.config.ports = vec![ssh_port(), ssh_port()]);
-        assert!(ingress_refusal(&duplicate_name, &config_with(serving_http(), binding())).is_some());
+        assert!(ingress_refusal(&duplicate_name, &config_with(and_one_more())).is_some());
 
         let shadowing_http = desired_instance(|instance| {
             instance.config.ports = vec![InstancePort {
@@ -132,7 +152,7 @@ mod tests {
                 ingress: PortIngress::Tcp,
             }];
         });
-        let refusal = ingress_refusal(&shadowing_http, &config_with(serving_http(), binding()))
+        let refusal = ingress_refusal(&shadowing_http, &config_with(and_one_more()))
             .expect("one guest port cannot answer two ways");
         assert!(refusal.contains("claimed twice"), "{refusal}");
     }
