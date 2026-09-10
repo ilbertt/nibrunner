@@ -245,7 +245,7 @@ pub struct AppConfig {
     pub restart_policy: RestartPolicy,
 }
 
-/// How many ports an app may name is the host's to say — `proxy.tcp.ports_per_app` — so what is
+/// How many ports an app may name is the host's to say — `proxy.tcp.max_ports_per_app` — so what is
 /// wrong here is only ever the shape of the list, never its length.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PortsInvalid {
