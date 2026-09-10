@@ -198,8 +198,8 @@ async fn the_embedded_hypervisor_runs_on_this_host() {
 }
 
 // The browse half of the guest contract has never been driven from outside its own unit tests:
-// removing the control plane took away the only thing that asked, and DECISIONS.md leaves it
-// "waiting for something to ask". This is that, without putting a service back into the daemon —
+// removing the control plane took away the only thing that asked, and it has been waiting for
+// something to ask ever since. This is that, without putting a service back into the daemon —
 // point it at a running guest's control socket and it speaks every verb the contract defines.
 //
 //   NIBRUNNER_GUEST_VSOCK=/var/lib/nibrunner/vm/<app>/<socket> NIBRUNNER_INTEGRATION=1 \

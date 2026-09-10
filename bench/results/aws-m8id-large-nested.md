@@ -16,8 +16,8 @@ nibrun guest-image stub init: not the real /init
 ```
 
 `crates/init` is the real PID 1 and builds fine, but the image carrying it was never committed.
-DECISIONS.md predicts exactly this — "A host that has to boot a tenant needs a published image
-rather than this one" — so the fix is to build `nibrunner-init` and install it as `/init`:
+A host that has to boot a tenant needs a published image rather than this one, so the fix is to
+build `nibrunner-init` and install it as `/init`:
 
 ```bash
 cargo zigbuild -p nibrunner-init --target x86_64-unknown-linux-musl --release
