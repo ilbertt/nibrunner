@@ -171,6 +171,8 @@ in is behind it — CI runs the latter on every pull request.
 
 ## Testing
 
+`mise install` puts `just` on the path at the version `mise.toml` pins.
+
 ```bash
 just test          # everything that needs no kernel
 just integration   # everything that does: root, Linux, nft, mke2fs, /dev/net/tun
