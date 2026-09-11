@@ -52,12 +52,15 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StoreErr
         })
 }
 
+/// A parent that is not there is made private, since what this writes is this host's own. One
+/// that is there is somebody's — `/etc/zerofs`, made readable so the account ZeroFS runs as can
+/// enter it — and putting a file in it is no reason to change who can.
 pub fn write_text(path: &Path, value: &str, mode: u32) -> Result<(), StoreError> {
     let unwritable = |source: std::io::Error| StoreError::Unwritable {
         path: path.to_path_buf(),
         source,
     };
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent().filter(|parent| !parent.exists()) {
         make_directory(parent, PRIVATE_DIR_MODE).map_err(unwritable)?;
     }
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
@@ -189,6 +192,22 @@ mod tests {
         let socket = directory.path().join("readable");
         write_text(&socket, "anyone", 0o644).unwrap();
         assert_eq!(mode(&socket), 0o644);
+    }
+
+    // ZeroFS reads its config as its own account, and the directory `install` made readable for
+    // it was being closed again by the very write that put the config there.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_put_in_a_directory_that_is_already_there_leaves_who_can_enter_it_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let readable = directory.path().join("etc-zerofs");
+        make_directory(&readable, 0o755).unwrap();
+        write_text(&readable.join("config.toml"), "[cache]\n", 0o644).unwrap();
+        assert_eq!(
+            std::fs::metadata(&readable).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     #[cfg(unix)]

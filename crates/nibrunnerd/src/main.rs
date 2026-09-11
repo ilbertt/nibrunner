@@ -168,17 +168,14 @@ async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
     for (unit, outcome) in &report.units {
         println!("  {unit:<32} {}", outcome.said());
     }
-    let failed: Vec<&str> = report.failed().collect();
-    if failed.is_empty() {
+    if report.all_up() {
         println!(
             "\nUp. It serves what {} says; `journalctl -u nibrunnerd -f` follows it.",
             config.desired_state_file.display()
         );
         return std::process::ExitCode::SUCCESS;
     }
-    for unit in failed {
-        eprintln!("\n{unit} is not up: journalctl -u {unit} -n 30");
-    }
+    eprintln!("\nNot up. What went wrong: {}", report.journal());
     std::process::ExitCode::FAILURE
 }
 

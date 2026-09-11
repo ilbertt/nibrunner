@@ -45,11 +45,15 @@ pub struct Report {
 }
 
 impl Report {
-    pub fn failed(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.units
-            .iter()
-            .filter(|(_, outcome)| *outcome == Outcome::Failed)
-            .map(|(unit, _)| *unit)
+    pub fn all_up(&self) -> bool {
+        self.units.iter().all(|(_, outcome)| *outcome != Outcome::Failed)
+    }
+
+    /// One command that shows every unit this host has, because the one that failed is rarely
+    /// the one that says why: the mount fails because the server it requires did.
+    pub fn journal(&self) -> String {
+        let named: Vec<String> = self.units.iter().map(|(unit, _)| format!("-u {unit}")).collect();
+        format!("journalctl {} -n 60 --no-pager", named.join(" "))
     }
 }
 
@@ -74,6 +78,14 @@ pub fn run(config: &HostConfig, environment_file: &Path, laid: &Laid) -> Result<
             false => Outcome::Failed,
         };
         units.push((unit, outcome));
+    }
+    // `Type=exec` calls a unit started the moment it execs, and one that exits right after is
+    // read as started by the check above — and as auto-restarting by this one, once the units
+    // after it have taken their time coming up.
+    for (unit, outcome) in &mut units {
+        if *outcome != Outcome::Failed && !is_active(unit) {
+            *outcome = Outcome::Failed;
+        }
     }
     Ok(Report { units })
 }
@@ -256,6 +268,26 @@ mod tests {
             plan,
             [(ZEROFS_UNIT, false), (MOUNT_UNIT, true), (DAEMON_UNIT, true)]
         );
+    }
+
+    #[test]
+    fn what_went_wrong_is_read_from_every_unit_the_host_has_not_only_the_one_that_failed() {
+        let report = Report {
+            units: vec![
+                (ZEROFS_UNIT, Outcome::Failed),
+                (MOUNT_UNIT, Outcome::Failed),
+                (DAEMON_UNIT, Outcome::Started),
+            ],
+        };
+        assert!(!report.all_up());
+        assert_eq!(
+            report.journal(),
+            "journalctl -u nibrunner-zerofs.service -u nibrunner-zerofs-mount.service -u nibrunnerd.service -n 60 --no-pager"
+        );
+        assert!(Report {
+            units: vec![(DAEMON_UNIT, Outcome::Running)]
+        }
+        .all_up());
     }
 
     #[test]

@@ -222,6 +222,10 @@ pub fn mount_unit(settings: &ZerofsSettings, config_file: &Path) -> String {
          # The socket goes with ZeroFS, so this mount goes with it: a restart of the server leaves\n\
          # a mount pointing at a socket that no longer exists.\n\
          PartOf={ZEROFS_UNIT}\n\
+         # A start job for this unit waits out every auto-restart of the server, and a server that\n\
+         # fails at once restarts for ever — so the job would too, and whoever asked for it with\n\
+         # it. A minute is longer than any first boot the server takes to open its socket.\n\
+         JobTimeoutSec=60\n\
          Before=nibrunnerd.service\n\
          \n\
          [Service]\n\
@@ -417,7 +421,11 @@ mod tests {
         );
         assert!(
             mount.contains("TimeoutStartSec=30"),
-            "a stat on an unanswering FUSE mount never returns, and a start job must: {mount}"
+            "a stat on an unanswering FUSE mount never returns, and a start attempt must: {mount}"
+        );
+        assert!(
+            mount.contains("JobTimeoutSec=60"),
+            "a job waits out every auto-restart of a server that fails at once, and must not for ever: {mount}"
         );
     }
 
