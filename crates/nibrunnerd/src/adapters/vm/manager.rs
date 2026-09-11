@@ -238,7 +238,7 @@ impl Vmm for VmManager {
         let memory_bytes = std::fs::metadata(&paths.memory_path)
             .map(|info| info.len())
             .unwrap_or(0);
-        self.metrics.snapshotted(paused.elapsed());
+        self.metrics.sleep_wake.snapshotted(paused.elapsed());
         tracing::info!(
             app_id = %request.app_id,
             slot = request.slot.slot,
@@ -292,7 +292,7 @@ impl Vmm for VmManager {
         }
         self.discard_snapshot(&request.app_id);
         outcome?;
-        self.metrics.restored(restoring.elapsed());
+        self.metrics.sleep_wake.restored(restoring.elapsed());
         tracing::info!(
             app_id = %request.app_id,
             slot = request.slot.slot,

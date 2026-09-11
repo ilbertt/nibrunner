@@ -15,6 +15,7 @@ use std::sync::Arc;
 use protocol::{DesiredInstanceState, HostDesiredState};
 
 use crate::adapters::vm::UNKNOWN_VM;
+use crate::domain::metrics::converge;
 use crate::host::Host;
 
 pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
@@ -139,6 +140,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
     network::apply_activators(host).await;
     network::apply_network(host).await;
     network::apply_routes(host).await;
+    converge::observe(host, crate::clock::now_ms()).await;
     host.persist().await;
 
     host.state.modify(|snapshot| snapshot.converged = true).await;
@@ -147,6 +149,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
 
 pub async fn refresh(host: &Arc<Host>) {
     instances::refresh_states(host).await;
+    converge::observe(host, crate::clock::now_ms()).await;
     network::apply_network(host).await;
     network::apply_routes(host).await;
     host.persist().await;

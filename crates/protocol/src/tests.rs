@@ -141,6 +141,7 @@ fn a_report_omits_what_it_does_not_know() {
         restart_count: 0,
         started_at: None,
         last_healthy_at: None,
+        converged_at: None,
         last_exit_code: Some(0),
         compute: None,
         meters: UsageMeters::default(),
@@ -149,6 +150,7 @@ fn a_report_omits_what_it_does_not_know() {
     let written = serde_json::to_value(&instance).unwrap();
     assert_eq!(written["lastExitCode"], 0);
     assert!(written.get("startedAt").is_none());
+    assert!(written.get("convergedAt").is_none());
     assert!(written.get("message").is_none());
     assert_eq!(written["hostPort"], 21000);
     // An app that has used nothing has used nothing, which is a figure and not an absence.
@@ -421,6 +423,7 @@ mod schema {
                 restart_count: 1,
                 started_at: Some(now.clone()),
                 last_healthy_at: Some(now.clone()),
+                converged_at: Some(now.clone()),
                 last_exit_code: Some(0),
                 compute: Some(ComputeUsage {
                     memory_total_bytes: 268_435_456,

@@ -15,6 +15,7 @@ use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
 use crate::domain::exports::reader::CheckpointServers;
 use crate::domain::exports::store::ExportStore;
+use crate::domain::metrics::HostMetrics;
 use crate::ports::{ArtifactStore, CommandRunner, PayloadBuilder, Vmm};
 use crate::state::SharedState;
 
@@ -36,6 +37,7 @@ pub struct Host {
     pub commands: Arc<dyn CommandRunner>,
     pub firewall: Arc<HostFirewall>,
     pub router: Arc<Router>,
+    pub metrics: Arc<HostMetrics>,
     pub activator: Arc<AppActivator>,
     /// Absent on a host whose configuration names no `[proxy.tcp]`, which is a host that offers
     /// no stream port. A document asking one of those for such a port is refused.

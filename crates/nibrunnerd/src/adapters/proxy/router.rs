@@ -116,14 +116,10 @@ impl Router {
         })
     }
 
-    pub fn metrics(&self) -> Arc<HostMetrics> {
-        self.metrics.clone()
-    }
-
     pub async fn apply(&self, table: RouteTable) {
         // The routes are the apps this host serves, so they are also the only ones whose timings
         // are still worth a series.
-        self.metrics.retain_apps(&table.app_ids());
+        self.metrics.proxy.retain_apps(&table.app_ids());
         *self.routes.write().await = Arc::new(table);
     }
 
@@ -140,7 +136,9 @@ impl Router {
         let started = std::time::Instant::now();
         let metrics = self.metrics.clone();
         let (mut response, outcome, app_id) = self.route(request, arrival).await;
-        metrics.answered(outcome, started.elapsed(), app_id.as_ref());
+        metrics
+            .proxy
+            .answered(outcome, started.elapsed(), app_id.as_ref());
         if http2 {
             // Illegal over HTTP/2, and hyper logs a warning for each one it has to strip.
             response.headers_mut().remove(hyper::header::CONNECTION);

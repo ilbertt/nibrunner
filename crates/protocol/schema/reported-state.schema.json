@@ -363,6 +363,17 @@
             }
           ]
         },
+        "convergedAt": {
+          "description": "When the instance first became what the document asks of it, for the `deploymentId` and\n`desiredState` it now carries. Absent while it is still on its way there, and for a\ndeployment this host was not there to see arrive.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "deploymentId": {
           "$ref": "#/$defs/DeploymentId"
         },

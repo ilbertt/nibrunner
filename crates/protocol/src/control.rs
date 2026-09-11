@@ -307,6 +307,11 @@ pub struct ReportedInstance {
     pub started_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_healthy_at: Option<Timestamp>,
+    /// When the instance first became what the document asks of it, for the `deploymentId` and
+    /// `desiredState` it now carries. Absent while it is still on its way there, and for a
+    /// deployment this host was not there to see arrive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converged_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

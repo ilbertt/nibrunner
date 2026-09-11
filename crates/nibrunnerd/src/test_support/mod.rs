@@ -190,6 +190,7 @@ pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedIn
         restart_count: 0,
         started_at: None,
         last_healthy_at: None,
+        converged_at: None,
         last_exit_code: None,
         compute: None,
         meters: Default::default(),
@@ -385,7 +386,8 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
         commands: commands.clone(),
         firewall: Arc::new(HostFirewall::new(commands.clone())),
         router: Router::new(metrics.clone()),
-        activator: AppActivator::new(state.clone(), Arc::new(NeverWoken), metrics),
+        activator: AppActivator::new(state.clone(), Arc::new(NeverWoken), metrics.clone()),
+        metrics,
         stream_activator: Some(crate::adapters::proxy::StreamActivator::new(
             state.clone(),
             Arc::new(NeverWoken),

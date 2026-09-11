@@ -5,11 +5,15 @@ use nft_render::AppTraffic;
 use protocol::{AppId, ComputeUsage, FilesystemUsage, ReportedVolume, UsageMeters, VolumeId};
 use tokio::sync::{Notify, RwLock};
 
+use crate::domain::metrics::converge::Deploy;
 use crate::domain::report::InstanceRecord;
 
 #[derive(Debug, Default, Clone)]
 pub struct HostSnapshot {
     pub records: BTreeMap<AppId, InstanceRecord>,
+    // Only ever this daemon's own account of what it set out on: a restart starts each over,
+    // and so is measured as one.
+    pub deploys: BTreeMap<AppId, Deploy>,
     pub deleted_volumes: BTreeMap<VolumeId, ReportedVolume>,
     pub volume_reports: Vec<ReportedVolume>,
     pub checkpoint_reports: Vec<protocol::ReportedCheckpoint>,

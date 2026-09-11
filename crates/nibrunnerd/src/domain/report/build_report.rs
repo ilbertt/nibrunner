@@ -22,6 +22,7 @@ pub fn to_reported_instance(
         restart_count: record.restart_count,
         started_at: record.started_at.clone(),
         last_healthy_at: record.health.last_healthy_at.clone(),
+        converged_at: record.converged_at.clone(),
         last_exit_code: record.last_exit_code,
         compute: measured.cloned(),
         meters: metered.copied().unwrap_or_default(),
