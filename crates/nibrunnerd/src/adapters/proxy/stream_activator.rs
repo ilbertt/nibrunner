@@ -7,6 +7,8 @@ use protocol::{AppId, GuestPort, HostPort, PortName};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
+use crate::domain::metrics::proxy::{Protocol, RawOutcome};
+use crate::domain::metrics::HostMetrics;
 use crate::ports::{WakeRefusal, Waker};
 use crate::state::SharedState;
 
@@ -58,15 +60,22 @@ async fn dial_until(upstream: SocketAddr, deadline: Instant) -> Option<TcpStream
 pub struct StreamActivator {
     state: SharedState,
     waker: Arc<dyn Waker>,
+    metrics: Arc<HostMetrics>,
     listen_address: IpAddr,
     listeners: Mutex<BTreeMap<(AppId, PortName), Listener>>,
 }
 
 impl StreamActivator {
-    pub fn new(state: SharedState, waker: Arc<dyn Waker>, listen_address: IpAddr) -> Arc<Self> {
+    pub fn new(
+        state: SharedState,
+        waker: Arc<dyn Waker>,
+        metrics: Arc<HostMetrics>,
+        listen_address: IpAddr,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state,
             waker,
+            metrics,
             listen_address,
             listeners: Mutex::new(BTreeMap::new()),
         })
@@ -135,16 +144,21 @@ impl StreamActivator {
     }
 
     async fn handle(self: Arc<Self>, app_id: AppId, guest_port: GuestPort, client: TcpStream) {
-        let Some(record) = self.state.record(&app_id).await else {
-            return;
+        let outcome = self.relay(&app_id, guest_port, client).await;
+        self.metrics.proxy.raw_session(&app_id, Protocol::Tcp, outcome);
+    }
+
+    async fn relay(&self, app_id: &AppId, guest_port: GuestPort, client: TcpStream) -> RawOutcome {
+        let Some(record) = self.state.record(app_id).await else {
+            return RawOutcome::Down;
         };
         if !record.on_request || !record.desired_running {
-            return;
+            return RawOutcome::Down;
         }
-        self.state.mark_active(&app_id, crate::clock::now_ms()).await;
+        self.state.mark_active(app_id, crate::clock::now_ms()).await;
 
         let started = Instant::now();
-        if let Err(refusal) = self.waker.wake(&app_id).await {
+        if let Err(refusal) = self.waker.wake(app_id).await {
             let reason = match refusal {
                 WakeRefusal::NoRoom { shortfall_mib } => {
                     format!("its machine is {shortfall_mib} MiB short of memory")
@@ -152,39 +166,45 @@ impl StreamActivator {
                 WakeRefusal::Failed { reason, .. } => reason,
             };
             tracing::warn!(%app_id, reason, "a stream could not be given an app");
-            return;
+            return RawOutcome::Refused;
         }
         let woke_ms = started.elapsed().as_millis();
 
-        let Some(woken) = self.state.record(&app_id).await else {
-            return;
+        let Some(woken) = self.state.record(app_id).await else {
+            return RawOutcome::Down;
         };
         let upstream = SocketAddr::new(
             match woken.guest_ipv4.as_str().parse() {
                 Ok(address) => address,
-                Err(_) => return,
+                Err(_) => return RawOutcome::Unreachable,
             },
             guest_port.get(),
         );
         let deadline = Instant::now() + Duration::from_millis(woken.health_check.grace_period_ms);
         let Some(mut guest) = dial_until(upstream, deadline).await else {
             tracing::warn!(%app_id, %upstream, "a woken app would not take the stream");
-            return;
+            return RawOutcome::Unreachable;
         };
         let _ = guest.set_nodelay(true);
         let mut client = client;
         let _ = client.set_nodelay(true);
 
         match tokio::io::copy_bidirectional(&mut client, &mut guest).await {
-            Ok((from_client, from_guest)) => tracing::info!(
-                %app_id,
-                woke_ms,
-                from_client,
-                from_guest,
-                "app took the stream that woke it"
-            ),
+            Ok((from_client, from_guest)) => {
+                self.metrics
+                    .proxy
+                    .raw_bytes(app_id, Protocol::Tcp, from_client, from_guest);
+                tracing::info!(
+                    %app_id,
+                    woke_ms,
+                    from_client,
+                    from_guest,
+                    "app took the stream that woke it"
+                );
+            }
             Err(error) => tracing::debug!(%app_id, %error, "a spliced stream ended"),
         }
+        RawOutcome::Served
     }
 }
 
@@ -232,6 +252,7 @@ mod tests {
         StreamActivator::new(
             host.state.clone(),
             Arc::new(AlwaysWakes),
+            host.metrics.clone(),
             std::net::Ipv4Addr::LOCALHOST.into(),
         )
     }
@@ -328,6 +349,21 @@ mod tests {
         let mut answer = [0u8; 7];
         client.read_exact(&mut answer).await.unwrap();
         assert_eq!(&answer, b"SSH-2.0");
+
+        // The session's bytes are counted when it ends, so end it.
+        drop(client);
+        let counted = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let app = host.metrics.proxy.of(&app_id());
+                if app.raw_sessions[0][0] == 1 {
+                    return app;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the stream was counted as served once it ended");
+        assert_eq!((counted.raw_bytes_in[0], counted.raw_bytes_out[0]), (4, 7));
     }
 
     #[tokio::test]

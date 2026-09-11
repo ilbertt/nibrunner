@@ -3,13 +3,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use hyper::StatusCode;
 use protocol::AppId;
 
 use crate::domain::metrics::{Histogram, Page};
+use crate::state::HostSnapshot;
 
 // Straddling the millisecond a tenant answers in and the tens of milliseconds a stall costs, since
 // telling those apart is the whole reason this histogram exists.
-pub(super) const BUCKET_BOUNDS_SECONDS: [f64; 13] = [
+const BUCKET_BOUNDS_SECONDS: [f64; 13] = [
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
@@ -35,28 +37,110 @@ impl Outcome {
 // What this proxy decided, which is all it can honestly claim: a 502 or a 503 travelling back
 // through it was the upstream's answer and is counted as served, because serving it is what
 // happened.
-const OUTCOMES: [Outcome; 4] = [
+pub const OUTCOMES: [Outcome; 4] = [
     Outcome::Served,
     Outcome::NoSuchHost,
     Outcome::WrongHost,
     Outcome::Refused,
 ];
 
-// Per app, deliberately without buckets. A tenant's own distribution would be fifteen series each
-// and this page is rendered whole on every scrape; a sum and a count are two, and `rate(sum) /
-// rate(count)` is enough to say which tenant is slow. The shape of the distribution is what the
-// host-wide histogram beside it is for.
-#[derive(Debug, Default, Clone, Copy)]
-struct AppTiming {
-    count: u64,
-    micros: u64,
+/// How a TLS handshake ended, in the word the counter uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handshake {
+    Completed,
+    Failed,
+    TimedOut,
+}
+
+impl Handshake {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Handshake::Completed => "completed",
+            Handshake::Failed => "failed",
+            Handshake::TimedOut => "timed_out",
+        }
+    }
+}
+
+const HANDSHAKES: [Handshake; 3] = [Handshake::Completed, Handshake::Failed, Handshake::TimedOut];
+
+/// What came of a stream or datagram session on a raw port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawOutcome {
+    Served,
+    Down,
+    Refused,
+    Unreachable,
+}
+
+impl RawOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RawOutcome::Served => "served",
+            RawOutcome::Down => "down",
+            RawOutcome::Refused => "refused",
+            RawOutcome::Unreachable => "unreachable",
+        }
+    }
+}
+
+const RAW_OUTCOMES: [RawOutcome; 4] = [
+    RawOutcome::Served,
+    RawOutcome::Down,
+    RawOutcome::Refused,
+    RawOutcome::Unreachable,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    Tcp,
+    Udp,
+}
+
+impl Protocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Protocol::Tcp => "tcp",
+            Protocol::Udp => "udp",
+        }
+    }
+}
+
+const PROTOCOLS: [Protocol; 2] = [Protocol::Tcp, Protocol::Udp];
+
+// 1xx to 5xx, by the hundreds digit.
+const CLASSES: [&str; 5] = ["1xx", "2xx", "3xx", "4xx", "5xx"];
+
+fn class_of(status: StatusCode) -> usize {
+    (usize::from(status.as_u16() / 100)).clamp(1, 5) - 1
+}
+
+/// What one app's ingress has carried, kept while the document names it. What its requests
+/// cost is a sum and a count, deliberately without buckets: a tenant's own distribution would be
+/// fifteen series each on a page rendered whole every scrape, and `rate(sum) / rate(count)` is
+/// enough to say which tenant is slow. The shape of the distribution is the host-wide histogram's.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AppProxy {
+    pub requests: [u64; CLASSES.len()],
+    pub request_count: u64,
+    pub request_micros: u64,
+    pub unreachable: u64,
+    pub raw_sessions: [[u64; RAW_OUTCOMES.len()]; PROTOCOLS.len()],
+    pub raw_bytes_in: [u64; PROTOCOLS.len()],
+    pub raw_bytes_out: [u64; PROTOCOLS.len()],
+}
+
+fn position<T: PartialEq>(of: &[T], value: &T) -> usize {
+    of.iter().position(|each| each == value).unwrap_or(0)
 }
 
 #[derive(Debug)]
 pub struct ProxyMetrics {
     served: [AtomicU64; OUTCOMES.len()],
     answered: Histogram,
-    per_app: Mutex<BTreeMap<AppId, AppTiming>>,
+    in_flight: AtomicU64,
+    handshakes: [AtomicU64; HANDSHAKES.len()],
+    apps: Mutex<BTreeMap<AppId, AppProxy>>,
 }
 
 impl Default for ProxyMetrics {
@@ -64,36 +148,85 @@ impl Default for ProxyMetrics {
         Self {
             served: Default::default(),
             answered: Histogram::over(&BUCKET_BOUNDS_SECONDS),
-            per_app: Mutex::new(BTreeMap::new()),
+            in_flight: AtomicU64::new(0),
+            handshakes: Default::default(),
+            apps: Mutex::new(BTreeMap::new()),
         }
     }
 }
 
 impl ProxyMetrics {
+    fn app(&self, app_id: &AppId, change: impl FnOnce(&mut AppProxy)) {
+        let mut apps = self.apps.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        change(apps.entry(app_id.clone()).or_default());
+    }
+
     pub fn answered(&self, outcome: Outcome, took: Duration, app_id: Option<&AppId>) {
         let index = OUTCOMES.iter().position(|each| *each == outcome).unwrap_or(0);
         self.served[index].fetch_add(1, Ordering::Relaxed);
         self.answered.observe(took);
-        let Some(app_id) = app_id else {
-            return;
-        };
-        if let Ok(mut per_app) = self.per_app.lock() {
-            let timing = per_app.entry(app_id.clone()).or_default();
-            timing.count += 1;
-            timing.micros += took.as_micros() as u64;
+        if let Some(app_id) = app_id {
+            self.app(app_id, |app| {
+                app.request_count += 1;
+                app.request_micros += took.as_micros() as u64;
+            });
         }
     }
 
-    // An app this host no longer serves keeps no series of its own, or a page rendered whole on
-    // every scrape grows for the life of the process with every tenant that ever left.
-    pub fn retain_apps(&self, served: &[AppId]) {
-        if let Ok(mut per_app) = self.per_app.lock() {
-            per_app.retain(|app_id, _| served.contains(app_id));
-        }
+    /// A request routed to an app came back with this status, or with none because the app
+    /// could not be reached — which the proxy answers with a 502 of its own.
+    pub fn app_answered(&self, app_id: &AppId, status: StatusCode, reached: bool) {
+        self.app(app_id, |app| {
+            app.requests[class_of(status)] += 1;
+            if !reached {
+                app.unreachable += 1;
+            }
+        });
+    }
+
+    pub fn began(&self) {
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn ended(&self) {
+        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn handshake(&self, outcome: Handshake) {
+        self.handshakes[position(&HANDSHAKES, &outcome)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn raw_session(&self, app_id: &AppId, protocol: Protocol, outcome: RawOutcome) {
+        self.app(app_id, |app| {
+            app.raw_sessions[position(&PROTOCOLS, &protocol)][position(&RAW_OUTCOMES, &outcome)] += 1;
+        });
+    }
+
+    pub fn raw_bytes(&self, app_id: &AppId, protocol: Protocol, from_client: u64, from_guest: u64) {
+        self.app(app_id, |app| {
+            app.raw_bytes_in[position(&PROTOCOLS, &protocol)] += from_client;
+            app.raw_bytes_out[position(&PROTOCOLS, &protocol)] += from_guest;
+        });
+    }
+
+    pub fn forget(&self, app_id: &AppId) {
+        self.apps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(app_id);
+    }
+
+    pub fn of(&self, app_id: &AppId) -> AppProxy {
+        self.apps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(app_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
-pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics) {
+pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics, snapshot: &HostSnapshot) {
     page.metric(
         "nibrunner_proxy_requests_total",
         "Requests this proxy answered, by what it answered with.",
@@ -114,6 +247,32 @@ pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics) {
     );
     page.histogram("nibrunner_proxy_request_duration_seconds", &[], &metrics.answered);
 
+    page.metric(
+        "nibrunner_proxy_requests_in_flight",
+        "Requests the proxy has taken and not yet answered.",
+        "gauge",
+    );
+    page.value(
+        "nibrunner_proxy_requests_in_flight",
+        &[],
+        metrics.in_flight.load(Ordering::Relaxed),
+    );
+
+    page.metric(
+        "nibrunner_proxy_tls_handshakes_total",
+        "TLS handshakes at the proxy, by how they ended.",
+        "counter",
+    );
+    for (index, handshake) in HANDSHAKES.iter().enumerate() {
+        page.value(
+            "nibrunner_proxy_tls_handshakes_total",
+            &[("outcome", handshake.as_str())],
+            metrics.handshakes[index].load(Ordering::Relaxed),
+        );
+    }
+
+    let apps: Vec<&AppId> = snapshot.records.keys().collect();
+
     // A summary with no quantiles, which is a sum and a count: what each tenant cost, without
     // fifteen series apiece for the shape of it.
     page.metric(
@@ -121,18 +280,205 @@ pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics) {
         "What requests to one app cost this proxy. Divide the rate of the sum by the rate of the count for that app's mean.",
         "summary",
     );
-    if let Ok(per_app) = metrics.per_app.lock() {
-        for (app_id, timing) in per_app.iter() {
+    for app_id in &apps {
+        let app = metrics.of(app_id);
+        page.value(
+            "nibrunner_app_request_duration_seconds_sum",
+            &[("app", app_id.as_str())],
+            app.request_micros as f64 / 1_000_000.0,
+        );
+        page.value(
+            "nibrunner_app_request_duration_seconds_count",
+            &[("app", app_id.as_str())],
+            app.request_count,
+        );
+    }
+
+    page.metric(
+        "nibrunner_app_requests_total",
+        "Requests routed to an app, by the class of the status that came back. A 502 for an app that could not be reached is the proxy's and counted apart below.",
+        "counter",
+    );
+    for app_id in &apps {
+        let app = metrics.of(app_id);
+        for (index, class) in CLASSES.iter().enumerate() {
             page.value(
-                "nibrunner_app_request_duration_seconds_sum",
-                &[("app", app_id.as_str())],
-                timing.micros as f64 / 1_000_000.0,
-            );
-            page.value(
-                "nibrunner_app_request_duration_seconds_count",
-                &[("app", app_id.as_str())],
-                timing.count,
+                "nibrunner_app_requests_total",
+                &[("app", app_id.as_str()), ("class", class)],
+                app.requests[index],
             );
         }
+    }
+
+    page.metric(
+        "nibrunner_app_requests_unreachable_total",
+        "Requests routed to an app that nothing answered, so the proxy answered 502 for it.",
+        "counter",
+    );
+    for app_id in &apps {
+        page.value(
+            "nibrunner_app_requests_unreachable_total",
+            &[("app", app_id.as_str())],
+            metrics.of(app_id).unreachable,
+        );
+    }
+
+    let with_raw_ports: Vec<&AppId> = snapshot
+        .records
+        .values()
+        .filter(|record| !record.ports.is_empty())
+        .map(|record| &record.app_id)
+        .collect();
+
+    page.metric(
+        "nibrunner_raw_port_sessions_total",
+        "Sessions on an app's raw ports — a TCP connection, or a UDP client address — by what came of them: relayed, the app was down, its wake was refused, or it would not take the session. Only for apps with a raw port.",
+        "counter",
+    );
+    for app_id in &with_raw_ports {
+        let app = metrics.of(app_id);
+        for (protocol_index, protocol) in PROTOCOLS.iter().enumerate() {
+            for (outcome_index, outcome) in RAW_OUTCOMES.iter().enumerate() {
+                page.value(
+                    "nibrunner_raw_port_sessions_total",
+                    &[
+                        ("app", app_id.as_str()),
+                        ("protocol", protocol.as_str()),
+                        ("outcome", outcome.as_str()),
+                    ],
+                    app.raw_sessions[protocol_index][outcome_index],
+                );
+            }
+        }
+    }
+
+    page.metric(
+        "nibrunner_raw_port_bytes_total",
+        "What the relay carried on an app's raw ports, by which way it went: in is towards the app. A TCP session's bytes are counted when it ends.",
+        "counter",
+    );
+    for app_id in &with_raw_ports {
+        let app = metrics.of(app_id);
+        for (index, protocol) in PROTOCOLS.iter().enumerate() {
+            for (direction, bytes) in [("in", app.raw_bytes_in[index]), ("out", app.raw_bytes_out[index])] {
+                page.value(
+                    "nibrunner_raw_port_bytes_total",
+                    &[
+                        ("app", app_id.as_str()),
+                        ("protocol", protocol.as_str()),
+                        ("direction", direction),
+                    ],
+                    bytes,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::metrics::render;
+    use crate::test_support::*;
+
+    fn lines_for<'a>(page: &'a str, name: &str) -> Vec<&'a str> {
+        page.lines()
+            .filter(|line| line.starts_with(&format!("{name}{{")) || line.starts_with(&format!("{name} ")))
+            .collect()
+    }
+
+    #[test]
+    fn a_status_is_classed_by_its_hundreds_and_nothing_falls_outside_the_five() {
+        assert_eq!(class_of(StatusCode::CONTINUE), 0);
+        assert_eq!(class_of(StatusCode::OK), 1);
+        assert_eq!(class_of(StatusCode::NOT_MODIFIED), 2);
+        assert_eq!(class_of(StatusCode::NOT_FOUND), 3);
+        assert_eq!(class_of(StatusCode::BAD_GATEWAY), 4);
+        assert_eq!(class_of(StatusCode::from_u16(599).unwrap()), 4);
+    }
+
+    #[tokio::test]
+    async fn what_each_app_was_asked_and_answered_is_on_its_own_series_and_raw_ports_only_where_there_are_any(
+    ) {
+        let host = test_host().await;
+        let other = AppId::parse("app-2").unwrap();
+        host.state.put_record(instance_record(|_| {})).await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.app_id = other.clone();
+                record.ports = vec![crate::domain::report::instance_record::RecordPort {
+                    name: protocol::PortName::parse("game").unwrap(),
+                    host_port: protocol::HostPort::new(21001).unwrap(),
+                    guest_port: protocol::GuestPort::new(7777).unwrap(),
+                }];
+            }))
+            .await;
+        let metrics = &host.metrics.proxy;
+        metrics.answered(Outcome::Served, Duration::from_millis(2), Some(&app_id()));
+        metrics.app_answered(&app_id(), StatusCode::OK, true);
+        metrics.answered(Outcome::Served, Duration::from_millis(4), Some(&app_id()));
+        metrics.app_answered(&app_id(), StatusCode::BAD_GATEWAY, false);
+        metrics.raw_session(&other, Protocol::Tcp, RawOutcome::Served);
+        metrics.raw_bytes(&other, Protocol::Tcp, 100, 2_000);
+        metrics.raw_session(&other, Protocol::Udp, RawOutcome::Refused);
+        metrics.began();
+        metrics.began();
+        metrics.ended();
+        metrics.handshake(Handshake::Completed);
+        metrics.handshake(Handshake::TimedOut);
+
+        let page = render(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        );
+        assert!(page.contains("nibrunner_proxy_requests_in_flight 1\n"));
+        assert!(page.contains("nibrunner_proxy_tls_handshakes_total{outcome=\"completed\"} 1\n"));
+        assert!(page.contains("nibrunner_proxy_tls_handshakes_total{outcome=\"failed\"} 0\n"));
+        assert!(page.contains("nibrunner_proxy_tls_handshakes_total{outcome=\"timed_out\"} 1\n"));
+        let requests = lines_for(&page, "nibrunner_app_requests_total");
+        assert_eq!(
+            requests.len(),
+            2 * CLASSES.len(),
+            "every class for every app: {requests:?}"
+        );
+        assert!(requests.contains(&"nibrunner_app_requests_total{app=\"app-1\",class=\"2xx\"} 1"));
+        assert!(requests.contains(&"nibrunner_app_requests_total{app=\"app-1\",class=\"5xx\"} 1"));
+        assert!(requests.contains(&"nibrunner_app_requests_total{app=\"app-2\",class=\"2xx\"} 0"));
+        assert!(page.contains("nibrunner_app_requests_unreachable_total{app=\"app-1\"} 1\n"));
+        assert!(page.contains("nibrunner_app_request_duration_seconds_sum{app=\"app-1\"} 0.006\n"));
+        assert!(page.contains("nibrunner_app_request_duration_seconds_count{app=\"app-1\"} 2\n"));
+
+        let sessions = lines_for(&page, "nibrunner_raw_port_sessions_total");
+        assert!(
+            sessions.iter().all(|line| line.contains("app=\"app-2\"")),
+            "{sessions:?}"
+        );
+        assert_eq!(sessions.len(), PROTOCOLS.len() * RAW_OUTCOMES.len());
+        assert!(sessions.contains(
+            &"nibrunner_raw_port_sessions_total{app=\"app-2\",protocol=\"tcp\",outcome=\"served\"} 1"
+        ));
+        assert!(sessions.contains(
+            &"nibrunner_raw_port_sessions_total{app=\"app-2\",protocol=\"udp\",outcome=\"refused\"} 1"
+        ));
+        let bytes = lines_for(&page, "nibrunner_raw_port_bytes_total");
+        assert!(bytes.contains(
+            &"nibrunner_raw_port_bytes_total{app=\"app-2\",protocol=\"tcp\",direction=\"in\"} 100"
+        ));
+        assert!(bytes.contains(
+            &"nibrunner_raw_port_bytes_total{app=\"app-2\",protocol=\"tcp\",direction=\"out\"} 2000"
+        ));
+        assert!(bytes
+            .contains(&"nibrunner_raw_port_bytes_total{app=\"app-2\",protocol=\"udp\",direction=\"in\"} 0"));
+    }
+
+    #[test]
+    fn an_app_the_document_dropped_is_forgotten() {
+        let metrics = ProxyMetrics::default();
+        metrics.app_answered(&app_id(), StatusCode::OK, true);
+        assert_eq!(metrics.of(&app_id()).requests[1], 1);
+        metrics.forget(&app_id());
+        assert_eq!(metrics.of(&app_id()), AppProxy::default());
     }
 }
