@@ -521,6 +521,45 @@ pub(crate) mod tests {
         }
     }
 
+    // A family introduced twice is a page Prometheus refuses whole, and a sample is one of its
+    // family only under its family's name — so a page with everything on it is checked for both.
+    #[test]
+    fn no_family_is_introduced_twice_and_every_sample_sits_under_its_own_family() {
+        let mut report = report();
+        report.instances = vec![crate::test_support::reported_instance(|_| {})];
+        report.volumes = vec![crate::test_support::reported_volume(|_| {})];
+        let snapshot = HostSnapshot {
+            records: std::collections::BTreeMap::from([(
+                crate::test_support::app_id(),
+                crate::test_support::instance_record(|_| {}),
+            )]),
+            ..Default::default()
+        };
+        let page = page(&report, &HostMetrics::default(), &snapshot, 0);
+
+        let mut families = Vec::new();
+        let mut current: Option<String> = None;
+        for line in page.lines().filter(|line| !line.is_empty()) {
+            if let Some(rest) = line.strip_prefix("# TYPE ") {
+                let name = rest.split(' ').next().unwrap().to_string();
+                assert!(!families.contains(&name), "{name} is introduced twice");
+                families.push(name.clone());
+                current = Some(name);
+            } else if !line.starts_with('#') {
+                let family = current.as_deref().expect("a sample under a family");
+                let name = line.split(['{', ' ']).next().unwrap();
+                assert!(
+                    name == family
+                        || name.strip_suffix("_bucket") == Some(family)
+                        || name.strip_suffix("_sum") == Some(family)
+                        || name.strip_suffix("_count") == Some(family),
+                    "{name} sits under {family}"
+                );
+            }
+        }
+        assert!(families.len() > 40, "{}", families.len());
+    }
+
     #[test]
     fn a_histogram_counts_every_request_once_and_its_buckets_only_grow() {
         let proxy = HostMetrics::new();
