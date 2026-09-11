@@ -15,6 +15,8 @@ than about the tenant.
 | [filesystem-exports](results/filesystem-exports.md) | vsock at 200 apps, exports on local-file | 200/200 measured | exports refused, correctly |
 | [multi-app-presets](results/multi-app-presets.md) | the same AX41, six deploy-link apps, S3 artifacts, Cloudflare TLS | 6/6 | nothing — a shape test, not a ceiling |
 | [zerofs-exports](results/zerofs-exports.md) | the same AX41, volumes in S3 over NBD | 1/1 on zerofs | the export, three defects in |
+| [exports-end-to-end](results/exports-end-to-end.md) | the same AX41, an export all the way into S3 | 2 bundles written | nothing left in the way |
+| [six-presets-on-zerofs](results/six-presets-on-zerofs.md) | six deploy-link apps on zerofs volumes, churned | 6/6 | gitea's first boot, and the grace period |
 
 The 752 is idle tenants. `contention.md` is what happens when they work: memory costs a flat
 82-87 MiB per microVM plus exactly what the tenant touches, so holding 128 MiB drops the host
