@@ -45,11 +45,12 @@ proxy.http.port is not free, because 21000-21999 is what a slot takes for an app
 | `volumes.storage_prefix` | string | 1–512 bytes, no leading or trailing `/`, no empty or `.`/`..` segment |
 | `exports.store_url` | string | same rule as `artifacts.store_url` |
 | `exports.staging_dir` | string | absolute path — a bundle is assembled here and removed after |
-| `network.control_plane_cidrs_v4` | array of string | each `a.b.c.d/n`, `n` ≤ 32 |
-| `network.control_plane_cidrs_v6` | array of string | each `addr/n`, `n` ≤ 128 |
+| `network.denied_egress_addresses_v4` | array of string | each `a.b.c.d/n`, `n` ≤ 32 |
+| `network.denied_egress_addresses_v6` | array of string | each `addr/n`, `n` ≤ 128 |
 
-Both CIDR arrays may be empty, but the keys must be there. What they hold is the ranges a guest is
-denied by name, on top of the blanket rules — a control plane a tenant must not reach.
+Both arrays may be empty, but the keys must be there. What they hold is the ranges a guest is
+denied by name, on top of the blanket rules — public addresses that are still yours, and that a
+tenant must not reach.
 
 **`volumes.storage_prefix` is one host, not one app.** Every tenant placed here shares it. Deleting
 it destroys all of them.
