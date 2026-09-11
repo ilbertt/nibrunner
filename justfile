@@ -62,12 +62,9 @@ test:
 integration:
     NIBRUNNER_INTEGRATION=1 cargo test -p nibrunnerd --test integration -- --test-threads 1 --nocapture
 
-fmt:
-    cargo fmt --all
-
-# `fmt` as a check: fails on anything it would have rewritten.
-fmt-check:
-    cargo fmt --all --check
+# `just fmt --check` refuses instead of rewriting.
+fmt *args:
+    cargo fmt --all {{args}}
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings

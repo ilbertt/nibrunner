@@ -19,7 +19,7 @@ jobs:
           prepare_for_build: disabled
 
       - name: Check Rust Codestyle
-        run: just fmt-check
+        run: just fmt --check
 
   lint:
     runs-on: ubuntu-latest
