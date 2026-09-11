@@ -72,7 +72,6 @@ main() {
     refuse_unless_this_machine_can_host
     version=${NIBRUNNER_VERSION:-$(newest_release)}
     [ -n "$version" ] || die "no release could be found for $REPO; name one in NIBRUNNER_VERSION"
-    say "release $version"
 
     packages
 
@@ -81,6 +80,9 @@ main() {
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT INT TERM
 
+    # Said here rather than before the packages, which scroll anything said before them off the
+    # screen: the version goes next to the downloads it names.
+    say "release $version — https://github.com/$REPO/releases/tag/$version"
     fetch_release "https://github.com/$REPO/releases/download/$version" "$work"
 
     say "nibrunnerd install"
