@@ -633,7 +633,7 @@ mod tests {
     fn cached_image(host: &crate::host::Host) -> std::path::PathBuf {
         crate::adapters::vm::artifacts::artifact_image_path(
             &host.config.artifact_cache_dir(),
-            &artifact(|_| {}).digest,
+            &artifact(|_| {}),
         )
     }
 
@@ -642,7 +642,7 @@ mod tests {
         let refusing = mocks::artifacts_refusing(crate::ports::ArtifactError::Transfer(reason.to_string()));
         Arc::get_mut(&mut host.host)
             .expect("nothing else holds this host yet")
-            .payloads = crate::adapters::vm::artifacts::ExecutablePayload::new(refusing, cache_dir);
+            .payloads = crate::adapters::vm::artifacts::ArtifactImages::new(refusing, cache_dir);
     }
 
     fn on_request() -> DesiredInstance {

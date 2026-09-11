@@ -4,12 +4,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use backhand::{compression::Compressor, FilesystemCompressor, FilesystemWriter, NodeHeader};
-use protocol::{DesiredArtifact, Sha256Digest};
+use protocol::{ArtifactKind, DesiredArtifact};
 
 use crate::json_store::make_directory;
 use crate::ports::{ArtifactError, ArtifactStore, ArtifactStoreExt, PayloadBuilder, PreparedPayload};
 
 pub const ARTIFACT_IMAGE_FILENAME: &str = "artifact.squashfs";
+/// A rootfs is attached as it was uploaded, so its name says nothing about its format. It sits
+/// beside the packed image rather than in its place: the digest is of what was uploaded, and the
+/// same bytes packed and attached whole are two different files.
+pub const ROOTFS_IMAGE_FILENAME: &str = "rootfs.image";
+
+const SQUASHFS_MAGIC: &[u8; 4] = b"hsqs";
+const EXT4_MAGIC: [u8; 2] = [0x53, 0xEF];
+const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
 
 const GUEST_BINARY_NAME: &str = "server";
 
@@ -54,25 +62,42 @@ fn pack(files: &[(&str, &[u8], u16)]) -> Result<Vec<u8>, ArtifactError> {
     Ok(image.into_inner())
 }
 
-pub fn artifact_image_path(cache_dir: &Path, digest: &Sha256Digest) -> PathBuf {
-    cache_dir.join(digest.as_str()).join(ARTIFACT_IMAGE_FILENAME)
+fn image_filename(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Executable => ARTIFACT_IMAGE_FILENAME,
+        ArtifactKind::Rootfs => ROOTFS_IMAGE_FILENAME,
+    }
 }
 
-/// The payload this host has always run: one static binary, packed as the only file on a
-/// read-only image the guest's own init execs.
-pub struct ExecutablePayload {
+pub fn artifact_image_path(cache_dir: &Path, artifact: &DesiredArtifact) -> PathBuf {
+    cache_dir
+        .join(artifact.digest.as_str())
+        .join(image_filename(artifact.kind))
+}
+
+fn is_mountable_rootfs(bytes: &[u8]) -> bool {
+    bytes.starts_with(SQUASHFS_MAGIC)
+        || bytes
+            .get(EXT4_MAGIC_OFFSET..EXT4_MAGIC_OFFSET + 2)
+            .is_some_and(|magic| magic == EXT4_MAGIC)
+}
+
+/// The image a microVM gets on its artifact drive, whatever the artifact is: a binary packed as
+/// the only file on a read-only image the guest's init execs, or a root filesystem attached as it
+/// was uploaded for that init to stack a writable layer over.
+pub struct ArtifactImages {
     store: Arc<dyn ArtifactStore>,
     cache_dir: PathBuf,
 }
 
-impl ExecutablePayload {
+impl ArtifactImages {
     pub fn new(store: Arc<dyn ArtifactStore>, cache_dir: PathBuf) -> Arc<Self> {
         Arc::new(Self { store, cache_dir })
     }
 }
 
 #[async_trait]
-impl PayloadBuilder for ExecutablePayload {
+impl PayloadBuilder for ArtifactImages {
     async fn prepare(&self, artifact: &DesiredArtifact) -> Result<PreparedPayload, ArtifactError> {
         let artifact_image_path = ensure_artifact_image(&self.store, &self.cache_dir, artifact).await?;
         Ok(PreparedPayload { artifact_image_path })
@@ -84,7 +109,7 @@ pub async fn ensure_artifact_image(
     cache_dir: &Path,
     artifact: &DesiredArtifact,
 ) -> Result<PathBuf, ArtifactError> {
-    let image_path = artifact_image_path(cache_dir, &artifact.digest);
+    let image_path = artifact_image_path(cache_dir, artifact);
     if image_path.exists() {
         let _ = std::fs::File::open(&image_path).and_then(|file| {
             file.set_times(
@@ -98,16 +123,30 @@ pub async fn ensure_artifact_image(
 
     let bytes = store.read_verified(artifact).await?;
 
-    let image = pack(&[(GUEST_BINARY_NAME, &bytes, BINARY_MODE)])?;
+    let image = match artifact.kind {
+        ArtifactKind::Executable => pack(&[(GUEST_BINARY_NAME, &bytes, BINARY_MODE)])?,
+        ArtifactKind::Rootfs => {
+            if !is_mountable_rootfs(&bytes) {
+                return Err(ArtifactError::Unpackable(
+                    "the rootfs is neither a squashfs nor an ext4 image".into(),
+                ));
+            }
+            bytes
+        }
+    };
     let directory = image_path
         .parent()
         .expect("the image is one level inside the cache");
     make_directory(directory, CACHE_DIR_MODE)
         .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    let staged = directory.join(format!("{ARTIFACT_IMAGE_FILENAME}.{}.tmp", std::process::id()));
+    let staged = directory.join(format!(
+        "{}.{}.tmp",
+        image_filename(artifact.kind),
+        std::process::id()
+    ));
     std::fs::write(&staged, &image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     std::fs::rename(&staged, &image_path).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    tracing::info!(digest = %artifact.digest, size_bytes = artifact.size_bytes, image_bytes = image.len(), "artifact image built");
+    tracing::info!(digest = %artifact.digest, kind = artifact.kind.as_str(), size_bytes = artifact.size_bytes, image_bytes = image.len(), "artifact image built");
     Ok(image_path)
 }
 
@@ -190,7 +229,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ArtifactError::DigestMismatch { .. }));
         assert!(error.message().contains("not to the"));
-        assert!(!artifact_image_path(directory.path(), &artifact(|_| {}).digest).exists());
+        assert!(!artifact_image_path(directory.path(), &artifact(|_| {})).exists());
 
         let store = store(artifact_bytes());
         let mismatched = artifact(|artifact| artifact.size_bytes = 1);
@@ -231,7 +270,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, ArtifactError::Transfer(_)), "{error}");
-        assert!(!artifact_image_path(directory.path(), &artifact(|_| {}).digest).exists());
+        assert!(!artifact_image_path(directory.path(), &artifact(|_| {})).exists());
     }
 
     #[tokio::test]
@@ -246,11 +285,11 @@ mod tests {
     #[tokio::test]
     async fn the_executable_payload_is_the_cached_image_and_nothing_more() {
         let directory = tempfile::tempdir().unwrap();
-        let payloads = ExecutablePayload::new(store(artifact_bytes()), directory.path().to_path_buf());
+        let payloads = ArtifactImages::new(store(artifact_bytes()), directory.path().to_path_buf());
         let prepared = payloads.prepare(&artifact(|_| {})).await.unwrap();
         assert_eq!(
             prepared.artifact_image_path,
-            artifact_image_path(directory.path(), &artifact(|_| {}).digest)
+            artifact_image_path(directory.path(), &artifact(|_| {}))
         );
         assert!(prepared.artifact_image_path.exists());
     }
@@ -258,14 +297,97 @@ mod tests {
     #[test]
     fn every_digest_gets_its_own_place_in_the_cache_so_a_redeploy_never_reads_the_old_binary() {
         let cache = Path::new("/var/lib/nibrunner/artifacts");
-        let one = artifact_image_path(cache, &artifact(|_| {}).digest);
+        let one = artifact_image_path(cache, &artifact(|_| {}));
         let other = artifact_image_path(
             cache,
-            &Sha256Digest::parse("0000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+            &artifact(|artifact| {
+                artifact.digest = protocol::Sha256Digest::parse(
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .unwrap();
+            }),
         );
         assert_ne!(one, other);
         assert!(one.starts_with(cache));
         assert!(one.ends_with(ARTIFACT_IMAGE_FILENAME));
+    }
+
+    #[test]
+    fn the_same_bytes_as_a_binary_and_as_a_rootfs_are_two_files_under_one_digest() {
+        let cache = Path::new("/var/lib/nibrunner/artifacts");
+        let packed = artifact_image_path(cache, &artifact(|_| {}));
+        let whole = artifact_image_path(cache, &rootfs(|_| {}));
+        assert_eq!(packed.parent(), whole.parent());
+        assert_ne!(packed, whole);
+        assert!(whole.ends_with(ROOTFS_IMAGE_FILENAME));
+    }
+
+    fn rootfs(edit: impl FnOnce(&mut DesiredArtifact)) -> DesiredArtifact {
+        artifact(|artifact| {
+            artifact.kind = ArtifactKind::Rootfs;
+            edit(artifact);
+        })
+    }
+
+    fn squashfs_bytes() -> Vec<u8> {
+        pack(&[("init", b"#!/bin/sh\n", BINARY_MODE)]).unwrap()
+    }
+
+    fn ext4_bytes() -> Vec<u8> {
+        let mut bytes = vec![0u8; 4096];
+        bytes[EXT4_MAGIC_OFFSET..EXT4_MAGIC_OFFSET + 2].copy_from_slice(&EXT4_MAGIC);
+        bytes
+    }
+
+    fn describing(bytes: &[u8]) -> DesiredArtifact {
+        use sha2::Digest;
+        let digest = hex::encode(sha2::Sha256::digest(bytes));
+        rootfs(|artifact| {
+            artifact.digest = protocol::Sha256Digest::parse(&digest).unwrap();
+            artifact.size_bytes = bytes.len() as u64;
+        })
+    }
+
+    #[tokio::test]
+    async fn a_rootfs_is_cached_as_it_was_uploaded_rather_than_packed() {
+        for image in [squashfs_bytes(), ext4_bytes()] {
+            let directory = tempfile::tempdir().unwrap();
+            let wanted = describing(&image);
+            let cached = ensure_artifact_image(&store(image.clone()), directory.path(), &wanted)
+                .await
+                .unwrap();
+            assert!(cached.ends_with(ROOTFS_IMAGE_FILENAME));
+            assert_eq!(std::fs::read(&cached).unwrap(), image);
+        }
+    }
+
+    #[tokio::test]
+    async fn bytes_that_no_kernel_could_mount_are_refused_on_the_host_rather_than_in_the_guest() {
+        let directory = tempfile::tempdir().unwrap();
+        let junk = b"not a filesystem at all, however you look at it".to_vec();
+        let wanted = describing(&junk);
+        let error = ensure_artifact_image(&store(junk), directory.path(), &wanted)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ArtifactError::Unpackable(_)), "{error}");
+        assert!(
+            error.message().contains("neither a squashfs nor an ext4"),
+            "{error}"
+        );
+        assert!(!artifact_image_path(directory.path(), &wanted).exists());
+
+        let directory = tempfile::tempdir().unwrap();
+        let as_binary = artifact(|artifact| {
+            artifact.digest = wanted.digest.clone();
+            artifact.size_bytes = wanted.size_bytes;
+        });
+        let junk = b"not a filesystem at all, however you look at it".to_vec();
+        assert!(
+            ensure_artifact_image(&store(junk), directory.path(), &as_binary)
+                .await
+                .is_ok(),
+            "the same bytes are a fine binary; only a rootfs has a shape to check"
+        );
     }
 
     #[test]

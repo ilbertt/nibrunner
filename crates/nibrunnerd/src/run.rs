@@ -13,7 +13,7 @@ use crate::adapters::net::firewall::HostFirewall;
 use crate::adapters::net::tap::HostNetwork;
 use crate::adapters::proxy::activator::AppActivator;
 use crate::adapters::proxy::{router, Router};
-use crate::adapters::vm::artifacts::ExecutablePayload;
+use crate::adapters::vm::artifacts::ArtifactImages;
 use crate::adapters::vm::manager::{verify_guest_image, VmManager};
 use crate::adapters::vm::process::{extract_firecracker, VmProcesses, FIRECRACKER_VERSION};
 use crate::adapters::volumes::local_file::LocalFileVolumes;
@@ -82,7 +82,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         ObjectArtifactStore::open(&config.artifact_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
     );
-    let payloads = ExecutablePayload::new(artifacts.clone(), config.artifact_cache_dir());
+    let payloads = ArtifactImages::new(artifacts.clone(), config.artifact_cache_dir());
     let network = open_network()?;
     let logs = TenantLogReceiver::new();
     let sink = Arc::new(FileLogSink::new(config.logs_dir()));

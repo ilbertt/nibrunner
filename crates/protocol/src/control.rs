@@ -28,6 +28,39 @@ pub enum DesiredPresence {
     Absent,
 }
 
+/// What the artifact is, and so what the guest does with the drive it arrives on: exec the one
+/// binary it holds, or stack a writable layer over the root filesystem it is and run that system's
+/// own init. Every document written before this field existed named a binary, so leaving it out
+/// keeps meaning that.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactKind {
+    #[default]
+    Executable,
+    Rootfs,
+}
+
+impl ArtifactKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArtifactKind::Executable => "executable",
+            ArtifactKind::Rootfs => "rootfs",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "executable" => Some(ArtifactKind::Executable),
+            "rootfs" => Some(ArtifactKind::Rootfs),
+            _ => None,
+        }
+    }
+
+    fn is_default(kind: &Self) -> bool {
+        *kind == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesiredArtifact {
@@ -35,6 +68,8 @@ pub struct DesiredArtifact {
     pub size_bytes: u64,
     pub object_key: ObjectKey,
     pub filename: Filename,
+    #[serde(default, skip_serializing_if = "ArtifactKind::is_default")]
+    pub kind: ArtifactKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

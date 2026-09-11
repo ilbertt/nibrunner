@@ -27,6 +27,29 @@ fn instance_json() -> serde_json::Value {
 }
 
 #[test]
+fn an_artifact_that_names_no_kind_is_the_binary_every_earlier_document_meant() {
+    let mut instance = instance_json();
+    let parsed: DesiredInstance = serde_json::from_value(instance.clone()).expect("parses");
+    assert_eq!(parsed.artifact.kind, ArtifactKind::Executable);
+    let written = serde_json::to_value(&parsed).expect("serializes");
+    assert!(
+        written["artifact"].get("kind").is_none(),
+        "a document that never said so is not rewritten to say so"
+    );
+
+    instance["artifact"]["kind"] = serde_json::json!("rootfs");
+    let parsed: DesiredInstance = serde_json::from_value(instance).expect("parses");
+    assert_eq!(parsed.artifact.kind, ArtifactKind::Rootfs);
+    let written = serde_json::to_value(&parsed).expect("serializes");
+    assert_eq!(written["artifact"]["kind"], "rootfs");
+
+    for kind in [ArtifactKind::Executable, ArtifactKind::Rootfs] {
+        assert_eq!(ArtifactKind::parse(kind.as_str()), Some(kind));
+    }
+    assert_eq!(ArtifactKind::parse("container"), None);
+}
+
+#[test]
 fn a_desired_state_round_trips_with_its_wire_names() {
     let document = serde_json::json!({
         "hostId": "host-1",

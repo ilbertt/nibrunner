@@ -30,6 +30,7 @@ mod tests {
 
     fn config(edit: impl FnOnce(&mut InstanceConfig)) -> InstanceConfig {
         let mut value = InstanceConfig {
+            artifact_kind: protocol::ArtifactKind::Executable,
             http_port: 3000,
             hostname: None,
             max_restarts: 5,

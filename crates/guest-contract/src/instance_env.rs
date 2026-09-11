@@ -1,5 +1,6 @@
 use protocol::{
-    AppHostname, AppHostnameKind, Hostname, HttpPort, RestartPolicy, TenantArguments, TenantEnvironment,
+    AppHostname, AppHostnameKind, ArtifactKind, Hostname, HttpPort, RestartPolicy, TenantArguments,
+    TenantEnvironment,
 };
 
 pub const INSTANCE_ENV_FILENAME: &str = "instance.env";
@@ -12,6 +13,7 @@ const DNS_SERVERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
 
 #[derive(Debug, Clone)]
 pub struct InstanceEnvContent<'a> {
+    pub artifact_kind: ArtifactKind,
     pub http_port: HttpPort,
     pub hostnames: &'a [AppHostname],
     pub args: &'a TenantArguments,
@@ -45,7 +47,10 @@ fn js_number(value: f64) -> String {
 }
 
 pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, UnrepresentableEnvironment> {
-    let mut lines = vec![format!("{RUNTIME_PREFIX}HTTP_PORT={}", content.http_port)];
+    let mut lines = vec![
+        format!("{RUNTIME_PREFIX}ARTIFACT_KIND={}", content.artifact_kind.as_str()),
+        format!("{RUNTIME_PREFIX}HTTP_PORT={}", content.http_port),
+    ];
     if let Some(hostname) = platform_hostname(content.hostnames) {
         lines.push(format!("{RUNTIME_PREFIX}HOSTNAME={hostname}"));
     }
@@ -106,6 +111,7 @@ pub const CONFIG_MAX_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstanceConfig {
+    pub artifact_kind: ArtifactKind,
     pub http_port: u32,
     pub hostname: Option<String>,
     pub max_restarts: u32,
@@ -242,7 +248,15 @@ pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError
         environment.push((name.clone(), expand(name, value, &runtime)?));
     }
 
+    let artifact_kind = required("NIBRUN_ARTIFACT_KIND").and_then(|text| {
+        ArtifactKind::parse(text).ok_or(InstanceEnvError::Malformed {
+            key: "NIBRUN_ARTIFACT_KIND".to_string(),
+            rule: "a kind of artifact this runtime knows",
+        })
+    })?;
+
     Ok(InstanceConfig {
+        artifact_kind,
         http_port: number("NIBRUN_HTTP_PORT")?,
         hostname: named("NIBRUN_HOSTNAME").cloned(),
         max_restarts: number("NIBRUN_MAX_RESTARTS")?,
@@ -303,6 +317,7 @@ mod tests {
     }
 
     struct Overrides {
+        artifact_kind: ArtifactKind,
         http_port: HttpPort,
         hostnames: Vec<AppHostname>,
         args: Vec<String>,
@@ -312,6 +327,7 @@ mod tests {
     impl Default for Overrides {
         fn default() -> Self {
             Self {
+                artifact_kind: ArtifactKind::Executable,
                 http_port: DEFAULT_HTTP_PORT,
                 hostnames: vec![hostname(PLATFORM_HOSTNAME, AppHostnameKind::Platform)],
                 args: vec![],
@@ -323,6 +339,7 @@ mod tests {
     fn attempt(overrides: Overrides) -> Result<String, UnrepresentableEnvironment> {
         let args = TenantArguments::try_from(overrides.args).unwrap();
         render_instance_env(&InstanceEnvContent {
+            artifact_kind: overrides.artifact_kind,
             http_port: overrides.http_port,
             hostnames: &overrides.hostnames,
             args: &args,
@@ -340,6 +357,7 @@ mod tests {
         let rendered = render(Overrides::default());
         let lines: Vec<&str> = rendered.lines().filter(|line| !line.is_empty()).collect();
         let expected = [
+            "NIBRUN_ARTIFACT_KIND=executable",
             "NIBRUN_HTTP_PORT=3000",
             "NIBRUN_HOSTNAME=my-app.nibrun.app",
             "NIBRUN_MAX_RESTARTS=5",
@@ -480,6 +498,7 @@ mod both_ends {
             kind: AppHostnameKind::Platform,
         }];
         render_instance_env(&InstanceEnvContent {
+            artifact_kind: ArtifactKind::Executable,
             http_port: DEFAULT_HTTP_PORT,
             hostnames: &hostnames,
             args: &args,
@@ -492,6 +511,7 @@ mod both_ends {
     #[test]
     fn what_the_host_writes_is_what_the_guest_reads() {
         let config = parse_instance_env(&written(&[("TOKEN", "hunter2")], &["--verbose", "-p"])).unwrap();
+        assert_eq!(config.artifact_kind, ArtifactKind::Executable);
         assert_eq!(config.http_port, u32::from(DEFAULT_HTTP_PORT.get()));
         assert_eq!(config.hostname.as_deref(), Some("my-app.nibrun.app"));
         assert_eq!(config.arguments, vec!["--verbose", "-p"]);
@@ -583,6 +603,7 @@ mod both_ends {
     fn a_key_the_writer_left_out_is_reported_rather_than_defaulted() {
         let whole = written(&[], &[]);
         for key in [
+            "NIBRUN_ARTIFACT_KIND",
             "NIBRUN_HTTP_PORT",
             "NIBRUN_MAX_RESTARTS",
             "NIBRUN_BACKOFF_FACTOR",
@@ -599,6 +620,31 @@ mod both_ends {
                 "{key}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn what_the_artifact_is_crosses_and_a_kind_this_guest_does_not_know_is_refused() {
+        let rootfs: String = written(&[], &[])
+            .lines()
+            .map(|line| {
+                if line.starts_with("NIBRUN_ARTIFACT_KIND=") {
+                    "NIBRUN_ARTIFACT_KIND=rootfs\n".to_string()
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect();
+        assert_eq!(
+            parse_instance_env(&rootfs).unwrap().artifact_kind,
+            ArtifactKind::Rootfs
+        );
+
+        let unknown = rootfs.replace("=rootfs", "=container");
+        let error = parse_instance_env(&unknown).unwrap_err();
+        assert!(
+            matches!(&error, InstanceEnvError::Malformed { key, .. } if key == "NIBRUN_ARTIFACT_KIND"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use protocol::{DesiredArtifact, TenantEnvironment};
+use protocol::{ArtifactKind, DesiredArtifact, TenantEnvironment};
 
 use crate::ports::{ArtifactStore, ArtifactStoreExt, CommandRequest, CommandRunner, CommandRunnerExt};
 
@@ -124,14 +124,30 @@ pub async fn write_bundle(
     environment: Option<&TenantEnvironment>,
     staging_dir: &Path,
 ) -> Result<WrittenBundle, BundleError> {
-    let binary_name = bundle_binary_name(artifact)?.to_string();
-    let bytes = artifacts
-        .read_verified(artifact)
-        .await
-        .map_err(|error| BundleError::Artifact(error.message()))?;
-
-    let binary_path = staging_dir.join(&binary_name);
-    write_file(&binary_path, &bytes, BINARY_MODE)?;
+    // A rootfs is reproducible from its digest and would be the bulk of every export it went
+    // into, so the bundle carries what the tenant wrote over it and nothing that was under it.
+    let binary_name = match artifact.kind {
+        ArtifactKind::Executable => {
+            let binary_name = bundle_binary_name(artifact)?.to_string();
+            let bytes = artifacts
+                .read_verified(artifact)
+                .await
+                .map_err(|error| BundleError::Artifact(error.message()))?;
+            write_file(&staging_dir.join(&binary_name), &bytes, BINARY_MODE)?;
+            Some(binary_name)
+        }
+        ArtifactKind::Rootfs => {
+            let scratch = staging_dir
+                .join(DATA_DIRECTORY)
+                .join(guest_contract::paths::OVERLAY_WORK_DIR);
+            if let Err(error) = std::fs::remove_dir_all(&scratch) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(BundleError::Unwritable(error.to_string()));
+                }
+            }
+            None
+        }
+    };
 
     if let Some(environment) = environment {
         write_file(
@@ -142,7 +158,12 @@ pub async fn write_bundle(
     }
 
     let bundle_path = staging_dir.join(BUNDLE_NAME);
-    archive(&bundle_path, staging_dir, &binary_name, environment.is_some())?;
+    archive(
+        &bundle_path,
+        staging_dir,
+        binary_name.as_deref(),
+        environment.is_some(),
+    )?;
     let size_bytes = std::fs::metadata(&bundle_path)
         .map_err(|error| BundleError::Unwritable(error.to_string()))?
         .len();
@@ -155,7 +176,7 @@ pub async fn write_bundle(
 fn archive(
     bundle_path: &Path,
     staging_dir: &Path,
-    binary_name: &str,
+    binary_name: Option<&str>,
     with_environment: bool,
 ) -> Result<(), BundleError> {
     let unwritable = |error: std::io::Error| BundleError::Unwritable(error.to_string());
@@ -165,9 +186,11 @@ fn archive(
     builder
         .append_dir_all(DATA_DIRECTORY, staging_dir.join(DATA_DIRECTORY))
         .map_err(unwritable)?;
-    builder
-        .append_path_with_name(staging_dir.join(binary_name), binary_name)
-        .map_err(unwritable)?;
+    if let Some(binary_name) = binary_name {
+        builder
+            .append_path_with_name(staging_dir.join(binary_name), binary_name)
+            .map_err(unwritable)?;
+    }
     if with_environment {
         builder
             .append_path_with_name(staging_dir.join(ENV_FILENAME), ENV_FILENAME)
@@ -277,6 +300,31 @@ mod tests {
         assert_eq!(
             names_in(&written.path),
             vec![".env", "data/", "data/notes.txt", "pocketbase"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rootfs_export_is_what_the_tenant_wrote_and_neither_the_image_nor_the_scratch() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let data = staging.join(DATA_DIRECTORY);
+        std::fs::create_dir_all(data.join(guest_contract::paths::OVERLAY_UPPER_DIR).join("etc")).unwrap();
+        std::fs::write(
+            data.join(guest_contract::paths::OVERLAY_UPPER_DIR)
+                .join("etc/motd"),
+            b"hello",
+        )
+        .unwrap();
+        std::fs::create_dir_all(data.join(guest_contract::paths::OVERLAY_WORK_DIR).join("work")).unwrap();
+
+        let wanted = artifact(|artifact| artifact.kind = ArtifactKind::Rootfs);
+        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_refusing(
+            crate::ports::ArtifactError::Transfer("the store was never asked".into()),
+        );
+        let written = write_bundle(&artifacts, &wanted, None, &staging).await.unwrap();
+        assert_eq!(
+            names_in(&written.path),
+            vec!["data/", "data/upper", "data/upper/etc", "data/upper/etc/motd"]
         );
     }
 

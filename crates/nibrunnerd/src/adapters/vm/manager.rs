@@ -90,6 +90,7 @@ impl VmManager {
         make_directory(&working_dir, VM_DIR_MODE).map_err(|error| VmError::Host(error.to_string()))?;
 
         let rendered = render_instance_env(&InstanceEnvContent {
+            artifact_kind: request.desired.artifact.kind,
             http_port: request.desired.config.http_port,
             hostnames: &request.desired.hostnames,
             args: &request.desired.config.args,

@@ -89,6 +89,7 @@ pub fn artifact(edit: impl FnOnce(&mut DesiredArtifact)) -> DesiredArtifact {
         size_bytes: ARTIFACT_BYTES.len() as u64,
         object_key: ObjectKey::parse("artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45").unwrap(),
         filename: Filename::parse("pocketbase").unwrap(),
+        kind: protocol::ArtifactKind::Executable,
     };
     edit(&mut value);
     value
@@ -355,10 +356,7 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
             commands.clone(),
         )),
         artifacts: artifacts.clone(),
-        payloads: crate::adapters::vm::artifacts::ExecutablePayload::new(
-            artifacts,
-            config.artifact_cache_dir(),
-        ),
+        payloads: crate::adapters::vm::artifacts::ArtifactImages::new(artifacts, config.artifact_cache_dir()),
         repositories,
         exports,
         checkpoint_servers: None,

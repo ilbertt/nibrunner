@@ -149,6 +149,33 @@ A document that names both is refused rather than served under whichever a loop 
 document that names neither means what it has always meant: an `on-request` instance sleeps after
 five minutes, and everything else does not sleep.
 
+### A root filesystem instead of a binary
+
+The artifact is a binary unless the document says otherwise. It may instead be a whole system:
+
+```json
+"artifact": {
+  "digest": "<sha256 of the image>",
+  "sizeBytes": 734003200,
+  "objectKey": "images/ubuntu-24.04",
+  "filename": "ubuntu-24.04.squashfs",
+  "kind": "rootfs"
+}
+```
+
+A `rootfs` is a squashfs or ext4 image with an `/sbin/init` in it, attached read-only exactly as
+it was uploaded. The guest stacks a writable layer over it on the app's volume and runs that
+system's own init underneath nibrunner's, which stays PID 1 — so the tenant is root, `apt` works,
+`systemd` runs, and what it writes survives a restart, while logs, usage and the freeze that makes
+a checkpoint consistent keep working with nothing installed in the image. The image itself is
+cached once per host by digest, and an export or a checkpoint carries only what was written over
+it: the same Ubuntu is never stored twice.
+
+What the guest still gets from the document: `args` are handed to `/sbin/init`, `environment` to
+its process, `restartPolicy` governs it the way it governs a binary, and `httpPort` is whatever
+the system listens on for its hostnames. `readyWhen: boot-completed` is the natural readiness for
+a system that answers no port; `port-answers` is fine for one that does.
+
 ## Testing
 
 ```bash

@@ -13,5 +13,12 @@ pub const APP_DIR: &str = "/app";
 pub const DATA_DIR: &str = "/app/data";
 pub const TENANT_TMP_DIR: &str = "/tmp";
 
+/// A rootfs artifact is the read-only lower layer; what the tenant writes lands in `upper` on the
+/// data volume, and `work` is overlayfs's own scratch beside it, which no export should carry.
+pub const OVERLAY_UPPER_DIR: &str = "upper";
+pub const OVERLAY_WORK_DIR: &str = "work";
+pub const ROOTFS_MOUNT: &str = "/mnt/root";
+pub const ROOTFS_INIT: &str = "/sbin/init";
+
 pub const TENANT_UID: u32 = 65534;
 pub const TENANT_GID: u32 = 65534;
