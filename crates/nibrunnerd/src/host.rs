@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use crate::adapters::net::allocator::SlotAllocator;
 use crate::adapters::net::firewall::HostFirewall;
 use crate::adapters::proxy::activator::AppActivator;
+use crate::adapters::proxy::datagram_activator::DatagramActivator;
 use crate::adapters::proxy::stream_activator::StreamActivator;
 use crate::adapters::proxy::Router;
 use crate::adapters::volumes::nbd::NbdDevices;
@@ -35,9 +36,11 @@ pub struct Host {
     pub firewall: Arc<HostFirewall>,
     pub router: Arc<Router>,
     pub activator: Arc<AppActivator>,
-    /// Absent on a host whose configuration names no `[ingress]`, which is a host that offers
-    /// no port but the proxy's. A document asking one of those for a stream port is refused.
+    /// Absent on a host whose configuration names no `[proxy.tcp]`, which is a host that offers
+    /// no stream port. A document asking one of those for such a port is refused.
     pub stream_activator: Option<Arc<StreamActivator>>,
+    /// The same, for `[proxy.udp]`.
+    pub datagram_activator: Option<Arc<DatagramActivator>>,
 }
 
 impl Host {

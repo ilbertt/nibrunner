@@ -97,6 +97,7 @@ mod tests {
             ports: vec![nft_render::ForwardedPort {
                 host_port: HostPort::new(21_000).unwrap(),
                 guest_port: protocol::GuestPort::new(3000).unwrap(),
+                raw: false,
             }],
             host_ipv4: Ipv4Address::parse("10.201.0.1").unwrap(),
             guest_ipv4: Ipv4Address::parse("10.201.0.2").unwrap(),

@@ -106,14 +106,17 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             waker: waker_slot.clone(),
         }),
     );
+    let deferred = || {
+        Arc::new(DeferredWaker {
+            waker: waker_slot.clone(),
+        })
+    };
+    // One budget covers both, so a host that carries anything raw binds for either.
     let stream_activator = config.proxy.raw.as_ref().map(|raw| {
-        crate::adapters::proxy::StreamActivator::new(
-            state.clone(),
-            Arc::new(DeferredWaker {
-                waker: waker_slot.clone(),
-            }),
-            raw.listen_address,
-        )
+        crate::adapters::proxy::StreamActivator::new(state.clone(), deferred(), raw.listen_address)
+    });
+    let datagram_activator = config.proxy.raw.as_ref().map(|raw| {
+        crate::adapters::proxy::DatagramActivator::new(state.clone(), deferred(), raw.listen_address)
     });
 
     let exports: Arc<dyn crate::domain::exports::store::ExportStore> = Arc::new(
@@ -146,6 +149,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         router: Router::new(),
         activator,
         stream_activator,
+        datagram_activator,
         config,
     });
     let _ = waker_slot.set(AppWaker::new(host.clone()));
