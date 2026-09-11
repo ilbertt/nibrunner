@@ -1,3 +1,8 @@
+#[cfg(feature = "schema")]
+use std::borrow::Cow;
+
+#[cfg(feature = "schema")]
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::*;
@@ -66,7 +71,7 @@ pub enum DesiredLayer {
     Executable {
         #[serde(flatten)]
         object: LayerObject,
-        destination_path: GuestPath,
+        destination_path: ExecutablePath,
     },
 }
 
@@ -80,6 +85,23 @@ impl DesiredLayer {
 
 /// Where the guest's init lives in a stacked root, and so the one place a program cannot be put.
 pub const INIT_PATH: &str = "/sbin/init";
+
+fn is_executable_path(path: &str) -> bool {
+    is_guest_path(path) && path != "/" && path != INIT_PATH
+}
+
+validated_string!(
+    /// Where an executable layer's program sits: a file, so not `/`, and not what starts it.
+    ExecutablePath,
+    "destinationPath",
+    "an absolute path to a file other than /sbin/init",
+    is_executable_path,
+    {
+        "pattern": GUEST_PATH_PATTERN,
+        "maxLength": MAX_GUEST_PATH_LENGTH,
+        "not": { "enum": ["/", INIT_PATH] }
+    }
+);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -172,21 +194,6 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
                 "an instance names at most {MAX_LAYERS} layers, because a microVM has that many drives to give them"
             )));
         }
-        for layer in &fields.layers {
-            let DesiredLayer::Executable { destination_path, .. } = layer else {
-                continue;
-            };
-            if destination_path.as_str() == "/" {
-                return Err(InvalidValue::new_public(
-                    "an executable's destinationPath names the file the program becomes, and / is not a file",
-                ));
-            }
-            if destination_path.as_str() == INIT_PATH {
-                return Err(InvalidValue::new_public(&format!(
-                    "an executable cannot be put at {INIT_PATH}, which is what starts it"
-                )));
-            }
-        }
         Ok(Self {
             app_id: fields.app_id,
             deployment_id: fields.deployment_id,
@@ -231,15 +238,6 @@ fn desired_instance_rules(schema: &mut schemars::Schema) {
     {
         layers.insert("minItems".into(), serde_json::json!(1));
         layers.insert("maxItems".into(), serde_json::json!(MAX_LAYERS));
-        layers.insert(
-            "items".into(),
-            serde_json::json!({
-                "allOf": [
-                    layers.get("items").cloned().unwrap_or(serde_json::json!({})),
-                    { "properties": { "destinationPath": { "not": { "enum": ["/", INIT_PATH] } } } }
-                ]
-            }),
-        );
     }
 }
 

@@ -239,23 +239,7 @@
           "description": "The root filesystem, bottom layer first. At least one; at most `MAX_LAYERS`.",
           "type": "array",
           "items": {
-            "allOf": [
-              {
-                "$ref": "#/$defs/DesiredLayer"
-              },
-              {
-                "properties": {
-                  "destinationPath": {
-                    "not": {
-                      "enum": [
-                        "/",
-                        "/sbin/init"
-                      ]
-                    }
-                  }
-                }
-              }
-            ]
+            "$ref": "#/$defs/DesiredLayer"
           },
           "maxItems": 8,
           "minItems": 1
@@ -364,7 +348,7 @@
           "type": "object",
           "properties": {
             "destinationPath": {
-              "$ref": "#/$defs/GuestPath"
+              "$ref": "#/$defs/ExecutablePath"
             },
             "digest": {
               "$ref": "#/$defs/Sha256Digest"
@@ -425,16 +409,22 @@
         "desiredState"
       ]
     },
+    "ExecutablePath": {
+      "description": "an absolute path to a file other than /sbin/init",
+      "type": "string",
+      "maxLength": 4096,
+      "not": {
+        "enum": [
+          "/",
+          "/sbin/init"
+        ]
+      },
+      "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
+    },
     "ExportId": {
       "description": "an identifier",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
-    },
-    "GuestPath": {
-      "description": "a guest path",
-      "type": "string",
-      "maxLength": 4096,
-      "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
     },
     "GuestPort": {
       "type": "integer",

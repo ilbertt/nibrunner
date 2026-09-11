@@ -185,7 +185,7 @@ mod tests {
     use super::*;
     use crate::test_support::mocks;
     use crate::test_support::{base_layer, layer, ARTIFACT_BYTES, ARTIFACT_DIGEST, BASE_LAYER_BYTES};
-    use protocol::{GuestPath, Sha256Digest};
+    use protocol::{ExecutablePath, Sha256Digest};
 
     fn artifact_bytes() -> Vec<u8> {
         ARTIFACT_BYTES.to_vec()
@@ -200,7 +200,7 @@ mod tests {
     fn placed_at(layer: DesiredLayer, path: &str) -> DesiredLayer {
         DesiredLayer::Executable {
             object: layer.object().clone(),
-            destination_path: GuestPath::parse(path).unwrap(),
+            destination_path: ExecutablePath::parse(path).unwrap(),
         }
     }
 

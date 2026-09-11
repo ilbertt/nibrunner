@@ -96,7 +96,7 @@ pub fn layer(edit: impl FnOnce(&mut LayerObject)) -> DesiredLayer {
     edit(&mut object);
     DesiredLayer::Executable {
         object,
-        destination_path: GuestPath::parse("/app/server").unwrap(),
+        destination_path: ExecutablePath::parse("/app/server").unwrap(),
     }
 }
 
