@@ -34,7 +34,9 @@ impl StatusController {
     }
 
     pub async fn status_once(&self) -> Duration {
+        let started = std::time::Instant::now();
         self.reconciler.refresh().await;
+        self.host.metrics.passes.refreshed(started.elapsed());
         self.reports.publish().await;
 
         let now = crate::clock::now_ms();
@@ -95,6 +97,16 @@ mod tests {
 
         let controller = StatusController::new(host.arc().clone(), Arc::new(reconciler), Arc::new(reports));
         assert_eq!(controller.status_once().await, STATUS_TICK);
+        let page = crate::domain::metrics::render(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &crate::state::HostSnapshot::default(),
+            0,
+        );
+        assert!(
+            page.contains("nibrunner_refresh_seconds_count 1\n"),
+            "the tick was timed"
+        );
     }
 
     #[tokio::test]

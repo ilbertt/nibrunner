@@ -1,17 +1,19 @@
 pub mod converge;
+pub mod passes;
 pub mod proxy;
 pub mod sleep_wake;
 
 pub use proxy::{Outcome, ProxyMetrics};
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use protocol::{AppId, HostReportedState, INSTANCE_STATES};
+use protocol::{HostReportedState, INSTANCE_STATES};
 
-use crate::domain::metrics::converge::{ConvergeMetrics, Deploy};
+use crate::domain::metrics::converge::ConvergeMetrics;
+use crate::domain::metrics::passes::PassMetrics;
 use crate::domain::metrics::sleep_wake::SleepWakeMetrics;
+use crate::state::HostSnapshot;
 
 /// Everything this daemon counts in memory rather than reads off the report. One per host, and
 /// a scrape renders it beside the report it is rendered with.
@@ -20,6 +22,7 @@ pub struct HostMetrics {
     pub proxy: ProxyMetrics,
     pub sleep_wake: SleepWakeMetrics,
     pub converge: ConvergeMetrics,
+    pub passes: PassMetrics,
 }
 
 impl HostMetrics {
@@ -139,7 +142,7 @@ impl Page {
 pub fn render(
     report: &HostReportedState,
     metrics: &HostMetrics,
-    deploys: &BTreeMap<AppId, Deploy>,
+    snapshot: &HostSnapshot,
     now_ms: i64,
 ) -> String {
     let mut page = Page::new();
@@ -309,7 +312,8 @@ pub fn render(
 
     proxy::render(&mut page, &metrics.proxy);
     sleep_wake::render(&mut page, &metrics.sleep_wake);
-    converge::render(&mut page, report, &metrics.converge, deploys, now_ms);
+    passes::render(&mut page, report, &metrics.passes, snapshot);
+    converge::render(&mut page, report, &metrics.converge, &snapshot.deploys, now_ms);
 
     page.0
 }
@@ -350,7 +354,7 @@ pub(crate) mod tests {
     }
 
     fn rendered(report: &HostReportedState, metrics: &HostMetrics) -> String {
-        render(report, metrics, &BTreeMap::new(), 0)
+        render(report, metrics, &HostSnapshot::default(), 0)
     }
 
     fn lines_for<'a>(page: &'a str, name: &str) -> Vec<&'a str> {
