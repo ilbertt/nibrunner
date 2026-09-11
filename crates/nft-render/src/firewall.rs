@@ -73,8 +73,8 @@ pub struct ForwardedInstance {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FirewallState {
     pub instances: Vec<ForwardedInstance>,
-    pub control_plane_cidrs_v4: Vec<String>,
-    pub control_plane_cidrs_v6: Vec<String>,
+    pub denied_egress_addresses_v4: Vec<String>,
+    pub denied_egress_addresses_v6: Vec<String>,
 }
 
 fn tap_match() -> String {
@@ -183,8 +183,8 @@ fn traffic_chains_v4(state: &FirewallState) -> Vec<String> {
                 app_received_counter_name(&instance.app_id)
             ),
             // Only what was let out. The forward chain at the priority above this one rejects a
-            // guest reaching another guest, the control plane, or a private destination, and a
-            // packet it rejected never arrives here to be counted against anybody.
+            // guest reaching another guest, a private destination, or an address the host denies
+            // by name, and a packet it rejected never arrives here to be counted against anybody.
             format!(
                 "iifname {tap} oifname != {tap} ip saddr {} counter name {}",
                 instance.guest_ipv4,
@@ -212,9 +212,9 @@ fn forward_chain_v4(state: &FirewallState) -> Vec<String> {
     ];
     rules.extend(
         state
-            .control_plane_cidrs_v4
+            .denied_egress_addresses_v4
             .iter()
-            .map(|cidr| format!("iifname {tap} ip daddr {cidr} {DENY} comment \"control plane\"")),
+            .map(|cidr| format!("iifname {tap} ip daddr {cidr} {DENY} comment \"denied egress\"")),
     );
     rules.push(format!(
         "iifname {tap} ip daddr {} {DENY} comment \"private destinations\"",
@@ -245,9 +245,9 @@ fn forward_chain_v6(state: &FirewallState) -> Vec<String> {
     ];
     rules.extend(
         state
-            .control_plane_cidrs_v6
+            .denied_egress_addresses_v6
             .iter()
-            .map(|cidr| format!("iifname {tap} ip6 daddr {cidr} {DENY} comment \"control plane\"")),
+            .map(|cidr| format!("iifname {tap} ip6 daddr {cidr} {DENY} comment \"denied egress\"")),
     );
     rules.push(format!(
         "iifname {tap} ip6 daddr {} {DENY} comment \"private destinations\"",
@@ -355,8 +355,8 @@ mod tests {
     fn state(instances: Vec<ForwardedInstance>, v4: &[&str], v6: &[&str]) -> FirewallState {
         FirewallState {
             instances,
-            control_plane_cidrs_v4: v4.iter().map(|s| s.to_string()).collect(),
-            control_plane_cidrs_v6: v6.iter().map(|s| s.to_string()).collect(),
+            denied_egress_addresses_v4: v4.iter().map(|s| s.to_string()).collect(),
+            denied_egress_addresses_v6: v6.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -395,12 +395,12 @@ mod tests {
         assert!(refusals(&with_instance)
             .iter()
             .any(|l| l.contains("10.201.0.0/16")));
-        let control = render_ruleset(&state(vec![], &["203.0.113.10/32"], &[]));
-        assert!(refusals(&control).iter().any(|l| l.contains("203.0.113.10/32")));
+        let denied = render_ruleset(&state(vec![], &["203.0.113.10/32"], &[]));
+        assert!(refusals(&denied).iter().any(|l| l.contains("203.0.113.10/32")));
     }
 
     #[test]
-    fn a_guest_cannot_reach_the_control_plane_before_it_is_allowed_out() {
+    fn a_denied_address_is_refused_before_the_guest_is_allowed_out() {
         let vpc = "10.43.0.0/16";
         let ruleset = render_ruleset(&state(vec![], &[vpc], &[]));
         let lines: Vec<&str> = ruleset.lines().collect();

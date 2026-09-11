@@ -39,8 +39,8 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
             host_ipv4: protocol::Ipv4Address::parse("10.201.0.1").unwrap(),
             guest_ipv4: protocol::Ipv4Address::parse("10.201.0.2").unwrap(),
         }],
-        control_plane_cidrs_v4: vec!["10.43.0.0/16".into()],
-        control_plane_cidrs_v6: vec!["2600:1f18:abcd::/56".into()],
+        denied_egress_addresses_v4: vec!["10.43.0.0/16".into()],
+        denied_egress_addresses_v6: vec!["2600:1f18:abcd::/56".into()],
     };
     firewall
         .apply(&state)

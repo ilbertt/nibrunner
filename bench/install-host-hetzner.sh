@@ -75,8 +75,8 @@ store_url = "$STATE/export-store"
 staging_dir = "$STATE/exports"
 
 [network]
-control_plane_cidrs_v4 = []
-control_plane_cidrs_v6 = []
+denied_egress_addresses_v4 = []
+denied_egress_addresses_v6 = []
 
 [proxy.http]
 port = $PROXY_PORT

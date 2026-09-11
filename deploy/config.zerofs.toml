@@ -46,8 +46,8 @@ store_url = "s3://nibrunner-exports-eu-west-2-123456789012/exports"
 staging_dir = "/var/lib/nibrunner/exports"
 
 [network]
-control_plane_cidrs_v4 = []
-control_plane_cidrs_v6 = []
+denied_egress_addresses_v4 = []
+denied_egress_addresses_v6 = []
 
 # The one HTTP listener, encrypted or not: nothing here redirects, so a second plain port beside
 # this one would serve every app both ways at once. It binds where the edge reaches this host.
