@@ -218,9 +218,9 @@ impl HostConfig {
 }
 
 mod file {
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct ConfigFile {
         pub(super) paths: Option<Paths>,
@@ -232,7 +232,7 @@ mod file {
         pub(super) metrics: Option<Metrics>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Paths {
         pub(super) state_dir: Option<String>,
@@ -244,20 +244,20 @@ mod file {
         pub(super) versions_file: Option<String>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Artifacts {
         pub(super) store_url: Option<String>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Exports {
         pub(super) store_url: Option<String>,
         pub(super) staging_dir: Option<String>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Volumes {
         pub(super) backend: Option<String>,
@@ -265,7 +265,7 @@ mod file {
         pub(super) zerofs: Option<Zerofs>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Zerofs {
         pub(super) binary: Option<String>,
@@ -283,21 +283,21 @@ mod file {
         pub(super) checkpoint_cache_dir: Option<String>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Network {
         pub(super) denied_egress_addresses_v4: Option<Vec<String>>,
         pub(super) denied_egress_addresses_v6: Option<Vec<String>>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Proxy {
         pub(super) http: Option<Http>,
         pub(super) raw: Option<Raw>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Http {
         pub(super) listen_address: Option<String>,
@@ -305,7 +305,7 @@ mod file {
         pub(super) tls: Option<Tls>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Tls {
         pub(super) certificate: Option<String>,
@@ -313,20 +313,20 @@ mod file {
         pub(super) client_ca: Option<ClientCa>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Raw {
         pub(super) listen_address: Option<String>,
         pub(super) max_ports_per_guest: Option<usize>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct ClientCa {
         pub(super) certificate: Option<String>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Metrics {
         pub(super) port: Option<u16>,
@@ -490,25 +490,178 @@ impl HostConfig {
         })
     }
 
+    /// The smallest configuration this daemon accepts, laid out where a Linux distribution would
+    /// put it: volumes as files on this machine's own disk, stores as directories on it, nothing
+    /// served. It is what `install` writes a host that has none — from here, so there is no file
+    /// in the repository to fall behind [`Self::from_document`].
+    pub fn starter() -> Self {
+        Self::laid_out(
+            PathBuf::from("/var/lib/nibrunner"),
+            PathBuf::from("/run/nibrunner"),
+            PathBuf::from("/var/lib/nibrunner/guest"),
+        )
+    }
+
     pub fn under(root: &std::path::Path) -> Self {
+        Self::laid_out(root.join("state"), root.join("run"), root.join("guest"))
+    }
+
+    fn laid_out(state_dir: PathBuf, runtime_dir: PathBuf, guest_image_dir: PathBuf) -> Self {
         Self {
-            state_dir: root.join("state"),
-            runtime_dir: root.join("run"),
-            snapshot_dir: root.join("state/snapshots"),
-            guest_image_dir: root.join("guest"),
-            firecracker_dir: root.join("run/firecracker"),
-            desired_state_file: root.join("state/desired.json"),
-            api_socket: root.join("run/nibrunner.sock"),
-            versions_file: root.join("state/versions.json"),
-            artifact_store_url: root.join("state/artifact-store").display().to_string(),
+            snapshot_dir: state_dir.join("snapshots"),
+            guest_image_dir,
+            firecracker_dir: runtime_dir.join("firecracker"),
+            desired_state_file: state_dir.join("desired.json"),
+            api_socket: runtime_dir.join("nibrunner.sock"),
+            versions_file: state_dir.join("versions.json"),
+            artifact_store_url: state_dir.join("artifact-store").display().to_string(),
             storage_prefix: "volumes".to_string(),
             volumes: VolumeBackend::LocalFile,
             denied_egress_addresses_v4: vec![],
             denied_egress_addresses_v6: vec![],
             proxy: ProxyConfig::default(),
             metrics: None,
-            export_store_url: root.join("state/export-store").display().to_string(),
-            export_staging_dir: root.join("state/exports"),
+            export_store_url: state_dir.join("export-store").display().to_string(),
+            export_staging_dir: state_dir.join("exports"),
+            state_dir,
+            runtime_dir,
+        }
+    }
+
+    /// A host with every section in it: volumes in an object store reached from the guest over
+    /// NBD, artifacts and exports in S3, TLS behind an edge that presents a client certificate,
+    /// raw ports for a relay, a metrics page. `deploy/config.example.toml` is this, rendered.
+    ///
+    /// Written out field by field rather than as changes to [`Self::starter`], so that a section
+    /// added to this daemon has to be decided on here — and an example that showed every section
+    /// but the newest would otherwise be exactly what nobody noticed.
+    pub fn example() -> Self {
+        Self {
+            state_dir: PathBuf::from("/var/lib/nibrunner"),
+            runtime_dir: PathBuf::from("/run/nibrunner"),
+            snapshot_dir: PathBuf::from("/data/nibrunner-vm"),
+            guest_image_dir: PathBuf::from("/var/lib/nibrunner/guest"),
+            firecracker_dir: PathBuf::from("/run/nibrunner/firecracker"),
+            desired_state_file: PathBuf::from("/var/lib/nibrunner/desired.json"),
+            api_socket: PathBuf::from("/run/nibrunner/nibrunner.sock"),
+            versions_file: PathBuf::from("/var/lib/nibrunner/versions.json"),
+            artifact_store_url: "s3://nibrunner-artifacts-eu-west-2-123456789012/artifacts".to_string(),
+            storage_prefix: "hetzner-1".to_string(),
+            volumes: VolumeBackend::Zerofs(Box::new(ZerofsSettings {
+                binary: PathBuf::from("/opt/nibrunner/bin/zerofs"),
+                config_file: PathBuf::from("/etc/zerofs/config.toml"),
+                mount_path: PathBuf::from("/mnt/zerofs"),
+                nbd_socket_path: PathBuf::from("/run/zerofs/nbd.sock"),
+                ninep_socket_path: PathBuf::from("/run/zerofs/9p.sock"),
+                rpc_socket_path: PathBuf::from("/run/zerofs/rpc.sock"),
+                storage_url: "s3://nibrunner-filesystems-eu-west-2-123456789012/hetzner-1".to_string(),
+                cache_dir: PathBuf::from("/data/zerofs"),
+                cache_disk_mib: 200 * MEBIBYTES_PER_GIBIBYTE,
+                cache_memory_mib: 2 * MEBIBYTES_PER_GIBIBYTE,
+                checkpoint_runtime_dir: PathBuf::from("/run/zerofs-checkpoint"),
+                checkpoint_config_file: PathBuf::from("/etc/zerofs/checkpoint.toml"),
+                checkpoint_cache_dir: PathBuf::from("/data/zerofs-checkpoint"),
+            })),
+            denied_egress_addresses_v4: vec![],
+            denied_egress_addresses_v6: vec![],
+            proxy: ProxyConfig {
+                http: Some(HttpListener {
+                    listen_address: IpAddr::from([0, 0, 0, 0]),
+                    port: 443,
+                    tls: Some(TlsMaterial {
+                        certificate: PathBuf::from("/etc/nibrunner/tls/origin.crt"),
+                        key: PathBuf::from("/etc/nibrunner/tls/origin.key"),
+                        client_ca: Some(PathBuf::from("/etc/nibrunner/tls/origin-pull-ca.pem")),
+                    }),
+                }),
+                raw: Some(RawPorts {
+                    listen_address: IpAddr::from([10, 0, 5, 18]),
+                    max_ports_per_guest: 1,
+                }),
+            },
+            metrics: Some(MetricsConfig {
+                port: 9100,
+                listen_address: IpAddr::from([127, 0, 0, 1]),
+            }),
+            export_store_url: "s3://nibrunner-exports-eu-west-2-123456789012/exports".to_string(),
+            export_staging_dir: PathBuf::from("/var/lib/nibrunner/exports"),
+        }
+    }
+
+    /// This configuration as the file [`Self::from_toml`] reads. What `install` writes a host that
+    /// has none, and what `deploy/config.example.toml` is written from.
+    pub fn to_toml(&self) -> String {
+        toml::to_string(&self.to_document())
+            .expect("every key here is a string, an integer, or a table of them")
+    }
+
+    /// [`Self::from_document`] run backwards. Every key is required on the way in and every
+    /// unknown one refused, so a key written here that is not read there, or read there that is
+    /// not written here, fails the round trip by name rather than drifting.
+    fn to_document(&self) -> file::ConfigFile {
+        let text = |path: &std::path::Path| Some(path.display().to_string());
+        file::ConfigFile {
+            paths: Some(file::Paths {
+                state_dir: text(&self.state_dir),
+                runtime_dir: text(&self.runtime_dir),
+                snapshot_dir: text(&self.snapshot_dir),
+                guest_image_dir: text(&self.guest_image_dir),
+                desired_state_file: text(&self.desired_state_file),
+                api_socket: text(&self.api_socket),
+                versions_file: text(&self.versions_file),
+            }),
+            artifacts: Some(file::Artifacts {
+                store_url: Some(self.artifact_store_url.clone()),
+            }),
+            volumes: Some(file::Volumes {
+                backend: Some(self.volumes.as_str().to_string()),
+                storage_prefix: Some(self.storage_prefix.clone()),
+                zerofs: self.volumes.zerofs().map(|settings| file::Zerofs {
+                    binary: text(&settings.binary),
+                    config_file: text(&settings.config_file),
+                    mount_path: text(&settings.mount_path),
+                    nbd_socket_path: text(&settings.nbd_socket_path),
+                    ninep_socket_path: text(&settings.ninep_socket_path),
+                    rpc_socket_path: text(&settings.rpc_socket_path),
+                    storage_url: Some(settings.storage_url.clone()),
+                    cache_dir: text(&settings.cache_dir),
+                    cache_disk_gib: Some(settings.cache_disk_mib / MEBIBYTES_PER_GIBIBYTE),
+                    cache_memory_gib: Some(settings.cache_memory_mib / MEBIBYTES_PER_GIBIBYTE),
+                    checkpoint_runtime_dir: text(&settings.checkpoint_runtime_dir),
+                    checkpoint_config_file: text(&settings.checkpoint_config_file),
+                    checkpoint_cache_dir: text(&settings.checkpoint_cache_dir),
+                }),
+            }),
+            exports: Some(file::Exports {
+                store_url: Some(self.export_store_url.clone()),
+                staging_dir: text(&self.export_staging_dir),
+            }),
+            network: Some(file::Network {
+                denied_egress_addresses_v4: Some(self.denied_egress_addresses_v4.clone()),
+                denied_egress_addresses_v6: Some(self.denied_egress_addresses_v6.clone()),
+            }),
+            // Left out rather than written as an empty `[proxy]`: both read back the same.
+            proxy: (self.proxy != ProxyConfig::default()).then(|| file::Proxy {
+                http: self.proxy.http.as_ref().map(|http| file::Http {
+                    listen_address: Some(http.listen_address.to_string()),
+                    port: Some(http.port),
+                    tls: http.tls.as_ref().map(|tls| file::Tls {
+                        certificate: text(&tls.certificate),
+                        key: text(&tls.key),
+                        client_ca: tls.client_ca.as_deref().map(|certificate| file::ClientCa {
+                            certificate: text(certificate),
+                        }),
+                    }),
+                }),
+                raw: self.proxy.raw.as_ref().map(|raw| file::Raw {
+                    listen_address: Some(raw.listen_address.to_string()),
+                    max_ports_per_guest: Some(raw.max_ports_per_guest),
+                }),
+            }),
+            metrics: self.metrics.as_ref().map(|metrics| file::Metrics {
+                port: Some(metrics.port),
+                listen_address: Some(metrics.listen_address.to_string()),
+            }),
         }
     }
 }
@@ -1337,11 +1490,42 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
         assert!(message.contains("config.toml"), "{message}");
     }
 
+    // What `install` writes a host that has none is the smallest document, and the smallest
+    // document is what every test here starts from — so the two are held to be one text.
     #[test]
-    fn the_sample_this_repository_ships_is_a_configuration_this_daemon_accepts() {
-        let sample = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/config.toml");
-        let text = std::fs::read_to_string(sample).unwrap();
-        assert_eq!(HostConfig::from_toml(&text).unwrap(), parsed(&whole()));
+    fn the_configuration_this_binary_carries_is_the_smallest_document_rendered() {
+        assert_eq!(HostConfig::starter().to_toml(), whole());
+    }
+
+    // Reading is writing run backwards, key for key. Every key is required on the way in and every
+    // unknown one refused, so a key rendered that is not read, or read that is not rendered, fails
+    // here by name — which is what lets the example this repository ships be written from code.
+    #[test]
+    fn a_configuration_rendered_is_the_configuration_read_back() {
+        for config in [
+            HostConfig::starter(),
+            HostConfig::example(),
+            HostConfig::under(Path::new("/srv/one-host")),
+        ] {
+            let rendered = config.to_toml();
+            assert_eq!(parsed(&rendered), config, "{rendered}");
+        }
+    }
+
+    // Every section this daemon reads is in the example, or it is not an example of every section.
+    #[test]
+    fn the_example_names_every_section_there_is() {
+        let config = HostConfig::example();
+        assert!(config.volumes.zerofs().is_some());
+        assert!(config
+            .proxy
+            .http
+            .as_ref()
+            .and_then(|http| http.tls.as_ref())
+            .and_then(|tls| tls.client_ca.as_ref())
+            .is_some());
+        assert!(config.proxy.raw.is_some());
+        assert!(config.metrics.is_some());
     }
 
     #[test]
