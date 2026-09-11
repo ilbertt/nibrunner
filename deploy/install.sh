@@ -35,9 +35,10 @@ packages() {
     if ! command -v apt-get >/dev/null 2>&1; then
         die "this installs packages with apt-get, which is not here. Install these and re-run: $*"
     fi
-    say "packages"
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null
+    say "apt-get update"
+    DEBIAN_FRONTEND=noninteractive apt-get update -q
+    say "apt-get install $*"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@"
 }
 
 # Releases are cut as prereleases, which /releases/latest does not answer with — so the newest is
