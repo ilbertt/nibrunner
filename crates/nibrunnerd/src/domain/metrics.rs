@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
-use protocol::{HostReportedState, INSTANCE_STATES};
+use protocol::{AppId, HostReportedState, INSTANCE_STATES};
 
 // Straddling the millisecond a tenant answers in and the tens of milliseconds a stall costs, since
 // telling those apart is the whole reason this histogram exists.
@@ -39,21 +41,14 @@ const OUTCOMES: [Outcome; 4] = [
 ];
 
 #[derive(Debug, Default)]
-pub struct ProxyMetrics {
-    served: [AtomicU64; OUTCOMES.len()],
+struct Histogram {
     buckets: [AtomicU64; BUCKET_BOUNDS_SECONDS.len()],
     above_every_bucket: AtomicU64,
     total_micros: AtomicU64,
 }
 
-impl ProxyMetrics {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn answered(&self, outcome: Outcome, took: Duration) {
-        let index = OUTCOMES.iter().position(|each| *each == outcome).unwrap_or(0);
-        self.served[index].fetch_add(1, Ordering::Relaxed);
+impl Histogram {
+    fn record(&self, took: Duration) {
         self.total_micros
             .fetch_add(took.as_micros() as u64, Ordering::Relaxed);
         let seconds = took.as_secs_f64();
@@ -63,11 +58,79 @@ impl ProxyMetrics {
         };
     }
 
-    fn answered_count(&self) -> u64 {
-        self.served
+    fn count(&self) -> u64 {
+        self.buckets
             .iter()
             .map(|count| count.load(Ordering::Relaxed))
-            .sum()
+            .sum::<u64>()
+            + self.above_every_bucket.load(Ordering::Relaxed)
+    }
+
+    fn seconds(&self) -> f64 {
+        self.total_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0
+    }
+}
+
+// Per app, deliberately without buckets. A tenant's own distribution would be fifteen series each
+// and this page is rendered whole on every scrape; a sum and a count are two, and `rate(sum) /
+// rate(count)` is enough to say which tenant is slow. The shape of the distribution is what the
+// host-wide histogram beside it is for.
+#[derive(Debug, Default, Clone, Copy)]
+struct AppTiming {
+    count: u64,
+    micros: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct HostMetrics {
+    served: [AtomicU64; OUTCOMES.len()],
+    answered: Histogram,
+    // Not a label on the histogram above: this daemon forwards to a loopback port that either the
+    // activator or the guest answers, and nothing comes back to say which. The activator knows,
+    // and records here, so the two populations stay separable without a side channel.
+    wake: Histogram,
+    snapshot: Histogram,
+    restore: Histogram,
+    per_app: Mutex<BTreeMap<AppId, AppTiming>>,
+}
+
+impl HostMetrics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn answered(&self, outcome: Outcome, took: Duration, app_id: Option<&AppId>) {
+        let index = OUTCOMES.iter().position(|each| *each == outcome).unwrap_or(0);
+        self.served[index].fetch_add(1, Ordering::Relaxed);
+        self.answered.record(took);
+        let Some(app_id) = app_id else {
+            return;
+        };
+        if let Ok(mut per_app) = self.per_app.lock() {
+            let timing = per_app.entry(app_id.clone()).or_default();
+            timing.count += 1;
+            timing.micros += took.as_micros() as u64;
+        }
+    }
+
+    pub fn woke(&self, took: Duration) {
+        self.wake.record(took);
+    }
+
+    pub fn snapshotted(&self, took: Duration) {
+        self.snapshot.record(took);
+    }
+
+    pub fn restored(&self, took: Duration) {
+        self.restore.record(took);
+    }
+
+    // An app this host no longer serves keeps no series of its own, or a page rendered whole on
+    // every scrape grows for the life of the process with every tenant that ever left.
+    pub fn retain_apps(&self, served: &[AppId]) {
+        if let Ok(mut per_app) = self.per_app.lock() {
+            per_app.retain(|app_id, _| served.contains(app_id));
+        }
     }
 }
 
@@ -119,7 +182,7 @@ impl Page {
     }
 }
 
-pub fn render(report: &HostReportedState, proxy: &ProxyMetrics) -> String {
+pub fn render(report: &HostReportedState, metrics: &HostMetrics) -> String {
     let mut page = Page::new();
 
     page.metric(
@@ -294,7 +357,7 @@ pub fn render(report: &HostReportedState, proxy: &ProxyMetrics) -> String {
         page.value(
             "nibrunner_proxy_requests_total",
             &[("outcome", outcome.as_str())],
-            proxy.served[index].load(Ordering::Relaxed),
+            metrics.served[index].load(Ordering::Relaxed),
         );
     }
 
@@ -303,29 +366,76 @@ pub fn render(report: &HostReportedState, proxy: &ProxyMetrics) -> String {
         "Deciding a route and getting an answer back from the app. Ends when the response is handed on to be written, so it counts neither the handshake before it nor the write after.",
         "histogram",
     );
-    let mut running = 0u64;
-    for (index, bound) in BUCKET_BOUNDS_SECONDS.iter().enumerate() {
-        running += proxy.buckets[index].load(Ordering::Relaxed);
-        page.value(
-            "nibrunner_proxy_request_duration_seconds_bucket",
-            &[("le", &bound.to_string())],
-            running,
-        );
+    histogram(
+        &mut page,
+        "nibrunner_proxy_request_duration_seconds",
+        &metrics.answered,
+    );
+
+    page.metric(
+        "nibrunner_wake_duration_seconds",
+        "Bringing a sleeping app back for the request that asked for it, from the activator taking the request to the app being ready to be forwarded one. On an on-request host this is the population that makes the tail of the histogram above.",
+        "histogram",
+    );
+    histogram(&mut page, "nibrunner_wake_duration_seconds", &metrics.wake);
+
+    page.metric(
+        "nibrunner_instance_snapshot_duration_seconds",
+        "Pausing a guest that has gone quiet and writing its memory out. Scales with the memory the app was given, so it is the cost of the sleep rather than of the app.",
+        "histogram",
+    );
+    histogram(
+        &mut page,
+        "nibrunner_instance_snapshot_duration_seconds",
+        &metrics.snapshot,
+    );
+
+    page.metric(
+        "nibrunner_instance_restore_duration_seconds",
+        "Bringing a guest back from the snapshot it slept in. The other half of the sleep, and cheaper than it by orders of magnitude.",
+        "histogram",
+    );
+    histogram(
+        &mut page,
+        "nibrunner_instance_restore_duration_seconds",
+        &metrics.restore,
+    );
+
+    // A summary with no quantiles, which is a sum and a count: what each tenant cost, without
+    // fifteen series apiece for the shape of it.
+    page.metric(
+        "nibrunner_app_request_duration_seconds",
+        "What requests to one app cost this proxy. Divide the rate of the sum by the rate of the count for that app's mean.",
+        "summary",
+    );
+    if let Ok(per_app) = metrics.per_app.lock() {
+        for (app_id, timing) in per_app.iter() {
+            page.value(
+                "nibrunner_app_request_duration_seconds_sum",
+                &[("app", app_id.as_str())],
+                timing.micros as f64 / 1_000_000.0,
+            );
+            page.value(
+                "nibrunner_app_request_duration_seconds_count",
+                &[("app", app_id.as_str())],
+                timing.count,
+            );
+        }
     }
-    let answered = proxy.answered_count();
-    page.value(
-        "nibrunner_proxy_request_duration_seconds_bucket",
-        &[("le", "+Inf")],
-        answered,
-    );
-    page.value(
-        "nibrunner_proxy_request_duration_seconds_sum",
-        &[],
-        proxy.total_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0,
-    );
-    page.value("nibrunner_proxy_request_duration_seconds_count", &[], answered);
 
     page.0
+}
+
+fn histogram(page: &mut Page, name: &str, held: &Histogram) {
+    let mut running = 0u64;
+    for (index, bound) in BUCKET_BOUNDS_SECONDS.iter().enumerate() {
+        running += held.buckets[index].load(Ordering::Relaxed);
+        page.value(&format!("{name}_bucket"), &[("le", &bound.to_string())], running);
+    }
+    let count = held.count();
+    page.value(&format!("{name}_bucket"), &[("le", "+Inf")], count);
+    page.value(&format!("{name}_sum"), &[], held.seconds());
+    page.value(&format!("{name}_count"), &[], count);
 }
 
 #[cfg(test)]
@@ -370,8 +480,69 @@ mod tests {
     }
 
     #[test]
+    fn a_wake_is_counted_apart_from_the_requests_it_is_the_tail_of() {
+        let metrics = HostMetrics::new();
+        metrics.answered(Outcome::Served, Duration::from_millis(2), None);
+        metrics.answered(Outcome::Served, Duration::from_millis(150), None);
+        metrics.woke(Duration::from_millis(148));
+        let page = render(&report(), &metrics);
+
+        assert!(page.contains("nibrunner_wake_duration_seconds_count 1"));
+        assert!(page.contains("nibrunner_proxy_request_duration_seconds_count 2"));
+    }
+
+    #[test]
+    fn the_two_halves_of_a_sleep_are_measured_apart_because_they_cost_nothing_alike() {
+        let metrics = HostMetrics::new();
+        metrics.snapshotted(Duration::from_millis(2563));
+        metrics.restored(Duration::from_millis(8));
+        let page = render(&report(), &metrics);
+
+        assert!(page.contains("nibrunner_instance_snapshot_duration_seconds_count 1"));
+        assert!(page.contains("nibrunner_instance_restore_duration_seconds_count 1"));
+        assert!(page.contains("nibrunner_instance_snapshot_duration_seconds_sum 2.563"));
+        assert!(page.contains("nibrunner_instance_restore_duration_seconds_sum 0.008"));
+    }
+
+    #[test]
+    fn what_one_app_cost_is_a_sum_and_a_count_rather_than_a_distribution_of_its_own() {
+        let metrics = HostMetrics::new();
+        let app = protocol::AppId::parse("app-1").unwrap();
+        metrics.answered(Outcome::Served, Duration::from_millis(10), Some(&app));
+        metrics.answered(Outcome::Served, Duration::from_millis(30), Some(&app));
+        let page = render(&report(), &metrics);
+
+        assert!(page.contains(r#"nibrunner_app_request_duration_seconds_count{app="app-1"} 2"#));
+        assert!(page.contains(r#"nibrunner_app_request_duration_seconds_sum{app="app-1"} 0.04"#));
+        // Fifteen series an app is what this is instead of, so no bucket may carry one.
+        assert!(
+            !lines_for(&page, "nibrunner_app_request_duration_seconds_bucket")
+                .iter()
+                .any(|line| line.contains("app=")),
+            "a per-app histogram is the cardinality this metric exists to avoid"
+        );
+    }
+
+    #[test]
+    fn an_app_this_host_has_stopped_serving_keeps_no_series_of_its_own() {
+        let metrics = HostMetrics::new();
+        let gone = protocol::AppId::parse("app-1").unwrap();
+        let kept = protocol::AppId::parse("app-2").unwrap();
+        metrics.answered(Outcome::Served, Duration::from_millis(10), Some(&gone));
+        metrics.answered(Outcome::Served, Duration::from_millis(10), Some(&kept));
+
+        metrics.retain_apps(std::slice::from_ref(&kept));
+        let page = render(&report(), &metrics);
+
+        assert!(!page.contains(r#"app="app-1""#), "a departed app kept a series");
+        assert!(page.contains(r#"app="app-2""#));
+        // What it cost is still in the host-wide total; only its own line goes.
+        assert!(page.contains("nibrunner_proxy_request_duration_seconds_count 2"));
+    }
+
+    #[test]
     fn every_series_is_introduced_before_it_is_given_a_value() {
-        let page = render(&report(), &ProxyMetrics::new());
+        let page = render(&report(), &HostMetrics::new());
         for line in page
             .lines()
             .filter(|line| !line.starts_with('#') && !line.is_empty())
@@ -393,9 +564,9 @@ mod tests {
 
     #[test]
     fn a_histogram_counts_every_request_once_and_its_buckets_only_grow() {
-        let proxy = ProxyMetrics::new();
+        let proxy = HostMetrics::new();
         for micros in [500, 3_000, 40_000, 90_000_000] {
-            proxy.answered(Outcome::Served, Duration::from_micros(micros));
+            proxy.answered(Outcome::Served, Duration::from_micros(micros), None);
         }
         let page = render(&report(), &proxy);
 
@@ -428,7 +599,7 @@ mod tests {
                 measured_at: Timestamp::from_epoch_ms(0),
             });
         })];
-        let page = render(&state, &ProxyMetrics::new());
+        let page = render(&state, &HostMetrics::new());
 
         let states = lines_for(&page, "nibrunner_instance_state");
         assert_eq!(states.len(), INSTANCE_STATES.len());
@@ -454,7 +625,7 @@ mod tests {
                 disk_used_mib_seconds: 5_242_880,
             };
         })];
-        let page = render(&state, &ProxyMetrics::new());
+        let page = render(&state, &HostMetrics::new());
 
         let time = lines_for(&page, "nibrunner_instance_time_seconds_total");
         assert_eq!(time.len(), 2, "memory and disk are counted apart: {time:?}");
@@ -479,7 +650,7 @@ mod tests {
     fn an_app_that_has_used_nothing_is_a_zero_rather_than_a_missing_series() {
         let mut state = report();
         state.instances = vec![crate::test_support::reported_instance(|_| {})];
-        let page = render(&state, &ProxyMetrics::new());
+        let page = render(&state, &HostMetrics::new());
         for name in [
             "nibrunner_instance_time_seconds_total",
             "nibrunner_instance_cpu_seconds_total",

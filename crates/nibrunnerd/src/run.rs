@@ -83,6 +83,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             .map_err(|error| StartupError::Config(error.message()))?,
     );
     let payloads = LayerImages::new(artifacts.clone(), config.artifact_cache_dir());
+    let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let network = open_network()?;
     let logs = TenantLogReceiver::new();
     let sink = Arc::new(FileLogSink::new(config.logs_dir()));
@@ -99,6 +100,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         logs,
         sink,
         state: state.clone(),
+        metrics: metrics.clone(),
     });
 
     let waker_slot: Arc<tokio::sync::OnceCell<Arc<AppWaker>>> = Arc::new(tokio::sync::OnceCell::new());
@@ -107,6 +109,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         Arc::new(DeferredWaker {
             waker: waker_slot.clone(),
         }),
+        metrics.clone(),
     );
     let deferred = || {
         Arc::new(DeferredWaker {
@@ -149,7 +152,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         artifacts,
         payloads,
         firewall: Arc::new(HostFirewall::new(commands)),
-        router: Router::new(),
+        router: Router::new(metrics),
         activator,
         stream_activator,
         datagram_activator,

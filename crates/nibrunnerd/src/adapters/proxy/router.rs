@@ -12,10 +12,10 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
-use protocol::HostPort;
+use protocol::{AppId, HostPort};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::domain::metrics::{Outcome, ProxyMetrics};
+use crate::domain::metrics::{HostMetrics, Outcome};
 use tokio::sync::RwLock;
 
 use crate::adapters::proxy::forward::{forward, hostname_of, note_the_hop, say, ProxyBody};
@@ -30,9 +30,17 @@ const LOOPBACK: &str = "127.0.0.1";
 // long over as their own users need.
 const GREETING_TIMEOUT: Duration = Duration::from_secs(10);
 
+// The app behind a hostname, not just the port: a request is measured against the tenant it was
+// for, and the port alone cannot say which that is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub app_id: AppId,
+    pub host_port: HostPort,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteTable {
-    by_hostname: BTreeMap<String, HostPort>,
+    by_hostname: BTreeMap<String, Route>,
 }
 
 impl RouteTable {
@@ -41,17 +49,37 @@ impl RouteTable {
             by_hostname: targets
                 .iter()
                 .flat_map(|target| {
-                    target
-                        .hostnames
-                        .iter()
-                        .map(|entry| (entry.hostname.as_str().to_ascii_lowercase(), target.host_port))
+                    target.hostnames.iter().map(|entry| {
+                        (
+                            entry.hostname.as_str().to_ascii_lowercase(),
+                            Route {
+                                app_id: target.app_id.clone(),
+                                host_port: target.host_port,
+                            },
+                        )
+                    })
                 })
                 .collect(),
         }
     }
 
+    pub fn route_for(&self, hostname: &str) -> Option<Route> {
+        self.by_hostname.get(hostname).cloned()
+    }
+
+    pub fn app_ids(&self) -> Vec<AppId> {
+        let mut held: Vec<AppId> = self
+            .by_hostname
+            .values()
+            .map(|route| route.app_id.clone())
+            .collect();
+        held.sort();
+        held.dedup();
+        held
+    }
+
     pub fn port_for(&self, hostname: &str) -> Option<HostPort> {
-        self.by_hostname.get(hostname).copied()
+        self.by_hostname.get(hostname).map(|route| route.host_port)
     }
 
     pub fn hostnames(&self) -> Vec<&str> {
@@ -76,23 +104,26 @@ pub struct Arrival {
 pub struct Router {
     routes: RwLock<Arc<RouteTable>>,
     client: Client<HttpConnector, Incoming>,
-    metrics: Arc<ProxyMetrics>,
+    metrics: Arc<HostMetrics>,
 }
 
 impl Router {
-    pub fn new() -> Arc<Self> {
+    pub fn new(metrics: Arc<HostMetrics>) -> Arc<Self> {
         Arc::new(Self {
             routes: RwLock::new(Arc::new(RouteTable::default())),
             client: crate::adapters::proxy::forward::upstream_client(),
-            metrics: Arc::new(ProxyMetrics::new()),
+            metrics,
         })
     }
 
-    pub fn metrics(&self) -> Arc<ProxyMetrics> {
+    pub fn metrics(&self) -> Arc<HostMetrics> {
         self.metrics.clone()
     }
 
     pub async fn apply(&self, table: RouteTable) {
+        // The routes are the apps this host serves, so they are also the only ones whose timings
+        // are still worth a series.
+        self.metrics.retain_apps(&table.app_ids());
         *self.routes.write().await = Arc::new(table);
     }
 
@@ -108,8 +139,8 @@ impl Router {
         let http2 = request.version() == hyper::Version::HTTP_2;
         let started = std::time::Instant::now();
         let metrics = self.metrics.clone();
-        let (mut response, outcome) = self.route(request, arrival).await;
-        metrics.answered(outcome, started.elapsed());
+        let (mut response, outcome, app_id) = self.route(request, arrival).await;
+        metrics.answered(outcome, started.elapsed(), app_id.as_ref());
         if http2 {
             // Illegal over HTTP/2, and hyper logs a warning for each one it has to strip.
             response.headers_mut().remove(hyper::header::CONNECTION);
@@ -121,11 +152,12 @@ impl Router {
         self: Arc<Self>,
         mut request: Request<Incoming>,
         arrival: Arrival,
-    ) -> (Response<ProxyBody>, Outcome) {
+    ) -> (Response<ProxyBody>, Outcome, Option<AppId>) {
         let Some(hostname) = hostname_of(&request) else {
             return (
                 say(StatusCode::BAD_REQUEST, "This request names no host.\n"),
                 Outcome::Refused,
+                None,
             );
         };
         // One certificate covers every app on this host, so the name in the handshake is the only
@@ -141,21 +173,24 @@ impl Router {
                     "This connection was opened for a different host.\n",
                 ),
                 Outcome::WrongHost,
+                None,
             );
         }
-        let Some(port) = self.routes().await.port_for(&hostname) else {
+        let Some(route) = self.routes().await.route_for(&hostname) else {
             return (
                 say(
                     StatusCode::NOT_FOUND,
                     "No app on this host answers for that hostname.\n",
                 ),
                 Outcome::NoSuchHost,
+                None,
             );
         };
         note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
         (
-            forward(&self.client, request, LOOPBACK, port.get(), true).await,
+            forward(&self.client, request, LOOPBACK, route.host_port.get(), true).await,
             Outcome::Served,
+            Some(route.app_id),
         )
     }
 }
@@ -346,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_router_that_has_been_told_nothing_answers_for_nothing() {
-        let router = Router::new();
+        let router = Router::new(std::sync::Arc::new(HostMetrics::new()));
         assert!(router.routes().await.is_empty());
         assert!(router.routes().await.hostnames().is_empty());
         assert_eq!(router.routes().await.port_for("app-1.example.com"), None);
@@ -354,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_table_replaces_the_old_one_rather_than_being_added_to_it() {
-        let router = Router::new();
+        let router = Router::new(std::sync::Arc::new(HostMetrics::new()));
         router
             .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
                 |_| {},
@@ -420,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_that_names_no_host_is_refused_before_any_table_is_read() {
-        let port = serving(Router::new()).await;
+        let port = serving(Router::new(std::sync::Arc::new(HostMetrics::new()))).await;
         let answered = asked(port, "GET / HTTP/1.0\r\n\r\n").await;
         assert!(answered.starts_with("HTTP/1.0 400 "), "{answered}");
         assert!(answered.ends_with("This request names no host.\n"), "{answered}");
@@ -428,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_hostname_no_app_on_this_host_holds_is_a_not_found_rather_than_a_gateway_failure() {
-        let router = Router::new();
+        let router = Router::new(std::sync::Arc::new(HostMetrics::new()));
         router
             .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
                 |_| {},
@@ -465,7 +500,7 @@ mod tests {
             }
         });
 
-        let router = Router::new();
+        let router = Router::new(std::sync::Arc::new(HostMetrics::new()));
         router
             .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
                 |record| record.host_port = host_port,
@@ -495,7 +530,7 @@ mod tests {
     }
 
     async fn routed_to_one_app(server_name: Option<&'static str>) -> u16 {
-        let router = Router::new();
+        let router = Router::new(std::sync::Arc::new(HostMetrics::new()));
         router
             .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
                 |_| {},
@@ -566,7 +601,7 @@ mod tests {
                 });
             }
         });
-        let router = Router::new();
+        let router = Router::new(std::sync::Arc::new(HostMetrics::new()));
         router
             .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
                 |record| record.host_port = host_port,
