@@ -492,7 +492,7 @@ pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
             _ => None,
         })
         .flatten()
-        .filter(|layer| seen.insert((layer.digest.clone(), layer.path.clone())))
+        .filter(|layer| seen.insert((layer.digest.clone(), layer.kind.clone())))
         .cloned()
         .collect()
 }
@@ -536,7 +536,11 @@ mod tests {
         };
         let wanted = layers_to_start(&plan);
         assert_eq!(wanted, vec![base_layer(), same.clone()]);
-        let elsewhere = layer(|layer| layer.path = Some(protocol::GuestPath::parse("/bin/server").unwrap()));
+        let elsewhere = layer(|layer| {
+            layer.kind = protocol::LayerKind::File {
+                path: protocol::GuestPath::parse("/bin/server").unwrap(),
+            }
+        });
         let same_bytes_twice = layers_to_start(&ReconcilePlan {
             instances: vec![InstancePlan::Start {
                 desired: desired_instance(|instance| instance.layers = vec![same.clone(), elsewhere.clone()]),

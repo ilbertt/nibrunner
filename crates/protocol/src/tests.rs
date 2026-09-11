@@ -9,11 +9,13 @@ fn instance_json() -> serde_json::Value {
         "idleTimeoutMs": 300000,
         "layers": [
             {
+                "kind": "filesystem",
                 "digest": "b".repeat(64),
                 "sizeBytes": 31457280,
                 "objectKey": "layers/debian-apphost"
             },
             {
+                "kind": "file",
                 "digest": "a".repeat(64),
                 "sizeBytes": 27,
                 "objectKey": "artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45",
@@ -532,6 +534,13 @@ mod schema {
                 "/instances/0/layers/0/objectKey",
                 serde_json::json!(""),
             ),
+            with(
+                desired_json(),
+                "/instances/0/layers/0/kind",
+                serde_json::json!("binary"),
+            ),
+            without(desired_json(), "/instances/0/layers/0/kind"),
+            without(desired_json(), "/instances/0/layers/1/path"),
             with(desired_json(), "/instances/0/layers", serde_json::json!([])),
             with(desired_json(), "/instances/0/layers", nine_layers),
             with(

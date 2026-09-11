@@ -37,6 +37,17 @@ pub enum DesiredPresence {
 
 pub const MAX_LAYERS: usize = 8;
 
+/// What the object a layer names is, and so what the host does with it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub enum LayerKind {
+    /// A squashfs or ext4 image, attached as it was uploaded.
+    Filesystem,
+    /// One file, which the host packs into an image at `path`.
+    File { path: GuestPath },
+}
+
 /// One read-only layer of the root filesystem an instance boots into, fetched from the object
 /// store the host's `artifacts.store_url` names and checked against `digest` before anything
 /// boots from it. Layers stack in the order the document lists them, first at the bottom, and
@@ -49,10 +60,8 @@ pub struct DesiredLayer {
     pub size_bytes: u64,
     /// Where the object lives in the store.
     pub object_key: ObjectKey,
-    /// Absent, the object is the layer: a squashfs or ext4 image, attached as it is. Present, the
-    /// object is one file and this is where it sits in a layer the host packs around it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<GuestPath>,
+    #[serde(flatten)]
+    pub kind: LayerKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,10 +158,10 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
         if fields
             .layers
             .iter()
-            .any(|layer| layer.path.as_ref().is_some_and(|path| path.as_str() == "/"))
+            .any(|layer| matches!(&layer.kind, LayerKind::File { path } if path.as_str() == "/"))
         {
             return Err(InvalidValue::new_public(
-                "a layer's path names the file the object becomes, and / is not a file",
+                "a file layer's path names the file the object becomes, and / is not a file",
             ));
         }
         Ok(Self {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use backhand::{compression::Compressor, FilesystemCompressor, FilesystemWriter, NodeHeader};
-use protocol::DesiredLayer;
+use protocol::{DesiredLayer, LayerKind};
 
 use crate::json_store::make_directory;
 use crate::ports::{ArtifactError, ArtifactStore, ArtifactStoreExt, PayloadBuilder, PreparedPayload};
@@ -78,9 +78,9 @@ fn short_hash(text: &str) -> String {
 /// whole or packed around a path, so the path is part of the name.
 pub fn layer_image_path(cache_dir: &Path, layer: &DesiredLayer) -> PathBuf {
     let directory = cache_dir.join(layer.digest.as_str());
-    match &layer.path {
-        None => directory.join(VERBATIM_IMAGE_FILENAME),
-        Some(path) => directory.join(format!("packed-{}.squashfs", short_hash(path.as_str()))),
+    match &layer.kind {
+        LayerKind::Filesystem => directory.join(VERBATIM_IMAGE_FILENAME),
+        LayerKind::File { path } => directory.join(format!("packed-{}.squashfs", short_hash(path.as_str()))),
     }
 }
 
@@ -124,14 +124,14 @@ pub async fn ensure_layer_image(
     }
 
     let bytes = store.read_verified(layer).await?;
-    let image = match &layer.path {
-        None if is_filesystem_image(&bytes) => bytes,
-        None => {
+    let image = match &layer.kind {
+        LayerKind::Filesystem if is_filesystem_image(&bytes) => bytes,
+        LayerKind::Filesystem => {
             return Err(ArtifactError::NotAnImage {
                 digest: layer.digest.clone(),
             })
         }
-        Some(path) => pack(&[(path.as_str(), &bytes, BINARY_MODE)])?,
+        LayerKind::File { path } => pack(&[(path.as_str(), &bytes, BINARY_MODE)])?,
     };
 
     let directory = image_path
@@ -150,7 +150,7 @@ pub async fn ensure_layer_image(
         digest = %layer.digest,
         size_bytes = layer.size_bytes,
         image_bytes = image.len(),
-        packed = layer.path.is_some(),
+        packed = matches!(layer.kind, LayerKind::File { .. }),
         "layer image ready"
     );
     Ok(image_path)
@@ -184,6 +184,12 @@ mod tests {
 
     fn artifact_bytes() -> Vec<u8> {
         ARTIFACT_BYTES.to_vec()
+    }
+
+    fn file_at(path: &str) -> LayerKind {
+        LayerKind::File {
+            path: GuestPath::parse(path).unwrap(),
+        }
     }
 
     fn store(bytes: Vec<u8>) -> Arc<dyn ArtifactStore> {
@@ -230,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn the_path_may_be_deep_and_the_directories_above_it_are_made() {
         let directory = tempfile::tempdir().unwrap();
-        let deep = layer(|layer| layer.path = Some(GuestPath::parse("/usr/local/bin/server").unwrap()));
+        let deep = layer(|layer| layer.kind = file_at("/usr/local/bin/server"));
         let image_path = ensure_layer_image(&store(artifact_bytes()), directory.path(), &deep)
             .await
             .unwrap();
@@ -253,10 +259,7 @@ mod tests {
     #[tokio::test]
     async fn a_layer_without_a_path_that_is_not_a_filesystem_is_refused_by_name() {
         let directory = tempfile::tempdir().unwrap();
-        let not_an_image = protocol::DesiredLayer {
-            path: None,
-            ..layer(|_| {})
-        };
+        let not_an_image = layer(|layer| layer.kind = LayerKind::Filesystem);
         let error = ensure_layer_image(&store(artifact_bytes()), directory.path(), &not_an_image)
             .await
             .unwrap_err();
@@ -365,17 +368,8 @@ mod tests {
     fn every_digest_and_path_gets_its_own_place_in_the_cache() {
         let cache = Path::new("/var/lib/nibrunner/artifacts");
         let packed = layer_image_path(cache, &layer(|_| {}));
-        let elsewhere = layer_image_path(
-            cache,
-            &layer(|layer| layer.path = Some(GuestPath::parse("/bin/server").unwrap())),
-        );
-        let whole = layer_image_path(
-            cache,
-            &protocol::DesiredLayer {
-                path: None,
-                ..layer(|_| {})
-            },
-        );
+        let elsewhere = layer_image_path(cache, &layer(|layer| layer.kind = file_at("/bin/server")));
+        let whole = layer_image_path(cache, &layer(|layer| layer.kind = LayerKind::Filesystem));
         let other = layer_image_path(
             cache,
             &layer(|layer| layer.digest = Sha256Digest::parse("0".repeat(64)).unwrap()),

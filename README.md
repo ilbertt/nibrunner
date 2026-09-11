@@ -60,10 +60,11 @@ first, or drop `hostnames` to run an app that nothing outside needs to reach.
       "desiredState": "on-request",
       "layers": [
         {
+          "kind": "file",
+          "path": "/server",
           "digest": "<sha256 of the binary, lowercase hex>",
           "sizeBytes": 12345678,
-          "objectKey": "my-server",
-          "path": "/server"
+          "objectKey": "my-server"
         }
       ],
       "config": {
@@ -89,10 +90,10 @@ it down and leaves the app reachable enough to say so.
 ### Layers
 
 `layers` is the root filesystem the microVM boots into, bottom first, each one an object in the
-store named by its digest. A layer with a `path` is one file the host packs into an image at that
-path; one without is an image already — a squashfs or ext4 — attached as it was uploaded. The
-host reads nothing else about a layer: what is in it, and what `/sbin/init` in the result is,
-are the uploader's to decide.
+store named by its digest and a `kind` saying what the object is. A `file` is one file the host
+packs into an image at `path`; a `filesystem` is an image already — a squashfs or ext4 — attached
+as it was uploaded. The host reads nothing else about a layer: what is in it, whether anything
+runs the file it placed, and what `/sbin/init` in the result is, are the uploader's to decide.
 
 A layer is fetched once per host and cached by digest, so ten apps on the same base hold it
 once, and a base uploaded once serves every document that names it.

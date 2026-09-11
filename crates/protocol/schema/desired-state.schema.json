@@ -336,23 +336,44 @@
           "description": "Where the object lives in the store.",
           "$ref": "#/$defs/ObjectKey"
         },
-        "path": {
-          "description": "Absent, the object is the layer: a squashfs or ext4 image, attached as it is. Present, the\nobject is one file and this is where it sits in a layer the host packs around it.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/GuestPath"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "sizeBytes": {
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         }
       },
+      "oneOf": [
+        {
+          "description": "A squashfs or ext4 image, attached as it was uploaded.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "filesystem"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "One file, which the host packs into an image at `path`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file"
+            },
+            "path": {
+              "$ref": "#/$defs/GuestPath"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        }
+      ],
       "required": [
         "digest",
         "sizeBytes",
