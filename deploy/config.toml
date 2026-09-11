@@ -19,5 +19,5 @@ store_url = "/var/lib/nibrunner/export-store"
 staging_dir = "/var/lib/nibrunner/exports"
 
 [network]
-control_plane_cidrs_v4 = []
-control_plane_cidrs_v6 = []
+denied_egress_addresses_v4 = []
+denied_egress_addresses_v6 = []

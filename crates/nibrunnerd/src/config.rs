@@ -155,8 +155,8 @@ pub struct HostConfig {
     pub artifact_store_url: String,
     pub storage_prefix: String,
     pub volumes: VolumeBackend,
-    pub control_plane_cidrs_v4: Vec<String>,
-    pub control_plane_cidrs_v6: Vec<String>,
+    pub denied_egress_addresses_v4: Vec<String>,
+    pub denied_egress_addresses_v6: Vec<String>,
     pub proxy: ProxyConfig,
     pub metrics: Option<MetricsConfig>,
     pub export_store_url: String,
@@ -286,8 +286,8 @@ mod file {
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Network {
-        pub(super) control_plane_cidrs_v4: Option<Vec<String>>,
-        pub(super) control_plane_cidrs_v6: Option<Vec<String>>,
+        pub(super) denied_egress_addresses_v4: Option<Vec<String>>,
+        pub(super) denied_egress_addresses_v6: Option<Vec<String>>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -462,19 +462,19 @@ impl HostConfig {
                 required_str("volumes.storage_prefix", &volumes.storage_prefix)?,
             )?,
             volumes: backend,
-            control_plane_cidrs_v4: cidrs(
-                "network.control_plane_cidrs_v4",
+            denied_egress_addresses_v4: cidrs(
+                "network.denied_egress_addresses_v4",
                 required(
-                    "network.control_plane_cidrs_v4",
-                    network.control_plane_cidrs_v4.as_ref(),
+                    "network.denied_egress_addresses_v4",
+                    network.denied_egress_addresses_v4.as_ref(),
                 )?,
                 Family::V4,
             )?,
-            control_plane_cidrs_v6: cidrs(
-                "network.control_plane_cidrs_v6",
+            denied_egress_addresses_v6: cidrs(
+                "network.denied_egress_addresses_v6",
                 required(
-                    "network.control_plane_cidrs_v6",
-                    network.control_plane_cidrs_v6.as_ref(),
+                    "network.denied_egress_addresses_v6",
+                    network.denied_egress_addresses_v6.as_ref(),
                 )?,
                 Family::V6,
             )?,
@@ -503,8 +503,8 @@ impl HostConfig {
             artifact_store_url: root.join("state/artifact-store").display().to_string(),
             storage_prefix: "volumes".to_string(),
             volumes: VolumeBackend::LocalFile,
-            control_plane_cidrs_v4: vec![],
-            control_plane_cidrs_v6: vec![],
+            denied_egress_addresses_v4: vec![],
+            denied_egress_addresses_v6: vec![],
             proxy: ProxyConfig::default(),
             metrics: None,
             export_store_url: root.join("state/export-store").display().to_string(),
@@ -798,8 +798,8 @@ store_url = "/var/lib/nibrunner/export-store"
 staging_dir = "/var/lib/nibrunner/exports"
 
 [network]
-control_plane_cidrs_v4 = []
-control_plane_cidrs_v6 = []
+denied_egress_addresses_v4 = []
+denied_egress_addresses_v6 = []
 "#;
 
     /// `WHOLE` with some keys written differently, and anything in `extra` appended. A field named
@@ -893,8 +893,8 @@ control_plane_cidrs_v6 = []
             "volumes.storage_prefix",
             "exports.store_url",
             "exports.staging_dir",
-            "network.control_plane_cidrs_v4",
-            "network.control_plane_cidrs_v6",
+            "network.denied_egress_addresses_v4",
+            "network.denied_egress_addresses_v6",
         ] {
             let message = refused(&without(field));
             assert!(message.contains(field), "{field}: {message}");
@@ -1143,35 +1143,35 @@ control_plane_cidrs_v6 = []
 
     #[test]
     fn a_range_that_nft_would_reject_is_refused_before_the_ruleset_is_rendered() {
-        let bad = |value: &str| refused(&document(&[("network.control_plane_cidrs_v4", value)], ""));
+        let bad = |value: &str| refused(&document(&[("network.denied_egress_addresses_v4", value)], ""));
         assert!(bad("[\"172.31.0.0\"]").contains("prefix length"));
         assert!(bad("[\"172.31.0.0/33\"]").contains("wider"));
         assert!(bad("[\"fd00::/8\"]").contains("IPv4"));
         assert!(bad("[\"10.0.0.0/eight\"]").contains("not a prefix length"));
         assert!(refused(&document(
-            &[("network.control_plane_cidrs_v6", "[\"172.31.0.0/16\"]")],
+            &[("network.denied_egress_addresses_v6", "[\"172.31.0.0/16\"]")],
             ""
         ))
         .contains("IPv6"));
         assert!(refused(&document(
-            &[("network.control_plane_cidrs_v6", "[\"fd00::/129\"]")],
+            &[("network.denied_egress_addresses_v6", "[\"fd00::/129\"]")],
             ""
         ))
         .contains("wider"));
         assert_eq!(
             parsed(&document(
-                &[("network.control_plane_cidrs_v4", "[\"172.31.0.0/16\"]")],
+                &[("network.denied_egress_addresses_v4", "[\"172.31.0.0/16\"]")],
                 ""
             ))
-            .control_plane_cidrs_v4,
+            .denied_egress_addresses_v4,
             vec!["172.31.0.0/16".to_string()]
         );
         assert_eq!(
             parsed(&document(
-                &[("network.control_plane_cidrs_v6", "[\" fd00::/8 \"]")],
+                &[("network.denied_egress_addresses_v6", "[\" fd00::/8 \"]")],
                 ""
             ))
-            .control_plane_cidrs_v6,
+            .denied_egress_addresses_v6,
             vec!["fd00::/8".to_string()]
         );
     }
@@ -1407,7 +1407,7 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
                 ("paths.state_dir", "\"/srv/nibrunner\""),
                 ("paths.snapshot_dir", "\"/mnt/cache/snapshots\""),
                 ("artifacts.store_url", "\"s3://nibrun-artifacts/prod\""),
-                ("network.control_plane_cidrs_v4", "[\"172.31.0.0/16\"]"),
+                ("network.denied_egress_addresses_v4", "[\"172.31.0.0/16\"]"),
             ],
             r#"[proxy.http]
 listen_address = "0.0.0.0"
@@ -1432,7 +1432,10 @@ listen_address = "127.0.0.1"
         assert_eq!(config.state_dir, PathBuf::from("/srv/nibrunner"));
         assert_eq!(config.snapshot_dir, PathBuf::from("/mnt/cache/snapshots"));
         assert_eq!(config.artifact_store_url, "s3://nibrun-artifacts/prod");
-        assert_eq!(config.control_plane_cidrs_v4, vec!["172.31.0.0/16".to_string()]);
+        assert_eq!(
+            config.denied_egress_addresses_v4,
+            vec!["172.31.0.0/16".to_string()]
+        );
         assert_eq!(
             config.proxy.http,
             Some(HttpListener {
