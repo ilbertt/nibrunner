@@ -233,6 +233,7 @@ pub async fn detected(host: &Host, changes: &Changes, cause: Cause, now_ms: i64)
                 if let Some(open) = snapshot.deploys.remove(gone).filter(Deploy::is_open) {
                     host.metrics.converge.closed(&open, Outcome::Superseded);
                 }
+                host.metrics.forget(gone);
             }
         })
         .await;

@@ -149,7 +149,7 @@ impl StreamActivator {
                 WakeRefusal::NoRoom { shortfall_mib } => {
                     format!("its machine is {shortfall_mib} MiB short of memory")
                 }
-                WakeRefusal::Failed { reason } => reason,
+                WakeRefusal::Failed { reason, .. } => reason,
             };
             tracing::warn!(%app_id, reason, "a stream could not be given an app");
             return;

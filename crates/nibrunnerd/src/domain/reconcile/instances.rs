@@ -5,12 +5,14 @@ use protocol::{AppId, DesiredInstance, DesiredInstanceState, InstanceState, Stat
 
 use crate::adapters::vm::{VmStatus, UNKNOWN_VM};
 use crate::clock::{now_ms, now_timestamp};
+use crate::domain::activation::SleepReason;
 use crate::domain::backoff::{is_ready_to_retry, next_attempt_window, BackoffPolicy, NO_START_ATTEMPTS};
 use crate::domain::health::{
     apply_probe, describe_instance_failure, evaluate_instance_state, initial_tracker, next_probe_delay_ms,
     LifecycleInputs,
 };
 use crate::domain::metrics::converge;
+use crate::domain::metrics::sleep_wake::SleepOutcome;
 use crate::domain::reconcile::plan::{InstancePlan, ReconcilePlan};
 use crate::domain::report::instance_record::{InstanceRecord, RecordFields};
 use crate::host::Host;
@@ -88,7 +90,8 @@ pub async fn stop_instance(host: &Host, app_id: &AppId, reason: &str) {
         .await;
 }
 
-pub async fn suspend_instance(host: &Host, app_id: &AppId, reason: &str) {
+pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
+    let reason = why.as_str();
     let Some(record) = host.state.record(app_id).await else {
         return;
     };
@@ -98,7 +101,9 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, reason: &str) {
     };
 
     host.state.mark_snapshotting(app_id, true).await;
+    let started = std::time::Instant::now();
     settled(host, app_id, reason).await;
+    let flushed = started.elapsed();
     let outcome = host
         .vms
         .sleep(SuspendRequest {
@@ -107,7 +112,8 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, reason: &str) {
             slot,
         })
         .await;
-    match outcome {
+    let snapshotted = started.elapsed() - flushed;
+    let outcome = match outcome {
         Ok(()) => {
             host.state
                 .update_record(app_id, |record| {
@@ -117,14 +123,27 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, reason: &str) {
                     record.message = None;
                 })
                 .await;
+            tracing::info!(
+                %app_id,
+                reason,
+                flushed_ms = flushed.as_millis(),
+                snapshotted_ms = snapshotted.as_millis(),
+                "app put to sleep"
+            );
+            SleepOutcome::Slept
         }
         Err(VmError::SleepRefused { reason: refusal }) => {
             tracing::warn!(%app_id, reason, refusal, "this microVM may not be snapshotted, so it stays up");
+            SleepOutcome::Refused
         }
         Err(error) => {
             tracing::warn!(%app_id, reason, error = %error.message(), "this microVM would not sleep; leaving it up");
+            SleepOutcome::Failed
         }
-    }
+    };
+    host.metrics
+        .sleep_wake
+        .slept(app_id, why, outcome, flushed, snapshotted);
     host.state.mark_snapshotting(app_id, false).await;
 }
 
@@ -766,7 +785,7 @@ mod tests {
         let host = test_host().await;
         host.slot_for(&app_id()).await.unwrap();
 
-        suspend_instance(&host, &app_id(), "idle").await;
+        suspend_instance(&host, &app_id(), SleepReason::Quiet).await;
 
         assert!(host.vms.calls().is_empty());
     }

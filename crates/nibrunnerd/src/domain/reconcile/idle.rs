@@ -127,6 +127,15 @@ pub async fn record_activity(host: &Host) {
         .await;
 }
 
+/// How long a policy lets an app be before it may sleep; nothing for one that never lets it.
+fn allowance_ms(policy: protocol::SleepPolicy) -> Option<u64> {
+    match policy {
+        protocol::SleepPolicy::Never => None,
+        protocol::SleepPolicy::TrafficIdle { timeout_ms } => Some(timeout_ms.get()),
+        protocol::SleepPolicy::MaxLifetime { ttl_ms } => Some(ttl_ms.get()),
+    }
+}
+
 pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
     let policies: BTreeMap<AppId, protocol::ActivationPolicy> = {
         let cache = host.cache.lock().await;
@@ -165,13 +174,23 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
             SleepReason::Quiet => signals.last_active_at_ms,
             SleepReason::LivedLongEnough => signals.started_at_ms,
         };
+        let for_ms = now - since.unwrap_or(now);
+        let late_ms = policies
+            .get(&record.app_id)
+            .and_then(|policy| allowance_ms(policy.sleep_when))
+            .map_or(0, |allowed| for_ms - allowed as i64)
+            .max(0);
+        host.metrics
+            .sleep_wake
+            .sleep_due(reason, std::time::Duration::from_millis(late_ms as u64));
         tracing::info!(
             app_id = %record.app_id,
             reason = reason.as_str(),
-            for_ms = now - since.unwrap_or(now),
+            for_ms,
+            late_ms,
             "letting an app sleep"
         );
-        crate::domain::reconcile::instances::suspend_instance(host, &record.app_id, reason.as_str()).await;
+        crate::domain::reconcile::instances::suspend_instance(host, &record.app_id, reason).await;
     }
     crate::domain::reconcile::network::apply_network(host).await;
 }
@@ -386,6 +405,27 @@ mod sleep_tests {
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Idle);
         assert!(record.stop_requested);
+    }
+
+    #[tokio::test]
+    async fn how_late_the_policy_was_acted_on_is_measured_against_what_it_allowed() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 4_000).await;
+
+        apply_sleep(host.arc()).await;
+
+        let page = crate::domain::metrics::render(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        );
+        assert!(page.contains("nibrunner_sleep_phase_seconds_count{phase=\"late\",reason=\"idle\"} 1\n"));
+        // Four seconds over, and so in the bucket that ends at five and not the one before it.
+        assert!(page
+            .contains("nibrunner_sleep_phase_seconds_bucket{phase=\"late\",reason=\"idle\",le=\"2.5\"} 0\n"));
+        assert!(page
+            .contains("nibrunner_sleep_phase_seconds_bucket{phase=\"late\",reason=\"idle\",le=\"5\"} 1\n"));
     }
 
     #[tokio::test]

@@ -285,10 +285,37 @@ pub enum TenantLogBody {
     },
 }
 
+/// Why a wake was refused, apart from want of memory: the word a counter uses, beside the
+/// sentence a log line does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeFailure {
+    HostStarting,
+    NotNamed,
+    NotOnRequest,
+    NotIsolated,
+    WouldNotStart,
+    NeverAnswered,
+    Abandoned,
+}
+
+impl WakeFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WakeFailure::HostStarting => "host_starting",
+            WakeFailure::NotNamed => "not_named",
+            WakeFailure::NotOnRequest => "not_on_request",
+            WakeFailure::NotIsolated => "not_isolated",
+            WakeFailure::WouldNotStart => "would_not_start",
+            WakeFailure::NeverAnswered => "never_answered",
+            WakeFailure::Abandoned => "abandoned",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakeRefusal {
     NoRoom { shortfall_mib: u64 },
-    Failed { reason: String },
+    Failed { kind: WakeFailure, reason: String },
 }
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
