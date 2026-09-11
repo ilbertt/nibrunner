@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
-use protocol::{AppId, DeploymentId, DesiredInstance, ObjectKey, Sha256Digest};
+use protocol::{AppId, DeploymentId, DesiredArtifact, DesiredInstance, ObjectKey, Sha256Digest};
 
 use crate::adapters::vm::VmStatus;
 
@@ -119,7 +119,7 @@ pub struct BootRequest {
     pub desired: DesiredInstance,
     pub slot: nft_render::AppSlot,
     pub data_device_path: String,
-    pub artifact_image_path: PathBuf,
+    pub payload: PreparedPayload,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +220,47 @@ pub trait GuestMeasurements: Send + Sync {
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
     async fn read(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ArtifactError>;
+}
+
+#[async_trait]
+pub trait ArtifactStoreExt {
+    async fn read_verified(&self, artifact: &DesiredArtifact) -> Result<Vec<u8>, ArtifactError>;
+}
+
+#[async_trait]
+impl<T: ArtifactStore + ?Sized> ArtifactStoreExt for T {
+    async fn read_verified(&self, artifact: &DesiredArtifact) -> Result<Vec<u8>, ArtifactError> {
+        use sha2::Digest;
+
+        let bytes = self.read(&artifact.object_key).await?;
+        let actual = hex::encode(sha2::Sha256::digest(&bytes));
+        if actual != artifact.digest.as_str() {
+            return Err(ArtifactError::DigestMismatch {
+                expected: artifact.digest.clone(),
+                actual,
+            });
+        }
+        if bytes.len() as u64 != artifact.size_bytes {
+            return Err(ArtifactError::SizeMismatch {
+                expected: artifact.size_bytes,
+                actual: bytes.len() as u64,
+            });
+        }
+        Ok(bytes)
+    }
+}
+
+/// What a payload hands a microVM to boot with. One image today, attached read-only beside the
+/// host's own kernel and root; the type is what a payload that brings its own root widens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPayload {
+    pub artifact_image_path: PathBuf,
+}
+
+#[cfg_attr(any(test, feature = "testing"), mockall::automock)]
+#[async_trait]
+pub trait PayloadBuilder: Send + Sync {
+    async fn prepare(&self, artifact: &DesiredArtifact) -> Result<PreparedPayload, ArtifactError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

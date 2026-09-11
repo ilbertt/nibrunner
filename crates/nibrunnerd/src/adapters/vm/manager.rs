@@ -114,7 +114,7 @@ impl VmManager {
                     .join(GUEST_ROOTFS_FILENAME)
                     .display()
                     .to_string(),
-                artifact_image_path: request.artifact_image_path.display().to_string(),
+                artifact_image_path: request.payload.artifact_image_path.display().to_string(),
                 instance_config_image_path: config_image.display().to_string(),
                 data_device_path: request.data_device_path.clone(),
             },
@@ -476,7 +476,9 @@ mod tests {
             slot: nft_render::describe_slot(0, desired.app_id.clone()),
             desired,
             data_device_path: "/dev/loop0".into(),
-            artifact_image_path: PathBuf::from("/cache/abc/artifact.squashfs"),
+            payload: crate::ports::PreparedPayload {
+                artifact_image_path: PathBuf::from("/cache/abc/artifact.squashfs"),
+            },
         }
     }
 

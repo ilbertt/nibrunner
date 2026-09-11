@@ -341,6 +341,7 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
     let (commands, command_log) = mocks::commands_succeeding();
     let (vms, vm_spy) = mocks::vmm();
     let (exports, export_spy) = mocks::exports_accepting();
+    let artifacts: Arc<dyn crate::ports::ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES.to_vec());
     let host = Arc::new(Host {
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         guest_image_version: "6.1.180-test".to_string(),
@@ -353,7 +354,11 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
             ObjectKey::parse(&config.storage_prefix).expect("a storage prefix"),
             commands.clone(),
         )),
-        artifacts: mocks::artifacts_holding(ARTIFACT_BYTES.to_vec()),
+        artifacts: artifacts.clone(),
+        payloads: crate::adapters::vm::artifacts::ExecutablePayload::new(
+            artifacts,
+            config.artifact_cache_dir(),
+        ),
         repositories,
         exports,
         checkpoint_servers: None,
