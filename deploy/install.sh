@@ -56,7 +56,9 @@ fetch_release() {
     base=$1
     into=$2
     for asset in nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json checksums.txt; do
-        curl -fsSL --retry 3 -o "$into/$asset" "$base/$asset" || die "$asset is not in this release"
+        say "$asset"
+        curl -fL --progress-bar --retry 3 -o "$into/$asset" "$base/$asset" ||
+            die "$asset is not in this release"
     done
     say "checksums"
     (cd "$into" && sha256sum -c checksums.txt >/dev/null) ||
