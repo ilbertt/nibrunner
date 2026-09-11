@@ -5,6 +5,7 @@ use serde::Serialize;
 
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const PRIVATE_DIR_MODE: u32 = 0o700;
+const TRAVERSABLE_DIR_MODE: u32 = 0o755;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -74,8 +75,18 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), StoreError
     write_text(path, &format!("{rendered}\n"), PRIVATE_FILE_MODE)
 }
 
+/// Whatever this makes on the way to `path` is something else's to cross — a service account
+/// reaching its binary under /opt, or its cache under /data — so each of those is given a mode
+/// outright rather than left to the umask of whichever shell ran this.
 pub fn make_directory(path: &Path, mode: u32) -> Result<(), std::io::Error> {
+    let missing: Vec<&Path> = path
+        .ancestors()
+        .take_while(|ancestor| !ancestor.exists())
+        .collect();
     std::fs::create_dir_all(path)?;
+    for made in missing.iter().skip(1) {
+        set_mode(made, TRAVERSABLE_DIR_MODE)?;
+    }
     set_mode(path, mode)
 }
 
