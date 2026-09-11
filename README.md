@@ -149,6 +149,26 @@ A document that names both is refused rather than served under whichever a loop 
 document that names neither means what it has always meant: an `on-request` instance sleeps after
 five minutes, and everything else does not sleep.
 
+### The schema
+
+[`desired-state.schema.json`](crates/protocol/schema/desired-state.schema.json) is the document
+above as a JSON Schema (draft 2020-12), and
+[`reported-state.schema.json`](crates/protocol/schema/reported-state.schema.json) is the one the
+daemon writes back to `reported.json` in its state directory. Both are generated from the Rust
+types in `crates/protocol`, so a tool built against them is built against what the daemon parses.
+An editor will complete and check a document that names one:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json",
+  "hostId": "host-1",
+  ...
+}
+```
+
+`just schema` writes them afresh from the code, and `just check-schema` fails when what is checked
+in is behind it — CI runs the latter on every pull request.
+
 ## Testing
 
 `mise install` puts `just` on the path at the version `mise.toml` pins.

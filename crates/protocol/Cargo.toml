@@ -10,11 +10,25 @@ rust-version.workspace = true
 name = "protocol"
 path = "src/lib.rs"
 
+[[bin]]
+name = "protocol-schema"
+path = "src/bin/protocol-schema.rs"
+required-features = ["schema"]
+
+[features]
+schema = ["dep:schemars"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+schemars = { workspace = true, optional = true }
 chrono.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+# Turns the feature on for this crate's own tests, which is what a dev-dependency on oneself is for.
+nibrunner-protocol = { path = ".", features = ["schema"] }
 
 [lints]
 workspace = true

@@ -49,10 +49,24 @@ jobs:
       - name: Run Tests
         run: just test
 
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/prepare
+        with:
+          cache: enabled
+          prepare_for_build: disabled
+
+      - name: Check the schemas are current
+        run: just check-schema
+
   checks-passed:
     if: always()
     name: checks:required
-    needs: [codestyle, lint, tests]
+    needs: [codestyle, lint, tests, schema]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed

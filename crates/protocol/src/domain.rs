@@ -1,10 +1,15 @@
+#[cfg(feature = "schema")]
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+#[cfg(feature = "schema")]
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 use crate::wire::*;
 
 const ENVIRONMENT_RESERVED_NAME: &str = "__proto__";
+pub const ENVIRONMENT_NAME_PATTERN: &str = "^[A-Za-z_][A-Za-z0-9_]*$";
 
 pub fn is_environment_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -106,6 +111,31 @@ impl std::fmt::Debug for TenantValue {
     }
 }
 
+#[cfg(feature = "schema")]
+impl JsonSchema for TenantValue {
+    fn schema_name() -> Cow<'static, str> {
+        "TenantValue".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::TenantValue").into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let mut schema = SecretString::json_schema(generator);
+        schema.insert(
+            "description".into(),
+            format!(
+                "Handed to the app as is, except that `${{NAME}}` and `$NAME` are filled in for NAME \
+                 in {}; any other `$NIBRUN_` reference is refused.",
+                RUNTIME_VALUE_NAMES.join(", ")
+            )
+            .into(),
+        );
+        schema
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(
     try_from = "BTreeMap<String, TenantValue>",
@@ -159,6 +189,28 @@ impl FromIterator<(String, TenantValue)> for TenantEnvironment {
     }
 }
 
+#[cfg(feature = "schema")]
+impl JsonSchema for TenantEnvironment {
+    fn schema_name() -> Cow<'static, str> {
+        "TenantEnvironment".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::TenantEnvironment").into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "propertyNames": {
+                "pattern": ENVIRONMENT_NAME_PATTERN,
+                "not": { "const": ENVIRONMENT_RESERVED_NAME }
+            },
+            "additionalProperties": generator.subschema_for::<TenantValue>()
+        })
+    }
+}
+
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_ARGUMENT_LENGTH: usize = 4096;
 
@@ -195,9 +247,30 @@ impl From<TenantArguments> for Vec<String> {
     }
 }
 
+#[cfg(feature = "schema")]
+impl JsonSchema for TenantArguments {
+    fn schema_name() -> Cow<'static, str> {
+        "TenantArguments".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::TenantArguments").into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({
+            "description": "The arguments the binary is started with.",
+            "type": "array",
+            "maxItems": MAX_ARGUMENTS,
+            "items": { "type": "string", "maxLength": MAX_ARGUMENT_LENGTH }
+        })
+    }
+}
+
 pub const MIN_HOSTNAMES: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum AppHostnameKind {
     Platform,
@@ -205,6 +278,7 @@ pub enum AppHostnameKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AppHostname {
     pub hostname: Hostname,
     pub kind: AppHostnameKind,
@@ -216,6 +290,7 @@ pub struct AppHostname {
 /// forwards both for every one in its range, and a guest that listens on only one of them
 /// answers the other with a port-unreachable the way any host would.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InstancePort {
     pub name: PortName,
@@ -223,11 +298,13 @@ pub struct InstancePort {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    /// The guest port the HTTP proxy sends this app's hostnames to, and the one the health check
+    /// probes.
     pub http_port: HttpPort,
-    /// What this app answers on besides `http_port`. Absent is the shape every document had
-    /// before there was anything to put here.
+    /// What this app answers on besides `httpPort`, if anything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<InstancePort>,
     pub args: TenantArguments,
@@ -319,6 +396,25 @@ impl From<IdleTimeoutMs> for u64 {
     }
 }
 
+#[cfg(feature = "schema")]
+impl JsonSchema for IdleTimeoutMs {
+    fn schema_name() -> Cow<'static, str> {
+        "IdleTimeoutMs".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::IdleTimeoutMs").into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "minimum": MIN_IDLE_TIMEOUT_MS,
+            "maximum": MAX_IDLE_TIMEOUT_MS
+        })
+    }
+}
+
 pub const MIN_MAX_LIFETIME_MS: u64 = 60_000;
 pub const MAX_MAX_LIFETIME_MS: u64 = 604_800_000;
 
@@ -349,10 +445,30 @@ impl From<MaxLifetimeMs> for u64 {
     }
 }
 
+#[cfg(feature = "schema")]
+impl JsonSchema for MaxLifetimeMs {
+    fn schema_name() -> Cow<'static, str> {
+        "MaxLifetimeMs".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::MaxLifetimeMs").into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "minimum": MIN_MAX_LIFETIME_MS,
+            "maximum": MAX_MAX_LIFETIME_MS
+        })
+    }
+}
+
 /// What puts a running microVM back to sleep. Only an `on-request` instance may carry one that
 /// fires: nothing else on this host would wake it again, and the next reconcile pass would bring
 /// it straight back up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum SleepPolicy {
     Never,
@@ -364,6 +480,7 @@ pub enum SleepPolicy {
 /// from afterwards. A guest this host did not build answers no port it was not told about, so
 /// `boot-completed` measures both from the microVM itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ReadinessPolicy {
     #[default]
@@ -372,6 +489,7 @@ pub enum ReadinessPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ActivationPolicy {
     pub sleep_when: SleepPolicy,
@@ -400,6 +518,7 @@ pub const MIN_MEMORY_MIB: u32 = 128;
 pub const MAX_MEMORY_MIB: u32 = 16_384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceResources {
     pub vcpu_count: u32,
@@ -412,8 +531,10 @@ pub const DEFAULT_INSTANCE_RESOURCES: InstanceResources = InstanceResources {
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HealthCheck {
+    /// The path an HTTP probe requests on `httpPort`. Absent, the probe is a TCP connect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     pub interval_ms: u64,
@@ -433,6 +554,7 @@ pub const DEFAULT_HEALTH_CHECK: HealthCheck = HealthCheck {
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RestartPolicy {
     pub max_restarts: u32,
@@ -451,6 +573,7 @@ pub const DEFAULT_RESTART_POLICY: RestartPolicy = RestartPolicy {
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum InstanceState {
     Pending,
@@ -492,6 +615,7 @@ impl InstanceState {
 pub const DEFAULT_VOLUME_SIZE_BYTES: u64 = 8_589_934_592;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum VolumeState {
     Pending,
@@ -502,6 +626,7 @@ pub enum VolumeState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum CheckpointState {
     Pending,
@@ -510,6 +635,7 @@ pub enum CheckpointState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ExportState {
     Pending,
@@ -520,6 +646,7 @@ pub enum ExportState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HostVersions {
     pub agent: String,
@@ -529,6 +656,7 @@ pub struct HostVersions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HostCapacity {
     pub vcpu_count: u32,
@@ -537,6 +665,7 @@ pub struct HostCapacity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum HostState {
     Registering,
@@ -546,6 +675,7 @@ pub enum HostState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeUsage {
     pub memory_total_bytes: u64,
@@ -562,6 +692,7 @@ pub struct ComputeUsage {
 /// Time is metered in two, because a running app holds the memory it was promised and an idle one
 /// holds only the disk its snapshot sits on. Which of those is worth what, this does not say.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct UsageMeters {
     pub running_ms: u64,
@@ -595,6 +726,7 @@ pub fn is_entry_name(name: &str) -> bool {
 }
 
 pub const MAX_GUEST_PATH_LENGTH: usize = 4096;
+pub const GUEST_PATH_PATTERN: &str = r#"^/$|^(/(?!\.\.?(/|$))[^/\\"'\x00-\x1f]+)+$"#;
 
 pub fn is_guest_path(path: &str) -> bool {
     if path.len() > MAX_GUEST_PATH_LENGTH || !path.starts_with('/') {
@@ -613,7 +745,12 @@ pub fn is_guest_path(path: &str) -> bool {
     })
 }
 
-validated_string_public!(GuestPath, "a guest path", is_guest_path);
+validated_string_public!(
+    GuestPath,
+    "a guest path",
+    is_guest_path,
+    { "pattern": GUEST_PATH_PATTERN, "maxLength": MAX_GUEST_PATH_LENGTH }
+);
 
 impl GuestPath {
     pub fn root() -> Self {
@@ -641,6 +778,7 @@ pub struct DirectoryListing {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FilesystemUsage {
     pub total_bytes: u64,
