@@ -6,9 +6,13 @@ default:
 build:
     cargo build --workspace
 
-# One static x86_64 Linux binary, what a host runs. Needs `zig` and `cargo-zigbuild` to cross to it.
-release:
-    cargo zigbuild -p nibrunnerd --target x86_64-unknown-linux-musl --release
+# How the host binary is linked: an x86_64 Linux box has a musl toolchain of its own (`musl-tools`),
+# anything else crosses to it through `zig` and `cargo-zigbuild`.
+cargo-musl := if os() + "-" + arch() == "linux-x86_64" { "cargo build" } else { "cargo zigbuild" }
+
+# One static x86_64 Linux binary, what a host runs.
+build-release:
+    {{cargo-musl}} -p nibrunnerd --target x86_64-unknown-linux-musl --release
     @ls -la target/x86_64-unknown-linux-musl/release/nibrunnerd
 
 # Builds guest/rootfs.ext4 and rewrites the manifest to describe it. Linux, root, docker, e2fsprogs.
@@ -58,8 +62,9 @@ test:
 integration:
     NIBRUNNER_INTEGRATION=1 cargo test -p nibrunnerd --test integration -- --test-threads 1 --nocapture
 
-fmt:
-    cargo fmt --all
+# `just fmt --check` refuses instead of rewriting.
+fmt *args:
+    cargo fmt --all {{args}}
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
