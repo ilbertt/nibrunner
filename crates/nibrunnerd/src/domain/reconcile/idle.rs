@@ -414,7 +414,7 @@ mod sleep_tests {
 
         apply_sleep(host.arc()).await;
 
-        let page = crate::domain::metrics::render(
+        let page = crate::domain::metrics::tests::page(
             &crate::domain::metrics::tests::report(),
             &host.metrics,
             &host.state.snapshot().await,

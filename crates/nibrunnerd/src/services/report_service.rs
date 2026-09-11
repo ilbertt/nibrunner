@@ -123,7 +123,7 @@ mod tests {
     }
 
     fn page(host: &TestHost, report: &HostReportedState) -> String {
-        crate::domain::metrics::render(report, &host.metrics, &crate::state::HostSnapshot::default(), 0)
+        crate::domain::metrics::tests::page(report, &host.metrics, &crate::state::HostSnapshot::default(), 0)
     }
 
     fn reporter(host: &TestHost) -> Arc<dyn ReportService> {

@@ -162,7 +162,7 @@ mod tests {
     }
 
     async fn page(host: &TestHost) -> String {
-        crate::domain::metrics::render(
+        crate::domain::metrics::tests::page(
             &crate::domain::metrics::tests::report(),
             &host.metrics,
             &host.state.snapshot().await,

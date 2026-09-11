@@ -378,7 +378,7 @@ pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics, snapshot: &HostSna
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::metrics::render;
+    use crate::domain::metrics::tests::page;
     use crate::test_support::*;
 
     fn lines_for<'a>(page: &'a str, name: &str) -> Vec<&'a str> {
@@ -427,7 +427,7 @@ mod tests {
         metrics.handshake(Handshake::Completed);
         metrics.handshake(Handshake::TimedOut);
 
-        let page = render(
+        let page = page(
             &crate::domain::metrics::tests::report(),
             &host.metrics,
             &host.state.snapshot().await,

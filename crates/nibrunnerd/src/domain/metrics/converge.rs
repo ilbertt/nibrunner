@@ -395,6 +395,7 @@ pub(super) fn render(
 mod tests {
     use super::*;
     use crate::adapters::vm::VmStatus;
+    use crate::domain::metrics::tests::page;
     use crate::domain::metrics::HostMetrics;
     use crate::state::HostSnapshot;
     use crate::test_support::*;
@@ -787,7 +788,7 @@ mod tests {
             deploys,
             ..Default::default()
         };
-        let page = crate::domain::metrics::render(&report, &metrics, &snapshot, DETECTED + 10_000);
+        let page = page(&report, &metrics, &snapshot, DETECTED + 10_000);
 
         let converged = lines_for(&page, "nibrunner_instance_converged");
         assert_eq!(
@@ -840,7 +841,7 @@ mod tests {
             deploys,
             ..Default::default()
         };
-        let page = crate::domain::metrics::render(&report, &metrics, &snapshot, DETECTED + 5_000);
+        let page = page(&report, &metrics, &snapshot, DETECTED + 5_000);
         assert_eq!(
             lines_for(&page, "nibrunner_instance_converged"),
             vec!["nibrunner_instance_converged{app=\"app-1\"} 0"]

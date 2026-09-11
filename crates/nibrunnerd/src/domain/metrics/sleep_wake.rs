@@ -491,7 +491,7 @@ pub(super) fn render(page: &mut Page, metrics: &SleepWakeMetrics, snapshot: &Hos
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::metrics::render;
+    use crate::domain::metrics::tests::page;
     use crate::ports::WakeFailure;
     use crate::test_support::*;
 
@@ -570,7 +570,7 @@ mod tests {
         metrics.first_response(Duration::from_millis(9));
         metrics.answered(Answer::ComeBack);
 
-        let page = render(
+        let page = page(
             &crate::domain::metrics::tests::report(),
             &host.metrics,
             &host.state.snapshot().await,

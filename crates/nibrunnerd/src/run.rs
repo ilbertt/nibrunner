@@ -294,7 +294,16 @@ async fn answer_scrape(host: &Arc<Host>, path: &str) -> hyper::Response<http_bod
     }
     let report = crate::domain::report::writer::build(host, host_versions(host)).await;
     let snapshot = host.state.snapshot().await;
-    let page = crate::domain::metrics::render(&report, &host.metrics, &snapshot, crate::clock::now_ms());
+    let page = crate::domain::metrics::render(
+        &host.metrics,
+        &crate::domain::metrics::Scrape {
+            report: &report,
+            snapshot: &snapshot,
+            now_ms: crate::clock::now_ms(),
+            slots_used: host.slots().await.len(),
+            memory_available_bytes: crate::domain::report::capacity::read_memory_available_bytes(),
+        },
+    );
     hyper::Response::builder()
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(Full::new(bytes::Bytes::from(page)))

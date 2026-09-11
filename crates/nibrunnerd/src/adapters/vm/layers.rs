@@ -102,10 +102,18 @@ impl LayerImages {
 impl PayloadBuilder for LayerImages {
     async fn prepare(&self, layers: &[DesiredLayer]) -> Result<PreparedPayload, ArtifactError> {
         let mut layer_image_paths = Vec::with_capacity(layers.len());
+        let mut fetched_bytes = 0;
         for layer in layers {
+            let cached = layer_image_path(&self.cache_dir, layer).exists();
             layer_image_paths.push(ensure_layer_image(&self.store, &self.cache_dir, layer).await?);
+            if !cached {
+                fetched_bytes += layer.object().size_bytes;
+            }
         }
-        Ok(PreparedPayload { layer_image_paths })
+        Ok(PreparedPayload {
+            layer_image_paths,
+            fetched_bytes,
+        })
     }
 }
 

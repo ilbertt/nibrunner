@@ -13,6 +13,7 @@ use crate::domain::health::{
 };
 use crate::domain::metrics::converge;
 use crate::domain::metrics::health::Failure;
+use crate::domain::metrics::resources::Operation;
 use crate::domain::metrics::sleep_wake::SleepOutcome;
 use crate::domain::reconcile::plan::{InstancePlan, ReconcilePlan};
 use crate::domain::report::instance_record::{InstanceRecord, RecordFields};
@@ -290,7 +291,12 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     let booted = match host.payloads.prepare(&desired.layers).await {
         Err(error) => Err((Failure::Layers, error.message())),
         Ok(payload) => {
-            let data_device_path = match host.volumes.attach(&desired.volume_id, &desired.app_id).await {
+            let attaching = std::time::Instant::now();
+            let attached = host.volumes.attach(&desired.volume_id, &desired.app_id).await;
+            host.metrics
+                .resources
+                .done(Operation::VolumeAttach, attached.is_ok(), attaching.elapsed());
+            let data_device_path = match attached {
                 Ok(attached) => {
                     let attached_at = now_ms();
                     converge::stamp(&host.state, &desired.app_id, |deploy| {
@@ -570,11 +576,22 @@ pub async fn prefetch_layers(host: &Host, plan: &ReconcilePlan) {
     let mut waiting: Vec<&DesiredInstance> = starting(plan).collect();
     let mut prepared = BTreeSet::new();
     for layer in layers_to_start(plan) {
+        let fetching = std::time::Instant::now();
         match host.payloads.prepare(std::slice::from_ref(&layer)).await {
+            Ok(payload) if payload.fetched_bytes > 0 => {
+                host.metrics
+                    .resources
+                    .layer_fetched(payload.fetched_bytes, fetching.elapsed());
+                prepared.insert(layer);
+            }
             Ok(_) => {
+                host.metrics.resources.layer_cached();
                 prepared.insert(layer);
             }
             Err(error) => {
+                host.metrics
+                    .resources
+                    .done(Operation::LayerFetch, false, fetching.elapsed());
                 tracing::warn!(digest = %layer.object().digest, error = %error.message(), "layer prefetch failed");
             }
         }
@@ -970,6 +987,43 @@ mod tests {
         .await;
 
         assert!(cached_image(&host).exists());
+        let page = metrics_page(&host).await;
+        assert!(page.contains(
+            "nibrunner_storage_operation_seconds_count{operation=\"layer_fetch\",outcome=\"ok\"} 1\n"
+        ));
+        assert!(page.contains(&format!(
+            "nibrunner_layer_fetch_bytes_total {}\n",
+            ARTIFACT_BYTES.len()
+        )));
+        assert!(page.contains("nibrunner_layers_cached_total 0\n"));
+
+        prefetch_layers(
+            &host,
+            &ReconcilePlan {
+                instances: vec![InstancePlan::Start {
+                    desired: desired_instance(|_| {}),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        let page = metrics_page(&host).await;
+        assert!(
+            page.contains("nibrunner_layers_cached_total 1\n"),
+            "the second pass found it"
+        );
+        assert!(page.contains(
+            "nibrunner_storage_operation_seconds_count{operation=\"layer_fetch\",outcome=\"ok\"} 1\n"
+        ));
+    }
+
+    async fn metrics_page(host: &TestHost) -> String {
+        crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        )
     }
 
     #[tokio::test]
@@ -989,6 +1043,9 @@ mod tests {
         .await;
 
         assert!(!cached_image(&host).exists());
+        assert!(metrics_page(&host).await.contains(
+            "nibrunner_storage_operation_seconds_count{operation=\"layer_fetch\",outcome=\"failed\"} 1\n"
+        ));
     }
 
     #[tokio::test]
