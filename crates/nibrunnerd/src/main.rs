@@ -250,6 +250,7 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
         })
         .collect();
 
+    ready();
     shutdown().await;
     tracing::info!("nibrunnerd stopping; every microVM on this host keeps running");
     for task in running {
@@ -258,6 +259,34 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
     lifecycle.stop().await;
     std::process::ExitCode::SUCCESS
 }
+
+/// Said to systemd once the host is built and every controller is running, which is what
+/// `Type=notify` makes "started" mean: a `systemctl start` that returns is one this daemon
+/// serves after, and one that exits binding a listener it was given returns as the failure it is.
+/// Nothing is listening when this is not run under systemd, and nothing is said.
+#[cfg(target_os = "linux")]
+fn ready() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    let address = match socket.as_encoded_bytes().strip_prefix(b"@") {
+        Some(abstract_name) => SocketAddr::from_abstract_name(abstract_name),
+        None => SocketAddr::from_pathname(&socket),
+    };
+    let sent = address.and_then(|address| {
+        let sender = UnixDatagram::unbound()?;
+        sender.send_to_addr(b"READY=1", &address)
+    });
+    if let Err(error) = sent {
+        tracing::warn!(error = %error, "systemd was not told this host is ready");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ready() {}
 
 #[cfg(unix)]
 async fn shutdown() {
