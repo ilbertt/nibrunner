@@ -72,6 +72,9 @@ pub async fn run(
                 laid.note(format!("guest image {version} already there"))
             }
             guest_image::Laid::Taken(version) => laid.note(format!("guest image {version} laid down")),
+            guest_image::Laid::Replaced { was, now } => {
+                laid.note(format!("guest image {was} replaced by {now}"))
+            }
         }
     }
     refuse_unready(config)?;
