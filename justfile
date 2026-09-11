@@ -12,7 +12,7 @@ cargo-musl := if os() + "-" + arch() == "linux-x86_64" { "cargo build" } else { 
 
 # One static x86_64 Linux binary, what a host runs.
 build-release:
-    {{cargo-musl}} -p nibrunnerd --target x86_64-unknown-linux-musl --release
+    {{cargo-musl}} -p nibrunnerd --bin nibrunnerd --target x86_64-unknown-linux-musl --release
     @ls -la target/x86_64-unknown-linux-musl/release/nibrunnerd
 
 # Builds guest/rootfs.ext4 and rewrites the manifest to describe it. Linux, root, docker, e2fsprogs.
@@ -82,5 +82,21 @@ check-schema:
     cargo run -q -p nibrunner-protocol --features schema --bin protocol-schema -- "$fresh"
     diff -ru crates/protocol/schema "$fresh" || {
         echo "crates/protocol/schema is behind the code: run \`just schema\` and commit the result"
+        exit 1
+    }
+
+# deploy/config.example.toml, written afresh from `HostConfig::example` in the daemon crate.
+config-example:
+    cargo run -q -p nibrunnerd --bin config-example -- deploy/config.example.toml
+
+# Fails if `just config-example` would change what is checked in.
+check-config-example:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fresh=$(mktemp -d)
+    trap 'rm -rf "$fresh"' EXIT
+    cargo run -q -p nibrunnerd --bin config-example -- "$fresh/config.example.toml"
+    diff -u deploy/config.example.toml "$fresh/config.example.toml" || {
+        echo "deploy/config.example.toml is behind the code: run \`just config-example\` and commit the result"
         exit 1
     }

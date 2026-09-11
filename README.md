@@ -33,8 +33,8 @@ no proxy, no object store. To make it this host's —
 ```
 
 **[docs/config.md](docs/config.md) is every key in that file.** Give a host its configuration up
-front instead — `deploy/config.zerofs.toml` is one for volumes in an object store and TLS behind an
-edge — and all that is left is the secrets and the units.
+front instead — `deploy/config.example.toml` is one with every section: volumes in an object store,
+TLS behind an edge, raw ports, metrics — and all that is left is the secrets and the units.
 
 Then deploy: the binary into `artifacts.store_url` under the key its digest names, and the document
 below into `paths.desired_state_file`. Everything past that is the daemon converging.

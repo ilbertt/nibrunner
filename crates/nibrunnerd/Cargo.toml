@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "nibrunnerd"
 path = "src/main.rs"
 
+# What `just config-example` runs. Not what a host runs: `just build-release` names the one above.
+[[bin]]
+name = "config-example"
+path = "src/bin/config-example.rs"
+
 [dependencies]
 protocol.workspace = true
 guest-contract.workspace = true

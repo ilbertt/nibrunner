@@ -195,9 +195,14 @@ debug one restart, not a property of the host.
 
 ## Two worked examples
 
-`deploy/config.toml` is the smallest file this daemon accepts: volumes as files on this machine's
-own disk, stores as directories on it, nothing served. It is what `install` writes when a host has
-no configuration at all.
+Both are rendered from the code that reads this file, so neither is a copy that can fall behind it.
 
-`deploy/config.zerofs.toml` is the same file for a host whose volumes live in an object store,
-whose artifacts and exports are in S3, and which serves TLS behind an edge.
+The smallest file this daemon accepts — volumes as files on this machine's own disk, stores as
+directories on it, nothing served — is what `install` writes when a host has no configuration at
+all. There is no copy of it in the repository: run `nibrunnerd install` on a host with none, or
+read `HostConfig::starter` in `crates/nibrunnerd/src/config.rs`.
+
+`deploy/config.example.toml` is a host with every section: volumes in an object store, artifacts
+and exports in S3, TLS behind an edge that presents a client certificate, raw ports for a relay,
+and a metrics page. `just config-example` writes it from `HostConfig::example`, and CI fails when
+it is behind.

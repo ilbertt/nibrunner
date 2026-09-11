@@ -49,7 +49,8 @@ jobs:
       - name: Run Tests
         run: just test
 
-  schema:
+  # Every file in the tree that is written from the code rather than by hand.
+  generated:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -63,10 +64,13 @@ jobs:
       - name: Check the schemas are current
         run: just check-schema
 
+      - name: Check the example configuration is current
+        run: just check-config-example
+
   checks-passed:
     if: always()
     name: checks:required
-    needs: [codestyle, lint, tests, schema]
+    needs: [codestyle, lint, tests, generated]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed

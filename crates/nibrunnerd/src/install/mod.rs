@@ -216,10 +216,21 @@ pub fn what_is_still_yours(config_file: &Path) -> String {
     )
 }
 
-/// The smallest configuration this daemon accepts, from the one copy of it in this repository.
+/// The smallest configuration this daemon accepts, rendered by the code that reads it rather than
+/// carried as a file that would have to be kept abreast of that code by hand. It is not one of the
+/// files `write_generated` writes and must never read as one: this is the file the others are
+/// rendered *from*, and a re-run leaves it alone.
 pub fn write_starter_configuration(path: &Path) -> Result<(), crate::json_store::StoreError> {
-    const STARTER: &str = include_str!("../../../../deploy/config.toml");
-    write_text(path, STARTER, READABLE_FILE_MODE)
+    let rendered = format!(
+        "# This host had no configuration, so this is the smallest one the daemon accepts: volumes\n\
+         # as files on its own disk, stores as directories on it, nothing served. It is yours from\n\
+         # here — edit it, then `nibrunnerd install` again — and nothing writes it for you again.\n\
+         # What every key means: https://github.com/ilbertt/nibrunner/blob/main/docs/config.md\n\
+         \n\
+         {}",
+        HostConfig::starter().to_toml()
+    );
+    write_text(path, &rendered, READABLE_FILE_MODE)
 }
 
 /// Every directory this host writes into that is not created on the way past. `runtime_dir` is
@@ -379,7 +390,19 @@ mod tests {
         let path = directory.path().join("config.toml");
         write_starter_configuration(&path).unwrap();
         let config = HostConfig::from_file(&path).expect("the starting configuration must load");
+        assert_eq!(config, HostConfig::starter());
         assert!(matches!(config.volumes, VolumeBackend::LocalFile));
+    }
+
+    // The marker is what lets a re-run replace a file, and this is the one file a re-run reads
+    // rather than writes — so it had better not be carrying it.
+    #[test]
+    fn the_configuration_this_binary_carries_is_not_one_a_rerun_would_replace() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        write_starter_configuration(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.starts_with(render::GENERATED_MARKER), "{written}");
     }
 
     #[test]
