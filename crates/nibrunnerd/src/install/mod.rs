@@ -92,8 +92,12 @@ pub async fn run(
     // refuse a host for — and a release was named precisely so this host would not have to have it
     // already.
     if let Some(release) = release {
-        if let guest_image::Laid::Taken(version) = guest_image::ensure(&config.guest_image_dir, release)? {
-            laid.did(format!("guest image {version} laid down"));
+        match guest_image::ensure(&config.guest_image_dir, release)? {
+            guest_image::Laid::AlreadyThere(_) => {}
+            guest_image::Laid::Taken(version) => laid.did(format!("guest image {version} laid down")),
+            guest_image::Laid::Replaced { was, now } => {
+                laid.did(format!("guest image {was} replaced by {now}"))
+            }
         }
     }
     refuse_unready(config)?;
@@ -219,10 +223,21 @@ pub fn next_steps(config: &HostConfig, config_file: &Path, origin: Origin) -> St
     said
 }
 
-/// The starting point this daemon carries, from the one copy of it in this repository.
+/// The starting point this daemon carries, rendered by the code that reads it rather than carried
+/// as a file that would have to be kept abreast of that code by hand. It is not one of the files
+/// `write_generated` writes and must never read as one: this is the file the others are rendered
+/// *from*, and a re-run leaves it alone.
 pub fn write_starter_configuration(path: &Path) -> Result<(), crate::json_store::StoreError> {
-    const STARTER: &str = include_str!("../../../../deploy/config.toml");
-    write_text(path, STARTER, READABLE_FILE_MODE)
+    let rendered = format!(
+        "# This host had no configuration, so this is the starting point: volumes as files on its own\n\
+         # disk, stores as directories on it, plain HTTP on :80. It is yours from here — edit it, then\n\
+         # `nibrunnerd start` — and nothing writes it for you again.\n\
+         # What every key means: {CONFIG_DOCS_URL}\n\
+         \n\
+         {}",
+        HostConfig::starter().to_toml()
+    );
+    write_text(path, &rendered, READABLE_FILE_MODE)
 }
 
 pub fn unit_path(unit: &str) -> PathBuf {
@@ -322,6 +337,7 @@ mod tests {
         let path = directory.path().join("config.toml");
         write_starter_configuration(&path).unwrap();
         let config = HostConfig::from_file(&path).expect("the starting configuration must load");
+        assert_eq!(config, HostConfig::starter());
         assert!(matches!(config.volumes, VolumeBackend::LocalFile));
         assert!(secrets::of(&config).iter().all(|secret| !secret.needed));
         let http = config
@@ -330,6 +346,17 @@ mod tests {
             .expect("plain HTTP, so the README's document is served");
         assert_eq!(http.port, 80);
         assert!(http.tls.is_none());
+    }
+
+    // The marker is what lets a re-run replace a file, and this is the one file a re-run reads
+    // rather than writes — so it had better not be carrying it.
+    #[test]
+    fn the_configuration_this_binary_carries_is_not_one_a_rerun_would_replace() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        write_starter_configuration(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.starts_with(render::GENERATED_MARKER), "{written}");
     }
 
     #[test]

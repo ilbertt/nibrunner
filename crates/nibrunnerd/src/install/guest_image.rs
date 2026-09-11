@@ -18,15 +18,14 @@ const READABLE_FILE_MODE: u32 = 0o644;
 pub enum Laid {
     AlreadyThere(String),
     Taken(String),
+    Replaced { was: String, now: String },
 }
 
-/// Idempotent by asking the same question the daemon asks on the way up: a directory that already
-/// verifies against its own manifest is one nothing needs to be done to.
+/// Idempotent against the release, not against the directory's own manifest: a directory that
+/// verifies against itself is only one nobody tampered with, and an older image does that as well
+/// as the current one. What says nothing needs doing is every artifact already hashing to what
+/// this release publishes.
 pub fn ensure(directory: &Path, release: &Path) -> Result<Laid, InstallError> {
-    if let Ok(version) = super::prerequisites::verify(directory) {
-        return Ok(Laid::AlreadyThere(version));
-    }
-
     let published = std::fs::read_to_string(release.join(CHECKSUMS)).map_err(|error| {
         InstallError::Refused(format!(
             "{} could not be read, so nothing in {} can be checked against it: {error}",
@@ -34,20 +33,36 @@ pub fn ensure(directory: &Path, release: &Path) -> Result<Laid, InstallError> {
             release.display()
         ))
     })?;
+    let expected = ARTIFACTS
+        .iter()
+        .map(|artifact| {
+            digest_of(&published, artifact)
+                .map(|digest| (*artifact, digest))
+                .ok_or_else(|| {
+                    InstallError::Refused(format!("{CHECKSUMS} publishes no digest for {artifact}"))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if expected
+        .iter()
+        .all(|(artifact, digest)| hashes_to(&directory.join(artifact), digest))
+    {
+        let version = super::prerequisites::verify(directory).map_err(InstallError::Refused)?;
+        return Ok(Laid::AlreadyThere(version));
+    }
+    let was = super::prerequisites::verify(directory).ok();
 
     crate::json_store::make_directory(directory, 0o755).map_err(|error| {
         InstallError::Refused(format!("{} could not be made: {error}", directory.display()))
     })?;
-    for artifact in ARTIFACTS {
+    for (artifact, expected) in &expected {
         let source = release.join(artifact);
         let bytes = std::fs::read(&source).map_err(|error| {
             InstallError::Refused(format!("{} is not in that release: {error}", source.display()))
         })?;
-        let expected = digest_of(&published, artifact).ok_or_else(|| {
-            InstallError::Refused(format!("{CHECKSUMS} publishes no digest for {artifact}"))
-        })?;
         let found = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
-        if found != expected {
+        if found != *expected {
             return Err(InstallError::Refused(format!(
                 "{artifact} did not hash to what {CHECKSUMS} publishes: expected {expected}, got {found}"
             )));
@@ -57,8 +72,16 @@ pub fn ensure(directory: &Path, release: &Path) -> Result<Laid, InstallError> {
 
     // The same check the daemon makes before it boots anything, run here so a directory that is
     // going to refuse at startup refuses now instead.
-    let version = super::prerequisites::verify(directory).map_err(InstallError::Refused)?;
-    Ok(Laid::Taken(version))
+    let now = super::prerequisites::verify(directory).map_err(InstallError::Refused)?;
+    Ok(match was {
+        Some(was) => Laid::Replaced { was, now },
+        None => Laid::Taken(now),
+    })
+}
+
+fn hashes_to(path: &Path, digest: &str) -> bool {
+    std::fs::read(path)
+        .is_ok_and(|bytes| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)) == digest)
 }
 
 /// `sha256sum` format: the digest, two spaces, the name.
@@ -127,16 +150,137 @@ b6ada6ce51628084d1ba1d8b0b9b7a9785d183ab34e3824cf408b274a86ef221  vmlinux
         let into = tempfile::tempdir().unwrap();
         release(
             from.path(),
-            &[("vmlinux", b"a kernel"), ("rootfs.ext4", b"a filesystem")],
+            &[
+                ("vmlinux", b"a kernel"),
+                ("rootfs.ext4", b"a filesystem"),
+                ("manifest.json", b"{}"),
+            ],
         );
         // Published under one digest and then replaced, which is the shape of a release that was
         // tampered with between being signed for and being read.
         std::fs::write(from.path().join("vmlinux"), b"not that kernel").unwrap();
-        std::fs::write(from.path().join("manifest.json"), b"{}").unwrap();
 
         let error = ensure(into.path(), from.path()).unwrap_err();
         assert!(error.message().contains("did not hash"), "{}", error.message());
         assert!(!into.path().join("vmlinux").exists());
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes))
+    }
+
+    /// A whole release: kernel, root filesystem, the manifest that describes them, and the sums.
+    fn image(directory: &Path, version: &str, kernel: &[u8], rootfs: &[u8]) {
+        let manifest = serde_json::json!({
+            "version": version,
+            "artifacts": [
+                { "name": "vmlinux", "sha256": sha256(kernel) },
+                { "name": "rootfs.ext4", "sha256": sha256(rootfs) },
+            ],
+        })
+        .to_string();
+        release(
+            directory,
+            &[
+                ("vmlinux", kernel),
+                ("rootfs.ext4", rootfs),
+                ("manifest.json", manifest.as_bytes()),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_directory_with_nothing_in_it_takes_the_release() {
+        let from = tempfile::tempdir().unwrap();
+        let into = tempfile::tempdir().unwrap();
+        image(
+            from.path(),
+            "6.1.180+nibrunner-init.aaaa",
+            b"a kernel",
+            b"a filesystem",
+        );
+
+        let laid = ensure(&into.path().join("guest"), from.path()).unwrap();
+        assert!(
+            matches!(laid, Laid::Taken(ref version) if version == "6.1.180+nibrunner-init.aaaa"),
+            "{laid:?}"
+        );
+        assert_eq!(
+            std::fs::read(into.path().join("guest/rootfs.ext4")).unwrap(),
+            b"a filesystem"
+        );
+    }
+
+    #[test]
+    fn a_directory_already_holding_the_release_is_left_alone() {
+        let from = tempfile::tempdir().unwrap();
+        let into = tempfile::tempdir().unwrap();
+        image(
+            from.path(),
+            "6.1.180+nibrunner-init.aaaa",
+            b"a kernel",
+            b"a filesystem",
+        );
+        ensure(into.path(), from.path()).unwrap();
+
+        let laid = ensure(into.path(), from.path()).unwrap();
+        assert!(matches!(laid, Laid::AlreadyThere(_)), "{laid:?}");
+    }
+
+    // The release that taught this: a rebuilt root filesystem under a manifest whose version had
+    // not moved. The directory verified against its own manifest, so the old image stayed and the
+    // new daemon booted an init that did not know its drives.
+    #[test]
+    fn an_older_image_is_replaced_even_when_it_verifies_against_itself() {
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        let into = tempfile::tempdir().unwrap();
+        image(
+            old.path(),
+            "6.1.180+nibrunner-init",
+            b"a kernel",
+            b"the old filesystem",
+        );
+        image(
+            new.path(),
+            "6.1.180+nibrunner-init",
+            b"a kernel",
+            b"the new filesystem",
+        );
+        ensure(into.path(), old.path()).unwrap();
+
+        let laid = ensure(into.path(), new.path()).unwrap();
+        assert!(
+            matches!(laid, Laid::Replaced { ref was, ref now } if was == "6.1.180+nibrunner-init" && now == was),
+            "{laid:?}"
+        );
+        assert_eq!(
+            std::fs::read(into.path().join("rootfs.ext4")).unwrap(),
+            b"the new filesystem"
+        );
+        assert_eq!(
+            super::super::prerequisites::verify(into.path()).unwrap(),
+            "6.1.180+nibrunner-init"
+        );
+    }
+
+    // Verifying against itself is not what decides, and neither is failing to: a directory that
+    // holds every byte the release does is the release, whatever else it holds.
+    #[test]
+    fn a_directory_that_holds_the_release_but_more_besides_is_still_left_alone() {
+        let from = tempfile::tempdir().unwrap();
+        let into = tempfile::tempdir().unwrap();
+        image(
+            from.path(),
+            "6.1.180+nibrunner-init.aaaa",
+            b"a kernel",
+            b"a filesystem",
+        );
+        ensure(into.path(), from.path()).unwrap();
+        std::fs::write(into.path().join("kernel.config"), b"CONFIG_KVM=y").unwrap();
+
+        let laid = ensure(into.path(), from.path()).unwrap();
+        assert!(matches!(laid, Laid::AlreadyThere(_)), "{laid:?}");
     }
 
     #[test]

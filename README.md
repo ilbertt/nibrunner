@@ -33,9 +33,9 @@ Laid out; nothing started. What is left:
 needs is still empty, and then starts — or restarts — the units that file names. It is also every
 later change: edit, `nibrunnerd start`.
 
-**[docs/config.md](docs/config.md) is every key in that file.** `deploy/config.zerofs.toml` is one
-for volumes in an object store and TLS behind an edge. A host given its configuration before the
-script runs is asked only for the secrets it needs.
+**[docs/config.md](docs/config.md) is every key in that file.** `deploy/config.example.toml` is
+one with every section: volumes in an object store, TLS behind an edge, raw ports, metrics. A host
+given its configuration before the script runs is asked only for the secrets it needs.
 
 Then deploy: the binary into `artifacts.store_url` under the key its digest names, and the document
 below into `paths.desired_state_file`. Everything past that is the daemon converging.

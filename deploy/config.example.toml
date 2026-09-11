@@ -1,0 +1,68 @@
+# Written by `just config-example` from `HostConfig::example` in crates/nibrunnerd/src/config.rs.
+# Edit that, not this: `just check-config-example` fails when this file is behind it.
+#
+# A host with every section: volumes in an object store, reached from the guest over NBD;
+# artifacts and exports in S3; TLS behind an edge, which presents a client certificate; raw ports
+# for a relay; a metrics page. What each key means is docs/config.md. A host with no
+# configuration is given the smallest one instead, by `nibrunnerd install`.
+#
+# Nothing here is a secret. The AWS credentials and the ZeroFS encryption password live in
+# host.env beside this file, which `install` creates empty and never writes into.
+
+[paths]
+state_dir = "/var/lib/nibrunner"
+runtime_dir = "/run/nibrunner"
+snapshot_dir = "/data/nibrunner-vm"
+guest_image_dir = "/var/lib/nibrunner/guest"
+desired_state_file = "/var/lib/nibrunner/desired.json"
+api_socket = "/run/nibrunner/nibrunner.sock"
+versions_file = "/var/lib/nibrunner/versions.json"
+
+[artifacts]
+store_url = "s3://nibrunner-artifacts-eu-west-2-123456789012/artifacts"
+
+[volumes]
+backend = "zerofs"
+storage_prefix = "hetzner-1"
+
+[volumes.zerofs]
+binary = "/opt/nibrunner/bin/zerofs"
+config_file = "/etc/zerofs/config.toml"
+mount_path = "/mnt/zerofs"
+nbd_socket_path = "/run/zerofs/nbd.sock"
+ninep_socket_path = "/run/zerofs/9p.sock"
+rpc_socket_path = "/run/zerofs/rpc.sock"
+storage_url = "s3://nibrunner-filesystems-eu-west-2-123456789012/hetzner-1"
+cache_dir = "/data/zerofs"
+cache_disk_gib = 200
+cache_memory_gib = 2
+checkpoint_runtime_dir = "/run/zerofs-checkpoint"
+checkpoint_config_file = "/etc/zerofs/checkpoint.toml"
+checkpoint_cache_dir = "/data/zerofs-checkpoint"
+
+[exports]
+store_url = "s3://nibrunner-exports-eu-west-2-123456789012/exports"
+staging_dir = "/var/lib/nibrunner/exports"
+
+[network]
+denied_egress_addresses_v4 = []
+denied_egress_addresses_v6 = []
+
+[proxy.http]
+listen_address = "0.0.0.0"
+port = 443
+
+[proxy.http.tls]
+certificate = "/etc/nibrunner/tls/origin.crt"
+key = "/etc/nibrunner/tls/origin.key"
+
+[proxy.http.tls.client_ca]
+certificate = "/etc/nibrunner/tls/origin-pull-ca.pem"
+
+[proxy.raw]
+listen_address = "10.0.5.18"
+max_ports_per_guest = 1
+
+[metrics]
+port = 9100
+listen_address = "127.0.0.1"
