@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use protocol::{AppId, GuestPort, HostPort, PortName};
 use tokio::net::{TcpListener, TcpStream};
@@ -18,10 +19,33 @@ pub struct StreamBinding {
     pub guest_port: GuestPort,
 }
 
+/// How often a woken guest is asked again whether it is listening yet.
+const DIAL_INTERVAL: Duration = Duration::from_millis(50);
+
 struct Listener {
     host_port: HostPort,
     guest_port: GuestPort,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// Dial the guest until it answers or the deadline passes.
+///
+/// The wake returns when the HTTP port answers, because that is the one port the readiness gate
+/// knows. A service on a raw port can be a few hundred milliseconds behind it, and a client that
+/// has just waited out a snapshot restore should not be closed on at the last step for that. Only
+/// a refusal is retried — it is the one error that means "not yet" rather than "not at all".
+async fn dial_until(upstream: SocketAddr, deadline: Instant) -> Option<TcpStream> {
+    loop {
+        match TcpStream::connect(upstream).await {
+            Ok(guest) => return Some(guest),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ConnectionRefused && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(DIAL_INTERVAL).await;
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// The way in for a protocol this host does not read.
@@ -119,7 +143,7 @@ impl StreamActivator {
         }
         self.state.mark_active(&app_id, crate::clock::now_ms()).await;
 
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         if let Err(refusal) = self.waker.wake(&app_id).await {
             let reason = match refusal {
                 WakeRefusal::NoRoom { shortfall_mib } => {
@@ -142,7 +166,8 @@ impl StreamActivator {
             },
             guest_port.get(),
         );
-        let Ok(mut guest) = TcpStream::connect(upstream).await else {
+        let deadline = Instant::now() + Duration::from_millis(woken.health_check.grace_period_ms);
+        let Some(mut guest) = dial_until(upstream, deadline).await else {
             tracing::warn!(%app_id, %upstream, "a woken app would not take the stream");
             return;
         };
@@ -303,6 +328,90 @@ mod tests {
         let mut answer = [0u8; 7];
         client.read_exact(&mut answer).await.unwrap();
         assert_eq!(&answer, b"SSH-2.0");
+    }
+
+    #[tokio::test]
+    async fn a_guest_whose_service_is_a_moment_behind_its_wake_is_waited_for() {
+        let host = test_host().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.desired_running = true;
+                record.state = InstanceState::Idle;
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.health_check.grace_period_ms = 2_000;
+            }))
+            .await;
+
+        // Nothing listens on the guest port until well after the client has connected.
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let guest_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let guest =
+                tokio::net::TcpListener::bind(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, guest_port)))
+                    .await
+                    .unwrap();
+            let (mut stream, _) = guest.accept().await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            stream.write_all(b"SSH-2.0").await.unwrap();
+        });
+
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host_port = free.local_addr().unwrap().port();
+        drop(free);
+        activator(&host)
+            .await
+            .serve(&[binding("ssh", host_port, guest_port)])
+            .await;
+
+        use tokio::io::AsyncReadExt;
+        let mut client = TcpStream::connect(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, host_port)))
+            .await
+            .unwrap();
+        let mut answer = [0u8; 7];
+        client
+            .read_exact(&mut answer)
+            .await
+            .expect("the activator kept dialling until sshd was there");
+        assert_eq!(&answer, b"SSH-2.0");
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_never_listens_is_given_up_on_at_the_grace_period_not_before_and_not_never() {
+        let host = test_host().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.desired_running = true;
+                record.state = InstanceState::Idle;
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.health_check.grace_period_ms = 200;
+            }))
+            .await;
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let guest_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host_port = free.local_addr().unwrap().port();
+        drop(free);
+        activator(&host)
+            .await
+            .serve(&[binding("ssh", host_port, guest_port)])
+            .await;
+
+        use tokio::io::AsyncReadExt;
+        let started = Instant::now();
+        let mut client = TcpStream::connect(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, host_port)))
+            .await
+            .unwrap();
+        let mut answer = [0u8; 1];
+        assert_eq!(client.read(&mut answer).await.unwrap(), 0, "closed, not hung");
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(150), "gave up early: {waited:?}");
+        assert!(waited < Duration::from_secs(2), "never gave up: {waited:?}");
     }
 
     #[tokio::test]

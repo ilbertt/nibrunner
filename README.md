@@ -39,6 +39,11 @@ edge — and all that is left is the secrets and the units.
 Then deploy: the binary into `artifacts.store_url` under the key its digest names, and the document
 below into `paths.desired_state_file`. Everything past that is the daemon converging.
 
+One thing the starter configuration will not do is serve the document below: it names a hostname,
+and a host with no `[proxy.http]` has nothing to answer for it. The instance is reported `failed`
+saying exactly that, rather than started where nothing could reach it. Give the host a listener
+first, or drop `hostnames` to run an app that nothing outside needs to reach.
+
 ### The document
 
 ```json
