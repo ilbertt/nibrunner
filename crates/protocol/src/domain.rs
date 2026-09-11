@@ -20,7 +20,7 @@ pub fn is_environment_name(name: &str) -> bool {
 
 const RUNTIME_VALUE_PREFIX: &str = "NIBRUN_";
 
-pub const RUNTIME_VALUE_NAMES: [&str; 3] = ["NIBRUN_DATA_DIR", "NIBRUN_HOSTNAME", "NIBRUN_HTTP_PORT"];
+pub const RUNTIME_VALUE_NAMES: [&str; 2] = ["NIBRUN_HOSTNAME", "NIBRUN_HTTP_PORT"];
 
 fn is_name_character(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
@@ -297,6 +297,20 @@ pub struct InstancePort {
     pub guest_port: GuestPort,
 }
 
+/// What the guest runs once its root is stacked, as uid 65534: `program` with `args`, in
+/// `workingDirectory`, with `environment`. The working directory is made if it is not there,
+/// given to that uid, and is where the program's persistent state lives, because everything
+/// under the root persists on the volume and nowhere else is the program's to write.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Command {
+    pub program: GuestPath,
+    pub args: TenantArguments,
+    pub working_directory: GuestPath,
+    pub environment: TenantEnvironment,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -307,8 +321,7 @@ pub struct AppConfig {
     /// What this app answers on besides `httpPort`, if anything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<InstancePort>,
-    pub args: TenantArguments,
-    pub environment: TenantEnvironment,
+    pub command: Command,
     pub resources: InstanceResources,
     pub health_check: HealthCheck,
     pub restart_policy: RestartPolicy,

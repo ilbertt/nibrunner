@@ -93,8 +93,10 @@ impl VmManager {
             http_port: request.desired.config.http_port,
             layers: request.payload.layer_image_paths.len(),
             hostnames: &request.desired.hostnames,
-            args: &request.desired.config.args,
-            environment: &request.desired.config.environment,
+            program: &request.desired.config.command.program,
+            working_directory: &request.desired.config.command.working_directory,
+            args: &request.desired.config.command.args,
+            environment: &request.desired.config.command.environment,
             restart_policy: &request.desired.config.restart_policy,
         })
         .map_err(|error| VmError::Host(error.to_string()))?;
@@ -810,7 +812,7 @@ mod tests {
             .await
             .unwrap();
         let changed = desired_instance(|instance| {
-            instance.config.environment = tenant_environment(&[("MODE", "production")])
+            instance.config.command.environment = tenant_environment(&[("MODE", "production")])
         });
         fixture.manager.stage(&boot_request(changed)).await.unwrap();
         let written = config_drive(&fixture.manager.working_dir_for(&app_id()));

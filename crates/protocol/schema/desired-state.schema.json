@@ -61,11 +61,8 @@
     "AppConfig": {
       "type": "object",
       "properties": {
-        "args": {
-          "$ref": "#/$defs/TenantArguments"
-        },
-        "environment": {
-          "$ref": "#/$defs/TenantEnvironment"
+        "command": {
+          "$ref": "#/$defs/Command"
         },
         "healthCheck": {
           "$ref": "#/$defs/HealthCheck"
@@ -90,8 +87,7 @@
       },
       "required": [
         "httpPort",
-        "args",
-        "environment",
+        "command",
         "resources",
         "healthCheck",
         "restartPolicy"
@@ -128,6 +124,30 @@
       "description": "an identifier",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "Command": {
+      "description": "What the guest runs once its root is stacked, as uid 65534: `program` with `args`, in\n`workingDirectory`, with `environment`. The working directory is made if it is not there,\ngiven to that uid, and is where the program's persistent state lives, because everything\nunder the root persists on the volume and nowhere else is the program's to write.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "$ref": "#/$defs/TenantArguments"
+        },
+        "environment": {
+          "$ref": "#/$defs/TenantEnvironment"
+        },
+        "program": {
+          "$ref": "#/$defs/GuestPath"
+        },
+        "workingDirectory": {
+          "$ref": "#/$defs/GuestPath"
+        }
+      },
+      "required": [
+        "program",
+        "args",
+        "workingDirectory",
+        "environment"
+      ]
     },
     "DeploymentId": {
       "description": "an identifier",
@@ -426,6 +446,12 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
     },
+    "GuestPath": {
+      "description": "a guest path",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
+    },
     "GuestPort": {
       "type": "integer",
       "maximum": 65535,
@@ -688,7 +714,7 @@
       }
     },
     "TenantValue": {
-      "description": "Handed to the app as is, except that `${NAME}` and `$NAME` are filled in for NAME in NIBRUN_DATA_DIR, NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT; any other `$NIBRUN_` reference is refused.",
+      "description": "Handed to the app as is, except that `${NAME}` and `$NAME` are filled in for NAME in NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT; any other `$NIBRUN_` reference is refused.",
       "type": "string",
       "maxLength": 32768
     },

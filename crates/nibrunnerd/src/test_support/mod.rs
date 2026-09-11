@@ -115,8 +115,12 @@ pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
     let mut value = AppConfig {
         ports: vec![],
         http_port: DEFAULT_HTTP_PORT,
-        args: TenantArguments::default(),
-        environment: TenantEnvironment::default(),
+        command: Command {
+            program: GuestPath::parse("/app/server").unwrap(),
+            args: TenantArguments::default(),
+            working_directory: GuestPath::parse("/app").unwrap(),
+            environment: TenantEnvironment::default(),
+        },
         resources: DEFAULT_INSTANCE_RESOURCES,
         health_check: DEFAULT_HEALTH_CHECK,
         restart_policy: DEFAULT_RESTART_POLICY,

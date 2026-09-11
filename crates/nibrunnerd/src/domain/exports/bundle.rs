@@ -12,14 +12,15 @@ const ENV_FILENAME: &str = ".env";
 const ENV_MODE: u32 = 0o600;
 const BUNDLE_NAME: &str = "bundle.tar.gz";
 
-const MKFS_ROOT_ENTRIES: [&str; 1] = ["lost+found"];
-
 const DUMP_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
-    #[error("reading {device_path} produced no files")]
-    EmptyDump { device_path: String },
+    #[error("{device_path} holds no {upper} directory, so no guest has ever written to it")]
+    NeverWritten {
+        device_path: String,
+        upper: &'static str,
+    },
     #[error("the bundle could not be written: {0}")]
     Unwritable(String),
 }
@@ -41,14 +42,16 @@ pub async fn dump_volume(
             return Err(unwritable(error));
         }
     }
-    let destination = staging_dir.join(DATA_DIRECTORY);
-    crate::json_store::make_directory(&destination, STAGING_MODE)
+    crate::json_store::make_directory(staging_dir, STAGING_MODE)
         .map_err(|error| BundleError::Unwritable(error.to_string()))?;
 
+    // Only the overlay's upper is the tenant's: everything else on the volume is overlayfs's
+    // own scratch. `rdump` lands a directory under its name, so it is renamed once it is here.
+    let upper = guest_contract::paths::VOLUME_UPPER_NAME;
     let mut request = CommandRequest::new(&[
         "debugfs",
         "-R",
-        &format!("rdump / {}", destination.display()),
+        &format!("rdump /{upper} {}", staging_dir.display()),
         device_path,
     ]);
     request.timeout = DUMP_TIMEOUT;
@@ -57,16 +60,14 @@ pub async fn dump_volume(
         .await
         .map_err(|error| BundleError::Unwritable(error.message()))?;
 
-    let listed = std::fs::read_dir(&destination).map_err(unwritable)?.count();
-    if listed == 0 {
-        return Err(BundleError::EmptyDump {
+    let dumped = staging_dir.join(upper);
+    if !dumped.is_dir() {
+        return Err(BundleError::NeverWritten {
             device_path: device_path.to_string(),
+            upper,
         });
     }
-    for entry in MKFS_ROOT_ENTRIES {
-        let _ = std::fs::remove_dir_all(destination.join(entry));
-    }
-    Ok(())
+    std::fs::rename(&dumped, staging_dir.join(DATA_DIRECTORY)).map_err(unwritable)
 }
 
 pub fn render_dotenv(environment: &TenantEnvironment) -> String {
@@ -179,20 +180,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dump_that_produced_nothing_is_a_failure_however_debugfs_exited() {
+    async fn a_volume_no_guest_has_written_to_is_named_rather_than_exported_empty() {
         let root = tempfile::tempdir().unwrap();
         let commands: Arc<dyn CommandRunner> = mocks::commands_succeeding().0;
         let error = dump_volume(&commands, "/dev/nbd63", &root.path().join("staging"))
             .await
             .unwrap_err();
-        assert!(matches!(error, BundleError::EmptyDump { .. }), "{error}");
+        assert!(matches!(error, BundleError::NeverWritten { .. }), "{error}");
+        assert!(error.message().contains("upper"), "{error}");
     }
 
     #[tokio::test]
     async fn a_tenant_who_wrote_nothing_exports_an_empty_data_directory() {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
-        let planted = staging.join(DATA_DIRECTORY).join("lost+found");
+        let planted = staging.join("upper");
         let commands: Arc<dyn CommandRunner> = mocks::commands_answering(move |_| {
             std::fs::create_dir_all(&planted).unwrap();
             Ok(CommandResult::succeeded())
@@ -202,7 +204,7 @@ mod tests {
         dump_volume(&commands, "/dev/nbd63", &staging).await.unwrap();
         let data = staging.join(DATA_DIRECTORY);
         assert!(data.exists());
-        assert!(!data.join("lost+found").exists());
+        assert!(!staging.join("upper").exists());
         assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
     }
 
@@ -258,8 +260,9 @@ mod tests {
         std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
         std::fs::write(&leftover, b"an earlier tenant").unwrap();
 
-        let planted = staging.join(DATA_DIRECTORY).join("notes.txt");
+        let planted = staging.join("upper").join("notes.txt");
         let commands: Arc<dyn CommandRunner> = mocks::commands_answering(move |_| {
+            std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
             std::fs::write(&planted, b"this tenant").unwrap();
             Ok(CommandResult::succeeded())
         })
@@ -277,8 +280,9 @@ mod tests {
     async fn the_device_a_dump_read_from_is_the_one_the_caller_named() {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
-        let planted = staging.join(DATA_DIRECTORY).join("notes.txt");
+        let planted = staging.join("upper").join("notes.txt");
         let (commands, log) = mocks::commands_answering(move |_| {
+            std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
             std::fs::write(&planted, b"tenant data").unwrap();
             Ok(CommandResult::succeeded())
         });
@@ -289,8 +293,12 @@ mod tests {
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0][0], "debugfs");
         assert_eq!(asked[0].last().unwrap(), "/dev/nbd63");
-        assert!(asked[0][2].starts_with("rdump / "));
-        assert!(asked[0][2].ends_with(&staging.join(DATA_DIRECTORY).display().to_string()));
+        assert!(asked[0][2].starts_with("rdump /upper "), "{}", asked[0][2]);
+        assert!(asked[0][2].ends_with(&staging.display().to_string()));
+        assert_eq!(
+            std::fs::read(staging.join(DATA_DIRECTORY).join("notes.txt")).unwrap(),
+            b"tenant data"
+        );
     }
 
     #[test]

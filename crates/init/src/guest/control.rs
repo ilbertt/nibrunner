@@ -34,7 +34,7 @@ fn answer(connection: OwnedFd) {
     if wire.read_line(&mut request).is_err() || request.trim() != FREEZE_REQUEST {
         return;
     }
-    if let Err(error) = freeze(paths::DATA_DIR) {
+    if let Err(error) = freeze(paths::VOLUME_MOUNT) {
         log(&format!("the filesystem would not freeze: {error}"));
         let _ = wire.get_mut().write_all(b"REFUSED\n");
         return;
@@ -89,7 +89,7 @@ pub(crate) fn freeze(mount_point: &str) -> std::io::Result<()> {
 }
 
 pub(crate) fn thaw_quietly() {
-    let _ = ioctl(paths::DATA_DIR, FITHAW);
+    let _ = ioctl(paths::VOLUME_MOUNT, FITHAW);
 }
 
 const FIFREEZE: libc::c_ulong = 0xC0045877;

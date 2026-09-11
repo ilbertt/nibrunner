@@ -35,12 +35,14 @@ docker export "$container" | tar -x -C "$work/rootfs"
 docker rm "$container" >/dev/null
 
 # The guest mounts these, and its root is ro while ensure_directory is a bare mkdir that only
-# tolerates EEXIST, so every target has to be in the image already.
-for directory in dev proc sys run tmp mnt mnt/artifact app app/data run/config; do
+# tolerates EEXIST, so every target has to be in the image already — one per layer a document
+# may name, which is protocol::MAX_LAYERS.
+for directory in dev proc sys run tmp mnt mnt/base mnt/volume mnt/root run/config \
+                 mnt/layers/0 mnt/layers/1 mnt/layers/2 mnt/layers/3 \
+                 mnt/layers/4 mnt/layers/5 mnt/layers/6 mnt/layers/7; do
     mkdir -p "$work/rootfs/$directory"
 done
 chmod 1777 "$work/rootfs/tmp"
-chown 65534:65534 "$work/rootfs/app/data"
 
 install -m 0755 "$init" "$work/rootfs/init"
 find "$work/rootfs" -exec touch -h -d "@$epoch" {} +

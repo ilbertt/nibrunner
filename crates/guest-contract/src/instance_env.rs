@@ -1,5 +1,6 @@
 use protocol::{
-    AppHostname, AppHostnameKind, Hostname, HttpPort, RestartPolicy, TenantArguments, TenantEnvironment,
+    AppHostname, AppHostnameKind, GuestPath, Hostname, HttpPort, RestartPolicy, TenantArguments,
+    TenantEnvironment,
 };
 
 pub const INSTANCE_ENV_FILENAME: &str = "instance.env";
@@ -16,6 +17,8 @@ pub struct InstanceEnvContent<'a> {
     /// How many layer drives follow the three every guest has.
     pub layers: usize,
     pub hostnames: &'a [AppHostname],
+    pub program: &'a GuestPath,
+    pub working_directory: &'a GuestPath,
     pub args: &'a TenantArguments,
     pub environment: &'a TenantEnvironment,
     pub restart_policy: &'a RestartPolicy,
@@ -50,6 +53,8 @@ pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, U
     let mut lines = vec![
         format!("{RUNTIME_PREFIX}HTTP_PORT={}", content.http_port),
         format!("{RUNTIME_PREFIX}LAYERS={}", content.layers),
+        format!("{RUNTIME_PREFIX}PROGRAM={}", content.program),
+        format!("{RUNTIME_PREFIX}CWD={}", content.working_directory),
     ];
     if let Some(hostname) = platform_hostname(content.hostnames) {
         lines.push(format!("{RUNTIME_PREFIX}HOSTNAME={hostname}"));
@@ -113,6 +118,8 @@ pub const CONFIG_MAX_BYTES: usize = 128 * 1024;
 pub struct InstanceConfig {
     pub http_port: u32,
     pub layers: usize,
+    pub program: String,
+    pub working_directory: String,
     pub hostname: Option<String>,
     pub max_restarts: u32,
     pub initial_backoff_ms: u32,
@@ -173,12 +180,7 @@ fn expand(key: &str, value: &str, runtime: &[(String, String)]) -> Result<String
 }
 
 pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError> {
-    // Where the volume is mounted is this end's to know, so the host never writes it and a
-    // reference to it would otherwise resolve against nothing.
-    let mut runtime: Vec<(String, String)> = vec![(
-        format!("{RUNTIME_PREFIX}DATA_DIR"),
-        crate::paths::DATA_DIR.to_string(),
-    )];
+    let mut runtime: Vec<(String, String)> = Vec::new();
     let mut tenant: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
         if line.is_empty() {
@@ -251,6 +253,8 @@ pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError
     Ok(InstanceConfig {
         http_port: number("NIBRUN_HTTP_PORT")?,
         layers: number("NIBRUN_LAYERS")? as usize,
+        program: required("NIBRUN_PROGRAM")?.clone(),
+        working_directory: required("NIBRUN_CWD")?.clone(),
         hostname: named("NIBRUN_HOSTNAME").cloned(),
         max_restarts: number("NIBRUN_MAX_RESTARTS")?,
         initial_backoff_ms: number("NIBRUN_INITIAL_BACKOFF_MS")?,
@@ -273,7 +277,6 @@ impl InstanceConfig {
         let mut owned = vec![
             ("NIBRUN_HTTP_PORT".to_string(), self.http_port.to_string()),
             ("PORT".to_string(), self.http_port.to_string()),
-            ("NIBRUN_DATA_DIR".to_string(), crate::paths::DATA_DIR.to_string()),
         ];
         if let Some(hostname) = &self.hostname {
             owned.push(("NIBRUN_HOSTNAME".to_string(), hostname.clone()));
@@ -333,6 +336,8 @@ mod tests {
             http_port: overrides.http_port,
             layers: 1,
             hostnames: &overrides.hostnames,
+            program: &GuestPath::parse("/app/server").unwrap(),
+            working_directory: &GuestPath::parse("/app").unwrap(),
             args: &args,
             environment: &overrides.environment,
             restart_policy: &DEFAULT_RESTART_POLICY,
@@ -350,6 +355,8 @@ mod tests {
         let expected = [
             "NIBRUN_HTTP_PORT=3000",
             "NIBRUN_LAYERS=1",
+            "NIBRUN_PROGRAM=/app/server",
+            "NIBRUN_CWD=/app",
             "NIBRUN_HOSTNAME=my-app.nibrun.app",
             "NIBRUN_MAX_RESTARTS=5",
             "NIBRUN_INITIAL_BACKOFF_MS=500",
@@ -492,6 +499,8 @@ mod both_ends {
             http_port: DEFAULT_HTTP_PORT,
             layers: 2,
             hostnames: &hostnames,
+            program: &GuestPath::parse("/app/server").unwrap(),
+            working_directory: &GuestPath::parse("/app").unwrap(),
             args: &args,
             environment: &environment,
             restart_policy: &DEFAULT_RESTART_POLICY,
@@ -504,6 +513,8 @@ mod both_ends {
         let config = parse_instance_env(&written(&[("TOKEN", "hunter2")], &["--verbose", "-p"])).unwrap();
         assert_eq!(config.http_port, u32::from(DEFAULT_HTTP_PORT.get()));
         assert_eq!(config.layers, 2);
+        assert_eq!(config.program, "/app/server");
+        assert_eq!(config.working_directory, "/app");
         assert_eq!(config.hostname.as_deref(), Some("my-app.nibrun.app"));
         assert_eq!(config.arguments, vec!["--verbose", "-p"]);
         assert_eq!(
@@ -596,6 +607,8 @@ mod both_ends {
         for key in [
             "NIBRUN_HTTP_PORT",
             "NIBRUN_LAYERS",
+            "NIBRUN_PROGRAM",
+            "NIBRUN_CWD",
             "NIBRUN_MAX_RESTARTS",
             "NIBRUN_BACKOFF_FACTOR",
             "NIBRUN_DNS",

@@ -25,8 +25,12 @@ fn instance_json() -> serde_json::Value {
         "config": {
             "httpPort": 3000,
             "ports": [{ "name": "ssh", "guestPort": 22 }],
-            "args": ["serve"],
-            "environment": { "DSN": "postgres://u:p@h/db", "PORT_HINT": "${NIBRUN_HTTP_PORT}" },
+            "command": {
+                "program": "/app/server",
+                "args": ["serve"],
+                "workingDirectory": "/app",
+                "environment": { "DSN": "postgres://u:p@h/db", "PORT_HINT": "${NIBRUN_HTTP_PORT}" }
+            },
             "resources": { "vcpuCount": 1, "memoryMib": 256 },
             "healthCheck": { "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
             "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
@@ -559,15 +563,27 @@ mod schema {
                 "/instances/0/config/httpPort",
                 serde_json::json!("3000"),
             ),
-            with(desired_json(), "/instances/0/config/args", sixty_five),
+            with(desired_json(), "/instances/0/config/command/args", sixty_five),
+            without(desired_json(), "/instances/0/config/command/program"),
             with(
                 desired_json(),
-                "/instances/0/config/environment",
+                "/instances/0/config/command/program",
+                serde_json::json!("app/server"),
+            ),
+            without(desired_json(), "/instances/0/config/command/workingDirectory"),
+            with(
+                desired_json(),
+                "/instances/0/config/command/workingDirectory",
+                serde_json::json!("/app/"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/command/environment",
                 serde_json::json!({ "1A": "x" }),
             ),
             with(
                 desired_json(),
-                "/instances/0/config/environment",
+                "/instances/0/config/command/environment",
                 serde_json::json!({ "__proto__": "x" }),
             ),
             with(
@@ -630,7 +646,7 @@ mod schema {
         let validator = validator(crate::schema::desired_state());
         let document = with(
             desired_json(),
-            "/instances/0/config/environment",
+            "/instances/0/config/command/environment",
             serde_json::json!({ "URL": "${NIBRUN_NOPE}" }),
         );
         assert!(serde_json::from_value::<HostDesiredState>(document.clone()).is_err());

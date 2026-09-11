@@ -69,8 +69,7 @@ first, or drop `hostnames` to run an app that nothing outside needs to reach.
       ],
       "config": {
         "httpPort": 3000,
-        "args": [],
-        "environment": {},
+        "command": { "program": "/app/server", "args": [], "workingDirectory": "/app", "environment": {} },
         "resources": { "vcpuCount": 1, "memoryMib": 256 },
         "healthCheck": { "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
         "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
@@ -87,20 +86,32 @@ first, or drop `hostnames` to run an app that nothing outside needs to reach.
 `on-request` brings it up for the first deploy and lets it sleep between visitors, `stopped` takes
 it down and leaves the app reachable enough to say so.
 
-### Layers
+### Layers, and what runs in them
 
-`layers` is the root filesystem the microVM boots into, bottom first, each one an object in the
-store named by its digest and a `kind` saying what the object is. An `executable` is one
-program, which the host packs into an image at `destinationPath` and runs the way it has always
-run one; a `filesystem` is an image already — a squashfs or ext4 — attached as it was uploaded,
-and the host reads nothing else about it: what is in it, and what runs in it, are the uploader's
-to decide.
+The root a microVM's program sees is a stack, bottom to top:
 
-A layer is fetched once per host and cached by digest, so ten apps on the same base hold it
-once, and a base uploaded once serves every document that names it.
+```
+the volume        writable, and the only thing backed up
+layers[n-1]
+…                 the document's layers, in the order it lists them
+layers[0]
+Debian            the guest image nibrunner ships, always at the bottom
+```
 
-Until the guest stacks them, a document names exactly one layer, an `executable`, and it runs
-as it always has. A guest given more says so and stops.
+Each layer is an object in the store named by its digest and a `kind` saying what the object is.
+An `executable` is one program, which the host packs into an image at `destinationPath`; a
+`filesystem` is an image already — a squashfs or ext4 — attached as it was uploaded. A layer is
+fetched once per host and cached by digest, so ten apps on the same base hold it once.
+
+The volume is not mounted anywhere in particular: it is the writable top of the whole root, so
+every write anywhere lands on it and persists, and nothing else does. An export is the volume's
+contents and the environment — never what a layer already holds.
+
+`command` is what the guest's init runs in that root once it is stacked: `program` with `args`,
+in `workingDirectory`, with `environment`, as uid 65534. The working directory is made if no
+layer holds it, given to that uid, and is where the program's persistent state lives — it is the
+one place under the root the program can write besides `/tmp`. The program cannot reach the
+guest's init, the volume's own bookkeeping, or the host: it is 65534 in a root it cannot leave.
 
 ### A port beside the HTTP one
 
