@@ -47,7 +47,7 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
         http_port: desired.config.http_port,
         ports: record_ports(desired, slot),
         guest_ipv4: slot.guest_ipv4.clone(),
-        artifact_digest: desired.artifact.digest.clone(),
+        layer_digests: desired.layers.iter().map(|layer| layer.digest.clone()).collect(),
         health_check: desired.config.health_check.clone(),
         resources: desired.config.resources,
         readiness: desired.activation().ready_when,
@@ -246,7 +246,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         return;
     }
 
-    let booted = match host.payloads.prepare(&desired.artifact).await {
+    let booted = match host.payloads.prepare(&desired.layers).await {
         Err(error) => Err(error.message()),
         Ok(payload) => {
             let data_device_path = match host.volumes.attach(&desired.volume_id, &desired.app_id).await {
@@ -483,23 +483,24 @@ async fn settle(
     host.state.signal_report();
 }
 
-pub fn artifacts_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredArtifact> {
+pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
     let mut seen = std::collections::BTreeSet::new();
     plan.instances
         .iter()
         .filter_map(|action| match action {
-            InstancePlan::Start { desired } | InstancePlan::Replace { desired } => Some(&desired.artifact),
+            InstancePlan::Start { desired } | InstancePlan::Replace { desired } => Some(&desired.layers),
             _ => None,
         })
-        .filter(|artifact| seen.insert(artifact.digest.clone()))
+        .flatten()
+        .filter(|layer| seen.insert((layer.digest.clone(), layer.path.clone())))
         .cloned()
         .collect()
 }
 
-pub async fn prefetch_artifacts(host: &Host, plan: &ReconcilePlan) {
-    for artifact in artifacts_to_start(plan) {
-        if let Err(error) = host.payloads.prepare(&artifact).await {
-            tracing::warn!(digest = %artifact.digest, error = %error.message(), "artifact prefetch failed");
+pub async fn prefetch_layers(host: &Host, plan: &ReconcilePlan) {
+    for layer in layers_to_start(plan) {
+        if let Err(error) = host.payloads.prepare(std::slice::from_ref(&layer)).await {
+            tracing::warn!(digest = %layer.digest, error = %error.message(), "layer prefetch failed");
         }
     }
 }
@@ -510,17 +511,17 @@ mod tests {
     use crate::test_support::*;
 
     #[test]
-    fn one_image_is_fetched_per_digest_however_many_apps_deploy_it() {
-        let same = artifact(|_| {});
+    fn one_image_is_fetched_per_layer_however_many_apps_deploy_it() {
+        let same = layer(|_| {});
         let plan = ReconcilePlan {
             instances: vec![
                 InstancePlan::Start {
-                    desired: desired_instance(|_| {}),
+                    desired: desired_instance(|instance| instance.layers = vec![base_layer(), same.clone()]),
                 },
                 InstancePlan::Replace {
                     desired: desired_instance(|instance| {
                         instance.app_id = AppId::parse("app-2").unwrap();
-                        instance.artifact = same.clone();
+                        instance.layers = vec![base_layer(), same.clone()];
                     }),
                 },
                 InstancePlan::Stop {
@@ -533,10 +534,21 @@ mod tests {
             ],
             ..Default::default()
         };
-        let wanted = artifacts_to_start(&plan);
-        assert_eq!(wanted.len(), 1);
-        assert_eq!(wanted[0].digest, same.digest);
-        assert!(artifacts_to_start(&ReconcilePlan {
+        let wanted = layers_to_start(&plan);
+        assert_eq!(wanted, vec![base_layer(), same.clone()]);
+        let elsewhere = layer(|layer| layer.path = Some(protocol::GuestPath::parse("/bin/server").unwrap()));
+        let same_bytes_twice = layers_to_start(&ReconcilePlan {
+            instances: vec![InstancePlan::Start {
+                desired: desired_instance(|instance| instance.layers = vec![same.clone(), elsewhere.clone()]),
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            same_bytes_twice,
+            vec![same, elsewhere],
+            "one digest at two paths is two images"
+        );
+        assert!(layers_to_start(&ReconcilePlan {
             instances: vec![InstancePlan::Sleep {
                 desired: desired_instance(|_| {})
             }],
@@ -631,10 +643,7 @@ mod tests {
     }
 
     fn cached_image(host: &crate::host::Host) -> std::path::PathBuf {
-        crate::adapters::vm::artifacts::artifact_image_path(
-            &host.config.artifact_cache_dir(),
-            &artifact(|_| {}).digest,
-        )
+        crate::adapters::vm::layers::layer_image_path(&host.config.artifact_cache_dir(), &layer(|_| {}))
     }
 
     fn refuse_artifacts(host: &mut TestHost, reason: &str) {
@@ -642,7 +651,7 @@ mod tests {
         let refusing = mocks::artifacts_refusing(crate::ports::ArtifactError::Transfer(reason.to_string()));
         Arc::get_mut(&mut host.host)
             .expect("nothing else holds this host yet")
-            .payloads = crate::adapters::vm::artifacts::ExecutablePayload::new(refusing, cache_dir);
+            .payloads = crate::adapters::vm::layers::LayerImages::new(refusing, cache_dir);
     }
 
     fn on_request() -> DesiredInstance {
@@ -826,7 +835,7 @@ mod tests {
     async fn the_image_of_everything_the_plan_starts_is_in_the_cache_before_any_of_it_boots() {
         let host = test_host().await;
 
-        prefetch_artifacts(
+        prefetch_layers(
             &host,
             &ReconcilePlan {
                 instances: vec![InstancePlan::Start {
@@ -845,7 +854,7 @@ mod tests {
         let mut host = test_host().await;
         refuse_artifacts(&mut host, "the object store is down");
 
-        prefetch_artifacts(
+        prefetch_layers(
             &host,
             &ReconcilePlan {
                 instances: vec![InstancePlan::Start {

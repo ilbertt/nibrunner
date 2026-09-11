@@ -1,6 +1,13 @@
-pub const ARTIFACT_DEVICE: &str = "/dev/vdb";
-pub const CONFIG_DEVICE: &str = "/dev/vdc";
-pub const DATA_DEVICE: &str = "/dev/vdd";
+pub const CONFIG_DEVICE: &str = "/dev/vdb";
+pub const DATA_DEVICE: &str = "/dev/vdc";
+
+// vda, vdb and vdc are the three every guest has; the layers are the drives after them.
+const FIRST_LAYER_DEVICE_INDEX: u8 = 3;
+
+pub fn layer_device(index: usize) -> String {
+    let letter = (b'a' + FIRST_LAYER_DEVICE_INDEX + index as u8) as char;
+    format!("/dev/vd{letter}")
+}
 
 pub const ARTIFACT_MOUNT: &str = "/mnt/artifact";
 pub const TENANT_BINARY: &str = "/mnt/artifact/server";

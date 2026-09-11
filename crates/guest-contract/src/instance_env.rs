@@ -13,6 +13,8 @@ const DNS_SERVERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
 #[derive(Debug, Clone)]
 pub struct InstanceEnvContent<'a> {
     pub http_port: HttpPort,
+    /// How many layer drives follow the three every guest has.
+    pub layers: usize,
     pub hostnames: &'a [AppHostname],
     pub args: &'a TenantArguments,
     pub environment: &'a TenantEnvironment,
@@ -45,7 +47,10 @@ fn js_number(value: f64) -> String {
 }
 
 pub fn render_instance_env(content: &InstanceEnvContent<'_>) -> Result<String, UnrepresentableEnvironment> {
-    let mut lines = vec![format!("{RUNTIME_PREFIX}HTTP_PORT={}", content.http_port)];
+    let mut lines = vec![
+        format!("{RUNTIME_PREFIX}HTTP_PORT={}", content.http_port),
+        format!("{RUNTIME_PREFIX}LAYERS={}", content.layers),
+    ];
     if let Some(hostname) = platform_hostname(content.hostnames) {
         lines.push(format!("{RUNTIME_PREFIX}HOSTNAME={hostname}"));
     }
@@ -107,6 +112,7 @@ pub const CONFIG_MAX_BYTES: usize = 128 * 1024;
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstanceConfig {
     pub http_port: u32,
+    pub layers: usize,
     pub hostname: Option<String>,
     pub max_restarts: u32,
     pub initial_backoff_ms: u32,
@@ -244,6 +250,7 @@ pub fn parse_instance_env(text: &str) -> Result<InstanceConfig, InstanceEnvError
 
     Ok(InstanceConfig {
         http_port: number("NIBRUN_HTTP_PORT")?,
+        layers: number("NIBRUN_LAYERS")? as usize,
         hostname: named("NIBRUN_HOSTNAME").cloned(),
         max_restarts: number("NIBRUN_MAX_RESTARTS")?,
         initial_backoff_ms: number("NIBRUN_INITIAL_BACKOFF_MS")?,
@@ -324,6 +331,7 @@ mod tests {
         let args = TenantArguments::try_from(overrides.args).unwrap();
         render_instance_env(&InstanceEnvContent {
             http_port: overrides.http_port,
+            layers: 1,
             hostnames: &overrides.hostnames,
             args: &args,
             environment: &overrides.environment,
@@ -341,6 +349,7 @@ mod tests {
         let lines: Vec<&str> = rendered.lines().filter(|line| !line.is_empty()).collect();
         let expected = [
             "NIBRUN_HTTP_PORT=3000",
+            "NIBRUN_LAYERS=1",
             "NIBRUN_HOSTNAME=my-app.nibrun.app",
             "NIBRUN_MAX_RESTARTS=5",
             "NIBRUN_INITIAL_BACKOFF_MS=500",
@@ -481,6 +490,7 @@ mod both_ends {
         }];
         render_instance_env(&InstanceEnvContent {
             http_port: DEFAULT_HTTP_PORT,
+            layers: 2,
             hostnames: &hostnames,
             args: &args,
             environment: &environment,
@@ -493,6 +503,7 @@ mod both_ends {
     fn what_the_host_writes_is_what_the_guest_reads() {
         let config = parse_instance_env(&written(&[("TOKEN", "hunter2")], &["--verbose", "-p"])).unwrap();
         assert_eq!(config.http_port, u32::from(DEFAULT_HTTP_PORT.get()));
+        assert_eq!(config.layers, 2);
         assert_eq!(config.hostname.as_deref(), Some("my-app.nibrun.app"));
         assert_eq!(config.arguments, vec!["--verbose", "-p"]);
         assert_eq!(
@@ -584,6 +595,7 @@ mod both_ends {
         let whole = written(&[], &[]);
         for key in [
             "NIBRUN_HTTP_PORT",
+            "NIBRUN_LAYERS",
             "NIBRUN_MAX_RESTARTS",
             "NIBRUN_BACKOFF_FACTOR",
             "NIBRUN_DNS",

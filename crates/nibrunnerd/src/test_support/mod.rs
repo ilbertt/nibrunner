@@ -16,6 +16,9 @@ pub const OBSERVED_AT: &str = "2026-08-03T10:00:00.000Z";
 pub const HOST_STORAGE_PREFIX: &str = "filesystems/host-1";
 pub const ARTIFACT_BYTES: &[u8] = b"#!/usr/bin/env fake-binary\n";
 pub const ARTIFACT_DIGEST: &str = "8eacc8ea7f20363ff4eeb79bc80edf5926effee2e7e13207a198ce341a0326f5";
+/// Enough of a squashfs to be taken for one: the magic, then nothing.
+pub const BASE_LAYER_BYTES: &[u8] = b"hsqs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+pub const BASE_LAYER_DIGEST: &str = "82672a6e9a29fa566bd340d9ef2d06e62146d64bd4dac03e92cdd162341c6d56";
 
 /// A zerofs host laid out the way `nibrunnerd install` lays one out, so a test that is about one
 /// field says only that field.
@@ -83,15 +86,26 @@ pub fn tenant_environment(values: &[(&str, &str)]) -> TenantEnvironment {
         .collect()
 }
 
-pub fn artifact(edit: impl FnOnce(&mut DesiredArtifact)) -> DesiredArtifact {
-    let mut value = DesiredArtifact {
+/// The app's own layer: one binary the host packs at `/server`.
+pub fn layer(edit: impl FnOnce(&mut DesiredLayer)) -> DesiredLayer {
+    let mut value = DesiredLayer {
         digest: Sha256Digest::parse(ARTIFACT_DIGEST).unwrap(),
         size_bytes: ARTIFACT_BYTES.len() as u64,
         object_key: ObjectKey::parse("artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45").unwrap(),
-        filename: Filename::parse("pocketbase").unwrap(),
+        path: Some(GuestPath::parse("/server").unwrap()),
     };
     edit(&mut value);
     value
+}
+
+/// A layer uploaded whole, attached as it is.
+pub fn base_layer() -> DesiredLayer {
+    DesiredLayer {
+        digest: Sha256Digest::parse(BASE_LAYER_DIGEST).unwrap(),
+        size_bytes: BASE_LAYER_BYTES.len() as u64,
+        object_key: ObjectKey::parse("layers/debian-apphost").unwrap(),
+        path: None,
+    }
 }
 
 pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
@@ -116,7 +130,7 @@ pub fn desired_instance(edit: impl FnOnce(&mut DesiredInstance)) -> DesiredInsta
         desired_state: DesiredInstanceState::Running,
         idle_timeout_ms: None,
         activation: None,
-        artifact: artifact(|_| {}),
+        layers: vec![layer(|_| {})],
         config: app_config(|_| {}),
         hostnames: vec![],
     };
@@ -151,7 +165,6 @@ pub fn desired_export(edit: impl FnOnce(&mut DesiredExport)) -> DesiredExport {
         app_id: app_id(),
         volume_id: volume_id(),
         object_key: ObjectKey::parse("exports/app-1/exp-1.tar.gz").unwrap(),
-        artifact: artifact(|_| {}),
         environment: Some(TenantEnvironment::default()),
         desired_state: DesiredPresence::Present,
     };
@@ -166,7 +179,7 @@ pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedIn
         state: InstanceState::Running,
         host_port: None,
         guest_ipv4: None,
-        artifact_digest: None,
+        layer_digests: Vec::new(),
         restart_count: 0,
         started_at: None,
         last_healthy_at: None,
@@ -249,7 +262,7 @@ pub fn record_fields() -> RecordFields {
         host_port: slot.host_port,
         http_port: DEFAULT_HTTP_PORT,
         guest_ipv4: slot.guest_ipv4,
-        artifact_digest: Sha256Digest::parse(ARTIFACT_DIGEST).unwrap(),
+        layer_digests: vec![Sha256Digest::parse(ARTIFACT_DIGEST).unwrap()],
         health_check: DEFAULT_HEALTH_CHECK,
         resources: DEFAULT_INSTANCE_RESOURCES,
         readiness: protocol::ReadinessPolicy::PortAnswers,
@@ -356,10 +369,7 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
             commands.clone(),
         )),
         artifacts: artifacts.clone(),
-        payloads: crate::adapters::vm::artifacts::ExecutablePayload::new(
-            artifacts,
-            config.artifact_cache_dir(),
-        ),
+        payloads: crate::adapters::vm::layers::LayerImages::new(artifacts, config.artifact_cache_dir()),
         repositories,
         exports,
         checkpoint_servers: None,

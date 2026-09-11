@@ -56,7 +56,7 @@ fn boot() -> Result<InstanceConfig, String> {
     mounts::pseudo_filesystems().map_err(|error| error.to_string())?;
     let config = read_instance_config()?;
     write_resolv_conf(&config)?;
-    prepare_tenant_filesystem()?;
+    prepare_tenant_filesystem(&config)?;
     Ok(config)
 }
 
@@ -95,8 +95,16 @@ fn write_resolv_conf(config: &InstanceConfig) -> Result<(), String> {
         .map_err(|error| format!("{} could not be written: {error}", paths::RESOLV_CONF))
 }
 
-fn prepare_tenant_filesystem() -> Result<(), String> {
-    mounts::artifact(paths::ARTIFACT_DEVICE, paths::ARTIFACT_MOUNT).map_err(|error| error.to_string())?;
+fn prepare_tenant_filesystem(config: &InstanceConfig) -> Result<(), String> {
+    // Stacking the layers under the volume is the guest half of this change; until it lands,
+    // this guest runs what it always has, and says so rather than mounting the wrong drive.
+    if config.layers != 1 {
+        return Err(format!(
+            "this guest mounts one layer as the artifact drive, and {} were given",
+            config.layers
+        ));
+    }
+    mounts::artifact(&paths::layer_device(0), paths::ARTIFACT_MOUNT).map_err(|error| error.to_string())?;
     let details = std::fs::metadata(paths::TENANT_BINARY)
         .map_err(|_| format!("the artifact drive holds no binary at {}", paths::TENANT_BINARY))?;
     if !details.is_file() {

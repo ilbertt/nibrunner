@@ -334,24 +334,6 @@ validated_string!(
     { "minLength": 1, "maxLength": MAX_OBJECT_KEY_LENGTH }
 );
 
-const MAX_FILENAME_LENGTH: usize = 127;
-pub const FILENAME_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$";
-
-fn is_filename(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first.is_ascii_alphanumeric())
-        && value.len() <= MAX_FILENAME_LENGTH
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
-validated_string!(
-    Filename,
-    "filename",
-    "one path segment",
-    is_filename,
-    { "pattern": FILENAME_PATTERN }
-);
-
 pub const MAX_STATE_MESSAGE_LENGTH: usize = 512;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

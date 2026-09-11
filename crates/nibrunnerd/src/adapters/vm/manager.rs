@@ -91,15 +91,15 @@ impl VmManager {
 
         let rendered = render_instance_env(&InstanceEnvContent {
             http_port: request.desired.config.http_port,
+            layers: request.payload.layer_image_paths.len(),
             hostnames: &request.desired.hostnames,
             args: &request.desired.config.args,
             environment: &request.desired.config.environment,
             restart_policy: &request.desired.config.restart_policy,
         })
         .map_err(|error| VmError::Host(error.to_string()))?;
-        let config_image =
-            crate::adapters::vm::artifacts::build_instance_config_image(&working_dir, &rendered)
-                .map_err(|error| VmError::Host(error.message()))?;
+        let config_image = crate::adapters::vm::layers::build_instance_config_image(&working_dir, &rendered)
+            .map_err(|error| VmError::Host(error.message()))?;
 
         let config = render_firecracker_config(
             request.desired.config.resources,
@@ -114,9 +114,14 @@ impl VmManager {
                     .join(GUEST_ROOTFS_FILENAME)
                     .display()
                     .to_string(),
-                artifact_image_path: request.payload.artifact_image_path.display().to_string(),
                 instance_config_image_path: config_image.display().to_string(),
                 data_device_path: request.data_device_path.clone(),
+                layer_image_paths: request
+                    .payload
+                    .layer_image_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
             },
             &VmNetwork {
                 tap_name: slot.tap_name.clone(),
@@ -477,7 +482,7 @@ mod tests {
             desired,
             data_device_path: "/dev/loop0".into(),
             payload: crate::ports::PreparedPayload {
-                artifact_image_path: PathBuf::from("/cache/abc/artifact.squashfs"),
+                layer_image_paths: vec![PathBuf::from("/cache/abc/packed-0123456789abcdef.squashfs")],
             },
         }
     }
@@ -501,13 +506,13 @@ mod tests {
         assert!(drives[1]["path_on_host"]
             .as_str()
             .unwrap()
-            .ends_with("artifact.squashfs"));
-        assert!(drives[2]["path_on_host"]
+            .ends_with("config.squashfs"));
+        assert_eq!(drives[2]["path_on_host"], "/dev/loop0");
+        assert_eq!(drives[2]["cache_type"], "Writeback");
+        assert!(drives[3]["path_on_host"]
             .as_str()
             .unwrap()
-            .ends_with("config.squashfs"));
-        assert_eq!(drives[3]["path_on_host"], "/dev/loop0");
-        assert_eq!(drives[3]["cache_type"], "Writeback");
+            .ends_with("packed-0123456789abcdef.squashfs"));
         assert!(config["boot-source"]["boot_args"]
             .as_str()
             .unwrap()
@@ -521,15 +526,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_config_drive_carries_the_port_the_tenant_was_told_to_listen_on() {
+    async fn the_config_drive_carries_the_port_the_tenant_was_told_to_listen_on_and_how_many_layers_follow() {
         let fixture = fixture();
-        fixture
-            .manager
-            .stage(&boot_request(desired_instance(|_| {})))
-            .await
-            .unwrap();
+        let mut request = boot_request(desired_instance(|_| {}));
+        request
+            .payload
+            .layer_image_paths
+            .push(PathBuf::from("/cache/def/layer.img"));
+        fixture.manager.stage(&request).await.unwrap();
         let written = config_drive(&fixture.manager.working_dir_for(&app_id()));
         assert!(written.contains("NIBRUN_HTTP_PORT=3000"));
+        assert!(written.contains("NIBRUN_LAYERS=2\n"), "{written}");
     }
 
     #[tokio::test]

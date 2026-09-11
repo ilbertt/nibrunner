@@ -7,12 +7,19 @@ fn instance_json() -> serde_json::Value {
         "volumeId": "vol-1",
         "desiredState": "on-request",
         "idleTimeoutMs": 300000,
-        "artifact": {
-            "digest": "a".repeat(64),
-            "sizeBytes": 27,
-            "objectKey": "artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45",
-            "filename": "pocketbase"
-        },
+        "layers": [
+            {
+                "digest": "b".repeat(64),
+                "sizeBytes": 31457280,
+                "objectKey": "layers/debian-apphost"
+            },
+            {
+                "digest": "a".repeat(64),
+                "sizeBytes": 27,
+                "objectKey": "artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45",
+                "path": "/server"
+            }
+        ],
         "config": {
             "httpPort": 3000,
             "ports": [{ "name": "ssh", "guestPort": 22 }],
@@ -107,9 +114,6 @@ fn identifiers_timestamps_and_addresses_are_checked() {
     assert!(Ipv4Address::parse("01.2.3.4").is_err());
     assert!(Hostname::parse("app-1.apps.example.com").is_ok());
     assert!(Hostname::parse("localhost").is_err());
-    assert!(Filename::parse("pocketbase").is_ok());
-    assert!(Filename::parse("../x").is_err());
-    assert!(Filename::parse("-flag").is_err());
     assert!(Sha256Digest::parse("A".repeat(64)).is_err());
     assert!(HttpPort::try_from(0u32).is_err());
     assert!(HttpPort::try_from(70000u32).is_err());
@@ -127,7 +131,7 @@ fn a_report_omits_what_it_does_not_know() {
         state: InstanceState::Running,
         host_port: HostPort::new(21000).ok(),
         guest_ipv4: None,
-        artifact_digest: None,
+        layer_digests: Vec::new(),
         restart_count: 0,
         started_at: None,
         last_healthy_at: None,
@@ -404,7 +408,10 @@ mod schema {
                 state: InstanceState::Running,
                 host_port: HostPort::new(21000).ok(),
                 guest_ipv4: Some(Ipv4Address::parse("10.201.0.2").unwrap()),
-                artifact_digest: Some(Sha256Digest::parse("a".repeat(64)).unwrap()),
+                layer_digests: vec![
+                    Sha256Digest::parse("b".repeat(64)).unwrap(),
+                    Sha256Digest::parse("a".repeat(64)).unwrap(),
+                ],
                 restart_count: 1,
                 started_at: Some(now.clone()),
                 last_healthy_at: Some(now.clone()),
@@ -481,6 +488,8 @@ mod schema {
     fn the_desired_state_schema_refuses_what_the_parser_refuses() {
         let validator = validator(crate::schema::desired_state());
         let sixty_five = serde_json::Value::Array(vec![serde_json::json!("x"); MAX_ARGUMENTS + 1]);
+        let nine_layers =
+            serde_json::Value::Array(vec![instance_json()["layers"][0].clone(); MAX_LAYERS + 1]);
         let broken = [
             with(desired_json(), "/hostId", serde_json::json!("has.a.dot")),
             with(
@@ -500,19 +509,31 @@ mod schema {
             ),
             with(
                 desired_json(),
-                "/instances/0/artifact/digest",
+                "/instances/0/layers/0/digest",
                 serde_json::json!("A".repeat(64)),
             ),
             with(
                 desired_json(),
-                "/instances/0/artifact/filename",
-                serde_json::json!("../x"),
+                "/instances/0/layers/1/path",
+                serde_json::json!("server"),
             ),
             with(
                 desired_json(),
-                "/instances/0/artifact/objectKey",
+                "/instances/0/layers/1/path",
+                serde_json::json!("/a/../server"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/layers/1/path",
+                serde_json::json!("/"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/layers/0/objectKey",
                 serde_json::json!(""),
             ),
+            with(desired_json(), "/instances/0/layers", serde_json::json!([])),
+            with(desired_json(), "/instances/0/layers", nine_layers),
             with(
                 desired_json(),
                 "/instances/0/config/httpPort",
@@ -565,7 +586,7 @@ mod schema {
                 "/volumes/0/desiredState",
                 serde_json::json!("gone"),
             ),
-            without(desired_json(), "/instances/0/artifact"),
+            without(desired_json(), "/instances/0/layers"),
             without(desired_json(), "/volumes/0/appId"),
             with(
                 desired_json(),

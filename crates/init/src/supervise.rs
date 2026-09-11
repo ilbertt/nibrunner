@@ -31,6 +31,7 @@ mod tests {
     fn config(edit: impl FnOnce(&mut InstanceConfig)) -> InstanceConfig {
         let mut value = InstanceConfig {
             http_port: 3000,
+            layers: 1,
             hostname: None,
             max_restarts: 5,
             initial_backoff_ms: 500,

@@ -134,34 +134,6 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
     },
-    "DesiredArtifact": {
-      "description": "The binary an instance runs, fetched from the object store the host's `artifacts.store_url`\nnames and checked against `digest` before anything boots from it.",
-      "type": "object",
-      "properties": {
-        "digest": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "filename": {
-          "description": "The name the binary carries inside an export bundle.",
-          "$ref": "#/$defs/Filename"
-        },
-        "objectKey": {
-          "description": "Where the binary lives in the store.",
-          "$ref": "#/$defs/ObjectKey"
-        },
-        "sizeBytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "digest",
-        "sizeBytes",
-        "objectKey",
-        "filename"
-      ]
-    },
     "DesiredCheckpoint": {
       "type": "object",
       "properties": {
@@ -186,9 +158,6 @@
       "properties": {
         "appId": {
           "$ref": "#/$defs/AppId"
-        },
-        "artifact": {
-          "$ref": "#/$defs/DesiredArtifact"
         },
         "desiredState": {
           "$ref": "#/$defs/DesiredPresence"
@@ -218,7 +187,6 @@
         "appId",
         "volumeId",
         "objectKey",
-        "artifact",
         "desiredState"
       ]
     },
@@ -239,14 +207,11 @@
         "appId": {
           "$ref": "#/$defs/AppId"
         },
-        "artifact": {
-          "$ref": "#/$defs/DesiredArtifact"
-        },
         "config": {
           "$ref": "#/$defs/AppConfig"
         },
         "deploymentId": {
-          "description": "A running instance is replaced when this changes, and only then: a new artifact or config\nunder the same `deploymentId` is not picked up.",
+          "description": "A running instance is replaced when this changes, and only then: a new layer or config\nunder the same `deploymentId` is not picked up.",
           "$ref": "#/$defs/DeploymentId"
         },
         "desiredState": {
@@ -269,6 +234,28 @@
               "type": "null"
             }
           ]
+        },
+        "layers": {
+          "description": "The root filesystem, bottom layer first. At least one; at most `MAX_LAYERS`.",
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/DesiredLayer"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "not": {
+                      "const": "/"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 8,
+          "minItems": 1
         },
         "volumeId": {
           "description": "One of this document's `volumes`, mounted in the guest as the app's data directory.",
@@ -298,7 +285,7 @@
         "deploymentId",
         "volumeId",
         "desiredState",
-        "artifact",
+        "layers",
         "config",
         "hostnames"
       ],
@@ -338,6 +325,40 @@
         }
       ]
     },
+    "DesiredLayer": {
+      "description": "One read-only layer of the root filesystem an instance boots into, fetched from the object\nstore the host's `artifacts.store_url` names and checked against `digest` before anything\nboots from it. Layers stack in the order the document lists them, first at the bottom, and\nthe app's volume is stacked writable over all of them.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "objectKey": {
+          "description": "Where the object lives in the store.",
+          "$ref": "#/$defs/ObjectKey"
+        },
+        "path": {
+          "description": "Absent, the object is the layer: a squashfs or ext4 image, attached as it is. Present, the\nobject is one file and this is where it sits in a layer the host packs around it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GuestPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "digest",
+        "sizeBytes",
+        "objectKey"
+      ]
+    },
     "DesiredPresence": {
       "type": "string",
       "enum": [
@@ -375,10 +396,11 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
     },
-    "Filename": {
-      "description": "one path segment",
+    "GuestPath": {
+      "description": "a guest path",
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$"
+      "maxLength": 4096,
+      "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
     },
     "GuestPort": {
       "type": "integer",

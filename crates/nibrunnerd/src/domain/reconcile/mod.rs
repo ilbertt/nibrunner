@@ -124,7 +124,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
         .await;
     sync_desired(host, desired).await;
 
-    let prefetch = instances::prefetch_artifacts(host, &plan);
+    let prefetch = instances::prefetch_layers(host, &plan);
     let stops = apply_stops(host, &plan);
     tokio::join!(prefetch, stops);
 

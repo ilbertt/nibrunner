@@ -35,18 +35,24 @@ pub enum DesiredPresence {
     Absent,
 }
 
-/// The binary an instance runs, fetched from the object store the host's `artifacts.store_url`
-/// names and checked against `digest` before anything boots from it.
+pub const MAX_LAYERS: usize = 8;
+
+/// One read-only layer of the root filesystem an instance boots into, fetched from the object
+/// store the host's `artifacts.store_url` names and checked against `digest` before anything
+/// boots from it. Layers stack in the order the document lists them, first at the bottom, and
+/// the app's volume is stacked writable over all of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct DesiredArtifact {
+pub struct DesiredLayer {
     pub digest: Sha256Digest,
     pub size_bytes: u64,
-    /// Where the binary lives in the store.
+    /// Where the object lives in the store.
     pub object_key: ObjectKey,
-    /// The name the binary carries inside an export bundle.
-    pub filename: Filename,
+    /// Absent, the object is the layer: a squashfs or ext4 image, attached as it is. Present, the
+    /// object is one file and this is where it sits in a layer the host packs around it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<GuestPath>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,7 +61,7 @@ pub struct DesiredArtifact {
 #[serde(rename_all = "camelCase", try_from = "DesiredInstanceFields")]
 pub struct DesiredInstance {
     pub app_id: AppId,
-    /// A running instance is replaced when this changes, and only then: a new artifact or config
+    /// A running instance is replaced when this changes, and only then: a new layer or config
     /// under the same `deploymentId` is not picked up.
     pub deployment_id: DeploymentId,
     /// One of this document's `volumes`, mounted in the guest as the app's data directory.
@@ -69,7 +75,8 @@ pub struct DesiredInstance {
     /// than `never` is refused on anything but an `on-request` instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<ActivationPolicy>,
-    pub artifact: DesiredArtifact,
+    /// The root filesystem, bottom layer first. At least one; at most `MAX_LAYERS`.
+    pub layers: Vec<DesiredLayer>,
     pub config: AppConfig,
     /// What the HTTP proxy routes to this app's `httpPort`. Empty for an app nothing outside needs
     /// to reach by name.
@@ -106,7 +113,7 @@ struct DesiredInstanceFields {
     idle_timeout_ms: Option<IdleTimeoutMs>,
     #[serde(default)]
     activation: Option<ActivationPolicy>,
-    artifact: DesiredArtifact,
+    layers: Vec<DesiredLayer>,
     config: AppConfig,
     hostnames: Vec<AppHostname>,
 }
@@ -129,6 +136,25 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
                 ));
             }
         }
+        if fields.layers.is_empty() {
+            return Err(InvalidValue::new_public(
+                "an instance names at least one layer, because a microVM boots from something",
+            ));
+        }
+        if fields.layers.len() > MAX_LAYERS {
+            return Err(InvalidValue::new_public(&format!(
+                "an instance names at most {MAX_LAYERS} layers, because a microVM has that many drives to give them"
+            )));
+        }
+        if fields
+            .layers
+            .iter()
+            .any(|layer| layer.path.as_ref().is_some_and(|path| path.as_str() == "/"))
+        {
+            return Err(InvalidValue::new_public(
+                "a layer's path names the file the object becomes, and / is not a file",
+            ));
+        }
         Ok(Self {
             app_id: fields.app_id,
             deployment_id: fields.deployment_id,
@@ -136,7 +162,7 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
             desired_state: fields.desired_state,
             idle_timeout_ms: fields.idle_timeout_ms,
             activation: fields.activation,
-            artifact: fields.artifact,
+            layers: fields.layers,
             config: fields.config,
             hostnames: fields.hostnames,
         })
@@ -166,6 +192,23 @@ fn desired_instance_rules(schema: &mut schemars::Schema) {
             }
         }),
     );
+    if let Some(layers) = schema
+        .get_mut("properties")
+        .and_then(|properties| properties.get_mut("layers"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        layers.insert("minItems".into(), serde_json::json!(1));
+        layers.insert("maxItems".into(), serde_json::json!(MAX_LAYERS));
+        layers.insert(
+            "items".into(),
+            serde_json::json!({
+                "allOf": [
+                    layers.get("items").cloned().unwrap_or(serde_json::json!({})),
+                    { "properties": { "path": { "not": { "const": "/" } } } }
+                ]
+            }),
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,7 +238,6 @@ pub struct DesiredExport {
     pub app_id: AppId,
     pub volume_id: VolumeId,
     pub object_key: ObjectKey,
-    pub artifact: DesiredArtifact,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<TenantEnvironment>,
     pub desired_state: DesiredPresence,
@@ -227,8 +269,9 @@ pub struct ReportedInstance {
     pub host_port: Option<HostPort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_ipv4: Option<Ipv4Address>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_digest: Option<Sha256Digest>,
+    /// The layers the running microVM was booted from, bottom first. Empty until one has been.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layer_digests: Vec<Sha256Digest>,
     pub restart_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Timestamp>,

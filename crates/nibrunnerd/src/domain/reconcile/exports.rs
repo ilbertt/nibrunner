@@ -137,14 +137,7 @@ async fn write_inner(
     }
     read?;
 
-    let bundle = write_bundle(
-        &host.artifacts,
-        &desired.artifact,
-        desired.environment.as_ref(),
-        staging_dir,
-    )
-    .await
-    .map_err(|error| error.message())?;
+    let bundle = write_bundle(desired.environment.as_ref(), staging_dir).map_err(|error| error.message())?;
     host.exports
         .upload(&bundle.path, &desired.object_key)
         .await
@@ -248,7 +241,6 @@ mod tests {
             app_id: app_id(),
             volume_id: VolumeId::parse("vol-1").unwrap(),
             object_key: ObjectKey::parse("exports/exp-1/bundle.tar.gz").unwrap(),
-            artifact: artifact(|_| {}),
             environment: None,
             desired_state: state,
         }

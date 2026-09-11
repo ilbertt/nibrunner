@@ -58,12 +58,14 @@ first, or drop `hostnames` to run an app that nothing outside needs to reach.
       "deploymentId": "dep-1",
       "volumeId": "vol-1",
       "desiredState": "on-request",
-      "artifact": {
-        "digest": "<sha256 of the binary, lowercase hex>",
-        "sizeBytes": 12345678,
-        "objectKey": "my-server",
-        "filename": "my-server"
-      },
+      "layers": [
+        {
+          "digest": "<sha256 of the binary, lowercase hex>",
+          "sizeBytes": 12345678,
+          "objectKey": "my-server",
+          "path": "/server"
+        }
+      ],
       "config": {
         "httpPort": 3000,
         "args": [],
@@ -83,6 +85,20 @@ first, or drop `hostnames` to run an app that nothing outside needs to reach.
 `desiredState` says whether an instance should be up: `running` keeps the microVM up,
 `on-request` brings it up for the first deploy and lets it sleep between visitors, `stopped` takes
 it down and leaves the app reachable enough to say so.
+
+### Layers
+
+`layers` is the root filesystem the microVM boots into, bottom first, each one an object in the
+store named by its digest. A layer with a `path` is one file the host packs into an image at that
+path; one without is an image already — a squashfs or ext4 — attached as it was uploaded. The
+host reads nothing else about a layer: what is in it, and what `/sbin/init` in the result is,
+are the uploader's to decide.
+
+A layer is fetched once per host and cached by digest, so ten apps on the same base hold it
+once, and a base uploaded once serves every document that names it.
+
+Until the guest stacks them, a document names exactly one layer, and it is what the guest has
+always run: a binary packed at `/server`. A guest given more says so and stops.
 
 ### A port beside the HTTP one
 
