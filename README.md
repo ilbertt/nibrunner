@@ -61,6 +61,7 @@ first, or drop `hostnames` to run an app that nothing outside needs to reach.
       "layers": [
         {
           "kind": "executable",
+          "destinationPath": "/app/server",
           "digest": "<sha256 of the binary, lowercase hex>",
           "sizeBytes": 12345678,
           "objectKey": "my-server"
@@ -90,9 +91,10 @@ it down and leaves the app reachable enough to say so.
 
 `layers` is the root filesystem the microVM boots into, bottom first, each one an object in the
 store named by its digest and a `kind` saying what the object is. An `executable` is one
-program, which the host packs into an image the way it has always run one; a `filesystem` is
-an image already — a squashfs or ext4 — attached as it was uploaded, and the host reads nothing
-else about it: what is in it, and what runs in it, are the uploader's to decide.
+program, which the host packs into an image at `destinationPath` and runs the way it has always
+run one; a `filesystem` is an image already — a squashfs or ext4 — attached as it was uploaded,
+and the host reads nothing else about it: what is in it, and what runs in it, are the uploader's
+to decide.
 
 A layer is fetched once per host and cached by digest, so ten apps on the same base hold it
 once, and a base uploaded once serves every document that names it.

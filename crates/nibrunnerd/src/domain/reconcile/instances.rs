@@ -540,7 +540,9 @@ mod tests {
         };
         let wanted = layers_to_start(&plan);
         assert_eq!(wanted, vec![base_layer(), same.clone()]);
-        let whole = protocol::DesiredLayer::Filesystem(same.object().clone());
+        let whole = protocol::DesiredLayer::Filesystem {
+            object: same.object().clone(),
+        };
         let same_bytes_twice = layers_to_start(&ReconcilePlan {
             instances: vec![InstancePlan::Start {
                 desired: desired_instance(|instance| instance.layers = vec![whole.clone(), same.clone()]),

@@ -239,7 +239,23 @@
           "description": "The root filesystem, bottom layer first. At least one; at most `MAX_LAYERS`.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/DesiredLayer"
+            "allOf": [
+              {
+                "$ref": "#/$defs/DesiredLayer"
+              },
+              {
+                "properties": {
+                  "destinationPath": {
+                    "not": {
+                      "enum": [
+                        "/",
+                        "/sbin/init"
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
           },
           "maxItems": 8,
           "minItems": 1
@@ -319,28 +335,60 @@
           "description": "A squashfs or ext4 image, attached as it was uploaded.",
           "type": "object",
           "properties": {
+            "digest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
             "kind": {
               "type": "string",
               "const": "filesystem"
+            },
+            "objectKey": {
+              "description": "Where the object lives in the store.",
+              "$ref": "#/$defs/ObjectKey"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
             }
           },
-          "$ref": "#/$defs/LayerObject",
           "required": [
-            "kind"
+            "kind",
+            "digest",
+            "sizeBytes",
+            "objectKey"
           ]
         },
         {
-          "description": "One program, packed into an image the way this host has always run one: as `/server`,\nstarted by the guest's own init with the app's arguments and environment.",
+          "description": "One program, packed into an image at `destinationPath` and run the way this host has\nalways run one: by the guest's own init, with the app's arguments and environment.",
           "type": "object",
           "properties": {
+            "destinationPath": {
+              "$ref": "#/$defs/GuestPath"
+            },
+            "digest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
             "kind": {
               "type": "string",
               "const": "executable"
+            },
+            "objectKey": {
+              "description": "Where the object lives in the store.",
+              "$ref": "#/$defs/ObjectKey"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
             }
           },
-          "$ref": "#/$defs/LayerObject",
           "required": [
-            "kind"
+            "kind",
+            "digest",
+            "sizeBytes",
+            "objectKey",
+            "destinationPath"
           ]
         }
       ]
@@ -381,6 +429,12 @@
       "description": "an identifier",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "GuestPath": {
+      "description": "a guest path",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
     },
     "GuestPort": {
       "type": "integer",
@@ -485,29 +539,6 @@
       "required": [
         "vcpuCount",
         "memoryMib"
-      ]
-    },
-    "LayerObject": {
-      "description": "An object in the store the host's `artifacts.store_url` names, checked against `digest`\nbefore anything boots from it.",
-      "type": "object",
-      "properties": {
-        "digest": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "objectKey": {
-          "description": "Where the object lives in the store.",
-          "$ref": "#/$defs/ObjectKey"
-        },
-        "sizeBytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "digest",
-        "sizeBytes",
-        "objectKey"
       ]
     },
     "MaxLifetimeMs": {

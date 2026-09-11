@@ -16,6 +16,7 @@ fn instance_json() -> serde_json::Value {
             },
             {
                 "kind": "executable",
+                "destinationPath": "/app/server",
                 "digest": "a".repeat(64),
                 "sizeBytes": 27,
                 "objectKey": "artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45"
@@ -525,6 +526,22 @@ mod schema {
             ),
             without(desired_json(), "/instances/0/layers/0/kind"),
             without(desired_json(), "/instances/0/layers/1/digest"),
+            without(desired_json(), "/instances/0/layers/1/destinationPath"),
+            with(
+                desired_json(),
+                "/instances/0/layers/1/destinationPath",
+                serde_json::json!("app/server"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/layers/1/destinationPath",
+                serde_json::json!("/"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/layers/1/destinationPath",
+                serde_json::json!("/sbin/init"),
+            ),
             with(desired_json(), "/instances/0/layers", serde_json::json!([])),
             with(desired_json(), "/instances/0/layers", nine_layers),
             with(

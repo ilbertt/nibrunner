@@ -94,16 +94,21 @@ pub fn layer(edit: impl FnOnce(&mut LayerObject)) -> DesiredLayer {
         object_key: ObjectKey::parse("artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45").unwrap(),
     };
     edit(&mut object);
-    DesiredLayer::Executable(object)
+    DesiredLayer::Executable {
+        object,
+        destination_path: GuestPath::parse("/app/server").unwrap(),
+    }
 }
 
 /// A layer uploaded whole, attached as it is.
 pub fn base_layer() -> DesiredLayer {
-    DesiredLayer::Filesystem(LayerObject {
-        digest: Sha256Digest::parse(BASE_LAYER_DIGEST).unwrap(),
-        size_bytes: BASE_LAYER_BYTES.len() as u64,
-        object_key: ObjectKey::parse("layers/debian").unwrap(),
-    })
+    DesiredLayer::Filesystem {
+        object: LayerObject {
+            digest: Sha256Digest::parse(BASE_LAYER_DIGEST).unwrap(),
+            size_bytes: BASE_LAYER_BYTES.len() as u64,
+            object_key: ObjectKey::parse("layers/debian").unwrap(),
+        },
+    }
 }
 
 pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {

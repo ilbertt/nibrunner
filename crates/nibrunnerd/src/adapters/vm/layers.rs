@@ -10,7 +10,6 @@ use crate::json_store::make_directory;
 use crate::ports::{ArtifactError, ArtifactStore, ArtifactStoreExt, PayloadBuilder, PreparedPayload};
 
 pub const VERBATIM_IMAGE_FILENAME: &str = "layer.img";
-pub const EXECUTABLE_IMAGE_FILENAME: &str = "executable.squashfs";
 
 pub const BINARY_MODE: u16 = 0o755;
 const CONFIG_MODE: u16 = 0o600;
@@ -70,13 +69,21 @@ pub fn is_filesystem_image(bytes: &[u8]) -> bool {
             .is_some_and(|magic| magic == EXT4_MAGIC)
 }
 
+fn short_hash(text: &str) -> String {
+    use sha2::Digest;
+    hex::encode(&sha2::Sha256::digest(text.as_bytes())[..8])
+}
+
 /// Where a layer's image lives in the cache. The object is the same bytes whether it is attached
-/// whole or packed as a program, so the kind is part of the name.
+/// whole or packed as a program at some path, so the kind and the path are part of the name.
 pub fn layer_image_path(cache_dir: &Path, layer: &DesiredLayer) -> PathBuf {
     let directory = cache_dir.join(layer.object().digest.as_str());
     match layer {
-        DesiredLayer::Filesystem(_) => directory.join(VERBATIM_IMAGE_FILENAME),
-        DesiredLayer::Executable(_) => directory.join(EXECUTABLE_IMAGE_FILENAME),
+        DesiredLayer::Filesystem { .. } => directory.join(VERBATIM_IMAGE_FILENAME),
+        DesiredLayer::Executable { destination_path, .. } => directory.join(format!(
+            "executable-{}.squashfs",
+            short_hash(destination_path.as_str())
+        )),
     }
 }
 
@@ -121,14 +128,14 @@ pub async fn ensure_layer_image(
 
     let bytes = store.read_verified(layer.object()).await?;
     let image = match layer {
-        DesiredLayer::Filesystem(_) if is_filesystem_image(&bytes) => bytes,
-        DesiredLayer::Filesystem(object) => {
+        DesiredLayer::Filesystem { .. } if is_filesystem_image(&bytes) => bytes,
+        DesiredLayer::Filesystem { object } => {
             return Err(ArtifactError::NotAnImage {
                 digest: object.digest.clone(),
             })
         }
-        DesiredLayer::Executable(_) => {
-            pack(&[(guest_contract::paths::EXECUTABLE_PATH, &bytes, BINARY_MODE)])?
+        DesiredLayer::Executable { destination_path, .. } => {
+            pack(&[(destination_path.as_str(), &bytes, BINARY_MODE)])?
         }
     };
 
@@ -148,7 +155,7 @@ pub async fn ensure_layer_image(
         digest = %layer.object().digest,
         size_bytes = layer.object().size_bytes,
         image_bytes = image.len(),
-        packed = matches!(layer, DesiredLayer::Executable(_)),
+        packed = matches!(layer, DesiredLayer::Executable { .. }),
         "layer image ready"
     );
     Ok(image_path)
@@ -178,14 +185,23 @@ mod tests {
     use super::*;
     use crate::test_support::mocks;
     use crate::test_support::{base_layer, layer, ARTIFACT_BYTES, ARTIFACT_DIGEST, BASE_LAYER_BYTES};
-    use protocol::Sha256Digest;
+    use protocol::{GuestPath, Sha256Digest};
 
     fn artifact_bytes() -> Vec<u8> {
         ARTIFACT_BYTES.to_vec()
     }
 
     fn as_filesystem(layer: DesiredLayer) -> DesiredLayer {
-        DesiredLayer::Filesystem(layer.object().clone())
+        DesiredLayer::Filesystem {
+            object: layer.object().clone(),
+        }
+    }
+
+    fn placed_at(layer: DesiredLayer, path: &str) -> DesiredLayer {
+        DesiredLayer::Executable {
+            object: layer.object().clone(),
+            destination_path: GuestPath::parse(path).unwrap(),
+        }
     }
 
     fn store(bytes: Vec<u8>) -> Arc<dyn ArtifactStore> {
@@ -217,7 +233,7 @@ mod tests {
         assert!(image_path.starts_with(directory.path().join(ARTIFACT_DIGEST)));
         let image = std::fs::read(&image_path).unwrap();
         assert_eq!(&image[..4], b"hsqs");
-        assert_eq!(read_back(&image, "/server"), artifact_bytes());
+        assert_eq!(read_back(&image, "/app/server"), artifact_bytes());
 
         let before = std::fs::metadata(&image_path).unwrap().len();
         let again = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
@@ -229,10 +245,16 @@ mod tests {
         assert_eq!(siblings, 1);
     }
 
-    #[test]
-    fn a_deep_path_has_the_directories_above_it_made() {
-        let image = pack(&[("/usr/local/bin/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
+    #[tokio::test]
+    async fn the_program_sits_where_the_document_put_it_and_the_directories_above_are_made() {
+        let directory = tempfile::tempdir().unwrap();
+        let deep = placed_at(layer(|_| {}), "/usr/local/bin/server");
+        let image_path = ensure_layer_image(&store(artifact_bytes()), directory.path(), &deep)
+            .await
+            .unwrap();
+        let image = std::fs::read(&image_path).unwrap();
         assert_eq!(read_back(&image, "/usr/local/bin/server"), artifact_bytes());
+        assert_ne!(image_path, layer_image_path(directory.path(), &layer(|_| {})));
     }
 
     #[tokio::test]
@@ -305,8 +327,8 @@ mod tests {
 
     #[test]
     fn packing_the_same_bytes_twice_is_byte_identical() {
-        let once = pack(&[("/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
-        let twice = pack(&[("/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
+        let once = pack(&[("/app/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
+        let twice = pack(&[("/app/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
         assert_eq!(once, twice);
     }
 
@@ -355,19 +377,20 @@ mod tests {
     }
 
     #[test]
-    fn every_digest_and_kind_gets_its_own_place_in_the_cache() {
+    fn every_digest_kind_and_path_gets_its_own_place_in_the_cache() {
         let cache = Path::new("/var/lib/nibrunner/artifacts");
         let packed = layer_image_path(cache, &layer(|_| {}));
+        let elsewhere = layer_image_path(cache, &placed_at(layer(|_| {}), "/bin/server"));
         let whole = layer_image_path(cache, &as_filesystem(layer(|_| {})));
         let other = layer_image_path(
             cache,
             &layer(|object| object.digest = Sha256Digest::parse("0".repeat(64)).unwrap()),
         );
-        assert_ne!(packed, whole);
-        assert_ne!(packed, other);
+        for (a, b) in [(&packed, &elsewhere), (&packed, &whole), (&packed, &other)] {
+            assert_ne!(a, b);
+        }
         assert_eq!(packed.parent(), whole.parent(), "one digest, one directory");
         assert!(packed.starts_with(cache));
-        assert!(packed.ends_with(EXECUTABLE_IMAGE_FILENAME));
         assert!(whole.ends_with(VERBATIM_IMAGE_FILENAME));
     }
 
@@ -383,7 +406,7 @@ mod tests {
     #[test]
     fn the_binary_a_guest_runs_is_packed_executable_and_the_config_it_reads_is_not() {
         let image = pack(&[
-            ("/server", &artifact_bytes(), BINARY_MODE),
+            ("/app/server", &artifact_bytes(), BINARY_MODE),
             ("/instance.env", b"NIBRUN_HTTP_PORT=3000\n", CONFIG_MODE),
         ])
         .unwrap();
@@ -395,7 +418,7 @@ mod tests {
                 .map(|node| node.header.permissions)
                 .unwrap_or_else(|| panic!("the image holds nothing at {path}"))
         };
-        assert_eq!(mode("/server"), BINARY_MODE);
+        assert_eq!(mode("/app/server"), BINARY_MODE);
         assert_eq!(mode("/instance.env"), CONFIG_MODE);
     }
 

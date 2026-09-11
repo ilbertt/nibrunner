@@ -54,22 +54,32 @@ pub struct LayerObject {
 /// all of them. The kind says what the object is, and so what the host does with it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum DesiredLayer {
     /// A squashfs or ext4 image, attached as it was uploaded.
-    Filesystem(LayerObject),
-    /// One program, packed into an image the way this host has always run one: as `/server`,
-    /// started by the guest's own init with the app's arguments and environment.
-    Executable(LayerObject),
+    Filesystem {
+        #[serde(flatten)]
+        object: LayerObject,
+    },
+    /// One program, packed into an image at `destinationPath` and run the way this host has
+    /// always run one: by the guest's own init, with the app's arguments and environment.
+    Executable {
+        #[serde(flatten)]
+        object: LayerObject,
+        destination_path: GuestPath,
+    },
 }
 
 impl DesiredLayer {
     pub fn object(&self) -> &LayerObject {
         match self {
-            DesiredLayer::Filesystem(object) | DesiredLayer::Executable(object) => object,
+            DesiredLayer::Filesystem { object } | DesiredLayer::Executable { object, .. } => object,
         }
     }
 }
+
+/// Where the guest's init lives in a stacked root, and so the one place a program cannot be put.
+pub const INIT_PATH: &str = "/sbin/init";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -162,6 +172,21 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
                 "an instance names at most {MAX_LAYERS} layers, because a microVM has that many drives to give them"
             )));
         }
+        for layer in &fields.layers {
+            let DesiredLayer::Executable { destination_path, .. } = layer else {
+                continue;
+            };
+            if destination_path.as_str() == "/" {
+                return Err(InvalidValue::new_public(
+                    "an executable's destinationPath names the file the program becomes, and / is not a file",
+                ));
+            }
+            if destination_path.as_str() == INIT_PATH {
+                return Err(InvalidValue::new_public(&format!(
+                    "an executable cannot be put at {INIT_PATH}, which is what starts it"
+                )));
+            }
+        }
         Ok(Self {
             app_id: fields.app_id,
             deployment_id: fields.deployment_id,
@@ -206,6 +231,15 @@ fn desired_instance_rules(schema: &mut schemars::Schema) {
     {
         layers.insert("minItems".into(), serde_json::json!(1));
         layers.insert("maxItems".into(), serde_json::json!(MAX_LAYERS));
+        layers.insert(
+            "items".into(),
+            serde_json::json!({
+                "allOf": [
+                    layers.get("items").cloned().unwrap_or(serde_json::json!({})),
+                    { "properties": { "destinationPath": { "not": { "enum": ["/", INIT_PATH] } } } }
+                ]
+            }),
+        );
     }
 }
 
