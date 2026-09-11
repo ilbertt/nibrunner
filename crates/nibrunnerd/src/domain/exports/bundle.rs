@@ -2,31 +2,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use protocol::{DesiredArtifact, TenantEnvironment};
+use protocol::TenantEnvironment;
 
-use crate::ports::{ArtifactStore, ArtifactStoreExt, CommandRequest, CommandRunner, CommandRunnerExt};
+use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
 const STAGING_MODE: u32 = 0o700;
 const DATA_DIRECTORY: &str = "data";
 const ENV_FILENAME: &str = ".env";
 const ENV_MODE: u32 = 0o600;
 const BUNDLE_NAME: &str = "bundle.tar.gz";
-const BINARY_MODE: u32 = 0o755;
-
-const MKFS_ROOT_ENTRIES: [&str; 1] = ["lost+found"];
 
 const DUMP_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
-    #[error("reading {device_path} produced no files")]
-    EmptyDump { device_path: String },
-    #[error("{filename} is a path rather than a filename")]
-    UnsafeFilename { filename: String },
+    #[error("{device_path} holds no {upper} directory, so no guest has ever written to it")]
+    NeverWritten {
+        device_path: String,
+        upper: &'static str,
+    },
     #[error("the bundle could not be written: {0}")]
     Unwritable(String),
-    #[error("{0}")]
-    Artifact(String),
 }
 
 impl BundleError {
@@ -46,14 +42,16 @@ pub async fn dump_volume(
             return Err(unwritable(error));
         }
     }
-    let destination = staging_dir.join(DATA_DIRECTORY);
-    crate::json_store::make_directory(&destination, STAGING_MODE)
+    crate::json_store::make_directory(staging_dir, STAGING_MODE)
         .map_err(|error| BundleError::Unwritable(error.to_string()))?;
 
+    // Only the overlay's upper is the tenant's: everything else on the volume is overlayfs's
+    // own scratch. `rdump` lands a directory under its name, so it is renamed once it is here.
+    let upper = guest_contract::paths::VOLUME_UPPER_NAME;
     let mut request = CommandRequest::new(&[
         "debugfs",
         "-R",
-        &format!("rdump / {}", destination.display()),
+        &format!("rdump /{upper} {}", staging_dir.display()),
         device_path,
     ]);
     request.timeout = DUMP_TIMEOUT;
@@ -62,30 +60,14 @@ pub async fn dump_volume(
         .await
         .map_err(|error| BundleError::Unwritable(error.message()))?;
 
-    let listed = std::fs::read_dir(&destination).map_err(unwritable)?.count();
-    if listed == 0 {
-        return Err(BundleError::EmptyDump {
+    let dumped = staging_dir.join(upper);
+    if !dumped.is_dir() {
+        return Err(BundleError::NeverWritten {
             device_path: device_path.to_string(),
+            upper,
         });
     }
-    for entry in MKFS_ROOT_ENTRIES {
-        let _ = std::fs::remove_dir_all(destination.join(entry));
-    }
-    Ok(())
-}
-
-pub fn bundle_binary_name(artifact: &DesiredArtifact) -> Result<&str, BundleError> {
-    let filename = artifact.filename.as_str();
-    let unsafe_name = || BundleError::UnsafeFilename {
-        filename: filename.to_string(),
-    };
-    if filename.is_empty() || filename.starts_with('.') || filename.starts_with('-') {
-        return Err(unsafe_name());
-    }
-    if Path::new(filename).file_name().and_then(|name| name.to_str()) != Some(filename) {
-        return Err(unsafe_name());
-    }
-    Ok(filename)
+    std::fs::rename(&dumped, staging_dir.join(DATA_DIRECTORY)).map_err(unwritable)
 }
 
 pub fn render_dotenv(environment: &TenantEnvironment) -> String {
@@ -118,21 +100,10 @@ pub struct WrittenBundle {
     pub size_bytes: u64,
 }
 
-pub async fn write_bundle(
-    artifacts: &Arc<dyn ArtifactStore>,
-    artifact: &DesiredArtifact,
+pub fn write_bundle(
     environment: Option<&TenantEnvironment>,
     staging_dir: &Path,
 ) -> Result<WrittenBundle, BundleError> {
-    let binary_name = bundle_binary_name(artifact)?.to_string();
-    let bytes = artifacts
-        .read_verified(artifact)
-        .await
-        .map_err(|error| BundleError::Artifact(error.message()))?;
-
-    let binary_path = staging_dir.join(&binary_name);
-    write_file(&binary_path, &bytes, BINARY_MODE)?;
-
     if let Some(environment) = environment {
         write_file(
             &staging_dir.join(ENV_FILENAME),
@@ -142,7 +113,7 @@ pub async fn write_bundle(
     }
 
     let bundle_path = staging_dir.join(BUNDLE_NAME);
-    archive(&bundle_path, staging_dir, &binary_name, environment.is_some())?;
+    archive(&bundle_path, staging_dir, environment.is_some())?;
     let size_bytes = std::fs::metadata(&bundle_path)
         .map_err(|error| BundleError::Unwritable(error.to_string()))?
         .len();
@@ -152,21 +123,13 @@ pub async fn write_bundle(
     })
 }
 
-fn archive(
-    bundle_path: &Path,
-    staging_dir: &Path,
-    binary_name: &str,
-    with_environment: bool,
-) -> Result<(), BundleError> {
+fn archive(bundle_path: &Path, staging_dir: &Path, with_environment: bool) -> Result<(), BundleError> {
     let unwritable = |error: std::io::Error| BundleError::Unwritable(error.to_string());
     let file = std::fs::File::create(bundle_path).map_err(unwritable)?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
     builder
         .append_dir_all(DATA_DIRECTORY, staging_dir.join(DATA_DIRECTORY))
-        .map_err(unwritable)?;
-    builder
-        .append_path_with_name(staging_dir.join(binary_name), binary_name)
         .map_err(unwritable)?;
     if with_environment {
         builder
@@ -203,22 +166,7 @@ mod tests {
     use super::*;
     use crate::ports::CommandResult;
     use crate::test_support::mocks;
-    use crate::test_support::{artifact, tenant_environment, ARTIFACT_BYTES};
-
-    #[test]
-    fn a_filename_that_is_a_path_never_reaches_an_archive_somebody_extracts() {
-        assert_eq!(bundle_binary_name(&artifact(|_| {})).unwrap(), "pocketbase");
-        for bad in ["../server", "bin/server", ".hidden", "-rf", "", "."] {
-            let Ok(filename) = protocol::Filename::parse(bad) else {
-                continue;
-            };
-            let named = artifact(|artifact| artifact.filename = filename);
-            assert!(
-                bundle_binary_name(&named).is_err(),
-                "{bad} was accepted as a name inside a bundle"
-            );
-        }
-    }
+    use crate::test_support::tenant_environment;
 
     #[test]
     fn a_value_with_a_newline_in_it_stays_on_one_line() {
@@ -232,20 +180,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dump_that_produced_nothing_is_a_failure_however_debugfs_exited() {
+    async fn a_volume_no_guest_has_written_to_is_named_rather_than_exported_empty() {
         let root = tempfile::tempdir().unwrap();
         let commands: Arc<dyn CommandRunner> = mocks::commands_succeeding().0;
         let error = dump_volume(&commands, "/dev/nbd63", &root.path().join("staging"))
             .await
             .unwrap_err();
-        assert!(matches!(error, BundleError::EmptyDump { .. }), "{error}");
+        assert!(matches!(error, BundleError::NeverWritten { .. }), "{error}");
+        assert!(error.message().contains("upper"), "{error}");
     }
 
     #[tokio::test]
     async fn a_tenant_who_wrote_nothing_exports_an_empty_data_directory() {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
-        let planted = staging.join(DATA_DIRECTORY).join("lost+found");
+        let planted = staging.join("upper");
         let commands: Arc<dyn CommandRunner> = mocks::commands_answering(move |_| {
             std::fs::create_dir_all(&planted).unwrap();
             Ok(CommandResult::succeeded())
@@ -255,67 +204,33 @@ mod tests {
         dump_volume(&commands, "/dev/nbd63", &staging).await.unwrap();
         let data = staging.join(DATA_DIRECTORY);
         assert!(data.exists());
-        assert!(!data.join("lost+found").exists());
+        assert!(!staging.join("upper").exists());
         assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
     }
 
-    #[tokio::test]
-    async fn a_bundle_carries_the_data_the_binary_and_the_environment() {
+    #[test]
+    fn a_bundle_carries_the_data_and_the_environment_and_nothing_the_layers_already_hold() {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
         std::fs::create_dir_all(staging.join(DATA_DIRECTORY)).unwrap();
         std::fs::write(staging.join(DATA_DIRECTORY).join("notes.txt"), b"tenant data").unwrap();
-
-        let wanted = artifact(|_| {});
-        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES);
         let environment = tenant_environment(&[("TOKEN", "hunter2")]);
 
-        let written = write_bundle(&artifacts, &wanted, Some(&environment), &staging)
-            .await
-            .unwrap();
+        let written = write_bundle(Some(&environment), &staging).unwrap();
         assert!(written.size_bytes > 0);
-        assert_eq!(
-            names_in(&written.path),
-            vec![".env", "data/", "data/notes.txt", "pocketbase"]
-        );
+        assert_eq!(names_in(&written.path), vec![".env", "data/", "data/notes.txt"]);
     }
 
-    #[tokio::test]
-    async fn the_binary_in_a_bundle_is_executable() {
+    #[test]
+    fn an_app_whose_environment_is_unknown_gets_no_env_file_at_all() {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
         std::fs::create_dir_all(staging.join(DATA_DIRECTORY)).unwrap();
-        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES);
-        let written = write_bundle(&artifacts, &artifact(|_| {}), None, &staging)
-            .await
-            .unwrap();
-
-        let read = std::fs::File::open(&written.path).unwrap();
-        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(read));
-        let binary = archive
-            .entries()
-            .unwrap()
-            .map(Result::unwrap)
-            .find(|entry| entry.path().unwrap().display().to_string() == "pocketbase")
-            .expect("the bundle carries the binary");
-        assert_eq!(binary.header().mode().unwrap() & 0o777, BINARY_MODE);
-    }
-
-    #[tokio::test]
-    async fn an_app_whose_environment_is_unknown_gets_no_env_file_at_all() {
-        let root = tempfile::tempdir().unwrap();
-        let staging = root.path().join("staging");
-        std::fs::create_dir_all(staging.join(DATA_DIRECTORY)).unwrap();
-        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES);
-        let written = write_bundle(&artifacts, &artifact(|_| {}), None, &staging)
-            .await
-            .unwrap();
+        let written = write_bundle(None, &staging).unwrap();
         assert!(!names_in(&written.path).contains(&".env".to_string()));
 
         let empty = tenant_environment(&[]);
-        let with_file = write_bundle(&artifacts, &artifact(|_| {}), Some(&empty), &staging)
-            .await
-            .unwrap();
+        let with_file = write_bundle(Some(&empty), &staging).unwrap();
         assert!(names_in(&with_file.path).contains(&".env".to_string()));
     }
 
@@ -345,8 +260,9 @@ mod tests {
         std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
         std::fs::write(&leftover, b"an earlier tenant").unwrap();
 
-        let planted = staging.join(DATA_DIRECTORY).join("notes.txt");
+        let planted = staging.join("upper").join("notes.txt");
         let commands: Arc<dyn CommandRunner> = mocks::commands_answering(move |_| {
+            std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
             std::fs::write(&planted, b"this tenant").unwrap();
             Ok(CommandResult::succeeded())
         })
@@ -364,8 +280,9 @@ mod tests {
     async fn the_device_a_dump_read_from_is_the_one_the_caller_named() {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
-        let planted = staging.join(DATA_DIRECTORY).join("notes.txt");
+        let planted = staging.join("upper").join("notes.txt");
         let (commands, log) = mocks::commands_answering(move |_| {
+            std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
             std::fs::write(&planted, b"tenant data").unwrap();
             Ok(CommandResult::succeeded())
         });
@@ -376,43 +293,19 @@ mod tests {
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0][0], "debugfs");
         assert_eq!(asked[0].last().unwrap(), "/dev/nbd63");
-        assert!(asked[0][2].starts_with("rdump / "));
-        assert!(asked[0][2].ends_with(&staging.join(DATA_DIRECTORY).display().to_string()));
+        assert!(asked[0][2].starts_with("rdump /upper "), "{}", asked[0][2]);
+        assert!(asked[0][2].ends_with(&staging.display().to_string()));
+        assert_eq!(
+            std::fs::read(staging.join(DATA_DIRECTORY).join("notes.txt")).unwrap(),
+            b"tenant data"
+        );
     }
 
     #[test]
-    fn a_name_the_wire_already_accepted_is_never_turned_away_at_the_archive() {
-        for allowed in ["pocketbase", "1", "a.b", "server-v2_final.tar.gz", "x..y"] {
-            let filename = protocol::Filename::parse(allowed)
-                .unwrap_or_else(|_| panic!("{allowed} is a name the wire accepts"));
-            let named = artifact(|artifact| artifact.filename = filename);
-            assert_eq!(bundle_binary_name(&named).unwrap(), allowed);
-        }
-    }
-
-    #[tokio::test]
-    async fn an_artifact_that_is_not_what_it_claims_is_never_handed_to_a_tenant() {
+    fn a_bundle_that_cannot_be_written_is_a_failure_rather_than_an_empty_archive() {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
-        std::fs::create_dir_all(staging.join(DATA_DIRECTORY)).unwrap();
-        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(b"something else entirely".to_vec());
-
-        let Err(error) = write_bundle(&artifacts, &artifact(|_| {}), None, &staging).await else {
-            panic!("an artifact that is not what it claims was bundled anyway");
-        };
-        assert!(matches!(error, BundleError::Artifact(_)), "{error}");
-        assert!(error.message().contains("hashes to"), "{error}");
-        assert!(!staging.join(BUNDLE_NAME).exists());
-    }
-
-    #[tokio::test]
-    async fn a_bundle_that_cannot_be_written_is_a_failure_rather_than_an_empty_archive() {
-        let root = tempfile::tempdir().unwrap();
-        let staging = root.path().join("staging");
-        let artifacts: Arc<dyn ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES);
-        assert!(write_bundle(&artifacts, &artifact(|_| {}), None, &staging)
-            .await
-            .is_err());
+        assert!(write_bundle(None, &staging).is_err());
     }
 
     fn names_in(bundle: &Path) -> Vec<String> {

@@ -61,11 +61,8 @@
     "AppConfig": {
       "type": "object",
       "properties": {
-        "args": {
-          "$ref": "#/$defs/TenantArguments"
-        },
-        "environment": {
-          "$ref": "#/$defs/TenantEnvironment"
+        "command": {
+          "$ref": "#/$defs/Command"
         },
         "healthCheck": {
           "$ref": "#/$defs/HealthCheck"
@@ -90,8 +87,7 @@
       },
       "required": [
         "httpPort",
-        "args",
-        "environment",
+        "command",
         "resources",
         "healthCheck",
         "restartPolicy"
@@ -129,38 +125,34 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
     },
+    "Command": {
+      "description": "What the guest runs once its root is stacked, as uid 65534: `program` with `args`, in\n`workingDirectory`, with `environment`. The working directory is made if it is not there,\ngiven to that uid, and is where the program's persistent state lives, because everything\nunder the root persists on the volume and nowhere else is the program's to write.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "$ref": "#/$defs/TenantArguments"
+        },
+        "environment": {
+          "$ref": "#/$defs/TenantEnvironment"
+        },
+        "program": {
+          "$ref": "#/$defs/GuestPath"
+        },
+        "workingDirectory": {
+          "$ref": "#/$defs/GuestPath"
+        }
+      },
+      "required": [
+        "program",
+        "args",
+        "workingDirectory",
+        "environment"
+      ]
+    },
     "DeploymentId": {
       "description": "an identifier",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
-    },
-    "DesiredArtifact": {
-      "description": "The binary an instance runs, fetched from the object store the host's `artifacts.store_url`\nnames and checked against `digest` before anything boots from it.",
-      "type": "object",
-      "properties": {
-        "digest": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
-        "filename": {
-          "description": "The name the binary carries inside an export bundle.",
-          "$ref": "#/$defs/Filename"
-        },
-        "objectKey": {
-          "description": "Where the binary lives in the store.",
-          "$ref": "#/$defs/ObjectKey"
-        },
-        "sizeBytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "digest",
-        "sizeBytes",
-        "objectKey",
-        "filename"
-      ]
     },
     "DesiredCheckpoint": {
       "type": "object",
@@ -186,9 +178,6 @@
       "properties": {
         "appId": {
           "$ref": "#/$defs/AppId"
-        },
-        "artifact": {
-          "$ref": "#/$defs/DesiredArtifact"
         },
         "desiredState": {
           "$ref": "#/$defs/DesiredPresence"
@@ -218,7 +207,6 @@
         "appId",
         "volumeId",
         "objectKey",
-        "artifact",
         "desiredState"
       ]
     },
@@ -239,14 +227,11 @@
         "appId": {
           "$ref": "#/$defs/AppId"
         },
-        "artifact": {
-          "$ref": "#/$defs/DesiredArtifact"
-        },
         "config": {
           "$ref": "#/$defs/AppConfig"
         },
         "deploymentId": {
-          "description": "A running instance is replaced when this changes, and only then: a new artifact or config\nunder the same `deploymentId` is not picked up.",
+          "description": "A running instance is replaced when this changes, and only then: a new layer or config\nunder the same `deploymentId` is not picked up.",
           "$ref": "#/$defs/DeploymentId"
         },
         "desiredState": {
@@ -269,6 +254,15 @@
               "type": "null"
             }
           ]
+        },
+        "layers": {
+          "description": "The root filesystem, bottom layer first. At least one; at most `MAX_LAYERS`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DesiredLayer"
+          },
+          "maxItems": 8,
+          "minItems": 1
         },
         "volumeId": {
           "description": "One of this document's `volumes`, mounted in the guest as the app's data directory.",
@@ -298,7 +292,7 @@
         "deploymentId",
         "volumeId",
         "desiredState",
-        "artifact",
+        "layers",
         "config",
         "hostnames"
       ],
@@ -338,6 +332,71 @@
         }
       ]
     },
+    "DesiredLayer": {
+      "description": "One read-only layer of the root filesystem an instance boots into. Layers stack in the order\nthe document lists them, first at the bottom, and the app's volume is stacked writable over\nall of them. The kind says what the object is, and so what the host does with it.",
+      "oneOf": [
+        {
+          "description": "A squashfs or ext4 image, attached as it was uploaded.",
+          "type": "object",
+          "properties": {
+            "digest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "kind": {
+              "type": "string",
+              "const": "filesystem"
+            },
+            "objectKey": {
+              "description": "Where the object lives in the store.",
+              "$ref": "#/$defs/ObjectKey"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "digest",
+            "sizeBytes",
+            "objectKey"
+          ]
+        },
+        {
+          "description": "One program, packed into an image at `destinationPath` and run the way this host has\nalways run one: by the guest's own init, with the app's arguments and environment.",
+          "type": "object",
+          "properties": {
+            "destinationPath": {
+              "$ref": "#/$defs/ExecutablePath"
+            },
+            "digest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "kind": {
+              "type": "string",
+              "const": "executable"
+            },
+            "objectKey": {
+              "description": "Where the object lives in the store.",
+              "$ref": "#/$defs/ObjectKey"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "digest",
+            "sizeBytes",
+            "objectKey",
+            "destinationPath"
+          ]
+        }
+      ]
+    },
     "DesiredPresence": {
       "type": "string",
       "enum": [
@@ -370,15 +429,28 @@
         "desiredState"
       ]
     },
+    "ExecutablePath": {
+      "description": "an absolute path to a file other than /sbin/init",
+      "type": "string",
+      "maxLength": 4096,
+      "not": {
+        "enum": [
+          "/",
+          "/sbin/init"
+        ]
+      },
+      "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
+    },
     "ExportId": {
       "description": "an identifier",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
     },
-    "Filename": {
-      "description": "one path segment",
+    "GuestPath": {
+      "description": "a guest path",
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$"
+      "maxLength": 4096,
+      "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
     },
     "GuestPort": {
       "type": "integer",
@@ -642,7 +714,7 @@
       }
     },
     "TenantValue": {
-      "description": "Handed to the app as is, except that `${NAME}` and `$NAME` are filled in for NAME in NIBRUN_DATA_DIR, NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT; any other `$NIBRUN_` reference is refused.",
+      "description": "Handed to the app as is, except that `${NAME}` and `$NAME` are filled in for NAME in NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT; any other `$NIBRUN_` reference is refused.",
       "type": "string",
       "maxLength": 32768
     },

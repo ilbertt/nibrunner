@@ -1,7 +1,14 @@
 use protocol::{InstanceResources, Ipv4Address};
 use serde::{Deserialize, Serialize};
 
-pub const DRIVE_IDS: [&str; 4] = ["rootfs", "artifact", "config", "data"];
+/// The drives every guest has, in the order they are attached: the host's root, the config
+/// image, the app's volume. The layers follow, one drive each, so these three sit at the same
+/// device however many there are.
+pub const FIXED_DRIVE_IDS: [&str; 3] = ["rootfs", "config", "data"];
+
+pub fn layer_drive_id(index: usize) -> String {
+    format!("layer{index}")
+}
 
 const BASE_KERNEL_ARGS: &str = "console=ttyS0 quiet reboot=k panic=1 pci=off i8042.noaux i8042.nomux i8042.dumbkbd clocksource=kvm-clock root=/dev/vda ro init=/init";
 
@@ -96,9 +103,10 @@ pub struct FirecrackerConfig {
 pub struct VmPaths {
     pub kernel_path: String,
     pub rootfs_path: String,
-    pub artifact_image_path: String,
     pub instance_config_image_path: String,
     pub data_device_path: String,
+    /// Bottom layer first, as the document listed them.
+    pub layer_image_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,19 +139,27 @@ pub fn render_firecracker_config(
             kernel_image_path: paths.kernel_path.clone(),
             boot_args: render_kernel_args(network),
         },
-        drives: vec![
-            read_only_drive(DRIVE_IDS[0], &paths.rootfs_path, true),
-            read_only_drive(DRIVE_IDS[1], &paths.artifact_image_path, false),
-            read_only_drive(DRIVE_IDS[2], &paths.instance_config_image_path, false),
+        drives: [
+            read_only_drive(FIXED_DRIVE_IDS[0], &paths.rootfs_path, true),
+            read_only_drive(FIXED_DRIVE_IDS[1], &paths.instance_config_image_path, false),
             FirecrackerDrive {
-                drive_id: DRIVE_IDS[3].to_string(),
+                drive_id: FIXED_DRIVE_IDS[2].to_string(),
                 path_on_host: paths.data_device_path.clone(),
                 is_root_device: false,
                 is_read_only: false,
                 cache_type: CacheType::Writeback,
                 io_engine: IoEngine::Sync,
             },
-        ],
+        ]
+        .into_iter()
+        .chain(
+            paths
+                .layer_image_paths
+                .iter()
+                .enumerate()
+                .map(|(index, path)| read_only_drive(&layer_drive_id(index), path, false)),
+        )
+        .collect(),
         machine_config: MachineConfig {
             vcpu_count: resources.vcpu_count,
             mem_size_mib: resources.memory_mib,
@@ -180,9 +196,12 @@ mod tests {
         VmPaths {
             kernel_path: "/opt/nibrun/bin/guest-image/vmlinux".into(),
             rootfs_path: "/opt/nibrun/bin/guest-image/rootfs.ext4".into(),
-            artifact_image_path: "/var/lib/nibrun/artifacts/abc/artifact.squashfs".into(),
             instance_config_image_path: "/var/lib/nibrun/vm/inst-1/config.squashfs".into(),
             data_device_path: "/dev/nbd3".into(),
+            layer_image_paths: vec![
+                "/var/lib/nibrun/artifacts/base/layer.img".into(),
+                "/var/lib/nibrun/artifacts/abc/packed-0123456789abcdef.squashfs".into(),
+            ],
         }
     }
 
@@ -199,33 +218,37 @@ mod tests {
     }
 
     #[test]
-    fn vda_vdb_vdc_vdd_are_rootfs_artifact_config_data() {
+    fn vda_vdb_vdc_are_rootfs_config_data_and_the_layers_follow_in_document_order() {
         let rendered = config();
         let ids: Vec<&str> = rendered.drives.iter().map(|d| d.drive_id.as_str()).collect();
-        assert_eq!(ids, DRIVE_IDS);
+        assert_eq!(ids, ["rootfs", "config", "data", "layer0", "layer1"]);
         let paths_on_host: Vec<String> = rendered.drives.iter().map(|d| d.path_on_host.clone()).collect();
         let p = paths();
         assert_eq!(
             paths_on_host,
             vec![
                 p.rootfs_path,
-                p.artifact_image_path,
                 p.instance_config_image_path,
-                p.data_device_path
+                p.data_device_path,
+                p.layer_image_paths[0].clone(),
+                p.layer_image_paths[1].clone(),
             ]
         );
         assert_eq!(rendered.drives.iter().filter(|d| d.is_root_device).count(), 1);
         assert!(rendered.drives[0].is_root_device);
+        for (index, drive) in rendered.drives[FIXED_DRIVE_IDS.len()..].iter().enumerate() {
+            assert_eq!(drive.drive_id, layer_drive_id(index));
+        }
     }
 
     #[test]
-    fn the_tenant_data_drive_is_writeback_so_a_guest_fsync_reaches_the_host() {
+    fn the_tenant_data_drive_is_the_only_writable_one_and_is_writeback_so_a_guest_fsync_reaches_the_host() {
         let drives = config().drives;
-        let data = drives.last().unwrap();
+        let data = &drives[2];
         assert_eq!(data.cache_type, CacheType::Writeback);
         assert!(!data.is_read_only);
-        for drive in &drives[..3] {
-            assert!(drive.is_read_only);
+        for drive in drives.iter().filter(|d| d.drive_id != "data") {
+            assert!(drive.is_read_only, "{}", drive.drive_id);
             assert_eq!(drive.cache_type, CacheType::Unsafe);
         }
         assert!(drives.iter().all(|d| d.io_engine == IoEngine::Sync));
@@ -277,6 +300,6 @@ mod tests {
         assert!(json.get("boot-source").is_some());
         assert!(json.get("machine-config").is_some());
         assert!(json.get("network-interfaces").is_some());
-        assert_eq!(json["drives"][3]["cache_type"], "Writeback");
+        assert_eq!(json["drives"][2]["cache_type"], "Writeback");
     }
 }

@@ -34,9 +34,10 @@ pub(crate) fn run() -> ExitCode {
     let channels = channels::start();
 
     log(&format!(
-        "starting the tenant as uid {} with data at {}",
+        "starting {} as uid {} in {}",
+        config.program,
         paths::TENANT_UID,
-        paths::DATA_DIR
+        config.working_directory
     ));
     match supervisor::supervise(&config) {
         supervisor::Ended::ShutdownRequested => log("the tenant has stopped; shutting the guest down"),
@@ -55,8 +56,8 @@ fn boot() -> Result<InstanceConfig, String> {
     unsafe { libc::umask(TENANT_UMASK) };
     mounts::pseudo_filesystems().map_err(|error| error.to_string())?;
     let config = read_instance_config()?;
+    stack_root(&config)?;
     write_resolv_conf(&config)?;
-    prepare_tenant_filesystem()?;
     Ok(config)
 }
 
@@ -91,40 +92,74 @@ fn write_resolv_conf(config: &InstanceConfig) -> Result<(), String> {
         .iter()
         .map(|address| format!("nameserver {address}\n"))
         .collect();
+    // A layer's own /etc/resolv.conf is as likely a dangling symlink as a file, so what is there
+    // is replaced rather than written through.
+    let _ = std::fs::remove_file(paths::RESOLV_CONF);
     std::fs::write(paths::RESOLV_CONF, rendered)
         .map_err(|error| format!("{} could not be written: {error}", paths::RESOLV_CONF))
 }
 
-fn prepare_tenant_filesystem() -> Result<(), String> {
-    mounts::artifact(paths::ARTIFACT_DEVICE, paths::ARTIFACT_MOUNT).map_err(|error| error.to_string())?;
-    let details = std::fs::metadata(paths::TENANT_BINARY)
-        .map_err(|_| format!("the artifact drive holds no binary at {}", paths::TENANT_BINARY))?;
+/// The root the program runs in: this image at the bottom, the document's layers over it in
+/// order, the volume writable over all of them.
+fn stack_root(config: &InstanceConfig) -> Result<(), String> {
+    let failed = |error: mounts::MountFailed| error.to_string();
+    mounts::base(paths::BASE_MOUNT).map_err(failed)?;
+    let mut lowers = vec![paths::BASE_MOUNT.to_string()];
+    for index in 0..config.layers {
+        let target = paths::layer_mount(index);
+        mounts::layer(&paths::layer_device(index), &target).map_err(failed)?;
+        lowers.push(target);
+    }
+    mounts::volume(paths::VOLUME_DEVICE, paths::VOLUME_MOUNT).map_err(failed)?;
+    mounts::overlay(
+        &lowers,
+        paths::VOLUME_UPPER_DIR,
+        paths::VOLUME_WORK_DIR,
+        paths::ROOT_MOUNT,
+    )
+    .map_err(failed)?;
+    mounts::into_root(paths::ROOT_MOUNT).map_err(failed)?;
+    mounts::working_directory(
+        &in_root(&config.working_directory),
+        paths::TENANT_UID,
+        paths::TENANT_GID,
+    )
+    .map_err(failed)?;
+
+    let program = in_root(&config.program);
+    let details =
+        std::fs::metadata(&program).map_err(|_| format!("no layer holds a program at {}", config.program))?;
     if !details.is_file() {
-        return Err(format!("{} is not a file", paths::TENANT_BINARY));
+        return Err(format!("{} is not a file", config.program));
     }
     if std::os::unix::fs::PermissionsExt::mode(&details.permissions()) & 0o001 == 0 {
         return Err(format!(
             "{} is not executable by the uid it runs as",
-            paths::TENANT_BINARY
+            config.program
         ));
     }
-    mounts::tmpfs(paths::APP_DIR, "mode=0755,size=1M").map_err(|error| error.to_string())?;
-    mounts::tenant_data(
-        paths::DATA_DEVICE,
-        paths::DATA_DIR,
-        paths::TENANT_UID,
-        paths::TENANT_GID,
-    )
-    .map_err(|error| error.to_string())
+    log(&format!(
+        "root stacked: this image, {} layer(s), the volume on top",
+        config.layers
+    ));
+    Ok(())
+}
+
+fn in_root(path: &str) -> String {
+    format!("{}{path}", paths::ROOT_MOUNT)
 }
 
 fn shutdown(channels: Option<&channels::Channels>) -> ExitCode {
     if let Some(channels) = channels {
         channels.stop();
     }
-    if let Err(error) = nix::mount::umount(paths::DATA_DIR) {
-        if !matches!(error, nix::errno::Errno::EINVAL | nix::errno::Errno::ENOENT) {
-            log(&format!("could not unmount {}: {error}", paths::DATA_DIR));
+    // The stacked root holds the volume busy, so it goes first; both lazily, because a program
+    // that has just been killed may still be letting go of what it had open.
+    for mount in [paths::ROOT_MOUNT, paths::VOLUME_MOUNT] {
+        if let Err(error) = nix::mount::umount2(mount, nix::mount::MntFlags::MNT_DETACH) {
+            if !matches!(error, nix::errno::Errno::EINVAL | nix::errno::Errno::ENOENT) {
+                log(&format!("could not unmount {mount}: {error}"));
+            }
         }
     }
     nix::unistd::sync();

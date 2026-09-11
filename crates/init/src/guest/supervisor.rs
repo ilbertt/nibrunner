@@ -169,7 +169,9 @@ fn stop(tenant: Pid) {
 }
 
 fn spawn(config: &InstanceConfig) -> Option<Tenant> {
-    let executable = CString::new(paths::TENANT_BINARY).ok()?;
+    let root = CString::new(paths::ROOT_MOUNT).ok()?;
+    let working_directory = CString::new(config.working_directory.as_str()).ok()?;
+    let executable = CString::new(config.program.as_str()).ok()?;
     let mut argv = vec![executable.clone()];
     for argument in &config.arguments {
         argv.push(CString::new(argument.as_str()).ok()?);
@@ -207,7 +209,10 @@ fn spawn(config: &InstanceConfig) -> Option<Tenant> {
             let _ = SigSet::all().thread_unblock();
             let _ = nix::unistd::dup2_stdout(&stdout_write).map_err(failed);
             let _ = nix::unistd::dup2_stderr(&stderr_write).map_err(failed);
-            let _ = nix::unistd::chdir(paths::APP_DIR).map_err(failed);
+            // Into the stacked root before the privileges go: chroot is root's to call, and a
+            // process that is 65534 in a root it cannot leave is the whole of the isolation.
+            let _ = nix::unistd::chroot(root.as_c_str()).map_err(failed);
+            let _ = nix::unistd::chdir(working_directory.as_c_str()).map_err(failed);
             let _ = nix::unistd::setgid(Gid::from_raw(paths::TENANT_GID)).map_err(failed);
             let _ = nix::unistd::setgroups(&[]).map_err(failed);
             let _ = nix::unistd::setuid(Uid::from_raw(paths::TENANT_UID)).map_err(failed);

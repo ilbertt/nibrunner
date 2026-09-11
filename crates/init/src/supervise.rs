@@ -31,6 +31,9 @@ mod tests {
     fn config(edit: impl FnOnce(&mut InstanceConfig)) -> InstanceConfig {
         let mut value = InstanceConfig {
             http_port: 3000,
+            layers: 1,
+            program: "/app/server".to_string(),
+            working_directory: "/app".to_string(),
             hostname: None,
             max_restarts: 5,
             initial_backoff_ms: 500,

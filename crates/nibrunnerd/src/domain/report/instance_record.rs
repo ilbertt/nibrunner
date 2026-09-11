@@ -30,7 +30,7 @@ pub struct InstanceRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<RecordPort>,
     pub guest_ipv4: Ipv4Address,
-    pub artifact_digest: Sha256Digest,
+    pub layer_digests: Vec<Sha256Digest>,
     pub state: InstanceState,
     pub health: HealthTracker,
     pub health_check: HealthCheck,
@@ -64,7 +64,7 @@ pub struct RecordFields {
     pub http_port: HttpPort,
     pub ports: Vec<RecordPort>,
     pub guest_ipv4: Ipv4Address,
-    pub artifact_digest: Sha256Digest,
+    pub layer_digests: Vec<Sha256Digest>,
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
     pub readiness: ReadinessPolicy,
@@ -83,7 +83,7 @@ impl InstanceRecord {
             http_port: fields.http_port,
             ports: fields.ports,
             guest_ipv4: fields.guest_ipv4,
-            artifact_digest: fields.artifact_digest,
+            layer_digests: fields.layer_digests,
             state,
             health,
             health_check: fields.health_check,
@@ -108,7 +108,7 @@ impl InstanceRecord {
         self.http_port = fields.http_port;
         self.ports = fields.ports;
         self.guest_ipv4 = fields.guest_ipv4;
-        self.artifact_digest = fields.artifact_digest;
+        self.layer_digests = fields.layer_digests;
         self.health_check = fields.health_check;
         self.resources = fields.resources;
         self.readiness = fields.readiness;
@@ -154,7 +154,7 @@ mod tests {
         fields.host_port = HostPort::new(23_456).unwrap();
         fields.http_port = HttpPort::new(9_001).unwrap();
         fields.guest_ipv4 = Ipv4Address::parse("10.9.9.9").unwrap();
-        fields.artifact_digest = Sha256Digest::parse("a".repeat(64)).unwrap();
+        fields.layer_digests = vec![Sha256Digest::parse("a".repeat(64)).unwrap()];
         fields.resources = InstanceResources {
             vcpu_count: 4,
             memory_mib: 4_096,
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(record.host_port, wanted.host_port);
         assert_eq!(record.http_port, wanted.http_port);
         assert_eq!(record.guest_ipv4, wanted.guest_ipv4);
-        assert_eq!(record.artifact_digest, wanted.artifact_digest);
+        assert_eq!(record.layer_digests, wanted.layer_digests);
         assert_eq!(record.resources, wanted.resources);
         assert!(!record.desired_running);
         assert!(record.on_request);

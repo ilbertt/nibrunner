@@ -353,16 +353,6 @@
         "appId": {
           "$ref": "#/$defs/AppId"
         },
-        "artifactDigest": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Sha256Digest"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "compute": {
           "anyOf": [
             {
@@ -412,6 +402,13 @@
               "type": "null"
             }
           ]
+        },
+        "layerDigests": {
+          "description": "The layers the running microVM was booted from, bottom first. Empty until one has been.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Sha256Digest"
+          }
         },
         "message": {
           "anyOf": [

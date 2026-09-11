@@ -18,7 +18,7 @@ pub fn to_reported_instance(
         state: record.state,
         host_port: Some(record.host_port),
         guest_ipv4: Some(record.guest_ipv4.clone()),
-        artifact_digest: Some(record.artifact_digest.clone()),
+        layer_digests: record.layer_digests.clone(),
         restart_count: record.restart_count,
         started_at: record.started_at.clone(),
         last_healthy_at: record.health.last_healthy_at.clone(),

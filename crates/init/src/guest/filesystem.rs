@@ -65,7 +65,7 @@ fn answer_all(connection: OwnedFd) {
 }
 
 fn resolve(path: &GuestPath) -> Option<PathBuf> {
-    let root = Path::new(paths::DATA_DIR);
+    let root = Path::new(paths::VOLUME_UPPER_DIR);
     let relative = path.as_str().trim_start_matches('/');
     let resolved = if relative.is_empty() {
         root.to_path_buf()
@@ -224,7 +224,7 @@ fn write(path: &Path, offset: u64, content: &[u8], truncate: bool) -> Vec<u8> {
 
 fn usage() -> Vec<u8> {
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    let Ok(mount) = std::ffi::CString::new(paths::DATA_DIR) else {
+    let Ok(mount) = std::ffi::CString::new(paths::VOLUME_MOUNT) else {
         return encode_refusal(STATUS_FAILED);
     };
     if unsafe { libc::statvfs(mount.as_ptr(), stats.as_mut_ptr()) } < 0 {

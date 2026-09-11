@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
-use protocol::{AppId, DeploymentId, DesiredArtifact, DesiredInstance, ObjectKey, Sha256Digest};
+use protocol::{AppId, DeploymentId, DesiredInstance, DesiredLayer, LayerObject, ObjectKey, Sha256Digest};
 
 use crate::adapters::vm::VmStatus;
 
@@ -188,13 +188,15 @@ pub trait Vmm: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArtifactError {
-    #[error("the artifact could not be fetched: {0}")]
+    #[error("the layer could not be fetched: {0}")]
     Transfer(String),
-    #[error("the artifact hashes to {actual}, not to the {expected} it claims")]
+    #[error("the layer hashes to {actual}, not to the {expected} it claims")]
     DigestMismatch { expected: Sha256Digest, actual: String },
-    #[error("the artifact is {actual} bytes, not the {expected} its manifest declares")]
+    #[error("the layer is {actual} bytes, not the {expected} its document declares")]
     SizeMismatch { expected: u64, actual: u64 },
-    #[error("the artifact image could not be built: {0}")]
+    #[error("the layer {digest} is neither a squashfs nor an ext4 image")]
+    NotAnImage { digest: Sha256Digest },
+    #[error("the layer image could not be built: {0}")]
     Unpackable(String),
 }
 
@@ -224,25 +226,25 @@ pub trait ArtifactStore: Send + Sync {
 
 #[async_trait]
 pub trait ArtifactStoreExt {
-    async fn read_verified(&self, artifact: &DesiredArtifact) -> Result<Vec<u8>, ArtifactError>;
+    async fn read_verified(&self, object: &LayerObject) -> Result<Vec<u8>, ArtifactError>;
 }
 
 #[async_trait]
 impl<T: ArtifactStore + ?Sized> ArtifactStoreExt for T {
-    async fn read_verified(&self, artifact: &DesiredArtifact) -> Result<Vec<u8>, ArtifactError> {
+    async fn read_verified(&self, object: &LayerObject) -> Result<Vec<u8>, ArtifactError> {
         use sha2::Digest;
 
-        let bytes = self.read(&artifact.object_key).await?;
+        let bytes = self.read(&object.object_key).await?;
         let actual = hex::encode(sha2::Sha256::digest(&bytes));
-        if actual != artifact.digest.as_str() {
+        if actual != object.digest.as_str() {
             return Err(ArtifactError::DigestMismatch {
-                expected: artifact.digest.clone(),
+                expected: object.digest.clone(),
                 actual,
             });
         }
-        if bytes.len() as u64 != artifact.size_bytes {
+        if bytes.len() as u64 != object.size_bytes {
             return Err(ArtifactError::SizeMismatch {
-                expected: artifact.size_bytes,
+                expected: object.size_bytes,
                 actual: bytes.len() as u64,
             });
         }
@@ -250,17 +252,16 @@ impl<T: ArtifactStore + ?Sized> ArtifactStoreExt for T {
     }
 }
 
-/// What a payload hands a microVM to boot with. One image today, attached read-only beside the
-/// host's own kernel and root; the type is what a payload that brings its own root widens.
+/// The images a microVM is given for its layers, one each, in the order the document listed them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedPayload {
-    pub artifact_image_path: PathBuf,
+    pub layer_image_paths: Vec<PathBuf>,
 }
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait PayloadBuilder: Send + Sync {
-    async fn prepare(&self, artifact: &DesiredArtifact) -> Result<PreparedPayload, ArtifactError>;
+    async fn prepare(&self, layers: &[DesiredLayer]) -> Result<PreparedPayload, ArtifactError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
