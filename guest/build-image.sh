@@ -57,12 +57,15 @@ import hashlib, json, pathlib, sys
 guest, init = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 manifest = json.loads((guest / "manifest.json").read_text())
 image = (guest / "rootfs.ext4").read_bytes()
-manifest["version"] = manifest["version"].split("+")[0] + "+nibrunner-init"
+digest = hashlib.sha256(image).hexdigest()
+# Part of the name: the daemon compares versions to decide whether a snapshot was taken on the
+# image it is about to restore into, so two images that boot differently must not share one.
+manifest["version"] = manifest["version"].split("+")[0] + "+nibrunner-init." + digest[:12]
 manifest["artifacts"] = [a for a in manifest["artifacts"] if a["name"] != "rootfs.ext4"]
 manifest["artifacts"].append({
     "name": "rootfs.ext4",
     "bytes": len(image),
-    "sha256": hashlib.sha256(image).hexdigest(),
+    "sha256": digest,
 })
 manifest["inputs"]["init_sha256"] = hashlib.sha256(init.read_bytes()).hexdigest()
 (guest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
