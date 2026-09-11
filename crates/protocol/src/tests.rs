@@ -15,6 +15,7 @@ fn instance_json() -> serde_json::Value {
         },
         "config": {
             "httpPort": 3000,
+            "ports": [{ "name": "ssh", "guestPort": 22 }],
             "args": ["serve"],
             "environment": { "DSN": "postgres://u:p@h/db", "PORT_HINT": "${NIBRUN_HTTP_PORT}" },
             "resources": { "vcpuCount": 1, "memoryMib": 256 },
@@ -26,16 +27,19 @@ fn instance_json() -> serde_json::Value {
     })
 }
 
-#[test]
-fn a_desired_state_round_trips_with_its_wire_names() {
-    let document = serde_json::json!({
+fn desired_json() -> serde_json::Value {
+    serde_json::json!({
         "hostId": "host-1",
         "volumes": [{ "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 4096, "desiredState": "present" }],
         "instances": [instance_json()],
         "checkpoints": [],
         "exports": []
-    });
-    let parsed: HostDesiredState = serde_json::from_value(document).expect("parses");
+    })
+}
+
+#[test]
+fn a_desired_state_round_trips_with_its_wire_names() {
+    let parsed: HostDesiredState = serde_json::from_value(desired_json()).expect("parses");
     assert_eq!(parsed.instances[0].desired_state, DesiredInstanceState::OnRequest);
     assert_eq!(
         parsed.instances[0].idle_timeout_ms.map(|t| t.get()),
@@ -328,4 +332,332 @@ fn a_lifetime_outside_what_a_host_will_hold_is_refused() {
     }))
     .expect_err("a second is not a lifetime a host will hold");
     assert!(refused.to_string().contains("ttlMs"), "{refused}");
+}
+
+mod schema {
+    use super::*;
+
+    fn validator(schema: schemars::Schema) -> jsonschema::Validator {
+        let schema = schema.to_value();
+        jsonschema::meta::validate(&schema).expect("a schema the draft accepts");
+        jsonschema::validator_for(&schema).expect("a schema that compiles")
+    }
+
+    fn with(mut document: serde_json::Value, pointer: &str, value: serde_json::Value) -> serde_json::Value {
+        let (parent, key) = pointer.rsplit_once('/').expect(pointer);
+        match document.pointer_mut(parent).expect(parent) {
+            serde_json::Value::Object(object) => object.insert(key.to_string(), value),
+            serde_json::Value::Array(items) => items
+                .get_mut(key.parse::<usize>().expect(key))
+                .map(|slot| std::mem::replace(slot, value)),
+            _ => panic!("{parent} holds neither an object nor an array"),
+        };
+        document
+    }
+
+    fn without(mut document: serde_json::Value, pointer: &str) -> serde_json::Value {
+        let (parent, key) = pointer.rsplit_once('/').expect(pointer);
+        document
+            .pointer_mut(parent)
+            .and_then(serde_json::Value::as_object_mut)
+            .expect(parent)
+            .remove(key);
+        document
+    }
+
+    fn reported_json() -> serde_json::Value {
+        let now = Timestamp::parse("2026-08-03T10:00:00.000Z").unwrap();
+        let capacity = HostCapacity {
+            vcpu_count: 8,
+            memory_mib: 32_768,
+            cache_bytes: 1 << 40,
+        };
+        let state = HostReportedState {
+            host_id: HostId::parse("host-1").unwrap(),
+            reported_at: now.clone(),
+            state: HostState::Ready,
+            capacity,
+            allocatable: capacity,
+            versions: HostVersions {
+                agent: "0.1.0".into(),
+                guest_image: "2026.8.3-1".into(),
+                zerofs: "0.5.0".into(),
+                firecracker: "1.12.0".into(),
+            },
+            volumes: vec![ReportedVolume {
+                volume_id: VolumeId::parse("vol-1").unwrap(),
+                app_id: AppId::parse("app-1").unwrap(),
+                state: VolumeState::Ready,
+                size_bytes: 4096,
+                storage_prefix: Some(ObjectKey::parse("volumes/vol-1").unwrap()),
+                device_path: Some("/dev/nbd0".into()),
+                usage: Some(FilesystemUsage {
+                    total_bytes: 4096,
+                    used_bytes: 1024,
+                    measured_at: now.clone(),
+                }),
+                message: Some(StateMessage::new("mounted")),
+            }],
+            instances: vec![ReportedInstance {
+                app_id: AppId::parse("app-1").unwrap(),
+                deployment_id: DeploymentId::parse("dep-1").unwrap(),
+                state: InstanceState::Running,
+                host_port: HostPort::new(21000).ok(),
+                guest_ipv4: Some(Ipv4Address::parse("10.201.0.2").unwrap()),
+                artifact_digest: Some(Sha256Digest::parse("a".repeat(64)).unwrap()),
+                restart_count: 1,
+                started_at: Some(now.clone()),
+                last_healthy_at: Some(now.clone()),
+                last_exit_code: Some(0),
+                compute: Some(ComputeUsage {
+                    memory_total_bytes: 268_435_456,
+                    memory_used_bytes: 1_048_576,
+                    cpu_share: Some(0.25),
+                    measured_at: now.clone(),
+                }),
+                meters: UsageMeters {
+                    running_ms: 60_000,
+                    idle_ms: 30_000,
+                    cpu_ms: 12_000,
+                    rx_bytes: 4096,
+                    tx_bytes: 8192,
+                    disk_provisioned_mib_seconds: 368_640,
+                    disk_used_mib_seconds: 90,
+                },
+                message: Some(StateMessage::new("healthy")),
+            }],
+            checkpoints: vec![ReportedCheckpoint {
+                checkpoint_id: CheckpointId::parse("ckpt-1").unwrap(),
+                volume_id: VolumeId::parse("vol-1").unwrap(),
+                state: CheckpointState::Ready,
+                reference: Some(StateMessage::new("snap-1")),
+                ready_at: Some(now.clone()),
+                message: None,
+            }],
+            exports: vec![ReportedExport {
+                export_id: ExportId::parse("exp-1").unwrap(),
+                checkpoint_id: Some(CheckpointId::parse("ckpt-1").unwrap()),
+                state: ExportState::Ready,
+                size_bytes: Some(2048),
+                ready_at: Some(now),
+                message: None,
+            }],
+        };
+        serde_json::to_value(state).unwrap()
+    }
+
+    fn activated(policy: serde_json::Value) -> serde_json::Value {
+        with(
+            without(desired_json(), "/instances/0/idleTimeoutMs"),
+            "/instances/0/activation",
+            policy,
+        )
+    }
+
+    #[test]
+    fn the_desired_state_schema_accepts_what_the_parser_accepts() {
+        let validator = validator(crate::schema::desired_state());
+        let accepted = [
+            desired_json(),
+            activated(serde_json::json!({
+                "sleepWhen": { "kind": "max-lifetime", "ttlMs": 3600000 },
+                "readyWhen": { "kind": "boot-completed" }
+            })),
+            activated(serde_json::json!({ "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 } })),
+            with(
+                activated(serde_json::json!({ "sleepWhen": { "kind": "never" } })),
+                "/instances/0/desiredState",
+                serde_json::json!("running"),
+            ),
+        ];
+        for document in accepted {
+            serde_json::from_value::<HostDesiredState>(document.clone()).unwrap();
+            let errors: Vec<String> = validator.iter_errors(&document).map(|e| e.to_string()).collect();
+            assert!(errors.is_empty(), "{errors:#?}");
+        }
+    }
+
+    #[test]
+    fn the_desired_state_schema_refuses_what_the_parser_refuses() {
+        let validator = validator(crate::schema::desired_state());
+        let sixty_five = serde_json::Value::Array(vec![serde_json::json!("x"); MAX_ARGUMENTS + 1]);
+        let broken = [
+            with(desired_json(), "/hostId", serde_json::json!("has.a.dot")),
+            with(
+                desired_json(),
+                "/instances/0/appId",
+                serde_json::json!("x".repeat(64)),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/desiredState",
+                serde_json::json!("asleep"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/idleTimeoutMs",
+                serde_json::json!(10),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/artifact/digest",
+                serde_json::json!("A".repeat(64)),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/artifact/filename",
+                serde_json::json!("../x"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/artifact/objectKey",
+                serde_json::json!(""),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/httpPort",
+                serde_json::json!(0),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/httpPort",
+                serde_json::json!(70_000),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/httpPort",
+                serde_json::json!("3000"),
+            ),
+            with(desired_json(), "/instances/0/config/args", sixty_five),
+            with(
+                desired_json(),
+                "/instances/0/config/environment",
+                serde_json::json!({ "1A": "x" }),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/environment",
+                serde_json::json!({ "__proto__": "x" }),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/ports/0/name",
+                serde_json::json!("SSH"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/ports/0/guestPort",
+                serde_json::json!(0),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/hostnames/0/hostname",
+                serde_json::json!("localhost"),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/hostnames/0/kind",
+                serde_json::json!("vanity"),
+            ),
+            with(desired_json(), "/volumes/0/sizeBytes", serde_json::json!(-1)),
+            with(
+                desired_json(),
+                "/volumes/0/desiredState",
+                serde_json::json!("gone"),
+            ),
+            without(desired_json(), "/instances/0/artifact"),
+            without(desired_json(), "/volumes/0/appId"),
+            with(
+                desired_json(),
+                "/instances/0/activation",
+                serde_json::json!({ "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 } }),
+            ),
+            with(
+                activated(serde_json::json!({ "sleepWhen": { "kind": "max-lifetime", "ttlMs": 3600000 } })),
+                "/instances/0/desiredState",
+                serde_json::json!("running"),
+            ),
+            activated(serde_json::json!({ "sleepWhen": { "kind": "no-sessions" } })),
+            activated(serde_json::json!({ "sleepWhen": { "kind": "max-lifetime", "ttlMs": 1000 } })),
+            activated(
+                serde_json::json!({ "sleepWhen": { "kind": "never" }, "readyWhen": { "kind": "prayer" } }),
+            ),
+        ];
+        for document in broken {
+            assert!(
+                serde_json::from_value::<HostDesiredState>(document.clone()).is_err(),
+                "the parser took {document}"
+            );
+            assert!(!validator.is_valid(&document), "the schema took {document}");
+        }
+    }
+
+    // What the parser knows and JSON Schema has no words for: a value may only name the runtime
+    // values the guest offers. A document the schema passes can still be refused for this.
+    #[test]
+    fn the_desired_state_schema_cannot_see_which_runtime_values_the_guest_offers() {
+        let validator = validator(crate::schema::desired_state());
+        let document = with(
+            desired_json(),
+            "/instances/0/config/environment",
+            serde_json::json!({ "URL": "${NIBRUN_NOPE}" }),
+        );
+        assert!(serde_json::from_value::<HostDesiredState>(document.clone()).is_err());
+        assert!(validator.is_valid(&document));
+    }
+
+    #[test]
+    fn the_reported_state_schema_accepts_what_the_daemon_writes() {
+        let validator = validator(crate::schema::reported_state());
+        let document = reported_json();
+        let errors: Vec<String> = validator.iter_errors(&document).map(|e| e.to_string()).collect();
+        assert!(errors.is_empty(), "{errors:#?}");
+    }
+
+    #[test]
+    fn the_reported_state_schema_refuses_what_the_parser_refuses() {
+        let validator = validator(crate::schema::reported_state());
+        let broken = [
+            with(
+                reported_json(),
+                "/reportedAt",
+                serde_json::json!("2026-08-03T10:00:00"),
+            ),
+            with(reported_json(), "/state", serde_json::json!("asleep")),
+            with(reported_json(), "/instances/0/state", serde_json::json!("asleep")),
+            with(
+                reported_json(),
+                "/instances/0/guestIpv4",
+                serde_json::json!("01.2.3.4"),
+            ),
+            with(reported_json(), "/instances/0/hostPort", serde_json::json!(0)),
+            with(
+                reported_json(),
+                "/instances/0/restartCount",
+                serde_json::json!(-1),
+            ),
+            with(
+                reported_json(),
+                "/instances/0/meters/cpuMs",
+                serde_json::json!(-1),
+            ),
+            with(reported_json(), "/volumes/0/state", serde_json::json!("lost")),
+            without(reported_json(), "/capacity"),
+        ];
+        for document in broken {
+            assert!(
+                serde_json::from_value::<HostReportedState>(document.clone()).is_err(),
+                "the parser took {document}"
+            );
+            assert!(!validator.is_valid(&document), "the schema took {document}");
+        }
+    }
+
+    #[test]
+    fn every_published_schema_is_named_by_its_id() {
+        for (filename, schema) in crate::schema::all() {
+            let id = schema.get("$id").and_then(serde_json::Value::as_str).unwrap();
+            assert_eq!(id, format!("{}{filename}", crate::schema::SCHEMA_ID_BASE));
+        }
+    }
 }

@@ -4,6 +4,8 @@
 mod wire;
 mod control;
 mod domain;
+#[cfg(feature = "schema")]
+pub mod schema;
 
 pub use control::*;
 pub use domain::*;

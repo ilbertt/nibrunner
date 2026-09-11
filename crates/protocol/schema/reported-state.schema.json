@@ -1,0 +1,608 @@
+{
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/reported-state.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HostReportedState",
+  "description": "What one host is running, as the daemon last wrote it to `reported.json` in its\n`paths.state_dir`.",
+  "type": "object",
+  "properties": {
+    "allocatable": {
+      "description": "What is left once every booted app is taken off.",
+      "$ref": "#/$defs/HostCapacity"
+    },
+    "capacity": {
+      "description": "What the machine has.",
+      "$ref": "#/$defs/HostCapacity"
+    },
+    "checkpoints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReportedCheckpoint"
+      }
+    },
+    "exports": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReportedExport"
+      }
+    },
+    "hostId": {
+      "$ref": "#/$defs/HostId"
+    },
+    "instances": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReportedInstance"
+      }
+    },
+    "reportedAt": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "state": {
+      "$ref": "#/$defs/HostState"
+    },
+    "versions": {
+      "$ref": "#/$defs/HostVersions"
+    },
+    "volumes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReportedVolume"
+      }
+    }
+  },
+  "required": [
+    "hostId",
+    "reportedAt",
+    "state",
+    "capacity",
+    "allocatable",
+    "versions",
+    "volumes",
+    "instances",
+    "checkpoints",
+    "exports"
+  ],
+  "$defs": {
+    "AppId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "CheckpointId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "CheckpointState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "ready",
+        "failed"
+      ]
+    },
+    "ComputeUsage": {
+      "type": "object",
+      "properties": {
+        "cpuShare": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "measuredAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "memoryTotalBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "memoryUsedBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "memoryTotalBytes",
+        "memoryUsedBytes",
+        "measuredAt"
+      ]
+    },
+    "DeploymentId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "ExportId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "ExportState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "preparing",
+        "ready",
+        "failed",
+        "expired"
+      ]
+    },
+    "FilesystemUsage": {
+      "type": "object",
+      "properties": {
+        "measuredAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "totalBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "usedBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "totalBytes",
+        "usedBytes",
+        "measuredAt"
+      ]
+    },
+    "HostCapacity": {
+      "type": "object",
+      "properties": {
+        "cacheBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "memoryMib": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vcpuCount": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "vcpuCount",
+        "memoryMib",
+        "cacheBytes"
+      ]
+    },
+    "HostId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "HostPort": {
+      "type": "integer",
+      "maximum": 65535,
+      "minimum": 1
+    },
+    "HostState": {
+      "type": "string",
+      "enum": [
+        "registering",
+        "ready",
+        "draining",
+        "unreachable"
+      ]
+    },
+    "HostVersions": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "firecracker": {
+          "type": "string"
+        },
+        "guestImage": {
+          "type": "string"
+        },
+        "zerofs": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "guestImage",
+        "zerofs",
+        "firecracker"
+      ]
+    },
+    "InstanceState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "starting",
+        "running",
+        "unhealthy",
+        "stopping",
+        "stopped",
+        "idle",
+        "failed"
+      ]
+    },
+    "Ipv4Address": {
+      "description": "an IPv4 address",
+      "type": "string",
+      "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])$"
+    },
+    "ObjectKey": {
+      "description": "between 1 and 1024 characters",
+      "type": "string",
+      "maxLength": 1024,
+      "minLength": 1
+    },
+    "ReportedCheckpoint": {
+      "type": "object",
+      "properties": {
+        "checkpointId": {
+          "$ref": "#/$defs/CheckpointId"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateMessage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "readyAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateMessage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/CheckpointState"
+        },
+        "volumeId": {
+          "$ref": "#/$defs/VolumeId"
+        }
+      },
+      "required": [
+        "checkpointId",
+        "volumeId",
+        "state"
+      ]
+    },
+    "ReportedExport": {
+      "type": "object",
+      "properties": {
+        "checkpointId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckpointId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exportId": {
+          "$ref": "#/$defs/ExportId"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateMessage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "readyAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sizeBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "$ref": "#/$defs/ExportState"
+        }
+      },
+      "required": [
+        "exportId",
+        "state"
+      ]
+    },
+    "ReportedInstance": {
+      "type": "object",
+      "properties": {
+        "appId": {
+          "$ref": "#/$defs/AppId"
+        },
+        "artifactDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compute": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComputeUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deploymentId": {
+          "$ref": "#/$defs/DeploymentId"
+        },
+        "guestIpv4": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ipv4Address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hostPort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostPort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastExitCode": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "lastHealthyAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateMessage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "meters": {
+          "$ref": "#/$defs/UsageMeters",
+          "default": {
+            "cpuMs": 0,
+            "diskProvisionedMibSeconds": 0,
+            "diskUsedMibSeconds": 0,
+            "idleMs": 0,
+            "runningMs": 0,
+            "rxBytes": 0,
+            "txBytes": 0
+          }
+        },
+        "restartCount": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "startedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/InstanceState"
+        }
+      },
+      "required": [
+        "appId",
+        "deploymentId",
+        "state",
+        "restartCount"
+      ]
+    },
+    "ReportedVolume": {
+      "type": "object",
+      "properties": {
+        "appId": {
+          "$ref": "#/$defs/AppId"
+        },
+        "devicePath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateMessage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "$ref": "#/$defs/VolumeState"
+        },
+        "storagePrefix": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FilesystemUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "volumeId": {
+          "$ref": "#/$defs/VolumeId"
+        }
+      },
+      "required": [
+        "volumeId",
+        "appId",
+        "state",
+        "sizeBytes"
+      ]
+    },
+    "Sha256Digest": {
+      "description": "a lowercase hex sha-256",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "StateMessage": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "Timestamp": {
+      "description": "an ISO 8601 instant with an offset",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "UsageMeters": {
+      "description": "What an app has used since this host first saw it. Every field only ever grows, so what it cost\nover any stretch is the difference between two readings of it, and a reading that was missed\ncosts nothing but resolution. A field that went down is a counter this host restarted.\n\nTime is metered in two, because a running app holds the memory it was promised and an idle one\nholds only the disk its snapshot sits on. Which of those is worth what, this does not say.",
+      "type": "object",
+      "properties": {
+        "cpuMs": {
+          "description": "Summed across the vCPUs the app was given, so a two-vCPU app that stayed busy for a second\nspent two seconds of it.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "diskProvisionedMibSeconds": {
+          "description": "Disk is a level rather than a flow, so what is metered is the level multiplied by the time\nit was held: what was set aside for the app, and what its guest reported having filled.\nMebibyte-seconds, because byte-milliseconds of a large volume outrun a `u64` in months.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "diskUsedMibSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "idleMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "runningMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rxBytes": {
+          "description": "What reached the guest, and what it put back on the wire. Only what was let out is\ncounted as sent: a packet the ruleset rejected never left, so nobody is charged for it.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "txBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "runningMs",
+        "idleMs",
+        "cpuMs",
+        "rxBytes",
+        "txBytes",
+        "diskProvisionedMibSeconds",
+        "diskUsedMibSeconds"
+      ]
+    },
+    "VolumeId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "VolumeState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "ready",
+        "detached",
+        "deleted",
+        "failed"
+      ]
+    }
+  }
+}
