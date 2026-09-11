@@ -1,15 +1,20 @@
 use std::ffi::CString;
+use std::os::fd::OwnedFd;
 use std::time::{Duration, Instant};
 
 use guest_contract::instance_env::InstanceConfig;
 use guest_contract::paths;
+use nix::sched::CloneFlags;
 use nix::sys::signal::{SigSet, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{ForkResult, Gid, Pid, Uid};
 
 use crate::guest::log;
 use crate::guest::logs::Forwarder;
-use crate::supervise::{backoff_ms, budget_resets, Outcome, SHUTDOWN_GRACE_MS};
+use crate::supervise::{
+    backoff_ms, budget_resets, halt_for, stumbled_on, system_argv, system_environment, Halt, Outcome,
+    Stumbled, SHUTDOWN_GRACE_MS,
+};
 
 pub(crate) use crate::supervise::Outcome as Ended;
 
@@ -37,10 +42,14 @@ pub(crate) fn supervise(config: &InstanceConfig) -> Ended {
         let Some(started_tenant) = spawn(config) else {
             return Outcome::SpawnFailed;
         };
-        let Tenant { pid: tenant, output } = started_tenant;
+        let Tenant {
+            pid: tenant,
+            output,
+            halt,
+        } = started_tenant;
         match watch(tenant, output, &mut forwarder) {
             Watched::ShutdownRequested => {
-                stop(tenant);
+                stop(tenant, halt);
                 return Outcome::ShutdownRequested;
             }
             Watched::Exited { status } => {
@@ -53,10 +62,16 @@ pub(crate) fn supervise(config: &InstanceConfig) -> Ended {
                 }
                 let delay = backoff_ms(config, restarts);
                 restarts += 1;
-                log(&format!(
-                    "the tenant exited ({status}); restart {restarts} of {} in {delay}ms",
-                    config.max_restarts
-                ));
+                match (halt, stumbled_on(status)) {
+                    (Halt::PowerOff, Some(stumble)) => log(&format!(
+                        "the system could not be entered: {stumble}; restart {restarts} of {} in {delay}ms",
+                        config.max_restarts
+                    )),
+                    _ => log(&format!(
+                        "the tenant exited ({status}); restart {restarts} of {} in {delay}ms",
+                        config.max_restarts
+                    )),
+                }
                 if wait_for_signal(Duration::from_millis(u64::from(delay))) == Arrived::Shutdown {
                     return Outcome::ShutdownRequested;
                 }
@@ -114,6 +129,7 @@ impl TenantOutput {
 pub(crate) struct Tenant {
     pid: Pid,
     output: TenantOutput,
+    halt: Halt,
 }
 
 fn reap_until(tenant: Pid) -> Option<i32> {
@@ -154,8 +170,12 @@ fn wait_for_signal(within: Duration) -> Arrived {
     }
 }
 
-fn stop(tenant: Pid) {
-    let _ = nix::sys::signal::kill(tenant, Signal::SIGTERM);
+fn stop(tenant: Pid, halt: Halt) {
+    let signal = match halt {
+        Halt::Terminate => libc::SIGTERM,
+        Halt::PowerOff => libc::SIGRTMIN() + 3,
+    };
+    let _ = unsafe { libc::kill(tenant.as_raw(), signal) };
     let deadline = Instant::now() + Duration::from_millis(u64::from(SHUTDOWN_GRACE_MS));
     while Instant::now() < deadline {
         if reap_until(tenant).is_some() {
@@ -169,6 +189,139 @@ fn stop(tenant: Pid) {
 }
 
 fn spawn(config: &InstanceConfig) -> Option<Tenant> {
+    match config.artifact_kind {
+        protocol::ArtifactKind::Executable => spawn_binary(config),
+        protocol::ArtifactKind::Rootfs => spawn_system(config),
+    }
+}
+
+fn pipes() -> Option<(TenantOutput, (OwnedFd, OwnedFd))> {
+    let (stdout_read, stdout_write) = nix::unistd::pipe().ok()?;
+    let (stderr_read, stderr_write) = nix::unistd::pipe().ok()?;
+    for read in [&stdout_read, &stderr_read] {
+        let _ = nix::fcntl::fcntl(read, nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK));
+    }
+    Some((
+        TenantOutput {
+            stdout: std::fs::File::from(stdout_read),
+            stderr: std::fs::File::from(stderr_read),
+        },
+        (stdout_write, stderr_write),
+    ))
+}
+
+const SYSTEM_STACK_BYTES: usize = 256 * 1024;
+
+/// The system's init, as PID 1 of namespaces of its own and a child of this one, which keeps
+/// PID 1 here and with it the pipes, the restarts and the vsock channels.
+///
+/// The child is made with `clone` rather than `fork` so that it is born into its namespaces and
+/// is this process's direct child: nothing relays its signals, and its death is its own. What
+/// `clone` does not do is take the allocator's locks the way `fork` would, and this process has
+/// threads holding them, so every string the child will need is built here and the child itself
+/// makes only system calls.
+fn spawn_system(config: &InstanceConfig) -> Option<Tenant> {
+    let init = CString::new(paths::ROOTFS_INIT).ok()?;
+    let argv: Vec<CString> = system_argv(config)
+        .into_iter()
+        .map(|argument| CString::new(argument).ok())
+        .collect::<Option<_>>()?;
+    let envp: Vec<CString> = system_environment(config)
+        .into_iter()
+        .map(|(name, value)| CString::new(format!("{name}={value}")).ok())
+        .collect::<Option<_>>()?;
+    let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|each| each.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null());
+    let mut envp_ptrs: Vec<*const libc::c_char> = envp.iter().map(|each| each.as_ptr()).collect();
+    envp_ptrs.push(std::ptr::null());
+    let root = CString::new(paths::ROOTFS_MOUNT).ok()?;
+    let root_dev = CString::new(format!("{}/dev", paths::ROOTFS_MOUNT)).ok()?;
+    let put_old = CString::new(format!("{}/mnt", paths::ROOTFS_MOUNT)).ok()?;
+    let hostname: Option<String> = config.hostname.clone();
+
+    let (output, (stdout_write, stderr_write)) = pipes()?;
+
+    let entered = || -> isize {
+        use nix::mount::{mount, umount2, MntFlags, MsFlags};
+        let none: Option<&str> = None;
+        let unprivileged = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
+        let writable = MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
+
+        let _ = SigSet::all().thread_unblock();
+        if nix::unistd::dup2_stdout(&stdout_write).is_err()
+            || nix::unistd::dup2_stderr(&stderr_write).is_err()
+        {
+            return Stumbled::Pipes as isize;
+        }
+        if mount(none, "/", none, MsFlags::MS_REC | MsFlags::MS_PRIVATE, none).is_err() {
+            return Stumbled::Propagation as isize;
+        }
+        if mount(
+            Some("/dev"),
+            root_dev.as_c_str(),
+            none,
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            none,
+        )
+        .is_err()
+        {
+            return Stumbled::Dev as isize;
+        }
+        if nix::unistd::pivot_root(root.as_c_str(), put_old.as_c_str()).is_err()
+            || nix::unistd::chdir("/").is_err()
+        {
+            return Stumbled::Pivot as isize;
+        }
+        let _ = umount2("/mnt", MntFlags::MNT_DETACH);
+        if mount(Some("proc"), "/proc", Some("proc"), unprivileged, none).is_err() {
+            return Stumbled::Proc as isize;
+        }
+        if mount(Some("sysfs"), "/sys", Some("sysfs"), unprivileged, none).is_err() {
+            return Stumbled::Sys as isize;
+        }
+        if mount(Some("tmpfs"), "/run", Some("tmpfs"), writable, Some("mode=0755")).is_err()
+            || mount(Some("tmpfs"), "/tmp", Some("tmpfs"), writable, Some("mode=1777")).is_err()
+        {
+            return Stumbled::Scratch as isize;
+        }
+        // A kernel without cgroup2 is the system's to complain about, in its own words.
+        let _ = mount(
+            Some("cgroup2"),
+            "/sys/fs/cgroup",
+            Some("cgroup2"),
+            unprivileged,
+            none,
+        );
+        if let Some(hostname) = &hostname {
+            let _ = nix::unistd::sethostname(hostname.as_str());
+        }
+        unsafe { libc::execve(init.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr()) };
+        Stumbled::Exec as isize
+    };
+
+    let mut stack = vec![0u8; SYSTEM_STACK_BYTES];
+    let flags = CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWPID
+        | CloneFlags::CLONE_NEWUTS
+        | CloneFlags::CLONE_NEWIPC
+        | CloneFlags::CLONE_NEWCGROUP;
+    let cloned = unsafe { nix::sched::clone(Box::new(entered), &mut stack, flags, Some(libc::SIGCHLD)) };
+    match cloned {
+        Ok(child) => Some(Tenant {
+            pid: child,
+            output,
+            halt: Halt::PowerOff,
+        }),
+        Err(error) => {
+            log(&format!(
+                "the system could not be cloned into its namespaces: {error}"
+            ));
+            None
+        }
+    }
+}
+
+fn spawn_binary(config: &InstanceConfig) -> Option<Tenant> {
     let executable = CString::new(paths::TENANT_BINARY).ok()?;
     let mut argv = vec![executable.clone()];
     for argument in &config.arguments {
@@ -180,11 +333,7 @@ fn spawn(config: &InstanceConfig) -> Option<Tenant> {
         .filter_map(|(name, value)| CString::new(format!("{name}={value}")).ok())
         .collect();
 
-    let (stdout_read, stdout_write) = nix::unistd::pipe().ok()?;
-    let (stderr_read, stderr_write) = nix::unistd::pipe().ok()?;
-    for read in [&stdout_read, &stderr_read] {
-        let _ = nix::fcntl::fcntl(read, nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK));
-    }
+    let (output, (stdout_write, stderr_write)) = pipes()?;
 
     match unsafe { nix::unistd::fork() } {
         Err(error) => {
@@ -196,10 +345,8 @@ fn spawn(config: &InstanceConfig) -> Option<Tenant> {
             drop(stderr_write);
             Some(Tenant {
                 pid: child,
-                output: TenantOutput {
-                    stdout: std::fs::File::from(stdout_read),
-                    stderr: std::fs::File::from(stderr_read),
-                },
+                output,
+                halt: halt_for(config.artifact_kind),
             })
         }
         Ok(ForkResult::Child) => {

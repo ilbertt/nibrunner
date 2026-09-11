@@ -14,7 +14,7 @@ protocol.workspace = true
 guest-contract.workspace = true
 libc.workspace = true
 thiserror.workspace = true
-nix = { version = "0.30", features = ["mount", "signal", "process", "fs", "socket", "user", "time"] }
+nix = { version = "0.30", features = ["mount", "signal", "process", "fs", "socket", "user", "time", "sched", "hostname"] }
 
 [dev-dependencies]
 tempfile.workspace = true

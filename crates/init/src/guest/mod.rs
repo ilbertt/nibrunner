@@ -33,11 +33,17 @@ pub(crate) fn run() -> ExitCode {
 
     let channels = channels::start();
 
-    log(&format!(
-        "starting the tenant as uid {} with data at {}",
-        paths::TENANT_UID,
-        paths::DATA_DIR
-    ));
+    match config.artifact_kind {
+        protocol::ArtifactKind::Executable => log(&format!(
+            "starting the tenant as uid {} with data at {}",
+            paths::TENANT_UID,
+            paths::DATA_DIR
+        )),
+        protocol::ArtifactKind::Rootfs => log(&format!(
+            "starting the system's {} in namespaces of its own",
+            paths::ROOTFS_INIT
+        )),
+    }
     match supervisor::supervise(&config) {
         supervisor::Ended::ShutdownRequested => log("the tenant has stopped; shutting the guest down"),
         supervisor::Ended::RestartBudgetExhausted => log(&format!(
@@ -56,7 +62,10 @@ fn boot() -> Result<InstanceConfig, String> {
     mounts::pseudo_filesystems().map_err(|error| error.to_string())?;
     let config = read_instance_config()?;
     write_resolv_conf(&config)?;
-    prepare_tenant_filesystem()?;
+    match config.artifact_kind {
+        protocol::ArtifactKind::Executable => prepare_tenant_filesystem()?,
+        protocol::ArtifactKind::Rootfs => prepare_system_filesystem(&config)?,
+    }
     Ok(config)
 }
 
@@ -112,16 +121,60 @@ fn prepare_tenant_filesystem() -> Result<(), String> {
     mounts::tenant_data(
         paths::DATA_DEVICE,
         paths::DATA_DIR,
-        paths::TENANT_UID,
-        paths::TENANT_GID,
+        Some((paths::TENANT_UID, paths::TENANT_GID)),
     )
     .map_err(|error| error.to_string())
+}
+
+/// The system's root is the uploaded image with the volume's `upper` written over it. The volume
+/// stays root's: what the system writes lands there as root wrote it. The DNS this host resolves
+/// with is written into the stacked root rather than bind-mounted, since a stock image's
+/// `/etc/resolv.conf` is as likely a dangling symlink as a file.
+fn prepare_system_filesystem(config: &InstanceConfig) -> Result<(), String> {
+    mounts::rootfs_image(paths::ARTIFACT_DEVICE, paths::ARTIFACT_MOUNT).map_err(|error| error.to_string())?;
+    let init = std::path::Path::new(paths::ARTIFACT_MOUNT).join(paths::ROOTFS_INIT.trim_start_matches('/'));
+    if std::fs::symlink_metadata(&init).is_err() {
+        return Err(format!(
+            "the root filesystem holds nothing at {}, so there is no system to start",
+            paths::ROOTFS_INIT
+        ));
+    }
+    mounts::tmpfs(paths::APP_DIR, "mode=0755,size=1M").map_err(|error| error.to_string())?;
+    mounts::tenant_data(paths::DATA_DEVICE, paths::DATA_DIR, None).map_err(|error| error.to_string())?;
+    let upper = format!("{}/{}", paths::DATA_DIR, paths::OVERLAY_UPPER_DIR);
+    let work = format!("{}/{}", paths::DATA_DIR, paths::OVERLAY_WORK_DIR);
+    mounts::overlay(paths::ARTIFACT_MOUNT, &upper, &work, paths::ROOTFS_MOUNT)
+        .map_err(|error| error.to_string())?;
+
+    let resolv_conf = std::path::Path::new(paths::ROOTFS_MOUNT).join("etc/resolv.conf");
+    if std::fs::symlink_metadata(&resolv_conf).is_ok() {
+        std::fs::remove_file(&resolv_conf)
+            .map_err(|error| format!("{} could not be replaced: {error}", resolv_conf.display()))?;
+    }
+    if let Some(parent) = resolv_conf.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let rendered: String = config
+        .nameservers
+        .iter()
+        .map(|address| format!("nameserver {address}\n"))
+        .collect();
+    std::fs::write(&resolv_conf, rendered)
+        .map_err(|error| format!("{} could not be written: {error}", resolv_conf.display()))?;
+    log(&format!(
+        "system root stacked at {} over {}",
+        paths::ROOTFS_MOUNT,
+        paths::ARTIFACT_MOUNT
+    ));
+    Ok(())
 }
 
 fn shutdown(channels: Option<&channels::Channels>) -> ExitCode {
     if let Some(channels) = channels {
         channels.stop();
     }
+    // A stacked root holds the volume open under it, so it comes down first or the volume never does.
+    let _ = nix::mount::umount2(paths::ROOTFS_MOUNT, nix::mount::MntFlags::MNT_DETACH);
     if let Err(error) = nix::mount::umount(paths::DATA_DIR) {
         if !matches!(error, nix::errno::Errno::EINVAL | nix::errno::Errno::ENOENT) {
             log(&format!("could not unmount {}: {error}", paths::DATA_DIR));

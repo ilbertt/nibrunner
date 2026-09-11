@@ -159,7 +159,51 @@ pub(crate) fn artifact(device: &str, target: &str) -> Result<(), MountFailed> {
     squashfs("the artifact drive", device, target, MsFlags::empty())
 }
 
-pub(crate) fn tenant_data(device: &str, target: &str, uid: u32, gid: u32) -> Result<(), MountFailed> {
+/// A root filesystem is attached as it was uploaded, so its format is read off the drive rather
+/// than assumed. It is the lower layer of a system that will run `sudo`, so nothing on it is
+/// masked but writing.
+pub(crate) fn rootfs_image(device: &str, target: &str) -> Result<(), MountFailed> {
+    wait_for_device(device)?;
+    ensure_directory(target, 0o755)?;
+    let mut refused = None;
+    for filesystem in ["squashfs", "ext4"] {
+        match mount(
+            Some(device),
+            Path::new(target),
+            Some(filesystem),
+            MsFlags::MS_RDONLY,
+            None::<&str>,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => refused = Some(error),
+        }
+    }
+    Err(MountFailed {
+        what: "the root filesystem",
+        target: target.to_string(),
+        reason: refused.map_or_else(
+            || "no filesystem this guest mounts".to_string(),
+            |error| format!("neither squashfs nor ext4 would mount it: {error}"),
+        ),
+    })
+}
+
+pub(crate) fn overlay(lower: &str, upper: &str, work: &str, target: &str) -> Result<(), MountFailed> {
+    ensure_directory(upper, 0o755)?;
+    ensure_directory(work, 0o755)?;
+    ensure_directory(target, 0o755)?;
+    mounted(
+        "the system's root",
+        "overlay",
+        target,
+        "overlay",
+        MsFlags::empty(),
+        Some(&format!("lowerdir={lower},upperdir={upper},workdir={work}")),
+        Existing::Refuse,
+    )
+}
+
+pub(crate) fn tenant_data(device: &str, target: &str, owner: Option<(u32, u32)>) -> Result<(), MountFailed> {
     wait_for_device(device)?;
     ensure_directory(target, 0o755)?;
     mounted(
@@ -171,6 +215,9 @@ pub(crate) fn tenant_data(device: &str, target: &str, uid: u32, gid: u32) -> Res
         None,
         Existing::Refuse,
     )?;
+    let Some((uid, gid)) = owner else {
+        return Ok(());
+    };
     nix::unistd::chown(
         Path::new(target),
         Some(nix::unistd::Uid::from_raw(uid)),
