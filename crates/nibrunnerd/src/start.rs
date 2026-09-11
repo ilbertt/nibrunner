@@ -4,6 +4,7 @@
 //! still empty in `host.env`, a certificate the configuration names that is not there. With those
 //! checked, a start that fails is one the configuration got wrong.
 
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -124,10 +125,38 @@ fn refuse_unstartable(config: &HostConfig, environment_file: &Path) -> Result<()
             ));
         }
     }
+    for (section, address) in listeners(config) {
+        if !this_host_has(address) {
+            reasons.push(format!(
+                "  [{section}] listen_address {address} is not an address this host has"
+            ));
+        }
+    }
     if reasons.is_empty() {
         return Ok(());
     }
     Err(StartError::Unstartable(reasons.join("\n")))
+}
+
+fn listeners(config: &HostConfig) -> Vec<(&'static str, IpAddr)> {
+    let mut listeners = Vec::new();
+    if let Some(http) = &config.proxy.http {
+        listeners.push(("proxy.http", http.listen_address));
+    }
+    if let Some(raw) = &config.proxy.raw {
+        listeners.push(("proxy.raw", raw.listen_address));
+    }
+    if let Some(metrics) = &config.metrics {
+        listeners.push(("metrics", metrics.listen_address));
+    }
+    listeners
+}
+
+/// Asked of the kernel the way the daemon will ask it, on a port it hands out: binding an address
+/// this host does not have fails the same way whichever port is named, and this way needs no
+/// privilege and takes nothing the daemon will want.
+fn this_host_has(address: IpAddr) -> bool {
+    address.is_unspecified() || UdpSocket::bind(SocketAddr::new(address, 0)).is_ok()
 }
 
 fn tls_material(config: &HostConfig) -> Vec<(&'static str, &Path)> {
@@ -307,6 +336,33 @@ mod tests {
         assert!(
             refuse_unstartable(&HostConfig::under(Path::new("/srv/nibrunner")), &environment_file).is_ok()
         );
+    }
+
+    // The example configuration names a relay's private address for raw ports, and a host that
+    // copied it as it is would bind an address it does not have — a second after `start` had
+    // called it up. Said here instead, before anything is asked of systemd.
+    #[test]
+    fn a_listen_address_this_host_does_not_have_refuses_the_start_by_name() {
+        use crate::config::RawPorts;
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::under(Path::new("/srv/nibrunner"));
+        config.proxy.raw = Some(RawPorts {
+            // TEST-NET-1: documentation only, so no host has it.
+            listen_address: "192.0.2.1".parse().unwrap(),
+            max_ports_per_guest: 1,
+        });
+        config.metrics = Some(crate::config::MetricsConfig {
+            port: 9100,
+            listen_address: "127.0.0.1".parse().unwrap(),
+        });
+
+        let error = refuse_unstartable(&config, &directory.path().join("host.env")).unwrap_err();
+        let said = error.to_string();
+        assert!(said.contains("[proxy.raw] listen_address 192.0.2.1"), "{said}");
+        assert!(!said.contains("[metrics]"), "{said}");
+
+        assert!(this_host_has("0.0.0.0".parse().unwrap()));
+        assert!(this_host_has("::".parse().unwrap()));
     }
 
     // The daemon reads it once, at bind time, and a path that is not there is a failed unit and a
