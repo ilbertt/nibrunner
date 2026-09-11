@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use nft_render::AppTraffic;
-use protocol::{AppId, ComputeUsage, FilesystemUsage, ReportedVolume, VolumeId};
+use protocol::{AppId, ComputeUsage, FilesystemUsage, ReportedVolume, UsageMeters, VolumeId};
 use tokio::sync::{Notify, RwLock};
 
 use crate::domain::report::InstanceRecord;
@@ -21,6 +21,10 @@ pub struct HostSnapshot {
     pub volume_usage: BTreeMap<AppId, FilesystemUsage>,
     pub compute_usage: BTreeMap<AppId, ComputeUsage>,
     pub compute_ticks: BTreeMap<AppId, guest_contract::filesystem::MeasuredCompute>,
+    pub meters: BTreeMap<AppId, UsageMeters>,
+    // Only ever this daemon's own note of when it last metered, so a restart credits nothing
+    // for the stretch it was not there to watch.
+    pub metered_at_ms: Option<i64>,
     pub converged: bool,
     pub deferred_work: bool,
     pub isolated: bool,

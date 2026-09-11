@@ -10,7 +10,7 @@ use crate::services::idle_service::IdleService;
 // overshoot: the least a timeout can be is 60 seconds, and waiting a minute to notice made an app
 // sleep at twice the time it asked for. It is the counters this reads that set the floor — they
 // come from the ruleset, whose size is the number of apps on the host.
-const IDLE_INTERVAL: Duration = Duration::from_secs(5);
+const IDLE_INTERVAL: Duration = Duration::from_millis(crate::domain::reconcile::idle::ACTIVITY_INTERVAL_MS);
 
 pub struct IdleController {
     idle: Arc<dyn IdleService>,

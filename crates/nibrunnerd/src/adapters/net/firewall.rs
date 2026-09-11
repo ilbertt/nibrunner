@@ -81,7 +81,7 @@ mod tests {
     use super::*;
     use crate::ports::CommandResult;
     use crate::test_support::mocks::{self, CommandLog};
-    use nft_render::{app_counter_name, ForwardedInstance};
+    use nft_render::{app_received_counter_name, app_sent_counter_name, Counted, ForwardedInstance};
     use protocol::{HostPort, Ipv4Address};
 
     fn holding(handles: (u64, u64)) -> String {
@@ -216,16 +216,29 @@ mod tests {
     #[tokio::test]
     async fn what_the_kernel_counted_is_read_back_per_app() {
         let app = AppId::parse("app-1").unwrap();
+        let counted = |name: String, bytes: u64| {
+            format!(
+                r#"{{"counter":{{"family":"ip","name":"{name}","table":"nibrun","handle":2,"packets":3,"bytes":{bytes}}}}}"#
+            )
+        };
+        // One listing carries both ways, so metering each apart costs no second call.
         let counters = format!(
-            r#"{{"nftables":[{{"counter":{{"family":"ip","name":"{}","table":"nibrun","handle":2,"packets":3,"bytes":512}}}}]}}"#,
-            app_counter_name(&app)
+            r#"{{"nftables":[{},{}]}}"#,
+            counted(app_received_counter_name(&app), 512),
+            counted(app_sent_counter_name(&app), 4096)
         );
         let firewall = HostFirewall::new(listing(counters).0);
         assert_eq!(
             firewall.traffic().await.unwrap().get(&app),
             Some(&AppTraffic {
-                packets: 3,
-                bytes: 512
+                received: Counted {
+                    packets: 3,
+                    bytes: 512
+                },
+                sent: Counted {
+                    packets: 3,
+                    bytes: 4096
+                },
             })
         );
     }

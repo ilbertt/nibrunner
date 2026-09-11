@@ -183,6 +183,10 @@ pub struct ReportedInstance {
     pub last_exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeUsage>,
+    // Not optional the way `compute` is: a guest that never answered has no usage to report, but
+    // an app this host has only ever held a record of has used nothing, and nothing is a number.
+    #[serde(default)]
+    pub meters: UsageMeters,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<StateMessage>,
 }

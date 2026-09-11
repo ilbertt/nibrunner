@@ -555,6 +555,31 @@ pub struct ComputeUsage {
     pub measured_at: Timestamp,
 }
 
+/// What an app has used since this host first saw it. Every field only ever grows, so what it cost
+/// over any stretch is the difference between two readings of it, and a reading that was missed
+/// costs nothing but resolution. A field that went down is a counter this host restarted.
+///
+/// Time is metered in two, because a running app holds the memory it was promised and an idle one
+/// holds only the disk its snapshot sits on. Which of those is worth what, this does not say.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageMeters {
+    pub running_ms: u64,
+    pub idle_ms: u64,
+    /// Summed across the vCPUs the app was given, so a two-vCPU app that stayed busy for a second
+    /// spent two seconds of it.
+    pub cpu_ms: u64,
+    /// What reached the guest, and what it put back on the wire. Only what was let out is
+    /// counted as sent: a packet the ruleset rejected never left, so nobody is charged for it.
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    /// Disk is a level rather than a flow, so what is metered is the level multiplied by the time
+    /// it was held: what was set aside for the app, and what its guest reported having filled.
+    /// Mebibyte-seconds, because byte-milliseconds of a large volume outrun a `u64` in months.
+    pub disk_provisioned_mib_seconds: u64,
+    pub disk_used_mib_seconds: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilesystemEntryKind {
