@@ -153,3 +153,163 @@ fn a_filesystem_query_response_is_a_tagged_union() {
             .unwrap();
     assert!(matches!(query, FilesystemQueryResponse::Query { .. }));
 }
+
+fn instance_with(edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+    let mut document = instance_json();
+    document
+        .as_object_mut()
+        .expect("an object")
+        .remove("idleTimeoutMs");
+    edit(&mut document);
+    document
+}
+
+fn read(document: serde_json::Value) -> Result<DesiredInstance, serde_json::Error> {
+    serde_json::from_value(document)
+}
+
+#[test]
+fn an_activation_policy_round_trips_with_its_wire_names() {
+    let instance = read(instance_with(|document| {
+        document["activation"] = serde_json::json!({
+            "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 },
+            "readyWhen": { "kind": "boot-completed" }
+        });
+    }))
+    .expect("parses");
+
+    let policy = instance.activation();
+    assert_eq!(
+        policy.sleep_when,
+        SleepPolicy::TrafficIdle {
+            timeout_ms: IdleTimeoutMs::try_from(900_000).unwrap()
+        }
+    );
+    assert_eq!(policy.ready_when, ReadinessPolicy::BootCompleted);
+
+    let written = serde_json::to_value(&instance).expect("serialises");
+    assert_eq!(written["activation"]["sleepWhen"]["kind"], "traffic-idle");
+    assert_eq!(written["activation"]["sleepWhen"]["timeoutMs"], 900_000);
+    assert_eq!(written["activation"]["readyWhen"]["kind"], "boot-completed");
+    assert!(written.get("idleTimeoutMs").is_none());
+}
+
+#[test]
+fn a_readiness_left_out_is_the_one_every_instance_written_before_it_had() {
+    let instance = read(instance_with(|document| {
+        document["activation"] = serde_json::json!({ "sleepWhen": { "kind": "never" } });
+    }))
+    .expect("parses");
+    assert_eq!(instance.activation().ready_when, ReadinessPolicy::PortAnswers);
+    assert_eq!(instance.activation().sleep_when, SleepPolicy::Never);
+}
+
+#[test]
+fn a_document_that_names_no_policy_means_what_it_meant_before_there_were_any() {
+    let on_request = read(instance_with(|document| {
+        document["desiredState"] = serde_json::json!("on-request");
+    }))
+    .expect("parses");
+    assert_eq!(
+        on_request.activation().sleep_when,
+        SleepPolicy::TrafficIdle {
+            timeout_ms: DEFAULT_IDLE_TIMEOUT
+        }
+    );
+
+    let timed = read(instance_with(|document| {
+        document["desiredState"] = serde_json::json!("on-request");
+        document["idleTimeoutMs"] = serde_json::json!(900_000);
+    }))
+    .expect("parses");
+    assert_eq!(
+        timed.activation().sleep_when,
+        SleepPolicy::TrafficIdle {
+            timeout_ms: IdleTimeoutMs::try_from(900_000).unwrap()
+        }
+    );
+
+    for state in ["running", "stopped"] {
+        let kept_up = read(instance_with(|document| {
+            document["desiredState"] = serde_json::json!(state);
+        }))
+        .expect("parses");
+        assert_eq!(kept_up.activation().sleep_when, SleepPolicy::Never, "{state}");
+    }
+}
+
+#[test]
+fn a_document_that_says_when_an_instance_sleeps_twice_is_refused() {
+    let refused = read(instance_with(|document| {
+        document["idleTimeoutMs"] = serde_json::json!(900_000);
+        document["activation"] = serde_json::json!({
+            "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 }
+        });
+    }))
+    .expect_err("both spellings are refused");
+    assert!(refused.to_string().contains("name one"), "{refused}");
+}
+
+#[test]
+fn only_an_on_request_instance_may_name_a_sleep_policy_that_fires() {
+    for state in ["running", "stopped"] {
+        let refused = read(instance_with(|document| {
+            document["desiredState"] = serde_json::json!(state);
+            document["activation"] = serde_json::json!({
+                "sleepWhen": { "kind": "max-lifetime", "ttlMs": 3600000 }
+            });
+        }))
+        .expect_err("nothing would wake it again");
+        assert!(refused.to_string().contains("on-request"), "{state}: {refused}");
+
+        assert!(
+            read(instance_with(|document| {
+                document["desiredState"] = serde_json::json!(state);
+                document["activation"] = serde_json::json!({ "sleepWhen": { "kind": "never" } });
+            }))
+            .is_ok(),
+            "{state} may still say it never sleeps"
+        );
+    }
+}
+
+#[test]
+fn a_policy_this_host_does_not_offer_is_refused_by_name_rather_than_ignored() {
+    assert!(read(instance_with(|document| {
+        document["activation"] = serde_json::json!({ "sleepWhen": { "kind": "no-sessions" } });
+    }))
+    .is_err());
+
+    assert!(read(instance_with(|document| {
+        document["activation"] = serde_json::json!({
+            "sleepWhen": { "kind": "never" },
+            "readyWhen": { "kind": "agent-ready" }
+        });
+    }))
+    .is_err());
+
+    assert!(
+        read(instance_with(|document| {
+            document["activation"] = serde_json::json!({});
+        }))
+        .is_err(),
+        "a policy that names no sleepWhen says nothing"
+    );
+}
+
+#[test]
+fn a_lifetime_outside_what_a_host_will_hold_is_refused() {
+    assert!(MaxLifetimeMs::try_from(MIN_MAX_LIFETIME_MS).is_ok());
+    assert!(MaxLifetimeMs::try_from(MAX_MAX_LIFETIME_MS).is_ok());
+    assert!(MaxLifetimeMs::try_from(MIN_MAX_LIFETIME_MS - 1).is_err());
+    assert!(MaxLifetimeMs::try_from(MAX_MAX_LIFETIME_MS + 1).is_err());
+
+    let refused = read(instance_with(|document| {
+        document["desiredState"] = serde_json::json!("on-request");
+        document["activation"] = serde_json::json!({
+            "sleepWhen": { "kind": "max-lifetime", "ttlMs": 1000 }
+        });
+    }))
+    .expect_err("a second is not a lifetime a host will hold");
+    assert!(refused.to_string().contains("ttlMs"), "{refused}");
+}

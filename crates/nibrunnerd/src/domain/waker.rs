@@ -108,17 +108,21 @@ impl AppWaker {
             return Err(WakeRefusal::Failed { reason });
         }
 
-        let deadline = Instant::now() + Duration::from_millis(record.health_check.grace_period_ms);
-        loop {
-            if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check).await {
-                break;
+        // A caller is handed on once the guest is ready for it, and what ready means is the
+        // instance's to say: a port that answers, or a microVM that started at all.
+        if crate::domain::activation::probes_a_port(record.readiness) {
+            let deadline = Instant::now() + Duration::from_millis(record.health_check.grace_period_ms);
+            loop {
+                if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check).await {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(WakeRefusal::Failed {
+                        reason: format!("nothing answered on port {} inside the guest", record.http_port),
+                    });
+                }
+                tokio::time::sleep(PROBE_INTERVAL).await;
             }
-            if Instant::now() >= deadline {
-                return Err(WakeRefusal::Failed {
-                    reason: format!("nothing answered on port {} inside the guest", record.http_port),
-                });
-            }
-            tokio::time::sleep(PROBE_INTERVAL).await;
         }
 
         self.host.state.signal_refresh();
@@ -223,8 +227,14 @@ mod tests {
         use std::net::SocketAddr;
         use tracing_subscriber::layer::SubscriberExt;
 
+        let _woken = WOKEN_LOG.lock();
         let counted = CountsCoalesced::default();
         let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(counted.clone()));
+        // Interest in a callsite is cached for the whole process by whichever thread reaches it
+        // first, and a thread with no subscriber of its own caches it as never. This subscriber is
+        // this thread's alone, so the cache is told the question is worth asking again — and the
+        // lock above keeps the other test that reaches the same callsite from answering it first.
+        tracing::callsite::rebuild_interest_cache();
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -261,6 +271,10 @@ mod tests {
         assert!(outcomes.iter().all(Result::is_ok));
         assert_eq!(counted.taken(), vec![9]);
     }
+
+    /// Both tests below reach the log line a finished wake writes, and only one of them may be the
+    /// thread that first decides whether anything is listening for it.
+    static WOKEN_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[derive(Clone, Default)]
     struct CountsCoalesced(Arc<std::sync::Mutex<Vec<u64>>>);
@@ -382,6 +396,37 @@ mod tests {
             panic!("a guest that never answered was reported as woken");
         };
         assert!(reason.contains("nothing answered on port 1"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_answers_no_port_is_woken_when_starting_is_all_it_promised() {
+        let _woken = WOKEN_LOG.lock();
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+                record.readiness = protocol::ReadinessPolicy::BootCompleted;
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.http_port = protocol::HttpPort::new(1).unwrap();
+                record.health_check.grace_period_ms = 20;
+                record.health_check.timeout_ms = 50;
+            }))
+            .await;
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
+
+        AppWaker::new(host.arc().clone())
+            .wake(&app_id())
+            .await
+            .expect("a microVM that started is the whole of what it promised");
+        assert!(host.vms.calls().contains(&crate::ports::VmCall::Wake));
     }
 
     #[tokio::test]

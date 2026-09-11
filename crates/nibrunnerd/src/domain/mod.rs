@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod backoff;
 pub mod exports;
 pub mod filesystem;

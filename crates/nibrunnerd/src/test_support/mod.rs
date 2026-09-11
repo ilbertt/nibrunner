@@ -115,6 +115,7 @@ pub fn desired_instance(edit: impl FnOnce(&mut DesiredInstance)) -> DesiredInsta
         volume_id: volume_id(),
         desired_state: DesiredInstanceState::Running,
         idle_timeout_ms: None,
+        activation: None,
         artifact: artifact(|_| {}),
         config: app_config(|_| {}),
         hostnames: vec![],
@@ -250,6 +251,7 @@ pub fn record_fields() -> RecordFields {
         artifact_digest: Sha256Digest::parse(ARTIFACT_DIGEST).unwrap(),
         health_check: DEFAULT_HEALTH_CHECK,
         resources: DEFAULT_INSTANCE_RESOURCES,
+        readiness: protocol::ReadinessPolicy::PortAnswers,
         desired_running: true,
         on_request: false,
     }

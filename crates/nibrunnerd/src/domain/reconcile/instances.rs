@@ -50,6 +50,7 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
         artifact_digest: desired.artifact.digest.clone(),
         health_check: desired.config.health_check.clone(),
         resources: desired.config.resources,
+        readiness: desired.activation().ready_when,
         desired_running: true,
         on_request: desired.desired_state == DesiredInstanceState::OnRequest,
     }
@@ -413,12 +414,18 @@ async fn settle(
     now_ms: i64,
 ) {
     let health = if status.active && due {
-        let healthy = crate::domain::health::probe::probe_instance(
-            &record.guest_ipv4,
-            record.http_port,
-            &record.health_check,
-        )
-        .await;
+        let healthy = if crate::domain::activation::probes_a_port(record.readiness) {
+            crate::domain::health::probe::probe_instance(
+                &record.guest_ipv4,
+                record.http_port,
+                &record.health_check,
+            )
+            .await
+        } else {
+            // A guest this host did not build answers no port it was never told about, so that
+            // its microVM is still up is the whole of what this host can observe about it.
+            true
+        };
         let delay = next_probe_delay_ms(&record.health, &record.grace_inputs(now_ms));
         host.state
             .modify(|snapshot| {

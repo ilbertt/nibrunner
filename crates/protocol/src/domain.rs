@@ -319,6 +319,72 @@ impl From<IdleTimeoutMs> for u64 {
     }
 }
 
+pub const MIN_MAX_LIFETIME_MS: u64 = 60_000;
+pub const MAX_MAX_LIFETIME_MS: u64 = 604_800_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct MaxLifetimeMs(u64);
+
+impl MaxLifetimeMs {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl TryFrom<u64> for MaxLifetimeMs {
+    type Error = InvalidValue;
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if (MIN_MAX_LIFETIME_MS..=MAX_MAX_LIFETIME_MS).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(InvalidValue::new_public("ttlMs is out of range"))
+        }
+    }
+}
+
+impl From<MaxLifetimeMs> for u64 {
+    fn from(value: MaxLifetimeMs) -> u64 {
+        value.0
+    }
+}
+
+/// What puts a running microVM back to sleep. Only an `on-request` instance may carry one that
+/// fires: nothing else on this host would wake it again, and the next reconcile pass would bring
+/// it straight back up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub enum SleepPolicy {
+    Never,
+    TrafficIdle { timeout_ms: IdleTimeoutMs },
+    MaxLifetime { ttl_ms: MaxLifetimeMs },
+}
+
+/// What tells this host a microVM is ready to be given a caller, and what its liveness is read
+/// from afterwards. A guest this host did not build answers no port it was not told about, so
+/// `boot-completed` measures both from the microVM itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ReadinessPolicy {
+    #[default]
+    PortAnswers,
+    BootCompleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationPolicy {
+    pub sleep_when: SleepPolicy,
+    // Every instance written before this field existed answers a port, so leaving it out keeps
+    // meaning what it has always meant. What puts an instance to sleep has no such single answer,
+    // and is named rather than assumed.
+    #[serde(default)]
+    pub ready_when: ReadinessPolicy,
+}
+
+pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
+pub const DEFAULT_IDLE_TIMEOUT: IdleTimeoutMs = IdleTimeoutMs(DEFAULT_IDLE_TIMEOUT_MS);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppState {

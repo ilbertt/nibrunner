@@ -80,7 +80,7 @@ first, or drop `hostnames` to run an app that nothing outside needs to reach.
 }
 ```
 
-`desiredState` is the whole of the activation policy: `running` keeps the microVM up,
+`desiredState` says whether an instance should be up: `running` keeps the microVM up,
 `on-request` brings it up for the first deploy and lets it sleep between visitors, `stopped` takes
 it down and leaves the app reachable enough to say so.
 
@@ -114,6 +114,40 @@ datagram has no connection to hold, so the datagram itself is kept and delivered
 The host must name a `[proxy.raw]` section to bind such a port, and a `[proxy.http]` one to
 serve a hostname. A document that asks for what this host does not serve is refused by name and
 the instance is reported `failed` saying so.
+### Activation
+
+What puts an instance back to sleep, and what tells this host it is ready for a caller, are the
+instance's to name. `activation` names them:
+
+```json
+{
+  "desiredState": "on-request",
+  "activation": {
+    "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 },
+    "readyWhen": { "kind": "boot-completed" }
+  }
+}
+```
+
+| `sleepWhen` | When the microVM is suspended |
+| --- | --- |
+| `{ "kind": "never" }` | Never. The document is the only thing that takes it down. |
+| `{ "kind": "traffic-idle", "timeoutMs": N }` | Nothing has been sent to it for `N` ms. |
+| `{ "kind": "max-lifetime", "ttlMs": N }` | It has been up for `N` ms, however busy it still is. |
+
+| `readyWhen` | What a wake waits for, and what liveness is then read from |
+| --- | --- |
+| `{ "kind": "port-answers" }` | The health check answers on `httpPort`. The default. |
+| `{ "kind": "boot-completed" }` | The microVM started. Nothing inside it is probed. |
+
+Only an `on-request` instance may name a `sleepWhen` other than `never`: nothing on this host
+would wake anything else again, and the next reconcile pass would bring it straight back up. A
+document that says so is refused whole, while an operator is still watching.
+
+`idleTimeoutMs` is the older spelling of `sleepWhen: traffic-idle`, and still means exactly that.
+A document that names both is refused rather than served under whichever a loop read first, and a
+document that names neither means what it has always meant: an `on-request` instance sleeps after
+five minutes, and everything else does not sleep.
 
 ## Testing
 
