@@ -246,15 +246,9 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         return;
     }
 
-    let artifact = crate::adapters::vm::artifacts::ensure_artifact_image(
-        &host.artifacts,
-        &host.config.artifact_cache_dir(),
-        &desired.artifact,
-    )
-    .await;
-    let booted = match artifact {
+    let booted = match host.payloads.prepare(&desired.artifact).await {
         Err(error) => Err(error.message()),
-        Ok(artifact_image_path) => {
+        Ok(payload) => {
             let data_device_path = match host.volumes.attach(&desired.volume_id, &desired.app_id).await {
                 Ok(attached) => attached.device_path,
                 Err(error) => {
@@ -273,7 +267,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                     desired: desired.clone(),
                     slot,
                     data_device_path,
-                    artifact_image_path,
+                    payload,
                 })
                 .await
                 .map_err(|error| error.message())
@@ -504,13 +498,7 @@ pub fn artifacts_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredArtifact
 
 pub async fn prefetch_artifacts(host: &Host, plan: &ReconcilePlan) {
     for artifact in artifacts_to_start(plan) {
-        if let Err(error) = crate::adapters::vm::artifacts::ensure_artifact_image(
-            &host.artifacts,
-            &host.config.artifact_cache_dir(),
-            &artifact,
-        )
-        .await
-        {
+        if let Err(error) = host.payloads.prepare(&artifact).await {
             tracing::warn!(digest = %artifact.digest, error = %error.message(), "artifact prefetch failed");
         }
     }
@@ -649,6 +637,14 @@ mod tests {
         )
     }
 
+    fn refuse_artifacts(host: &mut TestHost, reason: &str) {
+        let cache_dir = host.config.artifact_cache_dir();
+        let refusing = mocks::artifacts_refusing(crate::ports::ArtifactError::Transfer(reason.to_string()));
+        Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .payloads = crate::adapters::vm::artifacts::ExecutablePayload::new(refusing, cache_dir);
+    }
+
     fn on_request() -> DesiredInstance {
         desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest)
     }
@@ -749,11 +745,7 @@ mod tests {
     #[tokio::test]
     async fn an_image_this_host_cannot_fetch_fails_the_instance_rather_than_booting_something_else() {
         let mut host = test_host().await;
-        Arc::get_mut(&mut host.host)
-            .expect("nothing else holds this host yet")
-            .artifacts = mocks::artifacts_refusing(crate::ports::ArtifactError::Transfer(
-            "the object store is down".to_string(),
-        ));
+        refuse_artifacts(&mut host, "the object store is down");
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
 
         start_instance(&host, &desired_instance(|_| {})).await;
@@ -851,11 +843,7 @@ mod tests {
     #[tokio::test]
     async fn an_image_that_could_not_be_fetched_leaves_the_pass_running() {
         let mut host = test_host().await;
-        Arc::get_mut(&mut host.host)
-            .expect("nothing else holds this host yet")
-            .artifacts = mocks::artifacts_refusing(crate::ports::ArtifactError::Transfer(
-            "the object store is down".to_string(),
-        ));
+        refuse_artifacts(&mut host, "the object store is down");
 
         prefetch_artifacts(
             &host,

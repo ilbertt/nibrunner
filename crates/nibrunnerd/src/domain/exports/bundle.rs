@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use protocol::{DesiredArtifact, TenantEnvironment};
 
-use crate::ports::{ArtifactStore, CommandRequest, CommandRunner, CommandRunnerExt};
+use crate::ports::{ArtifactStore, ArtifactStoreExt, CommandRequest, CommandRunner, CommandRunnerExt};
 
 const STAGING_MODE: u32 = 0o700;
 const DATA_DIRECTORY: &str = "data";
@@ -125,7 +125,8 @@ pub async fn write_bundle(
     staging_dir: &Path,
 ) -> Result<WrittenBundle, BundleError> {
     let binary_name = bundle_binary_name(artifact)?.to_string();
-    let bytes = crate::adapters::vm::artifacts::fetch_verified(artifacts, artifact)
+    let bytes = artifacts
+        .read_verified(artifact)
         .await
         .map_err(|error| BundleError::Artifact(error.message()))?;
 

@@ -2,11 +2,12 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use backhand::{compression::Compressor, FilesystemCompressor, FilesystemWriter, NodeHeader};
 use protocol::{DesiredArtifact, Sha256Digest};
 
 use crate::json_store::make_directory;
-use crate::ports::{ArtifactError, ArtifactStore};
+use crate::ports::{ArtifactError, ArtifactStore, ArtifactStoreExt, PayloadBuilder, PreparedPayload};
 
 pub const ARTIFACT_IMAGE_FILENAME: &str = "artifact.squashfs";
 
@@ -53,34 +54,29 @@ fn pack(files: &[(&str, &[u8], u16)]) -> Result<Vec<u8>, ArtifactError> {
     Ok(image.into_inner())
 }
 
-fn digest_of(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    hex::encode(sha2::Sha256::digest(bytes))
-}
-
 pub fn artifact_image_path(cache_dir: &Path, digest: &Sha256Digest) -> PathBuf {
     cache_dir.join(digest.as_str()).join(ARTIFACT_IMAGE_FILENAME)
 }
 
-pub async fn fetch_verified(
-    store: &Arc<dyn ArtifactStore>,
-    artifact: &DesiredArtifact,
-) -> Result<Vec<u8>, ArtifactError> {
-    let bytes = store.read(&artifact.object_key).await?;
-    let actual = digest_of(&bytes);
-    if actual != artifact.digest.as_str() {
-        return Err(ArtifactError::DigestMismatch {
-            expected: artifact.digest.clone(),
-            actual,
-        });
+/// The payload this host has always run: one static binary, packed as the only file on a
+/// read-only image the guest's own init execs.
+pub struct ExecutablePayload {
+    store: Arc<dyn ArtifactStore>,
+    cache_dir: PathBuf,
+}
+
+impl ExecutablePayload {
+    pub fn new(store: Arc<dyn ArtifactStore>, cache_dir: PathBuf) -> Arc<Self> {
+        Arc::new(Self { store, cache_dir })
     }
-    if bytes.len() as u64 != artifact.size_bytes {
-        return Err(ArtifactError::SizeMismatch {
-            expected: artifact.size_bytes,
-            actual: bytes.len() as u64,
-        });
+}
+
+#[async_trait]
+impl PayloadBuilder for ExecutablePayload {
+    async fn prepare(&self, artifact: &DesiredArtifact) -> Result<PreparedPayload, ArtifactError> {
+        let artifact_image_path = ensure_artifact_image(&self.store, &self.cache_dir, artifact).await?;
+        Ok(PreparedPayload { artifact_image_path })
     }
-    Ok(bytes)
 }
 
 pub async fn ensure_artifact_image(
@@ -100,7 +96,7 @@ pub async fn ensure_artifact_image(
         return Ok(image_path);
     }
 
-    let bytes = fetch_verified(store, artifact).await?;
+    let bytes = store.read_verified(artifact).await?;
 
     let image = pack(&[(GUEST_BINARY_NAME, &bytes, BINARY_MODE)])?;
     let directory = image_path
@@ -146,11 +142,6 @@ mod tests {
 
     fn store(bytes: Vec<u8>) -> Arc<dyn ArtifactStore> {
         mocks::artifacts_holding(bytes)
-    }
-
-    #[test]
-    fn the_fixture_digest_is_the_digest_of_the_fixture_bytes() {
-        assert_eq!(digest_of(&artifact_bytes()), ARTIFACT_DIGEST);
     }
 
     fn read_back(image: &[u8], path: &str) -> Vec<u8> {
@@ -247,9 +238,21 @@ mod tests {
     async fn bytes_that_match_are_handed_back_whole_before_anything_is_built_from_them() {
         let store = store(artifact_bytes());
         assert_eq!(
-            fetch_verified(&store, &artifact(|_| {})).await.unwrap(),
+            store.read_verified(&artifact(|_| {})).await.unwrap(),
             artifact_bytes()
         );
+    }
+
+    #[tokio::test]
+    async fn the_executable_payload_is_the_cached_image_and_nothing_more() {
+        let directory = tempfile::tempdir().unwrap();
+        let payloads = ExecutablePayload::new(store(artifact_bytes()), directory.path().to_path_buf());
+        let prepared = payloads.prepare(&artifact(|_| {})).await.unwrap();
+        assert_eq!(
+            prepared.artifact_image_path,
+            artifact_image_path(directory.path(), &artifact(|_| {}).digest)
+        );
+        assert!(prepared.artifact_image_path.exists());
     }
 
     #[test]

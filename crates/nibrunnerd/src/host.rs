@@ -15,7 +15,7 @@ use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
 use crate::domain::exports::reader::CheckpointServers;
 use crate::domain::exports::store::ExportStore;
-use crate::ports::{ArtifactStore, CommandRunner, Vmm};
+use crate::ports::{ArtifactStore, CommandRunner, PayloadBuilder, Vmm};
 use crate::state::SharedState;
 
 pub struct Host {
@@ -28,6 +28,7 @@ pub struct Host {
     pub vms: Arc<dyn Vmm>,
     pub volumes: Arc<dyn VolumeBackend>,
     pub artifacts: Arc<dyn ArtifactStore>,
+    pub payloads: Arc<dyn PayloadBuilder>,
     pub repositories: crate::repositories::Repositories,
     pub exports: Arc<dyn ExportStore>,
     pub checkpoint_servers: Option<CheckpointServers>,
