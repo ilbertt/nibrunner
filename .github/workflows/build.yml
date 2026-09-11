@@ -20,4 +20,4 @@ jobs:
           prepare_for_build: enabled
 
       - name: Build
-        run: cargo build -p nibrunnerd --release --target x86_64-unknown-linux-musl
+        run: just release

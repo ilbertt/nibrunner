@@ -19,7 +19,7 @@ jobs:
           prepare_for_build: disabled
 
       - name: Check Rust Codestyle
-        run: cargo fmt --all --check
+        run: just fmt-check
 
   lint:
     runs-on: ubuntu-latest
@@ -33,7 +33,7 @@ jobs:
           prepare_for_build: disabled
 
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: just lint
 
   tests:
     runs-on: ubuntu-latest
@@ -47,7 +47,7 @@ jobs:
           prepare_for_build: disabled
 
       - name: Run Tests
-        run: cargo test --workspace
+        run: just test
 
   checks-passed:
     if: always()
