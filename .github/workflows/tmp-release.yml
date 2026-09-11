@@ -18,7 +18,7 @@ jobs:
         with:
           fetch-tags: true
 
-      - uses: ./.github/actions/build
+      - uses: ./.github/actions/build-release
 
       - name: Build the guest image
         run: just guest-image

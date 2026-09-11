@@ -1,4 +1,4 @@
-name: Build
+name: Build release
 description: Prepare the environment and build the host binary
 
 runs:
