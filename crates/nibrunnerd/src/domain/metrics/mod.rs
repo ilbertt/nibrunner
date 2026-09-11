@@ -1,4 +1,5 @@
 pub mod converge;
+pub mod health;
 pub mod passes;
 pub mod proxy;
 pub mod sleep_wake;
@@ -11,6 +12,7 @@ use std::time::Duration;
 use protocol::{HostReportedState, INSTANCE_STATES};
 
 use crate::domain::metrics::converge::ConvergeMetrics;
+use crate::domain::metrics::health::HealthMetrics;
 use crate::domain::metrics::passes::PassMetrics;
 use crate::domain::metrics::sleep_wake::SleepWakeMetrics;
 use crate::state::HostSnapshot;
@@ -23,6 +25,7 @@ pub struct HostMetrics {
     pub sleep_wake: SleepWakeMetrics,
     pub converge: ConvergeMetrics,
     pub passes: PassMetrics,
+    pub health: HealthMetrics,
 }
 
 impl HostMetrics {
@@ -33,6 +36,7 @@ impl HostMetrics {
     /// The document no longer names the app, so nothing kept per app is kept for it.
     pub fn forget(&self, app_id: &protocol::AppId) {
         self.sleep_wake.forget(app_id);
+        self.health.forget(app_id);
     }
 }
 
@@ -319,6 +323,7 @@ pub fn render(
     sleep_wake::render(&mut page, &metrics.sleep_wake, snapshot);
     passes::render(&mut page, report, &metrics.passes, snapshot);
     converge::render(&mut page, report, &metrics.converge, &snapshot.deploys, now_ms);
+    health::render(&mut page, report, &metrics.health, snapshot);
 
     page.0
 }
