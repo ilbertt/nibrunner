@@ -1,0 +1,14 @@
+name: Build release
+description: Prepare the environment and build the host binary
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/prepare
+      with:
+        cache: enabled
+        prepare_for_build: enabled
+
+    - name: Build
+      shell: bash
+      run: just build-release
