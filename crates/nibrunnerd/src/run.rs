@@ -106,6 +106,15 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             waker: waker_slot.clone(),
         }),
     );
+    let stream_activator = config.proxy.raw.as_ref().map(|raw| {
+        crate::adapters::proxy::StreamActivator::new(
+            state.clone(),
+            Arc::new(DeferredWaker {
+                waker: waker_slot.clone(),
+            }),
+            raw.listen_address,
+        )
+    });
 
     let exports: Arc<dyn crate::domain::exports::store::ExportStore> = Arc::new(
         crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)
@@ -136,6 +145,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         firewall: Arc::new(HostFirewall::new(commands)),
         router: Router::new(),
         activator,
+        stream_activator,
         config,
     });
     let _ = waker_slot.set(AppWaker::new(host.clone()));
@@ -179,31 +189,30 @@ pub fn host_versions(host: &Host) -> HostVersions {
 }
 
 pub fn serve_proxy(host: &Arc<Host>) {
-    if let Some(http) = &host.config.proxy.http {
-        let (router, port) = (host.router.clone(), http.port);
-        tokio::spawn(async move {
-            let address = SocketAddr::from(([0, 0, 0, 0], port));
-            if let Err(error) = router::serve_http(router, address).await {
-                tracing::error!(%error, "the proxy could not listen");
-            }
-        });
-    }
-    let Some(https) = host.config.proxy.https.clone() else {
+    let Some(http) = host.config.proxy.http.clone() else {
         return;
     };
     let router = host.router.clone();
+    let address = SocketAddr::new(http.listen_address, http.port);
     tokio::spawn(async move {
-        let address = SocketAddr::from(([0, 0, 0, 0], https.port));
-        if let Err(error) = router::serve_https(
-            router,
-            address,
-            &https.certificate,
-            &https.key,
-            https.client_ca.as_deref(),
-        )
-        .await
-        {
-            tracing::error!(%error, "the proxy could not listen for TLS");
+        // One listener, and what it is depends on whether this host was given the material to
+        // encrypt with. Nothing here redirects, so a second plain port beside a TLS one would
+        // serve every app both ways at once with nothing moving a visitor off the first.
+        let served = match &http.tls {
+            None => router::serve_http(router, address).await,
+            Some(tls) => {
+                router::serve_https(
+                    router,
+                    address,
+                    &tls.certificate,
+                    &tls.key,
+                    tls.client_ca.as_deref(),
+                )
+                .await
+            }
+        };
+        if let Err(error) = served {
+            tracing::error!(%error, secure = http.tls.is_some(), "the proxy could not listen");
         }
     });
 }

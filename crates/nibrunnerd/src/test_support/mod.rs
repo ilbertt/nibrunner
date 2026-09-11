@@ -96,6 +96,7 @@ pub fn artifact(edit: impl FnOnce(&mut DesiredArtifact)) -> DesiredArtifact {
 
 pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
     let mut value = AppConfig {
+        ports: vec![],
         http_port: DEFAULT_HTTP_PORT,
         args: TenantArguments::default(),
         environment: TenantEnvironment::default(),
@@ -238,6 +239,7 @@ pub fn observed_state(edit: impl FnOnce(&mut ObservedState)) -> ObservedState {
 pub fn record_fields() -> RecordFields {
     let slot = nft_render::describe_slot(nft_render::FIRST_SLOT, app_id());
     RecordFields {
+        ports: vec![],
         app_id: app_id(),
         deployment_id: deployment_id(),
         volume_id: volume_id(),
@@ -319,7 +321,20 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
     }
 
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let config = HostConfig::under(directory.path());
+    let mut config = HostConfig::under(directory.path());
+    // A host that serves apps under hostnames runs a proxy and binds the ports beside it, and an
+    // app is refused on a host that does neither.
+    config.proxy = crate::config::ProxyConfig {
+        http: Some(crate::config::HttpListener {
+            listen_address: std::net::Ipv4Addr::LOCALHOST.into(),
+            port: 8080,
+            tls: None,
+        }),
+        raw: Some(crate::config::RawPorts {
+            listen_address: std::net::Ipv4Addr::LOCALHOST.into(),
+            max_ports_per_guest: 1,
+        }),
+    };
     let state = HostState::shared();
     let (commands, command_log) = mocks::commands_succeeding();
     let (vms, vm_spy) = mocks::vmm();
@@ -344,7 +359,12 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
         commands: commands.clone(),
         firewall: Arc::new(HostFirewall::new(commands.clone())),
         router: Router::new(),
-        activator: AppActivator::new(state, Arc::new(NeverWoken)),
+        activator: AppActivator::new(state.clone(), Arc::new(NeverWoken)),
+        stream_activator: Some(crate::adapters::proxy::StreamActivator::new(
+            state,
+            Arc::new(NeverWoken),
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )),
         config,
     });
     TestHost {

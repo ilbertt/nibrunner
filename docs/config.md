@@ -19,7 +19,7 @@ does is what this file says.
 **An unknown key is refused too.** A mistyped key and a missing one are different errors, which is
 the thing an environment variable could never do for you.
 
-**A whole *section* is what may be absent** — `[proxy.https]`, `[metrics]`, `[volumes.zerofs]`. A
+**A whole *section* is what may be absent** — `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]`. A
 section that is present is filled in completely, so there is no half-configured listener to warn
 about at startup because there is no way to write one.
 
@@ -105,20 +105,29 @@ last of them.
 
 ## What this host serves
 
-Both listeners are optional and either is complete or absent.
+Every way in is a section under `[proxy]`, and each is absent or complete. Each binds an address
+of its own, because each faces a different machine.
 
 | Section | Key | What |
 | --- | --- | --- |
-| `[proxy.http]` | `port` | plain HTTP here |
-| `[proxy.https]` | `port`, `certificate`, `key` | TLS here, with this material |
-| `[proxy.https.client_ca]` | `certificate` | a PEM trust pool |
+| `[proxy.http]` | `listen_address`, `port` | the one HTTP listener, where the edge reaches it |
+| `[proxy.http.tls]` | `certificate`, `key` | serve that port encrypted, with this material |
+| `[proxy.http.tls.client_ca]` | `certificate` | a PEM trust pool |
+| `[proxy.raw]` | `listen_address`, `max_ports_per_guest` | ports carried to a guest unread, where the relay reaches them |
+
+**One HTTP listener, not a plain one and a TLS one.** Nothing here redirects, so two would serve
+every app unencrypted and encrypted at once, forever, with nothing moving a visitor from the first
+to the second. `[proxy.http.tls]` absent is plain HTTP, which is what a host behind an edge that
+terminates TLS wants.
+
+**This daemon does not obtain certificates.** It serves what is at the path it was given. ACME,
+renewal and rate limits belong to certbot, or to the edge. It is read once, at startup, so a
+renewed certificate needs `systemctl restart nibrunnerd` — safe, because nothing this daemon does
+stops a tenant, and neither does its death.
 
 **One certificate covers the whole host.** There is no SNI selection, so every hostname a tenant
 holds has to be covered by this one — a wildcard, in practice, which matches one label deep:
 `app.example.com` but not `a.b.example.com`.
-
-**It is read once, at startup.** A renewed certificate needs `systemctl restart nibrunnerd`, which
-is safe: nothing this daemon does stops a tenant, and neither does its death.
 
 **Naming a `client_ca` makes a caller's own certificate the price of the handshake.** On an origin
 whose IP is discoverable, that is what keeps it reachable only through the edge. It also means you
@@ -126,6 +135,26 @@ cannot reach it yourself without one, so turn it on after the plain path is prov
 
 A connection whose handshake named one app and whose request names another gets a **421**. That is
 the only thing standing between two tenants that share a certificate.
+
+**One HTTP port per guest.** A guest's hostname resolves to this host, and `[proxy.http]` carries
+it to the one port that guest answers HTTP on. That is what the subdomain means, so there is no
+second.
+
+**`[proxy.raw]` is the way in for a protocol this host does not read** — ssh, DNS, WireGuard.
+Such a port carries bytes and nothing else, so nothing can route it by name and it is reached at
+a port of its own. Which protocol carries each, `tcp` or `udp`, is the document's to name, port by
+port; `max_ports_per_guest` is how many, bounded by what a slot reserves past the HTTP port, which
+is seven. Absent carries nothing raw.
+
+**A raw port is never published from this host.** An address a tenant hands to its own users is
+published by definition, and publishing this host's would put every guest on it in front of one
+tenant's users. So the relay that publishes it is a machine of its own, and `proxy.raw.
+listen_address` is where that relay reaches this host — a private address, never the world's.
+Binding it to `0.0.0.0` is a choice this file lets you make and says out loud.
+
+**A document asking for what this host does not serve is refused by name**, and the instance is
+reported `failed` saying so, rather than started somewhere nothing could reach it: a hostname on a
+host with no `[proxy.http]`, or more ports than `[proxy.raw]` allows.
 
 ## Metrics
 
@@ -142,11 +171,13 @@ becoming a startup failure over there.
 
 ## Ports, across every section
 
-**21000–21999 is refused everywhere.** That range is what a slot takes for an app's loopback port,
-and a listener inside it would be taken out from under you by the next app deployed. `0` is refused
-separately: that is the kernel picking one, and a host should say what it serves on.
+**21000–28999 is refused everywhere.** Each slot reserves eight consecutive ports from 21000, and
+a listener inside that range would be taken out from under you by the next app deployed. A slot
+hands out only as many as the document asked for — one, or two — and the rest are reserve, so that
+raising the limit later moves nobody's ports. `0` is refused separately: that is the kernel picking
+one, and a host should say what it serves on.
 
-`proxy.https.port` must also differ from `proxy.http.port`, and `metrics.port` from both.
+`metrics.port` must differ from `proxy.http.port`.
 
 ## What is not in this file
 

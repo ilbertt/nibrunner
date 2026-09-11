@@ -39,6 +39,11 @@ edge — and all that is left is the secrets and the units.
 Then deploy: the binary into `artifacts.store_url` under the key its digest names, and the document
 below into `paths.desired_state_file`. Everything past that is the daemon converging.
 
+One thing the starter configuration will not do is serve the document below: it names a hostname,
+and a host with no `[proxy.http]` has nothing to answer for it. The instance is reported `failed`
+saying exactly that, rather than started where nothing could reach it. Give the host a listener
+first, or drop `hostnames` to run an app that nothing outside needs to reach.
+
 ### The document
 
 ```json
@@ -78,6 +83,31 @@ below into `paths.desired_state_file`. Everything past that is the daemon conver
 `desiredState` is the whole of the activation policy: `running` keeps the microVM up,
 `on-request` brings it up for the first deploy and lets it sleep between visitors, `stopped` takes
 it down and leaves the app reachable enough to say so.
+
+### A port beside the HTTP one
+
+`httpPort` is what the proxy sends this app's hostnames to. An app may name one more, and one more
+is the limit — an `ssh -L` carries every other port a tenant could have wanted:
+
+```json
+"config": {
+  "httpPort": 3000,
+  "ports": [{ "name": "ssh", "guestPort": 22, "ingress": "tcp" }],
+  ...
+}
+```
+
+A `tcp` port is a byte pipe: the host reads none of what crosses it, which is what lets a protocol
+this daemon does not speak arrive at all. It is reached at `<proxy.raw.listen_address>:<host port>`
+rather than by name, because ssh sends no hostname to route on — and that address is the one a
+relay reaches this host on, not the world: a port a tenant publishes to its users is published by
+definition, and that is a machine of its own. While the app sleeps, the first
+connection wakes it and is spliced through once it answers, so a client sees a slow banner rather
+than a closed socket.
+
+The host must name a `[proxy.raw]` section to bind such a port, and a `[proxy.http]` one to
+serve a hostname. A document that asks for what this host does not serve is refused by name and
+the instance is reported `failed` saying so.
 
 ## Testing
 
