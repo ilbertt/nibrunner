@@ -67,7 +67,7 @@ pub fn check(config: &HostConfig) -> Vec<Check> {
             "guest image",
             false,
             format!(
-                "{reason}; lay vmlinux, rootfs.ext4 and manifest.json down in {}",
+                "{reason}; run install.sh again, which lays vmlinux, rootfs.ext4 and manifest.json down in {} from the release it fetches",
                 config.guest_image_dir.display()
             ),
         ),

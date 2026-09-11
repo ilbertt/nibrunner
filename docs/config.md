@@ -7,8 +7,8 @@ The file is at `/etc/nibrunner/config.toml` unless `NIBRUNNER_CONFIG` names anot
 once, at startup, and validated whole — so a host that starts is a host whose configuration was
 right, and one that is wrong says which key and why before it does anything.
 
-Re-run `nibrunnerd install` after editing it. It re-renders what it wrote, leaves what it did not
-alone, and tells you which was which.
+`nibrunnerd start` after editing it. It re-renders what `install` wrote, leaves what it did not
+alone, and restarts whatever read something that changed.
 
 ## Three rules that explain every refusal
 
@@ -183,9 +183,11 @@ one, and a host should say what it serves on.
 ## What is not in this file
 
 **No secret.** The AWS credentials and the ZeroFS encryption password live in `host.env` beside
-this file, which `install` creates empty and never writes into. The rendered ZeroFS configuration
-references `${ZEROFS_ENCRYPTION_PASSWORD}` and `${AWS_REGION}`; the daemon resolves the rest from
-its own environment. So this file can be read over someone's shoulder.
+this file, which `install` creates with every variable named — the ones this configuration needs
+uncommented and empty, the rest commented — and never writes into. `nibrunnerd start` refuses
+while one it needs is still empty. The rendered ZeroFS configuration references
+`${ZEROFS_ENCRYPTION_PASSWORD}` and `${AWS_REGION}`; the daemon resolves the rest from its own
+environment. So this file can be read over someone's shoulder.
 
 **Nothing about what runs here.** Which apps this host serves is `desired.json`, which is watched
 rather than read once, and which whatever writes it is not this daemon's concern.
@@ -197,10 +199,10 @@ debug one restart, not a property of the host.
 
 Both are rendered from the code that reads this file, so neither is a copy that can fall behind it.
 
-The smallest file this daemon accepts — volumes as files on this machine's own disk, stores as
-directories on it, nothing served — is what `install` writes when a host has no configuration at
-all. There is no copy of it in the repository: run `nibrunnerd install` on a host with none, or
-read `HostConfig::starter` in `crates/nibrunnerd/src/config.rs`.
+The starting point — volumes as files on this machine's own disk, stores as directories on it,
+plain HTTP on :80 — is what `install` writes when a host has no configuration at all. There is no
+copy of it in the repository: run `nibrunnerd install` on a host with none, or read
+`HostConfig::starter` in `crates/nibrunnerd/src/config.rs`.
 
 `deploy/config.example.toml` is a host with every section: volumes in an object store, artifacts
 and exports in S3, TLS behind an edge that presents a client certificate, raw ports for a relay,

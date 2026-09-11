@@ -63,29 +63,25 @@ pub fn files(config: &HostConfig, config_file: &Path) -> Vec<(PathBuf, String)> 
 /// Made true on the kernel that is running, now that the files above have made it true of the next
 /// one. Everything here is idempotent.
 pub fn apply(config: &HostConfig, laid: &mut super::Laid) -> Result<(), InstallError> {
-    if std::fs::read_to_string(IP_FORWARD).is_ok_and(|text| text.trim() == "1") {
-        laid.note("ip_forward already on");
-    } else {
+    if !std::fs::read_to_string(IP_FORWARD).is_ok_and(|text| text.trim() == "1") {
         std::fs::write(IP_FORWARD, "1\n")
             .map_err(|error| InstallError::Refused(format!("{IP_FORWARD} could not be set: {error}")))?;
-        laid.note("ip_forward on");
+        laid.did("ip_forward on");
     }
 
-    if Path::new("/proc/sys/net/netfilter/nf_conntrack_max").exists() {
-        laid.note("nf_conntrack already loaded");
-    } else {
+    if !Path::new("/proc/sys/net/netfilter/nf_conntrack_max").exists() {
         modprobe(&["nf_conntrack"])?;
-        laid.note("nf_conntrack loaded");
+        laid.did("nf_conntrack loaded");
     }
 
     if config.volumes.zerofs().is_none() {
         return Ok(());
     }
     match verdict(loaded_minors(), required_minors()) {
-        Verdict::Enough => laid.note("nbd already has the minors this host needs"),
+        Verdict::Enough => {}
         Verdict::Load => {
             modprobe(&["nbd", &format!("nbds_max={NBDS_MAX_REQUESTED}")])?;
-            laid.note(format!("nbd loaded with {NBDS_MAX_REQUESTED} minors"));
+            laid.did(format!("nbd loaded with {NBDS_MAX_REQUESTED} minors"));
         }
         // The only ways out are a reboot, which the file just written makes correct, or unloading
         // the module — which errors every request queued on every attached volume. Neither is a

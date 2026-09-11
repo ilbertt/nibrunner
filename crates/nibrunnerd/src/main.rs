@@ -2,10 +2,12 @@
 
 use nibrunnerd::config::HostConfig;
 use nibrunnerd::controllers::lifecycle_controller::LifecycleController;
-use nibrunnerd::{install, run};
+use nibrunnerd::install::Origin;
+use nibrunnerd::{install, run, start};
 
-/// The two things this binary is ever asked to do. `install` lays a host out; everything else this
-/// daemon does, it does by serving — and neither reads anything the other does not.
+/// The three things this binary is ever asked to do. `install` lays a host out and `start` asks
+/// systemd for what it laid; everything else this daemon does, it does by serving — and none of
+/// them reads anything the others do not.
 #[derive(Debug)]
 enum Command {
     Serve,
@@ -13,16 +15,23 @@ enum Command {
         force: bool,
         release: Option<std::path::PathBuf>,
     },
+    Start {
+        force: bool,
+    },
 }
 
 const USAGE: &str = "\
 nibrunnerd — one binary that turns a Linux machine into an app host.
 
     nibrunnerd                 serve this host, reading /etc/nibrunner/config.toml
-    nibrunnerd install         lay this host out from that same file, then exit
-    nibrunnerd install --force replace files `install` did not write
-    nibrunnerd install --from <dir>
-                               take the guest image from a release unpacked here
+    nibrunnerd install         lay this host out from that file — guest image, kernel settings,
+                               ZeroFS, units — and start nothing
+    nibrunnerd start           lay it out again, then start what that file names under systemd,
+                               restarting whatever read something that changed. Run it after
+                               every edit.
+
+    --force                    replace files these commands did not write; both take it
+    install --from <dir>       take the guest image from a release unpacked here
 
 `--from` is what `deploy/install.sh` passes: it downloads a release and names the directory,
 and everything about where the files in it go is read from the configuration rather than
@@ -32,35 +41,46 @@ NIBRUNNER_CONFIG names another configuration file. NIBRUNNER_LOG is a tracing fi
 ";
 
 impl Command {
-    fn install(arguments: &[String]) -> Result<Self, String> {
+    fn flags(
+        command: &str,
+        arguments: &[String],
+        takes_release: bool,
+    ) -> Result<(bool, Option<std::path::PathBuf>), String> {
         let mut force = false;
         let mut release = None;
         let mut rest = arguments.iter();
         while let Some(argument) = rest.next() {
             match argument.as_str() {
                 "--force" => force = true,
-                "--from" => {
+                "--from" if takes_release => {
                     release = Some(rest.next().map(std::path::PathBuf::from).ok_or_else(|| {
                         format!(
-                            "nibrunnerd install: --from takes the directory a release was unpacked into\n\n{USAGE}"
+                            "nibrunnerd {command}: --from takes the directory a release was unpacked into\n\n{USAGE}"
                         )
                     })?);
                 }
                 unknown => {
                     return Err(format!(
-                        "nibrunnerd install: {unknown} is not an argument it takes\n\n{USAGE}"
+                        "nibrunnerd {command}: {unknown} is not an argument it takes\n\n{USAGE}"
                     ))
                 }
             }
         }
-        Ok(Self::Install { force, release })
+        Ok((force, release))
     }
 
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Self, String> {
         let arguments: Vec<String> = arguments.collect();
         match arguments.split_first() {
             None => Ok(Self::Serve),
-            Some((first, rest)) if first == "install" => Self::install(rest),
+            Some((first, rest)) if first == "install" => {
+                let (force, release) = Self::flags("install", rest, true)?;
+                Ok(Self::Install { force, release })
+            }
+            Some((first, rest)) if first == "start" => {
+                let (force, _) = Self::flags("start", rest, false)?;
+                Ok(Self::Start { force })
+            }
             Some((first, _)) if first == "--help" || first == "-h" || first == "help" => {
                 Err(USAGE.to_string())
             }
@@ -86,7 +106,7 @@ fn main() -> std::process::ExitCode {
         install_logger();
     }
 
-    let (config, started) = match configuration(&command) {
+    let (config, origin) = match configuration(&command) {
         Ok(config) => config,
         Err(code) => return code,
     };
@@ -101,35 +121,22 @@ fn main() -> std::process::ExitCode {
 
     match command {
         Command::Serve => runtime.block_on(serve(config)),
-        Command::Install { force, release } => runtime.block_on(lay_out(config, force, release, started)),
+        Command::Install { force, release } => runtime.block_on(lay_out(config, force, release, origin)),
+        Command::Start { force } => runtime.block_on(bring_up(config, force)),
     }
-}
-
-/// Whether this host was laid out from a configuration somebody wrote, or from the starting point
-/// this binary carries — which is the difference between having nothing left to decide and having
-/// every decision still ahead of you.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Started {
-    FromItsOwn,
-    FromTheOneThisBinaryCarries,
 }
 
 async fn lay_out(
     config: HostConfig,
     force: bool,
     release: Option<std::path::PathBuf>,
-    started: Started,
+    origin: Origin,
 ) -> std::process::ExitCode {
     let config_file = HostConfig::configured_file();
     match install::run(&config, &config_file, force, release.as_deref()).await {
         Ok(laid) => {
-            for step in laid.steps {
-                println!("  {step}");
-            }
-            print!("{}", install::what_is_left(&config, &config_file));
-            if started == Started::FromTheOneThisBinaryCarries {
-                print!("{}", install::what_is_still_yours(&config_file));
-            }
+            print_laid(&laid);
+            print!("{}", install::next_steps(&config, &config_file, origin));
             std::process::ExitCode::SUCCESS
         }
         Err(error) => {
@@ -139,24 +146,70 @@ async fn lay_out(
     }
 }
 
-/// A host with no configuration at all is given the smallest one this daemon accepts and laid out
+/// The layout again, so an edited `config.toml` is what comes up, then systemd.
+async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
+    let config_file = HostConfig::configured_file();
+    let laid = match install::run(&config, &config_file, force, None).await {
+        Ok(laid) => laid,
+        Err(error) => {
+            eprintln!("{}", error.message());
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    print_laid(&laid);
+    let report = match start::run(&config, &install::environment_file(&config_file), &laid) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("{error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    for (unit, outcome) in &report.units {
+        println!("  {unit:<32} {}", outcome.said());
+    }
+    let failed: Vec<&str> = report.failed().collect();
+    if failed.is_empty() {
+        println!(
+            "\nUp. It serves what {} says; `journalctl -u nibrunnerd -f` follows it.",
+            config.desired_state_file.display()
+        );
+        return std::process::ExitCode::SUCCESS;
+    }
+    for unit in failed {
+        eprintln!("\n{unit} is not up: journalctl -u {unit} -n 30");
+    }
+    std::process::ExitCode::FAILURE
+}
+
+fn print_laid(laid: &install::Laid) {
+    if laid.done.is_empty() {
+        println!("  nothing to change");
+    }
+    for step in &laid.done {
+        println!("  {step}");
+    }
+}
+
+/// A host with no configuration at all is given the starting point this binary carries and laid out
 /// from it in the same run — so what bootstraps this binary ends with a host that is laid out,
 /// rather than one that is half way and waiting to be told to finish.
 ///
 /// A configuration that is *there and wrong* is never written over: that is somebody's file, and
 /// the only useful thing to do with it is say which key is wrong.
-fn configuration(command: &Command) -> Result<(HostConfig, Started), std::process::ExitCode> {
+fn configuration(command: &Command) -> Result<(HostConfig, Origin), std::process::ExitCode> {
     let refused = |error: &nibrunnerd::config::ConfigError| {
         match command {
             Command::Serve => tracing::error!(error = %error.message(), "this host is not configured"),
-            Command::Install { .. } => eprintln!("this host is not configured: {}", error.message()),
+            Command::Install { .. } | Command::Start { .. } => {
+                eprintln!("this host is not configured: {}", error.message())
+            }
         }
         std::process::ExitCode::FAILURE
     };
 
     let path = HostConfig::configured_file();
     match HostConfig::load() {
-        Ok(config) => Ok((config, Started::FromItsOwn)),
+        Ok(config) => Ok((config, Origin::Operator)),
         Err(_) if matches!(command, Command::Install { .. }) && !path.exists() => {
             install::write_starter_configuration(&path).map_err(|error| {
                 eprintln!("{}", error.message());
@@ -164,7 +217,7 @@ fn configuration(command: &Command) -> Result<(HostConfig, Started), std::proces
             })?;
             println!("  {} written, because this host had none", path.display());
             HostConfig::load()
-                .map(|config| (config, Started::FromTheOneThisBinaryCarries))
+                .map(|config| (config, Origin::Starter))
                 .map_err(|error| refused(&error))
         }
         Err(error) => Err(refused(&error)),
@@ -271,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn install_is_the_only_command_and_force_the_only_flag() {
+    fn both_commands_take_force_and_only_install_takes_a_release() {
         assert!(matches!(
             parse(&["install"]),
             Ok(Command::Install {
@@ -286,6 +339,14 @@ mod tests {
                 release: None
             })
         ));
+        assert!(matches!(parse(&["start"]), Ok(Command::Start { force: false })));
+        assert!(matches!(
+            parse(&["start", "--force"]),
+            Ok(Command::Start { force: true })
+        ));
+        // `start` lays out from what is already on the host; a release is what bootstraps it.
+        let refused = parse(&["start", "--from", "/tmp/release"]).unwrap_err();
+        assert!(refused.contains("--from is not an argument"), "{refused}");
     }
 
     // A mistyped flag that is quietly ignored is a host laid out differently from the way it was
@@ -302,5 +363,6 @@ mod tests {
     fn asking_for_help_is_answered_with_what_it_takes() {
         let said = parse(&["--help"]).unwrap_err();
         assert!(said.contains("nibrunnerd install"), "{said}");
+        assert!(said.contains("nibrunnerd start"), "{said}");
     }
 }

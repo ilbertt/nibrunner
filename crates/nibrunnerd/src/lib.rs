@@ -16,6 +16,7 @@ pub mod ports;
 pub mod repositories;
 pub mod run;
 pub mod services;
+pub mod start;
 pub mod state;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;

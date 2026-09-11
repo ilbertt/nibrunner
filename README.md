@@ -13,36 +13,32 @@ Just write the desired configuration in the JSON file nibrunner watches.
 curl -fsSL https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/install.sh | sh
 ```
 
-That is the whole install: the packages, the release downloaded and checked against the digests it
-publishes, and `nibrunnerd install` — which writes a configuration if this host has none, lays the
-guest image down wherever that file says, sets the kernel settings, creates the account ZeroFS runs
-as, and renders every config file and every unit.
-
-It ends by telling you the only things it cannot do for you:
+That installs the packages and the release — checked against the digests it publishes — and runs
+`nibrunnerd install`, which lays the host out from `/etc/nibrunner/config.toml`: the guest image,
+the kernel settings, ZeroFS if that file asks for it, and every unit. A host with no such file is
+given one. It starts nothing, and ends with what is left:
 
 ```
-This host is laid out. What is left:
-  systemctl daemon-reload
-  systemctl enable --now nibrunnerd
+Laid out; nothing started. What is left:
 
-It is running the configuration this binary carries: volumes as files on its own disk,
-no proxy, no object store. To make it this host's —
-
-  edit /etc/nibrunner/config.toml
-  then `nibrunnerd install` again, and `systemctl restart nibrunnerd`
+  1. edit /etc/nibrunner/config.toml
+     written just now: volumes as files on this disk, plain HTTP on :80, nothing in an
+     object store. Every key: https://github.com/ilbertt/nibrunner/blob/main/docs/config.md
+  2. edit /etc/nibrunner/host.env
+     the secrets that configuration needs, each named in the file
+  3. nibrunnerd start
 ```
 
-**[docs/config.md](docs/config.md) is every key in that file.** Give a host its configuration up
-front instead — `deploy/config.example.toml` is one with every section: volumes in an object store,
-TLS behind an edge, raw ports, metrics — and all that is left is the secrets and the units.
+`nibrunnerd start` lays the host out again from the file as edited, refuses while a secret it
+needs is still empty, and then starts — or restarts — the units that file names. It is also every
+later change: edit, `nibrunnerd start`.
+
+**[docs/config.md](docs/config.md) is every key in that file.** `deploy/config.example.toml` is
+one with every section: volumes in an object store, TLS behind an edge, raw ports, metrics. A host
+given its configuration before the script runs is asked only for the secrets it needs.
 
 Then deploy: the binary into `artifacts.store_url` under the key its digest names, and the document
 below into `paths.desired_state_file`. Everything past that is the daemon converging.
-
-One thing the starter configuration will not do is serve the document below: it names a hostname,
-and a host with no `[proxy.http]` has nothing to answer for it. The instance is reported `failed`
-saying exactly that, rather than started where nothing could reach it. Give the host a listener
-first, or drop `hostnames` to run an app that nothing outside needs to reach.
 
 ### The document
 

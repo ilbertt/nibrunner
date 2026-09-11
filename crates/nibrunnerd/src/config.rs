@@ -490,16 +490,23 @@ impl HostConfig {
         })
     }
 
-    /// The smallest configuration this daemon accepts, laid out where a Linux distribution would
-    /// put it: volumes as files on this machine's own disk, stores as directories on it, nothing
-    /// served. It is what `install` writes a host that has none — from here, so there is no file
-    /// in the repository to fall behind [`Self::from_document`].
+    /// The starting point, laid out where a Linux distribution would put it: volumes as files on
+    /// this machine's own disk, stores as directories on it, plain HTTP on :80 — because a host with
+    /// no listener refuses a document that names a hostname, and a host that serves nothing is not
+    /// a starting point. It is what `install` writes a host that has none — from here, so there is
+    /// no file in the repository to fall behind [`Self::from_document`].
     pub fn starter() -> Self {
-        Self::laid_out(
+        let mut starter = Self::laid_out(
             PathBuf::from("/var/lib/nibrunner"),
             PathBuf::from("/run/nibrunner"),
             PathBuf::from("/var/lib/nibrunner/guest"),
-        )
+        );
+        starter.proxy.http = Some(HttpListener {
+            listen_address: IpAddr::from([0, 0, 0, 0]),
+            port: 80,
+            tls: None,
+        });
+        starter
     }
 
     pub fn under(root: &std::path::Path) -> Self {
@@ -1490,11 +1497,15 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
         assert!(message.contains("config.toml"), "{message}");
     }
 
-    // What `install` writes a host that has none is the smallest document, and the smallest
-    // document is what every test here starts from — so the two are held to be one text.
+    // What `install` writes a host that has none is the smallest document every test here starts
+    // from, plus the one listener a starting point has to serve on — so the two are held to be one
+    // text.
     #[test]
-    fn the_configuration_this_binary_carries_is_the_smallest_document_rendered() {
-        assert_eq!(HostConfig::starter().to_toml(), whole());
+    fn the_configuration_this_binary_carries_is_the_smallest_document_with_a_listener_rendered() {
+        assert_eq!(
+            HostConfig::starter().to_toml(),
+            document(&[], &bound("\n[proxy.http]\nport = 80\n"))
+        );
     }
 
     // Reading is writing run backwards, key for key. Every key is required on the way in and every
