@@ -164,6 +164,7 @@ async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    println!();
     for (unit, outcome) in &report.units {
         println!("  {unit:<32} {}", outcome.said());
     }
@@ -181,12 +182,10 @@ async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
     std::process::ExitCode::FAILURE
 }
 
+/// Each step said itself as it happened; what is left to say is that there were none.
 fn print_laid(laid: &install::Laid) {
     if laid.done.is_empty() {
         println!("  nothing to change");
-    }
-    for step in &laid.done {
-        println!("  {step}");
     }
 }
 

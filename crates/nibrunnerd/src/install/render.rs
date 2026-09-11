@@ -235,6 +235,10 @@ pub fn mount_unit(settings: &ZerofsSettings, config_file: &Path) -> String {
          # created per app, once, so throughput is irrelevant and coherence is the whole point.\n\
          ExecStart={} mount --writeback false unix:{} {}\n\
          ExecStartPost=/bin/sh -c 'for _ in $(seq 100); do mountpoint -q {} && exit 0; sleep 0.1; done; exit 1'\n\
+         # The two waits above are ten seconds each, but a stat on a FUSE mount whose server has\n\
+         # stopped answering does not return, and neither would the loop around it. This is what\n\
+         # turns that into a failed unit with a status, rather than a start job that never ends.\n\
+         TimeoutStartSec=30\n\
          ExecStopPost=-/usr/bin/fusermount3 -u {}\n\
          Restart=always\n\
          RestartSec=2s\n\
@@ -410,6 +414,10 @@ mod tests {
         assert!(
             mount.contains(&format!("[ -S {} ]", settings.ninep_socket_path.display())),
             "the mount must wait for the socket rather than race it: {mount}"
+        );
+        assert!(
+            mount.contains("TimeoutStartSec=30"),
+            "a stat on an unanswering FUSE mount never returns, and a start job must: {mount}"
         );
     }
 

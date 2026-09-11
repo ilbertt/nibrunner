@@ -47,9 +47,9 @@ impl InstallError {
     }
 }
 
-/// What one run changed, so the operator reads the outcome rather than inferring it from silence
-/// — and so `start` knows which unit read something that changed. What was found already right
-/// is not in here.
+/// What one run changed, said as it happens — a fetch or a hash takes long enough that silence
+/// reads as a hang — and kept, so `start` knows which unit read something that changed. What was
+/// found already right is not in here.
 #[derive(Debug, Default)]
 pub struct Laid {
     pub done: Vec<String>,
@@ -58,7 +58,9 @@ pub struct Laid {
 
 impl Laid {
     fn did(&mut self, what: impl Into<String>) {
-        self.done.push(what.into());
+        let what = what.into();
+        println!("  {what}");
+        self.done.push(what);
     }
 
     fn changed(&mut self, path: &Path) {
@@ -90,17 +92,22 @@ pub async fn run(
 
     // Before the checks rather than after them, because the guest image is one of the things they
     // refuse a host for — and a release was named precisely so this host would not have to have it
-    // already.
-    if let Some(release) = release {
-        match guest_image::ensure(&config.guest_image_dir, release)? {
-            guest_image::Laid::AlreadyThere(_) => {}
-            guest_image::Laid::Taken(version) => laid.did(format!("guest image {version} laid down")),
-            guest_image::Laid::Replaced { was, now } => {
-                laid.did(format!("guest image {was} replaced by {now}"))
+    // already. What it verified is handed on, so the image is hashed once rather than once more.
+    let verified = match release {
+        None => None,
+        Some(release) => Some(match guest_image::ensure(&config.guest_image_dir, release)? {
+            guest_image::Laid::AlreadyThere(version) => version,
+            guest_image::Laid::Taken(version) => {
+                laid.did(format!("guest image {version} laid down"));
+                version
             }
-        }
-    }
-    refuse_unready(config)?;
+            guest_image::Laid::Replaced { was, now } => {
+                laid.did(format!("guest image {was} replaced by {now}"));
+                now
+            }
+        }),
+    };
+    let guest_image = refuse_unready(config, verified)?;
 
     let environment_file = environment_file(config_file);
 
@@ -131,8 +138,9 @@ pub async fn run(
         })?;
         service_user::own(&settings.cache_dir, owner)?;
 
-        if let zerofs::Laid::Fetched = zerofs::ensure(&settings.binary).await? {
-            laid.did(format!("zerofs {} fetched", zerofs::VERSION));
+        if !zerofs::installed(&settings.binary) {
+            laid.did(format!("fetching zerofs {}", zerofs::VERSION));
+            zerofs::fetch(&settings.binary).await?;
             laid.changed(&settings.binary);
         }
 
@@ -181,7 +189,7 @@ pub async fn run(
         laid.did(format!("{} created", environment_file.display()));
     }
 
-    stamp_versions(config)?;
+    stamp_versions(config, guest_image)?;
     Ok(laid)
 }
 
@@ -271,18 +279,25 @@ fn directories(config: &HostConfig) -> Vec<PathBuf> {
 
 /// What this command cannot put right: a machine without hardware virtualisation, a tool it does
 /// not install, a guest image nobody laid down. The kernel settings used to be in here and are not
-/// any more — those it sets.
-fn refuse_unready(config: &HostConfig) -> Result<(), InstallError> {
-    let checks = prerequisites::check(config);
-    let missing: Vec<String> = checks
+/// any more — those it sets. Hands back the guest image's version, verified here unless the caller
+/// already had.
+fn refuse_unready(config: &HostConfig, verified: Option<String>) -> Result<String, InstallError> {
+    let guest_image = verified.map_or_else(|| prerequisites::guest_image(config), Ok);
+    let mut missing: Vec<String> = prerequisites::check(config)
         .iter()
         .filter(|check| !check.met)
         .map(|check| format!("  {} is missing — {}", check.what, check.remedy))
         .collect();
-    if missing.is_empty() {
-        return Ok(());
+    if let Err(reason) = &guest_image {
+        missing.push(format!(
+            "  guest image is missing — {reason}; run install.sh again, which lays vmlinux, rootfs.ext4 and manifest.json down in {} from the release it fetches",
+            config.guest_image_dir.display()
+        ));
     }
-    Err(InstallError::Unready(missing.join("\n")))
+    if !missing.is_empty() {
+        return Err(InstallError::Unready(missing.join("\n")));
+    }
+    guest_image.map_err(InstallError::Refused)
 }
 
 /// A file this command wrote is one it may write again. A file without its marker was written by
@@ -310,10 +325,10 @@ fn write_generated(path: &Path, rendered: &str, force: bool, laid: &mut Laid) ->
 
 /// The file `paths.versions_file` was always for: what the installer laid down, read back by the
 /// daemon so a report names the host rather than the build.
-fn stamp_versions(config: &HostConfig) -> Result<(), InstallError> {
+fn stamp_versions(config: &HostConfig, guest_image: String) -> Result<(), InstallError> {
     let versions = HostVersions {
         agent: env!("CARGO_PKG_VERSION").to_string(),
-        guest_image: prerequisites::guest_image(config).map_err(InstallError::Refused)?,
+        guest_image,
         zerofs: match config.volumes {
             VolumeBackend::LocalFile => "none".to_string(),
             VolumeBackend::Zerofs(_) => zerofs::VERSION.to_string(),
@@ -499,7 +514,7 @@ mod tests {
     fn an_unready_host_is_told_everything_that_is_missing_at_once() {
         let mut config = HostConfig::under(Path::new("/nibrunner-nowhere"));
         config.volumes = VolumeBackend::Zerofs(Box::new(crate::test_support::zerofs_settings(|_| {})));
-        let Err(error) = refuse_unready(&config) else {
+        let Err(error) = refuse_unready(&config, None) else {
             // A host that genuinely has all of this is a Linux box with the tools on it, and the
             // guest image check still fails against a directory that is not there.
             panic!("a directory that does not exist cannot be a ready host");

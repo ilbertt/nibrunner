@@ -5,7 +5,8 @@
 //! checked, a start that fails is one the configuration got wrong.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::HostConfig;
 use crate::install::render::{DAEMON_UNIT, MOUNT_UNIT, ZEROFS_UNIT};
@@ -54,23 +55,23 @@ impl Report {
 
 pub fn run(config: &HostConfig, environment_file: &Path, laid: &Laid) -> Result<Report, StartError> {
     refuse_unstartable(config, environment_file)?;
-    systemctl(&["daemon-reload"])?;
+    must(&["daemon-reload"])?;
 
     let plan = plan(config, laid);
     let mut enable = vec!["enable"];
     enable.extend(plan.iter().map(|(unit, _)| *unit));
-    systemctl(&enable)?;
+    must(&enable)?;
 
     let mut units = Vec::new();
     for (unit, restart) in plan {
         let was_active = is_active(unit);
         let verb = if restart { "restart" } else { "start" };
-        let outcome = match systemctl(&[verb, unit]) {
-            Err(_) => Outcome::Failed,
-            Ok(()) if !is_active(unit) => Outcome::Failed,
-            Ok(()) if !was_active => Outcome::Started,
-            Ok(()) if restart => Outcome::Restarted,
-            Ok(()) => Outcome::Running,
+        let outcome = match systemctl(&[verb, unit])? {
+            true if !is_active(unit) => Outcome::Failed,
+            true if !was_active => Outcome::Started,
+            true if restart => Outcome::Restarted,
+            true => Outcome::Running,
+            false => Outcome::Failed,
         };
         units.push((unit, outcome));
     }
@@ -131,19 +132,50 @@ fn tls_material(config: &HostConfig) -> Vec<(&'static str, &Path)> {
     material
 }
 
-fn systemctl(arguments: &[&str]) -> Result<(), StartError> {
-    let output = Command::new("systemctl")
-        .args(arguments)
-        .output()
-        .map_err(|error| StartError::Systemd(format!("systemctl could not be run: {error}")))?;
-    if output.status.success() {
+/// Longer than any unit here can take to start or stop — the mount waits up to twenty seconds,
+/// ZeroFS is given two minutes to stop — so reaching it means a job that is not going to finish,
+/// which is a thing to be told about rather than waited on.
+const SYSTEMCTL_DEADLINE: Duration = Duration::from_secs(300);
+
+fn must(arguments: &[&str]) -> Result<(), StartError> {
+    if systemctl(arguments)? {
         return Ok(());
     }
     Err(StartError::Systemd(format!(
-        "systemctl {} failed: {}",
-        arguments.join(" "),
-        String::from_utf8_lossy(&output.stderr).trim()
+        "systemctl {} failed",
+        arguments.join(" ")
     )))
+}
+
+/// Said before it is run, so a call that blocks is seen blocking on the command it is. systemd's
+/// own stderr comes straight through: "Job for X failed, see journalctl -xeu X" is the message,
+/// and rewording it would only lose the unit's name.
+fn systemctl(arguments: &[&str]) -> Result<bool, StartError> {
+    println!("  systemctl {}", arguments.join(" "));
+    let could_not =
+        |error: std::io::Error| StartError::Systemd(format!("systemctl could not be run: {error}"));
+    let mut child = Command::new("systemctl")
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(could_not)?;
+    let deadline = Instant::now() + SYSTEMCTL_DEADLINE;
+    loop {
+        if let Some(status) = child.try_wait().map_err(could_not)? {
+            return Ok(status.success());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            return Err(StartError::Systemd(format!(
+                "systemctl {} has not returned after {} minutes. The job is still queued: `systemctl list-jobs` shows it, and `systemctl status` on the unit says what it is waiting on",
+                arguments.join(" "),
+                SYSTEMCTL_DEADLINE.as_secs() / 60
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn is_active(unit: &str) -> bool {
