@@ -23,8 +23,8 @@ impl Check {
     }
 }
 
-/// Every check, in one pass. All of them run even after one fails: a host missing three things
-/// should be told three times, not three times over.
+/// Every cheap check, in one pass. All of them run even after one fails: a host missing three
+/// things should be told three times, not three times over.
 pub fn check(config: &HostConfig) -> Vec<Check> {
     let mut checks = vec![Check::new(
         "/dev/kvm",
@@ -61,20 +61,11 @@ pub fn check(config: &HostConfig) -> Vec<Check> {
         }
     }
 
-    checks.push(match guest_image(config) {
-        Ok(version) => Check::new(format!("guest image {version}"), true, String::new()),
-        Err(reason) => Check::new(
-            "guest image",
-            false,
-            format!(
-                "{reason}; run install.sh again, which lays vmlinux, rootfs.ext4 and manifest.json down in {} from the release it fetches",
-                config.guest_image_dir.display()
-            ),
-        ),
-    });
     checks
 }
 
+/// Not one of the checks above, because it hashes two files a few hundred megabytes long: asked
+/// once, where the answer is kept, rather than on every pass over the list.
 pub fn guest_image(config: &HostConfig) -> Result<String, String> {
     verify(&config.guest_image_dir)
 }

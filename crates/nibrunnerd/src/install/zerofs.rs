@@ -15,12 +15,13 @@ const SHA256: &str = "7a7d083f58677ccf5480850347fcf570e364baf48573bbd51f6f8d4129
 const MEMBER: &str = "zerofs-linux-amd64-pgo";
 const EXECUTABLE_MODE: u32 = 0o755;
 
-/// Idempotent, and by asking the binary rather than by trusting the path: a host that already runs
-/// this version is left alone, and one carrying another is replaced.
-pub async fn ensure(binary: &Path) -> Result<Laid, InstallError> {
-    if installed_version(binary).as_deref() == Some(VERSION) {
-        return Ok(Laid::AlreadyThere);
-    }
+/// Asked of the binary rather than of the path: a host that already runs this version is left
+/// alone, and one carrying another is replaced.
+pub fn installed(binary: &Path) -> bool {
+    installed_version(binary).as_deref() == Some(VERSION)
+}
+
+pub async fn fetch(binary: &Path) -> Result<(), InstallError> {
     let archive = download().await?;
     let found = digest(&archive);
     if found != SHA256 {
@@ -30,13 +31,7 @@ pub async fn ensure(binary: &Path) -> Result<Laid, InstallError> {
     }
     let extracted = member(&archive)
         .ok_or_else(|| InstallError::Refused(format!("the zerofs release does not hold {MEMBER}")))?;
-    write_executable(binary, &extracted)?;
-    Ok(Laid::Fetched)
-}
-
-pub enum Laid {
-    AlreadyThere,
-    Fetched,
+    write_executable(binary, &extracted)
 }
 
 /// The version a host is actually running, which is the only thing that answers whether it needs
