@@ -11,7 +11,7 @@ build:
 cargo-musl := if os() + "-" + arch() == "linux-x86_64" { "cargo build" } else { "cargo zigbuild" }
 
 # One static x86_64 Linux binary, what a host runs.
-release:
+build-release:
     {{cargo-musl}} -p nibrunnerd --target x86_64-unknown-linux-musl --release
     @ls -la target/x86_64-unknown-linux-musl/release/nibrunnerd
 

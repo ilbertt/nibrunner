@@ -11,4 +11,4 @@ runs:
 
     - name: Build
       shell: bash
-      run: just release
+      run: just build-release
