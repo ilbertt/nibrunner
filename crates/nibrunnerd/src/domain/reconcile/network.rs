@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use nft_render::{FirewallState, ForwardedInstance};
+use nft_render::{FirewallState, ForwardedInstance, ForwardedPort};
 use protocol::InstanceState;
 
+use crate::adapters::proxy::stream_activator::StreamBinding;
 use crate::adapters::proxy::RouteTable;
 use crate::domain::report::routes::renderable_routes;
+use crate::domain::report::InstanceRecord;
 use crate::host::Host;
 
 pub async fn forwarded_instances(host: &Host) -> Vec<ForwardedInstance> {
@@ -16,10 +18,19 @@ pub async fn forwarded_instances(host: &Host) -> Vec<ForwardedInstance> {
         let Some(slot) = host.slot_of(&record.app_id).await else {
             continue;
         };
+        let mut ports = vec![ForwardedPort {
+            host_port: slot.host_port,
+            guest_port: protocol::GuestPort::new(record.http_port.get()).expect("a port is never zero"),
+            raw: false,
+        }];
+        ports.extend(record.ports.iter().map(|port| ForwardedPort {
+            host_port: port.host_port,
+            guest_port: port.guest_port,
+            raw: true,
+        }));
         forwarded.push(ForwardedInstance {
             app_id: record.app_id.clone(),
-            host_port: slot.host_port,
-            http_port: record.http_port,
+            ports,
             host_ipv4: slot.host_ipv4,
             guest_ipv4: slot.guest_ipv4,
         });
@@ -42,6 +53,25 @@ pub async fn apply_network(host: &Host) {
     }
 }
 
+/// Only what a record names.
+///
+/// A slot reserves eight host ports so that the limit on how many an app may ask for can be
+/// raised without moving anybody's, and a reserved port that ended up listening would undo the
+/// reason there is a limit at all. So this reads the records rather than the slots.
+pub fn port_bindings(records: &[InstanceRecord]) -> Vec<StreamBinding> {
+    records
+        .iter()
+        .flat_map(|record| {
+            record.ports.iter().map(|port| StreamBinding {
+                app_id: record.app_id.clone(),
+                name: port.name.clone(),
+                host_port: port.host_port,
+                guest_port: port.guest_port,
+            })
+        })
+        .collect()
+}
+
 pub async fn apply_activators(host: &Arc<Host>) {
     let slots: Vec<_> = host
         .slots()
@@ -50,6 +80,16 @@ pub async fn apply_activators(host: &Arc<Host>) {
         .map(|slot| (slot.app_id, slot.host_port))
         .collect();
     host.activator.serve(&slots).await;
+
+    // Every raw port is bound both ways: a port carries whatever arrives on it, and which of the
+    // two a sleeping guest is woken by is not the host's to guess.
+    let bindings = port_bindings(&host.state.records().await);
+    if let Some(streams) = host.stream_activator.clone() {
+        streams.serve(&bindings).await;
+    }
+    if let Some(datagrams) = host.datagram_activator.clone() {
+        datagrams.serve(&bindings).await;
+    }
 }
 
 pub async fn apply_routes(host: &Host) {
@@ -152,7 +192,71 @@ mod tests {
         assert_eq!(running.len(), 1);
         assert_eq!(running[0].app_id, app_id());
         assert_eq!(running[0].guest_ipv4.as_str(), "10.201.0.2");
-        assert_eq!(running[0].http_port, protocol::DEFAULT_HTTP_PORT);
+        assert_eq!(running[0].ports.len(), 1, "the HTTP port and nothing else");
+        assert_eq!(
+            running[0].ports[0].guest_port.get(),
+            protocol::DEFAULT_HTTP_PORT.get()
+        );
+    }
+
+    #[test]
+    fn a_slot_binds_the_ports_its_record_named_and_none_of_the_reserve() {
+        use crate::domain::report::instance_record::RecordPort;
+
+        let slot = nft_render::describe_slot(0, app_id());
+        let named = |index: u32, port: u16, name: &str| RecordPort {
+            name: protocol::PortName::parse(name).unwrap(),
+            host_port: slot.host_port_at(index).unwrap(),
+            guest_port: protocol::GuestPort::new(port).unwrap(),
+        };
+        let record = instance_record(|record| {
+            record.ports = vec![named(1, 22, "ssh"), named(2, 53, "dns")];
+        });
+
+        let bound = port_bindings(std::slice::from_ref(&record));
+        assert_eq!(
+            bound.len(),
+            2,
+            "the slot reserves {} ports and the record named two",
+            nft_render::PORTS_PER_SLOT
+        );
+        assert_eq!(bound[0].host_port, slot.host_port_at(1).unwrap());
+        assert_eq!(bound[0].guest_port.get(), 22);
+        assert_eq!(bound[1].host_port, slot.host_port_at(2).unwrap());
+        assert_eq!(bound[1].guest_port.get(), 53);
+        assert!(
+            port_bindings(&[instance_record(|_| {})]).is_empty(),
+            "an app that named no port beside its HTTP one binds nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_that_names_a_second_port_forwards_both_and_only_the_raw_one_both_ways() {
+        use crate::domain::report::instance_record::RecordPort;
+
+        let forwarded = forwards_for(vec![instance_record(|record| {
+            record.ports = vec![RecordPort {
+                name: protocol::PortName::parse("ssh").unwrap(),
+                host_port: protocol::HostPort::new(21_001).unwrap(),
+                guest_port: protocol::GuestPort::new(22).unwrap(),
+            }];
+        })])
+        .await;
+
+        assert_eq!(forwarded.len(), 1);
+        let carried: Vec<(u16, u16, bool)> = forwarded[0]
+            .ports
+            .iter()
+            .map(|port| (port.host_port.get(), port.guest_port.get(), port.raw))
+            .collect();
+        assert_eq!(
+            carried,
+            vec![
+                (21_000, protocol::DEFAULT_HTTP_PORT.get(), false),
+                (21_001, 22, true)
+            ],
+            "the HTTP port first and tcp only, then what the record named, carried whatever arrives"
+        );
     }
 
     #[tokio::test]

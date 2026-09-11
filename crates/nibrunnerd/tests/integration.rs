@@ -31,8 +31,11 @@ async fn the_isolation_ruleset_loads_into_the_kernel() {
     let state = nft_render::FirewallState {
         instances: vec![nft_render::ForwardedInstance {
             app_id: protocol::AppId::parse("app-1").unwrap(),
-            host_port: protocol::HostPort::new(21_000).unwrap(),
-            http_port: protocol::HttpPort::new(3000).unwrap(),
+            ports: vec![nft_render::ForwardedPort {
+                host_port: protocol::HostPort::new(21_000).unwrap(),
+                guest_port: protocol::GuestPort::new(3000).unwrap(),
+                raw: false,
+            }],
             host_ipv4: protocol::Ipv4Address::parse("10.201.0.1").unwrap(),
             guest_ipv4: protocol::Ipv4Address::parse("10.201.0.2").unwrap(),
         }],

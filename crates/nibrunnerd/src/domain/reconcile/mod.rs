@@ -1,6 +1,7 @@
 pub mod checkpoints;
 pub mod exports;
 pub mod idle;
+pub mod ingress;
 pub mod instances;
 pub mod network;
 pub mod plan;

@@ -38,7 +38,7 @@ pub struct DesiredArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "DesiredInstanceFields")]
 pub struct DesiredInstance {
     pub app_id: AppId,
     pub deployment_id: DeploymentId,
@@ -46,9 +46,78 @@ pub struct DesiredInstance {
     pub desired_state: DesiredInstanceState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_ms: Option<IdleTimeoutMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<ActivationPolicy>,
     pub artifact: DesiredArtifact,
     pub config: AppConfig,
     pub hostnames: Vec<AppHostname>,
+}
+
+impl DesiredInstance {
+    /// The policy this instance runs under, whichever of the two spellings its document used.
+    /// A document that used neither is one written before either existed, and means what it
+    /// meant then.
+    pub fn activation(&self) -> ActivationPolicy {
+        self.activation.unwrap_or_else(|| ActivationPolicy {
+            sleep_when: match self.desired_state {
+                DesiredInstanceState::OnRequest => SleepPolicy::TrafficIdle {
+                    timeout_ms: self.idle_timeout_ms.unwrap_or(DEFAULT_IDLE_TIMEOUT),
+                },
+                DesiredInstanceState::Running | DesiredInstanceState::Stopped => SleepPolicy::Never,
+            },
+            ready_when: ReadinessPolicy::PortAnswers,
+        })
+    }
+}
+
+// The document is read once and refused whole, so a pair of fields that disagree about when an
+// instance sleeps is caught here rather than by whichever loop read one of them first.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesiredInstanceFields {
+    app_id: AppId,
+    deployment_id: DeploymentId,
+    volume_id: VolumeId,
+    desired_state: DesiredInstanceState,
+    #[serde(default)]
+    idle_timeout_ms: Option<IdleTimeoutMs>,
+    #[serde(default)]
+    activation: Option<ActivationPolicy>,
+    artifact: DesiredArtifact,
+    config: AppConfig,
+    hostnames: Vec<AppHostname>,
+}
+
+impl TryFrom<DesiredInstanceFields> for DesiredInstance {
+    type Error = InvalidValue;
+
+    fn try_from(fields: DesiredInstanceFields) -> Result<Self, Self::Error> {
+        if fields.activation.is_some() && fields.idle_timeout_ms.is_some() {
+            return Err(InvalidValue::new_public(
+                "activation and idleTimeoutMs both say when an instance sleeps; name one",
+            ));
+        }
+        if let Some(policy) = &fields.activation {
+            if fields.desired_state != DesiredInstanceState::OnRequest
+                && policy.sleep_when != SleepPolicy::Never
+            {
+                return Err(InvalidValue::new_public(
+                    "only an on-request instance may name a sleepWhen other than never, because nothing would wake it again",
+                ));
+            }
+        }
+        Ok(Self {
+            app_id: fields.app_id,
+            deployment_id: fields.deployment_id,
+            volume_id: fields.volume_id,
+            desired_state: fields.desired_state,
+            idle_timeout_ms: fields.idle_timeout_ms,
+            activation: fields.activation,
+            artifact: fields.artifact,
+            config: fields.config,
+            hostnames: fields.hostnames,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

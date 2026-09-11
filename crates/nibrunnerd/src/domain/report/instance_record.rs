@@ -1,11 +1,20 @@
 use protocol::{
-    AppHostname, AppId, DeploymentId, HealthCheck, HostPort, HttpPort, InstanceResources, InstanceState,
-    Ipv4Address, Sha256Digest, StateMessage, Timestamp, VolumeId,
+    AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort, InstanceResources,
+    InstanceState, Ipv4Address, PortName, ReadinessPolicy, Sha256Digest, StateMessage, Timestamp, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::domain::backoff::{AttemptWindow, NO_START_ATTEMPTS};
 use crate::domain::health::{GraceInputs, HealthTracker};
+
+/// A port beyond the HTTP one, and the host port the slot handed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordPort {
+    pub name: PortName,
+    pub host_port: HostPort,
+    pub guest_port: GuestPort,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +25,10 @@ pub struct InstanceRecord {
     pub hostnames: Vec<AppHostname>,
     pub host_port: HostPort,
     pub http_port: HttpPort,
+    /// Everything this app answers on besides `http_port`. Absent is every record written
+    /// before an app could ask for a second port.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<RecordPort>,
     pub guest_ipv4: Ipv4Address,
     pub artifact_digest: Sha256Digest,
     pub state: InstanceState,
@@ -24,6 +37,10 @@ pub struct InstanceRecord {
     pub resources: InstanceResources,
     pub desired_running: bool,
     pub on_request: bool,
+    // Every record written before this field existed belongs to an instance that answers a port,
+    // which is what the default reads as.
+    #[serde(default)]
+    pub readiness: ReadinessPolicy,
     #[serde(default)]
     pub start_attempts: AttemptWindow,
     pub restart_count: u32,
@@ -45,10 +62,12 @@ pub struct RecordFields {
     pub hostnames: Vec<AppHostname>,
     pub host_port: HostPort,
     pub http_port: HttpPort,
+    pub ports: Vec<RecordPort>,
     pub guest_ipv4: Ipv4Address,
     pub artifact_digest: Sha256Digest,
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
+    pub readiness: ReadinessPolicy,
     pub desired_running: bool,
     pub on_request: bool,
 }
@@ -62,12 +81,14 @@ impl InstanceRecord {
             hostnames: fields.hostnames,
             host_port: fields.host_port,
             http_port: fields.http_port,
+            ports: fields.ports,
             guest_ipv4: fields.guest_ipv4,
             artifact_digest: fields.artifact_digest,
             state,
             health,
             health_check: fields.health_check,
             resources: fields.resources,
+            readiness: fields.readiness,
             desired_running: fields.desired_running,
             on_request: fields.on_request,
             start_attempts: NO_START_ATTEMPTS,
@@ -85,10 +106,12 @@ impl InstanceRecord {
         self.hostnames = fields.hostnames;
         self.host_port = fields.host_port;
         self.http_port = fields.http_port;
+        self.ports = fields.ports;
         self.guest_ipv4 = fields.guest_ipv4;
         self.artifact_digest = fields.artifact_digest;
         self.health_check = fields.health_check;
         self.resources = fields.resources;
+        self.readiness = fields.readiness;
         self.desired_running = fields.desired_running;
         self.on_request = fields.on_request;
     }

@@ -82,7 +82,7 @@ mod tests {
     use crate::ports::CommandResult;
     use crate::test_support::mocks::{self, CommandLog};
     use nft_render::{app_received_counter_name, app_sent_counter_name, Counted, ForwardedInstance};
-    use protocol::{HostPort, HttpPort, Ipv4Address};
+    use protocol::{HostPort, Ipv4Address};
 
     fn holding(handles: (u64, u64)) -> String {
         format!(
@@ -94,8 +94,11 @@ mod tests {
     fn instance() -> ForwardedInstance {
         ForwardedInstance {
             app_id: AppId::parse("app-1").unwrap(),
-            host_port: HostPort::new(21_000).unwrap(),
-            http_port: HttpPort::new(3000).unwrap(),
+            ports: vec![nft_render::ForwardedPort {
+                host_port: HostPort::new(21_000).unwrap(),
+                guest_port: protocol::GuestPort::new(3000).unwrap(),
+                raw: false,
+            }],
             host_ipv4: Ipv4Address::parse("10.201.0.1").unwrap(),
             guest_ipv4: Ipv4Address::parse("10.201.0.2").unwrap(),
         }
