@@ -7,8 +7,8 @@ The file is at `/etc/nibrunner/config.toml` unless `NIBRUNNER_CONFIG` names anot
 once, at startup, and validated whole — so a host that starts is a host whose configuration was
 right, and one that is wrong says which key and why before it does anything.
 
-Re-run `nibrunnerd install` after editing it. It re-renders what it wrote, leaves what it did not
-alone, and tells you which was which.
+`nibrunnerd start` after editing it. It re-renders what `install` wrote, leaves what it did not
+alone, and restarts whatever read something that changed.
 
 ## Three rules that explain every refusal
 
@@ -183,9 +183,11 @@ one, and a host should say what it serves on.
 ## What is not in this file
 
 **No secret.** The AWS credentials and the ZeroFS encryption password live in `host.env` beside
-this file, which `install` creates empty and never writes into. The rendered ZeroFS configuration
-references `${ZEROFS_ENCRYPTION_PASSWORD}` and `${AWS_REGION}`; the daemon resolves the rest from
-its own environment. So this file can be read over someone's shoulder.
+this file, which `install` creates with every variable named — the ones this configuration needs
+uncommented and empty, the rest commented — and never writes into. `nibrunnerd start` refuses
+while one it needs is still empty. The rendered ZeroFS configuration references
+`${ZEROFS_ENCRYPTION_PASSWORD}` and `${AWS_REGION}`; the daemon resolves the rest from its own
+environment. So this file can be read over someone's shoulder.
 
 **Nothing about what runs here.** Which apps this host serves is `desired.json`, which is watched
 rather than read once, and which whatever writes it is not this daemon's concern.
@@ -195,9 +197,9 @@ debug one restart, not a property of the host.
 
 ## Two worked examples
 
-`deploy/config.toml` is the smallest file this daemon accepts: volumes as files on this machine's
-own disk, stores as directories on it, nothing served. It is what `install` writes when a host has
-no configuration at all.
+`deploy/config.toml` is the starting point: volumes as files on this machine's own disk, stores
+as directories on it, plain HTTP on :80. It is what `install` writes when a host has no
+configuration at all.
 
 `deploy/config.zerofs.toml` is the same file for a host whose volumes live in an object store,
 whose artifacts and exports are in S3, and which serves TLS behind an edge.

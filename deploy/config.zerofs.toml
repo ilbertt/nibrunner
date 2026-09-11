@@ -4,7 +4,8 @@
 # written beside them.
 #
 # Nothing here is a secret. The AWS credentials and the ZeroFS encryption password live in
-# host.env beside this file, which `install` creates empty and never writes into.
+# host.env beside this file, which `install` creates with each of them named and never writes
+# into.
 
 [paths]
 state_dir = "/var/lib/nibrunner"

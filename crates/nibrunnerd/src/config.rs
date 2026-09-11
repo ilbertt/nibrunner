@@ -1337,11 +1337,15 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
         assert!(message.contains("config.toml"), "{message}");
     }
 
+    // The smallest document and the one listener a starting point has to serve on.
     #[test]
     fn the_sample_this_repository_ships_is_a_configuration_this_daemon_accepts() {
         let sample = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/config.toml");
         let text = std::fs::read_to_string(sample).unwrap();
-        assert_eq!(HostConfig::from_toml(&text).unwrap(), parsed(&whole()));
+        assert_eq!(
+            HostConfig::from_toml(&text).unwrap(),
+            with(&bound("[proxy.http]\nport = 80\n"))
+        );
     }
 
     #[test]

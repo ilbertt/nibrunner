@@ -1,16 +1,18 @@
 //! One-time host setup: everything between a machine with the packages on it and a machine
-//! `systemctl start nibrunnerd` works on.
+//! `nibrunnerd start` works on.
 //!
 //! It is a subcommand rather than something the daemon does on the way up, and that is the whole
 //! of its design. Laying ZeroFS down is not the same act as supervising it: there is exactly one
 //! read-write `zerofs run` per storage prefix fleet-wide, a second writer is fenced by SlateDB's
 //! epoch only after a window of acknowledging writes it then discards, and the thing that holds
-//! that lock is a single-instance unit. So this writes the unit and never becomes it.
+//! that lock is a single-instance unit. So this writes the unit and never becomes it — `start`
+//! asks systemd for it.
 
 pub mod guest_image;
 pub mod kernel;
 pub mod prerequisites;
 pub mod render;
+pub mod secrets;
 pub mod service_user;
 pub mod zerofs;
 
@@ -26,9 +28,10 @@ const MEBIBYTES_PER_GIBIBYTE: u64 = 1024;
 const DIRECTORY_MODE: u32 = 0o700;
 const PUBLIC_DIRECTORY_MODE: u32 = 0o755;
 const READABLE_FILE_MODE: u32 = 0o644;
-const SECRET_FILE_MODE: u32 = 0o600;
 
-const SYSTEMD_DIR: &str = "/etc/systemd/system";
+pub const SYSTEMD_DIR: &str = "/etc/systemd/system";
+
+const CONFIG_DOCS_URL: &str = "https://github.com/ilbertt/nibrunner/blob/main/docs/config.md";
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
@@ -44,15 +47,37 @@ impl InstallError {
     }
 }
 
-/// What one run did, so the operator reads the outcome rather than inferring it from silence.
+/// What one run changed, so the operator reads the outcome rather than inferring it from silence
+/// — and so `start` knows which unit read something that changed. What was found already right
+/// is not in here.
+#[derive(Debug, Default)]
 pub struct Laid {
-    pub steps: Vec<String>,
+    pub done: Vec<String>,
+    pub written: Vec<PathBuf>,
 }
 
 impl Laid {
-    fn note(&mut self, step: impl Into<String>) {
-        self.steps.push(step.into());
+    fn did(&mut self, what: impl Into<String>) {
+        self.done.push(what.into());
     }
+
+    fn changed(&mut self, path: &Path) {
+        self.written.push(path.to_path_buf());
+    }
+
+    fn wrote(&mut self, path: &Path) {
+        self.did(format!("{} written", path.display()));
+        self.changed(path);
+    }
+}
+
+/// Whether this host was laid out from a configuration somebody wrote, or from the starting point
+/// this binary carries — which is the difference between having nothing left to decide and having
+/// every decision still ahead of you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Operator,
+    Starter,
 }
 
 pub async fn run(
@@ -61,17 +86,14 @@ pub async fn run(
     force: bool,
     release: Option<&Path>,
 ) -> Result<Laid, InstallError> {
-    let mut laid = Laid { steps: Vec::new() };
+    let mut laid = Laid::default();
 
     // Before the checks rather than after them, because the guest image is one of the things they
     // refuse a host for — and a release was named precisely so this host would not have to have it
     // already.
     if let Some(release) = release {
-        match guest_image::ensure(&config.guest_image_dir, release)? {
-            guest_image::Laid::AlreadyThere(version) => {
-                laid.note(format!("guest image {version} already there"))
-            }
-            guest_image::Laid::Taken(version) => laid.note(format!("guest image {version} laid down")),
+        if let guest_image::Laid::Taken(version) = guest_image::ensure(&config.guest_image_dir, release)? {
+            laid.did(format!("guest image {version} laid down"));
         }
     }
     refuse_unready(config)?;
@@ -90,16 +112,10 @@ pub async fn run(
             InstallError::Refused(format!("{} could not be made: {error}", directory.display()))
         })?;
     }
-    laid.note("directories");
 
     if let Some(settings) = config.volumes.zerofs() {
-        match service_user::ensure(service_user::ZEROFS_USER)? {
-            service_user::Made::AlreadyThere => {
-                laid.note(format!("{} account already there", service_user::ZEROFS_USER))
-            }
-            service_user::Made::Created => {
-                laid.note(format!("{} account created", service_user::ZEROFS_USER))
-            }
+        if let service_user::Made::Created = service_user::ensure(service_user::ZEROFS_USER)? {
+            laid.did(format!("{} account created", service_user::ZEROFS_USER));
         }
         // The cache is the one thing the live server writes that systemd does not create for it,
         // so it is the one thing whose ownership has to be handed over.
@@ -110,15 +126,10 @@ pub async fn run(
             ))
         })?;
         service_user::own(&settings.cache_dir, owner)?;
-        laid.note(format!(
-            "{} owned by {}",
-            settings.cache_dir.display(),
-            service_user::ZEROFS_USER
-        ));
 
-        match zerofs::ensure(&settings.binary).await? {
-            zerofs::Laid::AlreadyThere => laid.note(format!("zerofs {} already installed", zerofs::VERSION)),
-            zerofs::Laid::Fetched => laid.note(format!("zerofs {} fetched", zerofs::VERSION)),
+        if let zerofs::Laid::Fetched = zerofs::ensure(&settings.binary).await? {
+            laid.did(format!("zerofs {} fetched", zerofs::VERSION));
+            laid.changed(&settings.binary);
         }
 
         write_generated(
@@ -134,13 +145,13 @@ pub async fn run(
             &mut laid,
         )?;
         write_generated(
-            &Path::new(SYSTEMD_DIR).join(render::ZEROFS_UNIT),
+            &unit_path(render::ZEROFS_UNIT),
             &render::zerofs_unit(settings, config_file, &environment_file),
             force,
             &mut laid,
         )?;
         write_generated(
-            &Path::new(SYSTEMD_DIR).join(render::MOUNT_UNIT),
+            &unit_path(render::MOUNT_UNIT),
             &render::mount_unit(settings, config_file),
             force,
             &mut laid,
@@ -149,74 +160,80 @@ pub async fn run(
 
     if let Ok(binary) = std::env::current_exe() {
         write_generated(
-            &Path::new(SYSTEMD_DIR).join(render::DAEMON_UNIT),
+            &unit_path(render::DAEMON_UNIT),
             &render::daemon_unit(config_file, &binary),
             force,
             &mut laid,
         )?;
     }
     write_generated(
-        &Path::new(SYSTEMD_DIR).join(render::DAEMON_DROP_IN),
+        &unit_path(render::DAEMON_DROP_IN),
         &render::daemon_drop_in(config, config_file, &environment_file),
         force,
         &mut laid,
     )?;
 
-    if ensure_environment_file(&environment_file, config)? {
-        laid.note(format!(
-            "{} created — put this host's secrets in it",
-            environment_file.display()
-        ));
+    if secrets::ensure_file(&environment_file, config)? {
+        laid.did(format!("{} created", environment_file.display()));
     }
 
     stamp_versions(config)?;
-    laid.note(format!("{} stamped", config.versions_file.display()));
     Ok(laid)
 }
 
-/// What a person still has to do, said by the thing that knows: which units this host has, where
-/// its environment file is, and whether anything needs to go in it at all. Nothing that bootstraps
-/// this binary should be repeating any of it.
-pub fn what_is_left(config: &HostConfig, config_file: &Path) -> String {
+/// What only a person can do before `nibrunnerd start`, numbered, said by the thing that knows:
+/// whether the configuration is theirs yet, and which secret it needs that is not there.
+pub fn next_steps(config: &HostConfig, config_file: &Path, origin: Origin) -> String {
     let environment_file = environment_file(config_file);
-    let mut said = String::from("\nThis host is laid out. What is left:\n");
-    if reaches_an_object_store(config) || matches!(config.volumes, VolumeBackend::Zerofs(_)) {
-        said.push_str(&format!(
-            "  the secrets in {}, which nothing but you holds\n",
-            environment_file.display()
-        ));
+    let mut steps = Vec::new();
+    match origin {
+        Origin::Starter => {
+            steps.push(format!(
+                "edit {}\n     \
+                 written just now: volumes as files on this disk, plain HTTP on :80, nothing in an\n     \
+                 object store. Every key: {CONFIG_DOCS_URL}",
+                config_file.display()
+            ));
+            steps.push(format!(
+                "edit {}\n     the secrets that configuration needs, each named in the file",
+                environment_file.display()
+            ));
+        }
+        Origin::Operator => {
+            let missing = secrets::missing(config, &environment_file);
+            if !missing.is_empty() {
+                steps.push(format!(
+                    "set {} in {}",
+                    missing.join(", "),
+                    environment_file.display()
+                ));
+            }
+        }
     }
-    said.push_str("  systemctl daemon-reload\n");
-    if config.volumes.zerofs().is_some() {
-        said.push_str(&format!(
-            "  systemctl enable --now {} {}\n",
-            render::ZEROFS_UNIT,
-            render::MOUNT_UNIT
-        ));
+    steps.push("nibrunnerd start".to_string());
+
+    let mut said = String::from("\nLaid out; nothing started. What is left:\n\n");
+    for (number, step) in steps.iter().enumerate() {
+        said.push_str(&format!("  {}. {step}\n", number + 1));
     }
-    said.push_str("  systemctl enable --now nibrunnerd\n");
     said
 }
 
-/// Said only to a host laid out from the starting point this binary carries: it is serving, and
-/// every choice about what it serves and where its storage is is still ahead of whoever ran this.
-pub fn what_is_still_yours(config_file: &Path) -> String {
-    format!(
-        "\nIt is running the configuration this binary carries: volumes as files on its own disk,\n\
-         no proxy, no object store. To make it this host's —\n\
-         \n  \
-         edit {}\n  \
-         then `nibrunnerd install` again, and `systemctl restart nibrunnerd`\n\
-         \n\
-         docs/config.md is every key in it.\n",
-        config_file.display()
-    )
-}
-
-/// The smallest configuration this daemon accepts, from the one copy of it in this repository.
+/// The starting point this daemon carries, from the one copy of it in this repository.
 pub fn write_starter_configuration(path: &Path) -> Result<(), crate::json_store::StoreError> {
     const STARTER: &str = include_str!("../../../../deploy/config.toml");
     write_text(path, STARTER, READABLE_FILE_MODE)
+}
+
+pub fn unit_path(unit: &str) -> PathBuf {
+    Path::new(SYSTEMD_DIR).join(unit)
+}
+
+pub fn environment_file(config_file: &Path) -> PathBuf {
+    config_file
+        .parent()
+        .unwrap_or(Path::new("/etc/nibrunner"))
+        .join(render::ENVIRONMENT_FILENAME)
 }
 
 /// Every directory this host writes into that is not created on the way past. `runtime_dir` is
@@ -257,10 +274,7 @@ fn refuse_unready(config: &HostConfig) -> Result<(), InstallError> {
 /// somebody, and replacing it is their decision rather than one a re-run makes for them.
 fn write_generated(path: &Path, rendered: &str, force: bool, laid: &mut Laid) -> Result<(), InstallError> {
     match std::fs::read_to_string(path) {
-        Ok(existing) if existing == rendered => {
-            laid.note(format!("{} unchanged", path.display()));
-            return Ok(());
-        }
+        Ok(existing) if existing == rendered => return Ok(()),
         Ok(existing) if !existing.starts_with(render::GENERATED_MARKER) && !force => {
             return Err(InstallError::Refused(format!(
                 "{} was not written by `nibrunnerd install` and will not be replaced by it. Move it aside, or pass --force to overwrite it.",
@@ -275,73 +289,8 @@ fn write_generated(path: &Path, rendered: &str, force: bool, laid: &mut Laid) ->
         })?;
     }
     write_text(path, rendered, READABLE_FILE_MODE).map_err(|error| InstallError::Refused(error.message()))?;
-    laid.note(format!("{} written", path.display()));
+    laid.wrote(path);
     Ok(())
-}
-
-fn environment_file(config_file: &Path) -> PathBuf {
-    config_file
-        .parent()
-        .unwrap_or(Path::new("/etc/nibrunner"))
-        .join(render::ENVIRONMENT_FILENAME)
-}
-
-/// Made, never filled. What belongs in it is a password whose loss destroys every tenant disk on
-/// this host and a credential that reaches an account this daemon has no business creating things
-/// in — so it is written once by whoever holds them, and a re-run never touches it again.
-///
-/// It is made even when this host needs nothing in it: the drop-in names it with a bare
-/// `EnvironmentFile=`, and systemd fails a unit whose environment file is not there.
-fn ensure_environment_file(path: &Path, config: &HostConfig) -> Result<bool, InstallError> {
-    if path.exists() {
-        return Ok(false);
-    }
-    let mut lines = "# Read by nibrunnerd and, on a zerofs host, by ZeroFS's own units. Not written by\n\
-                     # `nibrunnerd install`: everything here is a secret it has no way to know.\n"
-        .to_string();
-    if reaches_an_object_store(config) {
-        lines.push_str(&format!(
-            "#\n\
-             # This host reaches an object store, and resolves credentials from this environment.\n\
-             # {REGION}=\n\
-             # {KEY}=\n\
-             # {SECRET}=\n",
-            REGION = render::REGION_VARIABLE,
-            KEY = "AWS_ACCESS_KEY_ID",
-            SECRET = "AWS_SECRET_ACCESS_KEY",
-        ));
-    }
-    if matches!(config.volumes, VolumeBackend::Zerofs(_)) {
-        lines.push_str(&format!(
-            "#\n\
-             # Everything in this host's storage prefix is encrypted under this. Losing it loses\n\
-             # every tenant disk, so it is permanent for the life of the bucket.\n\
-             # {}=\n",
-            render::PASSWORD_VARIABLE
-        ));
-    }
-    if lines.lines().all(|line| !line.ends_with('=')) {
-        lines.push_str(
-            "#\n\
-             # Nothing on this host needs a secret: its volumes are files on its own disk and its\n\
-             # stores are directories on it. This file is here because the unit names it.\n",
-        );
-    }
-    write_text(path, &lines, SECRET_FILE_MODE).map_err(|error| InstallError::Refused(error.message()))?;
-    Ok(true)
-}
-
-/// Whether anything this host is configured to reach is an object store rather than a directory.
-/// A host whose artifacts, exports and volumes are all local needs no credential, and naming one
-/// in its environment file would be telling it to go and find something it does not have.
-fn reaches_an_object_store(config: &HostConfig) -> bool {
-    let remote = |url: &str| url.starts_with("s3://");
-    remote(&config.artifact_store_url)
-        || remote(&config.export_store_url)
-        || config
-            .volumes
-            .zerofs()
-            .is_some_and(|settings| remote(&settings.storage_url))
 }
 
 /// The file `paths.versions_file` was always for: what the installer laid down, read back by the
@@ -364,19 +313,23 @@ fn stamp_versions(config: &HostConfig) -> Result<(), InstallError> {
 mod tests {
     use super::*;
 
-    fn laid() -> Laid {
-        Laid { steps: Vec::new() }
-    }
-
-    // It is written to a host that then has to load it. A starting point this daemon refuses is
-    // one that leaves a fresh machine no better off than having no configuration at all.
+    // It is written to a host that then has to load it, and the next-steps block describes it. A
+    // starting point this daemon refuses, or that serves nothing, leaves a fresh machine no better
+    // off than having no configuration at all.
     #[test]
-    fn the_configuration_this_binary_carries_is_one_it_would_accept() {
+    fn the_configuration_this_binary_carries_is_one_it_would_accept_and_serve_on() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         write_starter_configuration(&path).unwrap();
         let config = HostConfig::from_file(&path).expect("the starting configuration must load");
         assert!(matches!(config.volumes, VolumeBackend::LocalFile));
+        assert!(secrets::of(&config).iter().all(|secret| !secret.needed));
+        let http = config
+            .proxy
+            .http
+            .expect("plain HTTP, so the README's document is served");
+        assert_eq!(http.port, 80);
+        assert!(http.tls.is_none());
     }
 
     #[test]
@@ -386,8 +339,8 @@ mod tests {
         let first = format!("{}\nfirst\n", render::GENERATED_MARKER);
         let second = format!("{}\nsecond\n", render::GENERATED_MARKER);
 
-        write_generated(&path, &first, false, &mut laid()).unwrap();
-        write_generated(&path, &second, false, &mut laid()).unwrap();
+        write_generated(&path, &first, false, &mut Laid::default()).unwrap();
+        write_generated(&path, &second, false, &mut Laid::default()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), second);
     }
 
@@ -397,7 +350,7 @@ mod tests {
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "# mine\ndisk_size_gb = 9000\n").unwrap();
 
-        let error = write_generated(&path, "# theirs\n", false, &mut laid()).unwrap_err();
+        let error = write_generated(&path, "# theirs\n", false, &mut Laid::default()).unwrap_err();
         assert!(error.message().contains("--force"), "{}", error.message());
         assert!(error.message().contains(&path.display().to_string()));
         assert!(std::fs::read_to_string(&path).unwrap().contains("9000"));
@@ -408,22 +361,24 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "# mine\n").unwrap();
-        write_generated(&path, "# theirs\n", true, &mut laid()).unwrap();
+        write_generated(&path, "# theirs\n", true, &mut Laid::default()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# theirs\n");
     }
 
     // Re-running is how a host is brought up to a new release, so it has to be readable as having
-    // done nothing when there was nothing to do.
+    // done nothing when there was nothing to do — and `start` restarts what read a file in
+    // `written`, so a file that did not change must not be in it.
     #[test]
-    fn a_rerun_that_changes_nothing_says_so() {
+    fn a_rerun_that_changes_nothing_records_nothing() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         let rendered = format!("{}\nsame\n", render::GENERATED_MARKER);
-        let mut steps = laid();
-        write_generated(&path, &rendered, false, &mut steps).unwrap();
-        write_generated(&path, &rendered, false, &mut steps).unwrap();
-        assert!(steps.steps[0].ends_with("written"), "{:?}", steps.steps);
-        assert!(steps.steps[1].ends_with("unchanged"), "{:?}", steps.steps);
+        let mut laid = Laid::default();
+        write_generated(&path, &rendered, false, &mut laid).unwrap();
+        write_generated(&path, &rendered, false, &mut laid).unwrap();
+        assert_eq!(laid.done.len(), 1, "{:?}", laid.done);
+        assert!(laid.done[0].ends_with("written"), "{:?}", laid.done);
+        assert_eq!(laid.written, [path]);
     }
 
     #[test]
@@ -438,89 +393,51 @@ mod tests {
         );
     }
 
+    // Every choice about what the host serves is still ahead of whoever ran this, and the secrets
+    // the choice will need are in a file they have not opened yet.
     #[test]
-    fn a_secret_file_is_made_once_and_never_written_over() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("host.env");
-        let config = HostConfig::under(Path::new("/srv/nibrunner"));
-
-        assert!(ensure_environment_file(&path, &config).unwrap());
-        std::fs::write(&path, "AWS_ACCESS_KEY_ID=real\n").unwrap();
-        assert!(!ensure_environment_file(&path, &config).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "AWS_ACCESS_KEY_ID=real\n"
+    fn a_host_laid_out_from_the_starter_is_told_to_edit_both_files_then_start() {
+        let config_file = Path::new("/etc/nibrunner/config.toml");
+        let said = next_steps(
+            &HostConfig::under(Path::new("/srv/nibrunner")),
+            config_file,
+            Origin::Starter,
         );
+        let steps: Vec<&str> = said
+            .lines()
+            .filter(|line| line.trim_start().starts_with(char::is_numeric))
+            .collect();
+        assert_eq!(steps.len(), 3, "{said}");
+        assert!(steps[0].contains("edit /etc/nibrunner/config.toml"), "{said}");
+        assert!(steps[1].contains("edit /etc/nibrunner/host.env"), "{said}");
+        assert!(steps[2].ends_with("nibrunnerd start"), "{said}");
+        assert!(said.contains(CONFIG_DOCS_URL), "{said}");
+        assert!(said.contains("plain HTTP on :80"), "{said}");
     }
 
     #[test]
-    fn the_secret_file_is_readable_only_by_the_host_that_runs_on_it() {
+    fn a_host_with_its_own_configuration_is_asked_only_for_what_is_missing() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("host.env");
-        ensure_environment_file(&path, &HostConfig::under(Path::new("/srv/nibrunner"))).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, SECRET_FILE_MODE);
-        }
-    }
-
-    // Its volumes are files on its own disk and its stores are directories on it, so there is no
-    // account for it to reach and nothing to encrypt. Naming either would send an operator looking
-    // for a credential this host has no use for.
-    #[test]
-    fn a_host_that_reaches_nothing_remote_is_asked_for_no_secret_at_all() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("host.env");
-        ensure_environment_file(&path, &HostConfig::under(Path::new("/srv/nibrunner"))).unwrap();
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(!written.contains(render::PASSWORD_VARIABLE), "{written}");
-        assert!(!written.contains(render::REGION_VARIABLE), "{written}");
-        assert!(!written.contains("AWS_ACCESS_KEY_ID"), "{written}");
-        assert!(
-            written.contains("Nothing on this host needs a secret"),
-            "{written}"
-        );
-    }
-
-    // The file is made whether or not it holds anything, because the drop-in names it with a bare
-    // EnvironmentFile= and systemd fails a unit whose environment file is not there.
-    #[test]
-    fn a_host_that_needs_no_secret_still_gets_the_file_its_unit_names() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("host.env");
-        assert!(ensure_environment_file(&path, &HostConfig::under(Path::new("/srv/nibrunner"))).unwrap());
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn a_local_file_host_whose_artifacts_are_in_a_bucket_is_asked_for_the_credential() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("host.env");
+        let config_file = directory.path().join("config.toml");
         let mut config = HostConfig::under(Path::new("/srv/nibrunner"));
         config.artifact_store_url = "s3://nibrunner-artifacts/artifacts".to_string();
-        ensure_environment_file(&path, &config).unwrap();
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains("AWS_ACCESS_KEY_ID"), "{written}");
-        // Its volumes are still files on its own disk, so there is still nothing to encrypt.
-        assert!(!written.contains(render::PASSWORD_VARIABLE), "{written}");
-    }
 
-    #[test]
-    fn every_store_a_host_could_reach_remotely_is_looked_at() {
-        let local = HostConfig::under(Path::new("/srv/nibrunner"));
-        assert!(!reaches_an_object_store(&local));
+        let said = next_steps(&config, &config_file, Origin::Operator);
+        assert!(
+            said.contains("1. set AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY in"),
+            "{said}"
+        );
+        assert!(said.contains("2. nibrunnerd start"), "{said}");
+        assert!(!said.contains("edit"), "{said}");
 
-        let mut exports = HostConfig::under(Path::new("/srv/nibrunner"));
-        exports.export_store_url = "s3://nibrunner-exports/exports".to_string();
-        assert!(reaches_an_object_store(&exports));
-
-        let mut volumes = HostConfig::under(Path::new("/srv/nibrunner"));
-        volumes.volumes = VolumeBackend::Zerofs(Box::new(crate::test_support::zerofs_settings(|settings| {
-            settings.storage_url = "s3://nibrunner-filesystems/hetzner-1".to_string();
-        })));
-        assert!(reaches_an_object_store(&volumes));
+        std::fs::write(
+            directory.path().join("host.env"),
+            "AWS_REGION=eu-west-2\nAWS_ACCESS_KEY_ID=a\nAWS_SECRET_ACCESS_KEY=b\n",
+        )
+        .unwrap();
+        let said = next_steps(&config, &config_file, Origin::Operator);
+        assert!(said.contains("1. nibrunnerd start"), "{said}");
+        assert!(!said.contains("2."), "{said}");
     }
 
     #[test]

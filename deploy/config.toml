@@ -21,3 +21,9 @@ staging_dir = "/var/lib/nibrunner/exports"
 [network]
 denied_egress_addresses_v4 = []
 denied_egress_addresses_v6 = []
+
+# Plain HTTP, where whatever terminates TLS reaches this host. Without a listener a document that
+# names a hostname is refused, so a host that serves nothing is not a starting point.
+[proxy.http]
+listen_address = "0.0.0.0"
+port = 80
