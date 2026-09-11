@@ -4,7 +4,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=exec
+# Started means serving: the daemon says READY=1 once its host is built and every controller
+# runs, so a start that returns is one it serves after, and one that exits binding a listener it
+# was given fails the start rather than the next five-second restart.
+Type=notify
 ExecStart=/usr/local/bin/nibrunnerd
 
 Restart=always
