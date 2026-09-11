@@ -1,6 +1,10 @@
+#[cfg(feature = "schema")]
+use std::borrow::Cow;
 use std::fmt;
 use std::net::Ipv4Addr;
 
+#[cfg(feature = "schema")]
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -18,13 +22,15 @@ impl InvalidValue {
 }
 
 macro_rules! validated_string_public {
-    ($(#[$meta:meta])* $name:ident, $rule:expr, $check:expr) => {
-        validated_string!($(#[$meta])* $name, stringify!($name), $rule, $check);
+    ($(#[$meta:meta])* $name:ident, $rule:expr, $check:expr, { $($schema:tt)* }) => {
+        validated_string!($(#[$meta])* $name, stringify!($name), $rule, $check, { $($schema)* });
     };
 }
 
+// The schema fragment is the check restated in JSON Schema terms; `tests.rs` holds the two to the
+// same answer on the values it tries.
 macro_rules! validated_string {
-    ($(#[$meta:meta])* $name:ident, $what:expr, $rule:expr, $check:expr) => {
+    ($(#[$meta:meta])* $name:ident, $what:expr, $rule:expr, $check:expr, { $($schema:tt)* }) => {
         $(#[$meta])*
         #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
@@ -83,10 +89,27 @@ macro_rules! validated_string {
                 write!(f, "{}({:?})", stringify!($name), self.0)
             }
         }
+
+
+        #[cfg(feature = "schema")]
+        impl JsonSchema for $name {
+            fn schema_name() -> Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn schema_id() -> Cow<'static, str> {
+                concat!(module_path!(), "::", stringify!($name)).into()
+            }
+
+            fn json_schema(_: &mut SchemaGenerator) -> Schema {
+                schemars::json_schema!({ "type": "string", "description": $rule, $($schema)* })
+            }
+        }
     };
 }
 
 pub const MAX_PORT_NAME_LENGTH: usize = 16;
+pub const PORT_NAME_PATTERN: &str = "^[a-z][a-z0-9-]{0,15}$";
 
 pub fn is_port_name(value: &str) -> bool {
     let mut chars = value.chars();
@@ -100,6 +123,7 @@ pub fn is_port_name(value: &str) -> bool {
 }
 
 const MAX_IDENTIFIER_LENGTH: usize = 63;
+pub const IDENTIFIER_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$";
 
 pub fn is_identifier(value: &str) -> bool {
     let mut chars = value.chars();
@@ -112,7 +136,13 @@ pub fn is_identifier(value: &str) -> bool {
 
 macro_rules! identifier {
     ($(#[$meta:meta])* $name:ident) => {
-        validated_string!($(#[$meta])* $name, stringify!($name), "an identifier", is_identifier);
+        validated_string!(
+            $(#[$meta])* $name,
+            stringify!($name),
+            "an identifier",
+            is_identifier,
+            { "pattern": IDENTIFIER_PATTERN }
+        );
     };
 }
 
@@ -127,6 +157,7 @@ identifier!(ExportId);
 identifier!(FilesystemQueryId);
 
 const SHA256_HEX_LENGTH: usize = 64;
+pub const SHA256_HEX_PATTERN: &str = "^[0-9a-f]{64}$";
 
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == SHA256_HEX_LENGTH
@@ -135,16 +166,25 @@ fn is_sha256_hex(value: &str) -> bool {
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
-validated_string!(Sha256Digest, "digest", "a lowercase hex sha-256", is_sha256_hex);
+validated_string!(
+    Sha256Digest,
+    "digest",
+    "a lowercase hex sha-256",
+    is_sha256_hex,
+    { "pattern": SHA256_HEX_PATTERN }
+);
 
 validated_string!(
     PortName,
     "port name",
     "lowercase letters, digits and dashes, starting with a letter",
-    is_port_name
+    is_port_name,
+    { "pattern": PORT_NAME_PATTERN }
 );
 
 const MAX_TIMESTAMP_LENGTH: usize = 35;
+pub const TIMESTAMP_PATTERN: &str =
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$";
 
 fn is_timestamp(value: &str) -> bool {
     if value.len() > MAX_TIMESTAMP_LENGTH {
@@ -200,7 +240,8 @@ validated_string!(
     Timestamp,
     "timestamp",
     "an ISO 8601 instant with an offset",
-    is_timestamp
+    is_timestamp,
+    { "pattern": TIMESTAMP_PATTERN }
 );
 
 impl Timestamp {
@@ -222,6 +263,7 @@ impl Timestamp {
 }
 
 pub const MAX_DNS_LABEL_LENGTH: usize = 63;
+pub const DNS_LABEL_PATTERN: &str = "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$";
 
 fn is_dns_label(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -233,9 +275,11 @@ fn is_dns_label(value: &str) -> bool {
     edge(&bytes[0]) && edge(&bytes[bytes.len() - 1]) && bytes.iter().all(inner)
 }
 
-validated_string!(DnsLabel, "label", "a DNS label", is_dns_label);
+validated_string!(DnsLabel, "label", "a DNS label", is_dns_label, { "pattern": DNS_LABEL_PATTERN });
 
 const MAX_HOSTNAME_LENGTH: usize = 253;
+pub const HOSTNAME_PATTERN: &str =
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$";
 
 fn is_hostname(value: &str) -> bool {
     value.len() <= MAX_HOSTNAME_LENGTH && {
@@ -244,9 +288,16 @@ fn is_hostname(value: &str) -> bool {
     }
 }
 
-validated_string!(Hostname, "hostname", "a hostname", is_hostname);
+validated_string!(
+    Hostname,
+    "hostname",
+    "a hostname",
+    is_hostname,
+    { "pattern": HOSTNAME_PATTERN, "maxLength": MAX_HOSTNAME_LENGTH }
+);
 
 const MAX_IPV4_LENGTH: usize = 15;
+pub const IPV4_PATTERN: &str = r"^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])$";
 
 fn is_ipv4(value: &str) -> bool {
     value.len() <= MAX_IPV4_LENGTH
@@ -259,7 +310,7 @@ fn is_ipv4(value: &str) -> bool {
             .all(|octet| octet == "0" || !octet.starts_with('0'))
 }
 
-validated_string!(Ipv4Address, "address", "an IPv4 address", is_ipv4);
+validated_string!(Ipv4Address, "address", "an IPv4 address", is_ipv4, { "pattern": IPV4_PATTERN });
 
 impl Ipv4Address {
     pub fn addr(&self) -> Ipv4Addr {
@@ -279,10 +330,12 @@ validated_string!(
     ObjectKey,
     "object key",
     "between 1 and 1024 characters",
-    |value| !value.is_empty() && value.len() <= MAX_OBJECT_KEY_LENGTH
+    |value| !value.is_empty() && value.len() <= MAX_OBJECT_KEY_LENGTH,
+    { "minLength": 1, "maxLength": MAX_OBJECT_KEY_LENGTH }
 );
 
 const MAX_FILENAME_LENGTH: usize = 127;
+pub const FILENAME_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$";
 
 fn is_filename(value: &str) -> bool {
     let mut chars = value.chars();
@@ -291,7 +344,13 @@ fn is_filename(value: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-validated_string!(Filename, "filename", "one path segment", is_filename);
+validated_string!(
+    Filename,
+    "filename",
+    "one path segment",
+    is_filename,
+    { "pattern": FILENAME_PATTERN }
+);
 
 pub const MAX_STATE_MESSAGE_LENGTH: usize = 512;
 
@@ -331,6 +390,21 @@ impl From<String> for StateMessage {
 impl From<&str> for StateMessage {
     fn from(value: &str) -> Self {
         Self::new(value)
+    }
+}
+
+#[cfg(feature = "schema")]
+impl JsonSchema for StateMessage {
+    fn schema_name() -> Cow<'static, str> {
+        "StateMessage".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::StateMessage").into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({ "type": "string", "maxLength": MAX_STATE_MESSAGE_LENGTH })
     }
 }
 
@@ -384,6 +458,22 @@ macro_rules! port {
                 write!(f, "{}", self.0)
             }
         }
+
+
+        #[cfg(feature = "schema")]
+        impl JsonSchema for $name {
+            fn schema_name() -> Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn schema_id() -> Cow<'static, str> {
+                concat!(module_path!(), "::", stringify!($name)).into()
+            }
+
+            fn json_schema(_: &mut SchemaGenerator) -> Schema {
+                schemars::json_schema!({ "type": "integer", "minimum": 1, "maximum": u16::MAX })
+            }
+        }
     };
 }
 
@@ -431,5 +521,24 @@ impl From<SecretString> for String {
 impl fmt::Debug for SecretString {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
         f.write_str(REDACTED)
+    }
+}
+
+#[cfg(feature = "schema")]
+impl JsonSchema for SecretString {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "SecretString".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::SecretString").into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({ "type": "string", "maxLength": MAX_SECRET_LENGTH })
     }
 }

@@ -62,4 +62,20 @@ fmt:
     cargo fmt --all
 
 lint:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# The JSON Schemas in crates/protocol/schema, written afresh from the protocol crate's types.
+schema:
+    cargo run -q -p nibrunner-protocol --features schema --bin protocol-schema -- crates/protocol/schema
+
+# Fails if `just schema` would change what is checked in.
+check-schema:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fresh=$(mktemp -d)
+    trap 'rm -rf "$fresh"' EXIT
+    cargo run -q -p nibrunner-protocol --features schema --bin protocol-schema -- "$fresh"
+    diff -ru crates/protocol/schema "$fresh" || {
+        echo "crates/protocol/schema is behind the code: run \`just schema\` and commit the result"
+        exit 1
+    }

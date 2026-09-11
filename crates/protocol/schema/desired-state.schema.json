@@ -1,0 +1,655 @@
+{
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HostDesiredState",
+  "description": "What one host should be running. The daemon watches this document at the path its\n`paths.desired_state_file` names and converges on every change to it.",
+  "type": "object",
+  "properties": {
+    "checkpoints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DesiredCheckpoint"
+      }
+    },
+    "exports": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DesiredExport"
+      }
+    },
+    "hostId": {
+      "$ref": "#/$defs/HostId"
+    },
+    "instances": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DesiredInstance"
+      }
+    },
+    "volumes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DesiredVolume"
+      }
+    }
+  },
+  "required": [
+    "hostId",
+    "volumes",
+    "instances",
+    "checkpoints",
+    "exports"
+  ],
+  "$defs": {
+    "ActivationPolicy": {
+      "type": "object",
+      "properties": {
+        "readyWhen": {
+          "$ref": "#/$defs/ReadinessPolicy",
+          "default": {
+            "kind": "port-answers"
+          }
+        },
+        "sleepWhen": {
+          "$ref": "#/$defs/SleepPolicy"
+        }
+      },
+      "required": [
+        "sleepWhen"
+      ]
+    },
+    "AppConfig": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "$ref": "#/$defs/TenantArguments"
+        },
+        "environment": {
+          "$ref": "#/$defs/TenantEnvironment"
+        },
+        "healthCheck": {
+          "$ref": "#/$defs/HealthCheck"
+        },
+        "httpPort": {
+          "description": "The guest port the HTTP proxy sends this app's hostnames to, and the one the health check\nprobes.",
+          "$ref": "#/$defs/HttpPort"
+        },
+        "ports": {
+          "description": "What this app answers on besides `httpPort`, if anything.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InstancePort"
+          }
+        },
+        "resources": {
+          "$ref": "#/$defs/InstanceResources"
+        },
+        "restartPolicy": {
+          "$ref": "#/$defs/RestartPolicy"
+        }
+      },
+      "required": [
+        "httpPort",
+        "args",
+        "environment",
+        "resources",
+        "healthCheck",
+        "restartPolicy"
+      ]
+    },
+    "AppHostname": {
+      "type": "object",
+      "properties": {
+        "hostname": {
+          "$ref": "#/$defs/Hostname"
+        },
+        "kind": {
+          "$ref": "#/$defs/AppHostnameKind"
+        }
+      },
+      "required": [
+        "hostname",
+        "kind"
+      ]
+    },
+    "AppHostnameKind": {
+      "type": "string",
+      "enum": [
+        "platform",
+        "custom"
+      ]
+    },
+    "AppId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "CheckpointId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "DeploymentId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "DesiredArtifact": {
+      "description": "The binary an instance runs, fetched from the object store the host's `artifacts.store_url`\nnames and checked against `digest` before anything boots from it.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "filename": {
+          "description": "The name the binary carries inside an export bundle.",
+          "$ref": "#/$defs/Filename"
+        },
+        "objectKey": {
+          "description": "Where the binary lives in the store.",
+          "$ref": "#/$defs/ObjectKey"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "digest",
+        "sizeBytes",
+        "objectKey",
+        "filename"
+      ]
+    },
+    "DesiredCheckpoint": {
+      "type": "object",
+      "properties": {
+        "checkpointId": {
+          "$ref": "#/$defs/CheckpointId"
+        },
+        "desiredState": {
+          "$ref": "#/$defs/DesiredPresence"
+        },
+        "volumeId": {
+          "$ref": "#/$defs/VolumeId"
+        }
+      },
+      "required": [
+        "checkpointId",
+        "volumeId",
+        "desiredState"
+      ]
+    },
+    "DesiredExport": {
+      "type": "object",
+      "properties": {
+        "appId": {
+          "$ref": "#/$defs/AppId"
+        },
+        "artifact": {
+          "$ref": "#/$defs/DesiredArtifact"
+        },
+        "desiredState": {
+          "$ref": "#/$defs/DesiredPresence"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TenantEnvironment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exportId": {
+          "$ref": "#/$defs/ExportId"
+        },
+        "objectKey": {
+          "$ref": "#/$defs/ObjectKey"
+        },
+        "volumeId": {
+          "$ref": "#/$defs/VolumeId"
+        }
+      },
+      "required": [
+        "exportId",
+        "appId",
+        "volumeId",
+        "objectKey",
+        "artifact",
+        "desiredState"
+      ]
+    },
+    "DesiredInstance": {
+      "type": "object",
+      "properties": {
+        "activation": {
+          "description": "What puts this instance to sleep and what tells the host it is ready. A `sleepWhen` other\nthan `never` is refused on anything but an `on-request` instance.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActivationPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "appId": {
+          "$ref": "#/$defs/AppId"
+        },
+        "artifact": {
+          "$ref": "#/$defs/DesiredArtifact"
+        },
+        "config": {
+          "$ref": "#/$defs/AppConfig"
+        },
+        "deploymentId": {
+          "description": "A running instance is replaced when this changes, and only then: a new artifact or config\nunder the same `deploymentId` is not picked up.",
+          "$ref": "#/$defs/DeploymentId"
+        },
+        "desiredState": {
+          "$ref": "#/$defs/DesiredInstanceState"
+        },
+        "hostnames": {
+          "description": "What the HTTP proxy routes to this app's `httpPort`. Empty for an app nothing outside needs\nto reach by name.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AppHostname"
+          }
+        },
+        "idleTimeoutMs": {
+          "description": "How long an `on-request` instance stays up after its last request before it sleeps: the\nolder spelling of `activation.sleepWhen`, refused beside it. 300000 when neither is named.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdleTimeoutMs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "volumeId": {
+          "description": "One of this document's `volumes`, mounted in the guest as the app's data directory.",
+          "$ref": "#/$defs/VolumeId"
+        }
+      },
+      "if": {
+        "properties": {
+          "desiredState": {
+            "not": {
+              "const": "on-request"
+            }
+          }
+        },
+        "required": [
+          "activation"
+        ]
+      },
+      "not": {
+        "required": [
+          "activation",
+          "idleTimeoutMs"
+        ]
+      },
+      "required": [
+        "appId",
+        "deploymentId",
+        "volumeId",
+        "desiredState",
+        "artifact",
+        "config",
+        "hostnames"
+      ],
+      "then": {
+        "properties": {
+          "activation": {
+            "properties": {
+              "sleepWhen": {
+                "properties": {
+                  "kind": {
+                    "const": "never"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "DesiredInstanceState": {
+      "description": "The whole of an instance's activation policy.",
+      "oneOf": [
+        {
+          "description": "Keeps the microVM up.",
+          "type": "string",
+          "const": "running"
+        },
+        {
+          "description": "Brings the microVM up for the first deploy and for every request that finds it asleep, and\nlets it sleep again once it has been quiet for `idleTimeoutMs`.",
+          "type": "string",
+          "const": "on-request"
+        },
+        {
+          "description": "Takes the microVM down and leaves the app reachable enough to say so.",
+          "type": "string",
+          "const": "stopped"
+        }
+      ]
+    },
+    "DesiredPresence": {
+      "type": "string",
+      "enum": [
+        "present",
+        "absent"
+      ]
+    },
+    "DesiredVolume": {
+      "type": "object",
+      "properties": {
+        "appId": {
+          "$ref": "#/$defs/AppId"
+        },
+        "desiredState": {
+          "$ref": "#/$defs/DesiredPresence"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "volumeId": {
+          "$ref": "#/$defs/VolumeId"
+        }
+      },
+      "required": [
+        "volumeId",
+        "appId",
+        "sizeBytes",
+        "desiredState"
+      ]
+    },
+    "ExportId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "Filename": {
+      "description": "one path segment",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$"
+    },
+    "GuestPort": {
+      "type": "integer",
+      "maximum": 65535,
+      "minimum": 1
+    },
+    "HealthCheck": {
+      "type": "object",
+      "properties": {
+        "gracePeriodMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "healthyThreshold": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "intervalMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "path": {
+          "description": "The path an HTTP probe requests on `httpPort`. Absent, the probe is a TCP connect.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "unhealthyThreshold": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "intervalMs",
+        "timeoutMs",
+        "gracePeriodMs",
+        "healthyThreshold",
+        "unhealthyThreshold"
+      ]
+    },
+    "HostId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "Hostname": {
+      "description": "a hostname",
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "HttpPort": {
+      "type": "integer",
+      "maximum": 65535,
+      "minimum": 1
+    },
+    "IdleTimeoutMs": {
+      "type": "integer",
+      "maximum": 86400000,
+      "minimum": 60000
+    },
+    "InstancePort": {
+      "description": "A port a guest answers on beside its HTTP one, carried to it unread.\n\nIt carries whatever arrives, tcp or udp: a port is a port, the relay in front of a host\nforwards both for every one in its range, and a guest that listens on only one of them\nanswers the other with a port-unreachable the way any host would.",
+      "type": "object",
+      "properties": {
+        "guestPort": {
+          "$ref": "#/$defs/GuestPort"
+        },
+        "name": {
+          "$ref": "#/$defs/PortName"
+        }
+      },
+      "required": [
+        "name",
+        "guestPort"
+      ]
+    },
+    "InstanceResources": {
+      "type": "object",
+      "properties": {
+        "memoryMib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "vcpuCount": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "vcpuCount",
+        "memoryMib"
+      ]
+    },
+    "MaxLifetimeMs": {
+      "type": "integer",
+      "maximum": 604800000,
+      "minimum": 60000
+    },
+    "ObjectKey": {
+      "description": "between 1 and 1024 characters",
+      "type": "string",
+      "maxLength": 1024,
+      "minLength": 1
+    },
+    "PortName": {
+      "description": "lowercase letters, digits and dashes, starting with a letter",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,15}$"
+    },
+    "ReadinessPolicy": {
+      "description": "What tells this host a microVM is ready to be given a caller, and what its liveness is read\nfrom afterwards. A guest this host did not build answers no port it was not told about, so\n`boot-completed` measures both from the microVM itself.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "port-answers"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "boot-completed"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "RestartPolicy": {
+      "type": "object",
+      "properties": {
+        "backoffFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "initialBackoffMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxBackoffMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxRestarts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "resetAfterMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "maxRestarts",
+        "initialBackoffMs",
+        "maxBackoffMs",
+        "backoffFactor",
+        "resetAfterMs"
+      ]
+    },
+    "Sha256Digest": {
+      "description": "a lowercase hex sha-256",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "SleepPolicy": {
+      "description": "What puts a running microVM back to sleep. Only an `on-request` instance may carry one that\nfires: nothing else on this host would wake it again, and the next reconcile pass would bring\nit straight back up.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "never"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "traffic-idle"
+            },
+            "timeoutMs": {
+              "$ref": "#/$defs/IdleTimeoutMs"
+            }
+          },
+          "required": [
+            "kind",
+            "timeoutMs"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "max-lifetime"
+            },
+            "ttlMs": {
+              "$ref": "#/$defs/MaxLifetimeMs"
+            }
+          },
+          "required": [
+            "kind",
+            "ttlMs"
+          ]
+        }
+      ]
+    },
+    "TenantArguments": {
+      "description": "The arguments the binary is started with.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 4096
+      },
+      "maxItems": 64
+    },
+    "TenantEnvironment": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/TenantValue"
+      },
+      "propertyNames": {
+        "not": {
+          "const": "__proto__"
+        },
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      }
+    },
+    "TenantValue": {
+      "description": "Handed to the app as is, except that `${NAME}` and `$NAME` are filled in for NAME in NIBRUN_DATA_DIR, NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT; any other `$NIBRUN_` reference is refused.",
+      "type": "string",
+      "maxLength": 32768
+    },
+    "VolumeId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    }
+  }
+}

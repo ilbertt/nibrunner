@@ -3,11 +3,17 @@ use serde::{Deserialize, Serialize};
 use crate::domain::*;
 use crate::wire::*;
 
+/// The whole of an instance's activation policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum DesiredInstanceState {
+    /// Keeps the microVM up.
     Running,
+    /// Brings the microVM up for the first deploy and for every request that finds it asleep, and
+    /// lets it sleep again once it has been quiet for `idleTimeoutMs`.
     OnRequest,
+    /// Takes the microVM down and leaves the app reachable enough to say so.
     Stopped,
 }
 
@@ -22,34 +28,51 @@ impl DesiredInstanceState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DesiredPresence {
     Present,
     Absent,
 }
 
+/// The binary an instance runs, fetched from the object store the host's `artifacts.store_url`
+/// names and checked against `digest` before anything boots from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DesiredArtifact {
     pub digest: Sha256Digest,
     pub size_bytes: u64,
+    /// Where the binary lives in the store.
     pub object_key: ObjectKey,
+    /// The name the binary carries inside an export bundle.
     pub filename: Filename,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(!try_from, transform = desired_instance_rules))]
 #[serde(rename_all = "camelCase", try_from = "DesiredInstanceFields")]
 pub struct DesiredInstance {
     pub app_id: AppId,
+    /// A running instance is replaced when this changes, and only then: a new artifact or config
+    /// under the same `deploymentId` is not picked up.
     pub deployment_id: DeploymentId,
+    /// One of this document's `volumes`, mounted in the guest as the app's data directory.
     pub volume_id: VolumeId,
     pub desired_state: DesiredInstanceState,
+    /// How long an `on-request` instance stays up after its last request before it sleeps: the
+    /// older spelling of `activation.sleepWhen`, refused beside it. 300000 when neither is named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_ms: Option<IdleTimeoutMs>,
+    /// What puts this instance to sleep and what tells the host it is ready. A `sleepWhen` other
+    /// than `never` is refused on anything but an `on-request` instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<ActivationPolicy>,
     pub artifact: DesiredArtifact,
     pub config: AppConfig,
+    /// What the HTTP proxy routes to this app's `httpPort`. Empty for an app nothing outside needs
+    /// to reach by name.
     pub hostnames: Vec<AppHostname>,
 }
 
@@ -120,7 +143,33 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
     }
 }
 
+// What `TryFrom<DesiredInstanceFields>` refuses, said in the schema's words so a document an editor
+// passes is one this host takes.
+#[cfg(feature = "schema")]
+fn desired_instance_rules(schema: &mut schemars::Schema) {
+    schema.insert(
+        "not".into(),
+        serde_json::json!({ "required": ["activation", "idleTimeoutMs"] }),
+    );
+    schema.insert(
+        "if".into(),
+        serde_json::json!({
+            "required": ["activation"],
+            "properties": { "desiredState": { "not": { "const": "on-request" } } }
+        }),
+    );
+    schema.insert(
+        "then".into(),
+        serde_json::json!({
+            "properties": {
+                "activation": { "properties": { "sleepWhen": { "properties": { "kind": { "const": "never" } } } } }
+            }
+        }),
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DesiredVolume {
     pub volume_id: VolumeId,
@@ -130,6 +179,7 @@ pub struct DesiredVolume {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DesiredCheckpoint {
     pub checkpoint_id: CheckpointId,
@@ -138,6 +188,7 @@ pub struct DesiredCheckpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DesiredExport {
     pub export_id: ExportId,
@@ -150,7 +201,10 @@ pub struct DesiredExport {
     pub desired_state: DesiredPresence,
 }
 
+/// What one host should be running. The daemon watches this document at the path its
+/// `paths.desired_state_file` names and converges on every change to it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HostDesiredState {
     pub host_id: HostId,
@@ -163,6 +217,7 @@ pub struct HostDesiredState {
 pub const MAX_DEVICE_PATH_LENGTH: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReportedInstance {
     pub app_id: AppId,
@@ -192,6 +247,7 @@ pub struct ReportedInstance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReportedVolume {
     pub volume_id: VolumeId,
@@ -209,6 +265,7 @@ pub struct ReportedVolume {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReportedCheckpoint {
     pub checkpoint_id: CheckpointId,
@@ -223,6 +280,7 @@ pub struct ReportedCheckpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReportedExport {
     pub export_id: ExportId,
@@ -237,13 +295,18 @@ pub struct ReportedExport {
     pub message: Option<StateMessage>,
 }
 
+/// What one host is running, as the daemon last wrote it to `reported.json` in its
+/// `paths.state_dir`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HostReportedState {
     pub host_id: HostId,
     pub reported_at: Timestamp,
     pub state: HostState,
+    /// What the machine has.
     pub capacity: HostCapacity,
+    /// What is left once every booted app is taken off.
     pub allocatable: HostCapacity,
     pub versions: HostVersions,
     pub volumes: Vec<ReportedVolume>,
