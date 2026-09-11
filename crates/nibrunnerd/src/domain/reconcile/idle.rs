@@ -495,10 +495,13 @@ mod sleep_tests {
         );
     }
 
+    // Half way through, not a millisecond short of the end: the clock is read once to stamp the
+    // start and again to decide, and a runner that takes a millisecond between the two would have
+    // put an app started one millisecond inside its lifetime past it.
     #[tokio::test]
     async fn an_app_still_inside_its_lifetime_is_left_up_however_quiet_it_has_been() {
         let host = host_under(max_lifetime(TTL_MS)).await;
-        started(&host, TTL_MS as i64 - 1).await;
+        started(&host, TTL_MS as i64 / 2).await;
         last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;
 
         apply_sleep(host.arc()).await;
