@@ -1,0 +1,56 @@
+name: prepare-release
+
+on: workflow_dispatch
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-tags: true
+
+      - uses: ./.github/actions/prepare
+        with:
+          cache: disabled
+          prepare_for_build: disabled
+
+      - name: Check there is something to release
+        run: |
+          if tag=$(git describe --tags --match 'v*' --exact-match 2>/dev/null); then
+            echo "Nothing to release: main is already $tag."
+            exit 1
+          fi
+
+      - name: Name the release
+        id: version
+        run: echo "version=$(just next-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set the version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: just set-version "$VERSION"
+
+      - name: Open the release pull request
+        uses: ./.github/actions/open-pr
+        with:
+          branch: release/v${{ steps.version.outputs.version }}
+          title: "chore(release): v${{ steps.version.outputs.version }}"
+          paths: Cargo.toml Cargo.lock
+          token: ${{ secrets.OPEN_PR_TOKEN || github.token }}
+          body: |
+            Moves the workspace to **${{ steps.version.outputs.version }}**.
+
+            Merging this releases nothing. Tagging the commit it lands as is what does:
+
+            ```sh
+            git switch main && git pull
+            git tag v${{ steps.version.outputs.version }}
+            git push origin v${{ steps.version.outputs.version }}
+            ```

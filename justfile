@@ -42,8 +42,12 @@ stage-release dist:
     # Written from inside the directory, so it names what `sha256sum -c` will be run next to.
     cd "{{dist}}" && sha256sum nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json > checksums.txt
 
-# The version the next temporary prerelease carries, as CalVer `YYYY.M.D-N`, read off the tags.
-tmp-version:
+# The version the workspace is at.
+version:
+    @cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "nibrunnerd") | .version'
+
+# The version the next release carries, as CalVer `YYYY.M.D-N`, read off the tags.
+next-version:
     #!/usr/bin/env bash
     set -euo pipefail
     today="$(date -u +%Y.%-m.%-d)"
@@ -52,7 +56,17 @@ tmp-version:
     # many were, because counting the survivors of a day that lost its first release hands back a
     # number the second one is still holding.
     last="$(git tag --list "v$today-*" | sed "s/^v$today-//" | sort -n | tail -1)"
-    echo "v$today-$(( ${last:-0} + 1 ))"
+    echo "$today-$(( ${last:-0} + 1 ))"
+
+# Moves the workspace to a version: the one line in Cargo.toml every crate inherits, and the lockfile.
+set-version version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    current="$(just version)"
+    sed "s/^version = \"$current\"$/version = \"{{version}}\"/" Cargo.toml > Cargo.toml.next
+    mv Cargo.toml.next Cargo.toml
+    test "$(grep -c '^version = "{{version}}"$' Cargo.toml)" -eq 1
+    cargo update --workspace
 
 # Everything that needs no kernel: the planner, the codecs, the ruleset, the reconcile.
 test:

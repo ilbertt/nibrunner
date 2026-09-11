@@ -1,13 +1,12 @@
 name: tmp-release
 
-on: workflow_dispatch
+on:
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
-
-concurrency:
-  group: tmp-release
-  cancel-in-progress: false
 
 jobs:
   tmp-release:
@@ -15,10 +14,11 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-tags: true
 
       - uses: ./.github/actions/build-release
+
+      - name: Check the tag names the version built
+        run: test "v$(just version)" = "$GITHUB_REF_NAME"
 
       - name: Build the guest image
         run: just guest-image
@@ -26,21 +26,15 @@ jobs:
       - name: Verify the guest image
         run: just verify-guest-image
 
-      - name: Name the release
-        id: version
-        run: echo "tag=$(just tmp-version)" >> "$GITHUB_OUTPUT"
-
       - name: Stage the assets
         run: just stage-release "$RUNNER_TEMP/dist"
 
       - name: Create the prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "$TAG" \
-            --title "$TAG" \
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
             --notes "" \
             --prerelease \
-            --target "$GITHUB_SHA" \
             "$RUNNER_TEMP/dist"/*
