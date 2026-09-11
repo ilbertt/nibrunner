@@ -47,7 +47,11 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
         http_port: desired.config.http_port,
         ports: record_ports(desired, slot),
         guest_ipv4: slot.guest_ipv4.clone(),
-        layer_digests: desired.layers.iter().map(|layer| layer.digest.clone()).collect(),
+        layer_digests: desired
+            .layers
+            .iter()
+            .map(|layer| layer.object().digest.clone())
+            .collect(),
         health_check: desired.config.health_check.clone(),
         resources: desired.config.resources,
         readiness: desired.activation().ready_when,
@@ -492,7 +496,7 @@ pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
             _ => None,
         })
         .flatten()
-        .filter(|layer| seen.insert((layer.digest.clone(), layer.kind.clone())))
+        .filter(|layer| seen.insert((*layer).clone()))
         .cloned()
         .collect()
 }
@@ -500,7 +504,7 @@ pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
 pub async fn prefetch_layers(host: &Host, plan: &ReconcilePlan) {
     for layer in layers_to_start(plan) {
         if let Err(error) = host.payloads.prepare(std::slice::from_ref(&layer)).await {
-            tracing::warn!(digest = %layer.digest, error = %error.message(), "layer prefetch failed");
+            tracing::warn!(digest = %layer.object().digest, error = %error.message(), "layer prefetch failed");
         }
     }
 }
@@ -536,21 +540,17 @@ mod tests {
         };
         let wanted = layers_to_start(&plan);
         assert_eq!(wanted, vec![base_layer(), same.clone()]);
-        let elsewhere = layer(|layer| {
-            layer.kind = protocol::LayerKind::File {
-                path: protocol::GuestPath::parse("/bin/server").unwrap(),
-            }
-        });
+        let whole = protocol::DesiredLayer::Filesystem(same.object().clone());
         let same_bytes_twice = layers_to_start(&ReconcilePlan {
             instances: vec![InstancePlan::Start {
-                desired: desired_instance(|instance| instance.layers = vec![same.clone(), elsewhere.clone()]),
+                desired: desired_instance(|instance| instance.layers = vec![whole.clone(), same.clone()]),
             }],
             ..Default::default()
         });
         assert_eq!(
             same_bytes_twice,
-            vec![same, elsewhere],
-            "one digest at two paths is two images"
+            vec![whole, same],
+            "one digest as two kinds is two images"
         );
         assert!(layers_to_start(&ReconcilePlan {
             instances: vec![InstancePlan::Sleep {

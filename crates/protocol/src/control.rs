@@ -37,31 +37,38 @@ pub enum DesiredPresence {
 
 pub const MAX_LAYERS: usize = 8;
 
-/// What the object a layer names is, and so what the host does with it.
+/// An object in the store the host's `artifacts.store_url` names, checked against `digest`
+/// before anything boots from it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
-pub enum LayerKind {
-    /// A squashfs or ext4 image, attached as it was uploaded.
-    Filesystem,
-    /// One file, which the host packs into an image at `path`.
-    File { path: GuestPath },
-}
-
-/// One read-only layer of the root filesystem an instance boots into, fetched from the object
-/// store the host's `artifacts.store_url` names and checked against `digest` before anything
-/// boots from it. Layers stack in the order the document lists them, first at the bottom, and
-/// the app's volume is stacked writable over all of them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct DesiredLayer {
+pub struct LayerObject {
     pub digest: Sha256Digest,
     pub size_bytes: u64,
     /// Where the object lives in the store.
     pub object_key: ObjectKey,
-    #[serde(flatten)]
-    pub kind: LayerKind,
+}
+
+/// One read-only layer of the root filesystem an instance boots into. Layers stack in the order
+/// the document lists them, first at the bottom, and the app's volume is stacked writable over
+/// all of them. The kind says what the object is, and so what the host does with it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DesiredLayer {
+    /// A squashfs or ext4 image, attached as it was uploaded.
+    Filesystem(LayerObject),
+    /// One program, packed into an image the way this host has always run one: as `/server`,
+    /// started by the guest's own init with the app's arguments and environment.
+    Executable(LayerObject),
+}
+
+impl DesiredLayer {
+    pub fn object(&self) -> &LayerObject {
+        match self {
+            DesiredLayer::Filesystem(object) | DesiredLayer::Executable(object) => object,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,15 +162,6 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
                 "an instance names at most {MAX_LAYERS} layers, because a microVM has that many drives to give them"
             )));
         }
-        if fields
-            .layers
-            .iter()
-            .any(|layer| matches!(&layer.kind, LayerKind::File { path } if path.as_str() == "/"))
-        {
-            return Err(InvalidValue::new_public(
-                "a file layer's path names the file the object becomes, and / is not a file",
-            ));
-        }
         Ok(Self {
             app_id: fields.app_id,
             deployment_id: fields.deployment_id,
@@ -208,15 +206,6 @@ fn desired_instance_rules(schema: &mut schemars::Schema) {
     {
         layers.insert("minItems".into(), serde_json::json!(1));
         layers.insert("maxItems".into(), serde_json::json!(MAX_LAYERS));
-        layers.insert(
-            "items".into(),
-            serde_json::json!({
-                "allOf": [
-                    layers.get("items").cloned().unwrap_or(serde_json::json!({})),
-                    { "properties": { "path": { "not": { "const": "/" } } } }
-                ]
-            }),
-        );
     }
 }
 

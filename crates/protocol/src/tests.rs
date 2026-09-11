@@ -15,11 +15,10 @@ fn instance_json() -> serde_json::Value {
                 "objectKey": "layers/debian-apphost"
             },
             {
-                "kind": "file",
+                "kind": "executable",
                 "digest": "a".repeat(64),
                 "sizeBytes": 27,
-                "objectKey": "artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45",
-                "path": "/server"
+                "objectKey": "artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45"
             }
         ],
         "config": {
@@ -516,21 +515,6 @@ mod schema {
             ),
             with(
                 desired_json(),
-                "/instances/0/layers/1/path",
-                serde_json::json!("server"),
-            ),
-            with(
-                desired_json(),
-                "/instances/0/layers/1/path",
-                serde_json::json!("/a/../server"),
-            ),
-            with(
-                desired_json(),
-                "/instances/0/layers/1/path",
-                serde_json::json!("/"),
-            ),
-            with(
-                desired_json(),
                 "/instances/0/layers/0/objectKey",
                 serde_json::json!(""),
             ),
@@ -540,7 +524,7 @@ mod schema {
                 serde_json::json!("binary"),
             ),
             without(desired_json(), "/instances/0/layers/0/kind"),
-            without(desired_json(), "/instances/0/layers/1/path"),
+            without(desired_json(), "/instances/0/layers/1/digest"),
             with(desired_json(), "/instances/0/layers", serde_json::json!([])),
             with(desired_json(), "/instances/0/layers", nine_layers),
             with(

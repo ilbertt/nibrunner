@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
-use protocol::{AppId, DeploymentId, DesiredInstance, DesiredLayer, ObjectKey, Sha256Digest};
+use protocol::{AppId, DeploymentId, DesiredInstance, DesiredLayer, LayerObject, ObjectKey, Sha256Digest};
 
 use crate::adapters::vm::VmStatus;
 
@@ -226,25 +226,25 @@ pub trait ArtifactStore: Send + Sync {
 
 #[async_trait]
 pub trait ArtifactStoreExt {
-    async fn read_verified(&self, layer: &DesiredLayer) -> Result<Vec<u8>, ArtifactError>;
+    async fn read_verified(&self, object: &LayerObject) -> Result<Vec<u8>, ArtifactError>;
 }
 
 #[async_trait]
 impl<T: ArtifactStore + ?Sized> ArtifactStoreExt for T {
-    async fn read_verified(&self, layer: &DesiredLayer) -> Result<Vec<u8>, ArtifactError> {
+    async fn read_verified(&self, object: &LayerObject) -> Result<Vec<u8>, ArtifactError> {
         use sha2::Digest;
 
-        let bytes = self.read(&layer.object_key).await?;
+        let bytes = self.read(&object.object_key).await?;
         let actual = hex::encode(sha2::Sha256::digest(&bytes));
-        if actual != layer.digest.as_str() {
+        if actual != object.digest.as_str() {
             return Err(ArtifactError::DigestMismatch {
-                expected: layer.digest.clone(),
+                expected: object.digest.clone(),
                 actual,
             });
         }
-        if bytes.len() as u64 != layer.size_bytes {
+        if bytes.len() as u64 != object.size_bytes {
             return Err(ArtifactError::SizeMismatch {
-                expected: layer.size_bytes,
+                expected: object.size_bytes,
                 actual: bytes.len() as u64,
             });
         }

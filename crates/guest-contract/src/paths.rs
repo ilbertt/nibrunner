@@ -10,6 +10,8 @@ pub fn layer_device(index: usize) -> String {
 }
 
 pub const ARTIFACT_MOUNT: &str = "/mnt/artifact";
+/// Where an executable layer holds the program, relative to the layer's root.
+pub const EXECUTABLE_PATH: &str = "/server";
 pub const TENANT_BINARY: &str = "/mnt/artifact/server";
 
 pub const CONFIG_MOUNT: &str = "/run/config";

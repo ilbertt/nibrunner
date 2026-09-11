@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use backhand::{compression::Compressor, FilesystemCompressor, FilesystemWriter, NodeHeader};
-use protocol::{DesiredLayer, LayerKind};
+use protocol::DesiredLayer;
 
 use crate::json_store::make_directory;
 use crate::ports::{ArtifactError, ArtifactStore, ArtifactStoreExt, PayloadBuilder, PreparedPayload};
 
 pub const VERBATIM_IMAGE_FILENAME: &str = "layer.img";
+pub const EXECUTABLE_IMAGE_FILENAME: &str = "executable.squashfs";
 
 pub const BINARY_MODE: u16 = 0o755;
 const CONFIG_MODE: u16 = 0o600;
@@ -69,18 +70,13 @@ pub fn is_filesystem_image(bytes: &[u8]) -> bool {
             .is_some_and(|magic| magic == EXT4_MAGIC)
 }
 
-fn short_hash(text: &str) -> String {
-    use sha2::Digest;
-    hex::encode(&sha2::Sha256::digest(text.as_bytes())[..8])
-}
-
 /// Where a layer's image lives in the cache. The object is the same bytes whether it is attached
-/// whole or packed around a path, so the path is part of the name.
+/// whole or packed as a program, so the kind is part of the name.
 pub fn layer_image_path(cache_dir: &Path, layer: &DesiredLayer) -> PathBuf {
-    let directory = cache_dir.join(layer.digest.as_str());
-    match &layer.kind {
-        LayerKind::Filesystem => directory.join(VERBATIM_IMAGE_FILENAME),
-        LayerKind::File { path } => directory.join(format!("packed-{}.squashfs", short_hash(path.as_str()))),
+    let directory = cache_dir.join(layer.object().digest.as_str());
+    match layer {
+        DesiredLayer::Filesystem(_) => directory.join(VERBATIM_IMAGE_FILENAME),
+        DesiredLayer::Executable(_) => directory.join(EXECUTABLE_IMAGE_FILENAME),
     }
 }
 
@@ -123,15 +119,17 @@ pub async fn ensure_layer_image(
         return Ok(image_path);
     }
 
-    let bytes = store.read_verified(layer).await?;
-    let image = match &layer.kind {
-        LayerKind::Filesystem if is_filesystem_image(&bytes) => bytes,
-        LayerKind::Filesystem => {
+    let bytes = store.read_verified(layer.object()).await?;
+    let image = match layer {
+        DesiredLayer::Filesystem(_) if is_filesystem_image(&bytes) => bytes,
+        DesiredLayer::Filesystem(object) => {
             return Err(ArtifactError::NotAnImage {
-                digest: layer.digest.clone(),
+                digest: object.digest.clone(),
             })
         }
-        LayerKind::File { path } => pack(&[(path.as_str(), &bytes, BINARY_MODE)])?,
+        DesiredLayer::Executable(_) => {
+            pack(&[(guest_contract::paths::EXECUTABLE_PATH, &bytes, BINARY_MODE)])?
+        }
     };
 
     let directory = image_path
@@ -147,10 +145,10 @@ pub async fn ensure_layer_image(
     std::fs::write(&staged, &image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     std::fs::rename(&staged, &image_path).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     tracing::info!(
-        digest = %layer.digest,
-        size_bytes = layer.size_bytes,
+        digest = %layer.object().digest,
+        size_bytes = layer.object().size_bytes,
         image_bytes = image.len(),
-        packed = matches!(layer.kind, LayerKind::File { .. }),
+        packed = matches!(layer, DesiredLayer::Executable(_)),
         "layer image ready"
     );
     Ok(image_path)
@@ -180,16 +178,14 @@ mod tests {
     use super::*;
     use crate::test_support::mocks;
     use crate::test_support::{base_layer, layer, ARTIFACT_BYTES, ARTIFACT_DIGEST, BASE_LAYER_BYTES};
-    use protocol::{GuestPath, Sha256Digest};
+    use protocol::Sha256Digest;
 
     fn artifact_bytes() -> Vec<u8> {
         ARTIFACT_BYTES.to_vec()
     }
 
-    fn file_at(path: &str) -> LayerKind {
-        LayerKind::File {
-            path: GuestPath::parse(path).unwrap(),
-        }
+    fn as_filesystem(layer: DesiredLayer) -> DesiredLayer {
+        DesiredLayer::Filesystem(layer.object().clone())
     }
 
     fn store(bytes: Vec<u8>) -> Arc<dyn ArtifactStore> {
@@ -212,7 +208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_layer_with_a_path_is_packed_once_per_digest_and_path_and_holds_the_file_there() {
+    async fn an_executable_is_packed_once_per_digest_and_holds_the_program_where_the_guest_runs_it() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(artifact_bytes());
         let image_path = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
@@ -233,20 +229,14 @@ mod tests {
         assert_eq!(siblings, 1);
     }
 
-    #[tokio::test]
-    async fn the_path_may_be_deep_and_the_directories_above_it_are_made() {
-        let directory = tempfile::tempdir().unwrap();
-        let deep = layer(|layer| layer.kind = file_at("/usr/local/bin/server"));
-        let image_path = ensure_layer_image(&store(artifact_bytes()), directory.path(), &deep)
-            .await
-            .unwrap();
-        let image = std::fs::read(&image_path).unwrap();
+    #[test]
+    fn a_deep_path_has_the_directories_above_it_made() {
+        let image = pack(&[("/usr/local/bin/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
         assert_eq!(read_back(&image, "/usr/local/bin/server"), artifact_bytes());
-        assert_ne!(image_path, layer_image_path(directory.path(), &layer(|_| {})));
     }
 
     #[tokio::test]
-    async fn a_layer_without_a_path_is_attached_as_it_was_uploaded() {
+    async fn a_filesystem_is_attached_as_it_was_uploaded() {
         let directory = tempfile::tempdir().unwrap();
         let image_path =
             ensure_layer_image(&store(BASE_LAYER_BYTES.to_vec()), directory.path(), &base_layer())
@@ -257,9 +247,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_layer_without_a_path_that_is_not_a_filesystem_is_refused_by_name() {
+    async fn a_filesystem_that_is_not_one_is_refused_by_name() {
         let directory = tempfile::tempdir().unwrap();
-        let not_an_image = layer(|layer| layer.kind = LayerKind::Filesystem);
+        let not_an_image = as_filesystem(layer(|_| {}));
         let error = ensure_layer_image(&store(artifact_bytes()), directory.path(), &not_an_image)
             .await
             .unwrap_err();
@@ -291,7 +281,7 @@ mod tests {
         assert!(!layer_image_path(directory.path(), &layer(|_| {})).exists());
 
         let store = store(artifact_bytes());
-        let mismatched = layer(|layer| layer.size_bytes = 1);
+        let mismatched = layer(|object| object.size_bytes = 1);
         let error = ensure_layer_image(&store, directory.path(), &mismatched)
             .await
             .unwrap_err();
@@ -336,7 +326,7 @@ mod tests {
     async fn bytes_that_match_are_handed_back_whole_before_anything_is_built_from_them() {
         let store = store(artifact_bytes());
         assert_eq!(
-            store.read_verified(&layer(|_| {})).await.unwrap(),
+            store.read_verified(layer(|_| {}).object()).await.unwrap(),
             artifact_bytes()
         );
     }
@@ -346,7 +336,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut store = crate::ports::MockArtifactStore::new();
         store.expect_read().returning(|key| {
-            Ok(if key == &base_layer().object_key {
+            Ok(if key == &base_layer().object().object_key {
                 BASE_LAYER_BYTES.to_vec()
             } else {
                 ARTIFACT_BYTES.to_vec()
@@ -365,20 +355,19 @@ mod tests {
     }
 
     #[test]
-    fn every_digest_and_path_gets_its_own_place_in_the_cache() {
+    fn every_digest_and_kind_gets_its_own_place_in_the_cache() {
         let cache = Path::new("/var/lib/nibrunner/artifacts");
         let packed = layer_image_path(cache, &layer(|_| {}));
-        let elsewhere = layer_image_path(cache, &layer(|layer| layer.kind = file_at("/bin/server")));
-        let whole = layer_image_path(cache, &layer(|layer| layer.kind = LayerKind::Filesystem));
+        let whole = layer_image_path(cache, &as_filesystem(layer(|_| {})));
         let other = layer_image_path(
             cache,
-            &layer(|layer| layer.digest = Sha256Digest::parse("0".repeat(64)).unwrap()),
+            &layer(|object| object.digest = Sha256Digest::parse("0".repeat(64)).unwrap()),
         );
-        for (a, b) in [(&packed, &elsewhere), (&packed, &whole), (&packed, &other)] {
-            assert_ne!(a, b);
-        }
+        assert_ne!(packed, whole);
+        assert_ne!(packed, other);
         assert_eq!(packed.parent(), whole.parent(), "one digest, one directory");
         assert!(packed.starts_with(cache));
+        assert!(packed.ends_with(EXECUTABLE_IMAGE_FILENAME));
         assert!(whole.ends_with(VERBATIM_IMAGE_FILENAME));
     }
 

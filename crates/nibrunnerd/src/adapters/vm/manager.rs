@@ -482,7 +482,7 @@ mod tests {
             desired,
             data_device_path: "/dev/loop0".into(),
             payload: crate::ports::PreparedPayload {
-                layer_image_paths: vec![PathBuf::from("/cache/abc/packed-0123456789abcdef.squashfs")],
+                layer_image_paths: vec![PathBuf::from("/cache/abc/executable.squashfs")],
             },
         }
     }
@@ -512,7 +512,7 @@ mod tests {
         assert!(drives[3]["path_on_host"]
             .as_str()
             .unwrap()
-            .ends_with("packed-0123456789abcdef.squashfs"));
+            .ends_with("executable.squashfs"));
         assert!(config["boot-source"]["boot_args"]
             .as_str()
             .unwrap()
