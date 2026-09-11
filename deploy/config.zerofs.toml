@@ -49,12 +49,10 @@ staging_dir = "/var/lib/nibrunner/exports"
 control_plane_cidrs_v4 = []
 control_plane_cidrs_v6 = []
 
-# Where every way in binds. One listener serves HTTP, encrypted or not: nothing here redirects, so
-# a second plain port beside this one would serve every app both ways at once.
-[proxy]
-listen_address = "0.0.0.0"
-
+# The one HTTP listener, encrypted or not: nothing here redirects, so a second plain port beside
+# this one would serve every app both ways at once. It binds where the edge reaches this host.
 [proxy.http]
+listen_address = "0.0.0.0"
 port = 443
 
 # Absent serves plain HTTP, which is what a host behind an edge that terminates TLS wants. One
@@ -69,12 +67,14 @@ key = "/etc/nibrunner/tls/origin.key"
 [proxy.http.tls.client_ca]
 certificate = "/etc/nibrunner/tls/origin-pull-ca.pem"
 
-# How many ports may reach an app unread. The HTTP listener above is read rather than carried
-# raw, so it is not one of these. Which protocol carries each is the document's to name.
-# Absent carries nothing raw, and a document asking for one is refused. A slot reserves seven
-# past the port its HTTP listener takes, so this may be raised without moving anything.
+# The ports a guest may answer on beside its HTTP one, carried to it unread — ssh, DNS, WireGuard.
+# Which protocol carries each is the document's to name. A raw port published to the world is an
+# address a tenant hands to its own users, and that is a machine of its own: this binds where that
+# relay reaches this host, never where the world does. Absent carries nothing raw. A slot reserves
+# seven past its HTTP port, so the limit may be raised without moving anything.
 [proxy.raw]
-max_ports_per_app = 1
+listen_address = "10.0.5.18"
+max_ports_per_guest = 1
 
 # Not 9091: ZeroFS holds that one on this host, and a second binding is a startup failure.
 [metrics]

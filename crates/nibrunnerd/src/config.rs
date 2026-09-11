@@ -87,25 +87,25 @@ pub struct ZerofsSettings {
 /// Where the world reaches an app on this host.
 ///
 /// Every way in is a section under here, and each is absent or complete: there is no
-/// half-configured listener to warn about at startup because there is no way to write one. What
-/// separates them is whether this host reads the protocol to know whose connection it is — HTTP
-/// carries a hostname to route on, a raw one carries nothing — so a raw port is
-/// reached at a port of its own rather than by name.
+/// half-configured listener to warn about at startup because there is no way to write one. Each
+/// binds an address of its own, because each faces a different machine — HTTP arrives from the
+/// edge that terminates TLS for it, a raw port from the relay that publishes it — and a host that
+/// put both on one address would be saying they arrive from the same place.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProxyConfig {
-    /// Where every listener under here binds. `None` only on a host that offers no way in.
-    pub listen_address: Option<IpAddr>,
     pub http: Option<HttpListener>,
     pub raw: Option<RawPorts>,
 }
 
 /// The one HTTP listener.
 ///
-/// One rather than a plain port beside a TLS port, because nothing here redirects: two would
-/// serve every app unencrypted and encrypted at once, forever, with nothing moving a visitor
-/// from the first to the second.
+/// One per host and one per guest: a guest's hostname resolves to this host, and this is what
+/// carries it to the one port that guest answers HTTP on. One rather than a plain port beside a
+/// TLS port, because nothing here redirects — two would serve every app unencrypted and encrypted
+/// at once, forever, with nothing moving a visitor from the first to the second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpListener {
+    pub listen_address: IpAddr,
     pub port: u16,
     /// Absent serves plain HTTP, which is what a host behind an edge that terminates TLS wants.
     pub tls: Option<TlsMaterial>,
@@ -119,16 +119,21 @@ pub struct TlsMaterial {
     pub client_ca: Option<PathBuf>,
 }
 
-/// The raw TCP ports an app may answer on *beside* its HTTP one.
+/// The ports a guest may answer on beside its HTTP one, carried to it unread.
 ///
-/// The HTTP listener is `[proxy.http]` and is never counted here: this is the budget for ports
-/// this host does not read, so a host allowing one lets an app answer on its HTTP port and one
-/// more. Absent is a host that offers none, and a document asking one of those for such a port
-/// is refused rather than quietly left unreachable.
+/// A raw port carries a protocol this host does not speak — ssh, DNS, WireGuard — so nothing can
+/// route it by name and it is reached at a port of its own. Which protocol carries each is the
+/// document's to say, port by port. The HTTP listener is not one of these and is never counted.
+///
+/// The address is the one a relay reaches this host on. A raw port published to the world is an
+/// address a tenant hands to its own users, and that is a machine of its own; this host binds
+/// where that machine can see it and nowhere else. Absent is a host that carries nothing raw, and
+/// a document asking one of those for such a port is refused rather than quietly left unreachable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawPorts {
-    /// How many, beside the HTTP one. Bounded by what a slot reserves past its first port.
-    pub max_ports_per_app: usize,
+    pub listen_address: IpAddr,
+    /// Bounded by what a slot reserves past the port its HTTP listener takes.
+    pub max_ports_per_guest: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,7 +293,6 @@ mod file {
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Proxy {
-        pub(super) listen_address: Option<String>,
         pub(super) http: Option<Http>,
         pub(super) raw: Option<Raw>,
     }
@@ -296,6 +300,7 @@ mod file {
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Http {
+        pub(super) listen_address: Option<String>,
         pub(super) port: Option<u16>,
         pub(super) tls: Option<Tls>,
     }
@@ -311,7 +316,8 @@ mod file {
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct Raw {
-        pub(super) max_ports_per_app: Option<usize>,
+        pub(super) listen_address: Option<String>,
+        pub(super) max_ports_per_guest: Option<usize>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -507,6 +513,13 @@ impl HostConfig {
     }
 }
 
+fn bind_address(field: &str, value: &Option<String>) -> Result<IpAddr, ConfigError> {
+    required_str(field, value)?
+        .trim()
+        .parse()
+        .map_err(|_| ConfigError::invalid(field, "an IP address to bind"))
+}
+
 fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
     let Some(document) = document else {
         return Ok(ProxyConfig::default());
@@ -516,6 +529,7 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
         .as_ref()
         .map(|http| {
             Ok::<_, ConfigError>(HttpListener {
+                listen_address: bind_address("proxy.http.listen_address", &http.listen_address)?,
                 port: listener("proxy.http.port", required("proxy.http.port", http.port)?)?,
                 tls: http
                     .tls
@@ -541,38 +555,22 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
         .raw
         .as_ref()
         .map(|raw| {
-            let named = required("proxy.raw.max_ports_per_app", raw.max_ports_per_app)?;
+            let named = required("proxy.raw.max_ports_per_guest", raw.max_ports_per_guest)?;
             if named == 0 || named > MAX_RAW_PORTS {
                 return Err(ConfigError::invalid(
-                    "proxy.raw.max_ports_per_app",
+                    "proxy.raw.max_ports_per_guest",
                     format!(
                         "between 1 and {MAX_RAW_PORTS}, which is what a slot reserves beside the HTTP port"
                     ),
                 ));
             }
             Ok(RawPorts {
-                max_ports_per_app: named,
+                listen_address: bind_address("proxy.raw.listen_address", &raw.listen_address)?,
+                max_ports_per_guest: named,
             })
         })
         .transpose()?;
-
-    // Everything under here binds somewhere, and where is said out loud rather than guessed at:
-    // the host ports a stream listener takes are laid out in a range anybody could guess.
-    let listen_address = match (&http, &raw) {
-        (None, None) => None,
-        _ => Some(
-            required_str("proxy.listen_address", &document.listen_address)?
-                .trim()
-                .parse()
-                .map_err(|_| ConfigError::invalid("proxy.listen_address", "an IP address to bind"))?,
-        ),
-    };
-
-    Ok(ProxyConfig {
-        listen_address,
-        http,
-        raw,
-    })
+    Ok(ProxyConfig { http, raw })
 }
 
 /// What a slot has left over for an app once its HTTP port is taken.
@@ -605,11 +603,10 @@ fn metrics(
     }
     // A scrape surface names every app this host runs and what each is using, so where it is bound
     // is said out loud rather than guessed at.
-    let listen_address = required_str("metrics.listen_address", &document.listen_address)?
-        .trim()
-        .parse()
-        .map_err(|_| ConfigError::invalid("metrics.listen_address", "an IP address to bind"))?;
-    Ok(Some(MetricsConfig { port, listen_address }))
+    Ok(Some(MetricsConfig {
+        port,
+        listen_address: bind_address("metrics.listen_address", &document.listen_address)?,
+    }))
 }
 
 /// Nothing this daemon reads has a value it may leave out: a key that is here is a key the
@@ -845,9 +842,12 @@ control_plane_cidrs_v6 = []
         parsed(&document(&[], extra))
     }
 
-    /// Every listener binds somewhere, so a document naming one names that too.
+    /// Every listener binds somewhere, so a document naming one names that too. Each on an
+    /// address of its own, because each faces a different machine.
     fn bound(listeners: &str) -> String {
-        format!("[proxy]\nlisten_address = \"0.0.0.0\"\n\n{listeners}")
+        listeners
+            .replace("[proxy.http]\n", "[proxy.http]\nlisten_address = \"0.0.0.0\"\n")
+            .replace("[proxy.raw]\n", "[proxy.raw]\nlisten_address = \"10.0.5.18\"\n")
     }
 
     /// `WHOLE` with one key struck out, which is the only way a key can now be absent.
@@ -1005,11 +1005,28 @@ control_plane_cidrs_v6 = []
     #[test]
     fn a_listener_that_binds_nowhere_is_refused_rather_than_bound_everywhere() {
         let message = refused(&document(&[], "[proxy.http]\nport = 8080\n"));
-        assert!(message.contains("proxy.listen_address"), "{message}");
-        let streaming = refused(&document(&[], "[proxy.raw]\nmax_ports_per_app = 1\n"));
-        assert!(streaming.contains("proxy.listen_address"), "{streaming}");
+        assert!(message.contains("proxy.http.listen_address"), "{message}");
+        let raw = refused(&document(&[], "[proxy.raw]\nmax_ports_per_guest = 1\n"));
+        assert!(raw.contains("proxy.raw.listen_address"), "{raw}");
         // A host that offers no way in is not asked where it would have bound one.
         assert_eq!(parsed(&whole()).proxy, ProxyConfig::default());
+    }
+
+    #[test]
+    fn each_listener_binds_where_it_says_and_not_where_the_other_does() {
+        let both = with(&bound(
+            "[proxy.http]\nport = 8080\n\n[proxy.raw]\nmax_ports_per_guest = 1\n",
+        ));
+        assert_eq!(
+            both.proxy.http.unwrap().listen_address,
+            IpAddr::from([0, 0, 0, 0]),
+            "HTTP faces the edge"
+        );
+        assert_eq!(
+            both.proxy.raw.unwrap().listen_address,
+            IpAddr::from([10, 0, 5, 18]),
+            "raw ports face the relay"
+        );
     }
 
     #[test]
@@ -1064,28 +1081,28 @@ control_plane_cidrs_v6 = []
     #[test]
     fn how_many_ports_an_app_may_name_is_the_hosts_to_say_and_is_bounded_by_the_slot() {
         assert_eq!(
-            with(&bound("[proxy.raw]\nmax_ports_per_app = 1\n"))
+            with(&bound("[proxy.raw]\nmax_ports_per_guest = 1\n"))
                 .proxy
                 .raw
                 .unwrap()
-                .max_ports_per_app,
+                .max_ports_per_guest,
             1
         );
         for refused_count in ["0", &(MAX_RAW_PORTS + 1).to_string()] {
             let message = refused(&document(
                 &[],
-                &bound(&format!("[proxy.raw]\nmax_ports_per_app = {refused_count}\n")),
+                &bound(&format!("[proxy.raw]\nmax_ports_per_guest = {refused_count}\n")),
             ));
-            assert!(message.contains("proxy.raw.max_ports_per_app"), "{message}");
+            assert!(message.contains("proxy.raw.max_ports_per_guest"), "{message}");
         }
         assert_eq!(
             with(&bound(&format!(
-                "[proxy.raw]\nmax_ports_per_app = {MAX_RAW_PORTS}\n"
+                "[proxy.raw]\nmax_ports_per_guest = {MAX_RAW_PORTS}\n"
             )))
             .proxy
             .raw
             .unwrap()
-            .max_ports_per_app,
+            .max_ports_per_guest,
             MAX_RAW_PORTS
         );
     }
@@ -1392,10 +1409,8 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
                 ("artifacts.store_url", "\"s3://nibrun-artifacts/prod\""),
                 ("network.control_plane_cidrs_v4", "[\"172.31.0.0/16\"]"),
             ],
-            r#"[proxy]
+            r#"[proxy.http]
 listen_address = "0.0.0.0"
-
-[proxy.http]
 port = 443
 
 [proxy.http.tls]
@@ -1406,7 +1421,8 @@ key = "/etc/nibrunner/origin.key"
 certificate = "/etc/nibrunner/origin-pull-ca.pem"
 
 [proxy.raw]
-max_ports_per_app = 1
+listen_address = "10.0.5.18"
+max_ports_per_guest = 1
 
 [metrics]
 port = 9100
@@ -1417,10 +1433,10 @@ listen_address = "127.0.0.1"
         assert_eq!(config.snapshot_dir, PathBuf::from("/mnt/cache/snapshots"));
         assert_eq!(config.artifact_store_url, "s3://nibrun-artifacts/prod");
         assert_eq!(config.control_plane_cidrs_v4, vec!["172.31.0.0/16".to_string()]);
-        assert_eq!(config.proxy.listen_address, Some(IpAddr::from([0, 0, 0, 0])));
         assert_eq!(
             config.proxy.http,
             Some(HttpListener {
+                listen_address: IpAddr::from([0, 0, 0, 0]),
                 port: 443,
                 tls: Some(TlsMaterial {
                     certificate: PathBuf::from("/etc/nibrunner/origin.crt"),
@@ -1429,7 +1445,13 @@ listen_address = "127.0.0.1"
                 }),
             })
         );
-        assert_eq!(config.proxy.raw, Some(RawPorts { max_ports_per_app: 1 }));
+        assert_eq!(
+            config.proxy.raw,
+            Some(RawPorts {
+                listen_address: IpAddr::from([10, 0, 5, 18]),
+                max_ports_per_guest: 1,
+            })
+        );
         assert_eq!(
             config.metrics,
             Some(MetricsConfig {

@@ -93,8 +93,10 @@ is the limit — an `ssh -L` carries every other port a tenant could have wanted
 ```
 
 A `tcp` port is a byte pipe: the host reads none of what crosses it, which is what lets a protocol
-this daemon does not speak arrive at all. It is reached at `<ingress.listen_address>:<host port>`
-rather than by name, because ssh sends no hostname to route on. While the app sleeps, the first
+this daemon does not speak arrive at all. It is reached at `<proxy.raw.listen_address>:<host port>`
+rather than by name, because ssh sends no hostname to route on — and that address is the one a
+relay reaches this host on, not the world: a port a tenant publishes to its users is published by
+definition, and that is a machine of its own. While the app sleeps, the first
 connection wakes it and is spliced through once it answers, so a client sees a slow banner rather
 than a closed socket.
 

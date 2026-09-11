@@ -106,21 +106,15 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             waker: waker_slot.clone(),
         }),
     );
-    let stream_activator =
-        config
-            .proxy
-            .raw
-            .as_ref()
-            .zip(config.proxy.listen_address)
-            .map(|(_, listen_address)| {
-                crate::adapters::proxy::StreamActivator::new(
-                    state.clone(),
-                    Arc::new(DeferredWaker {
-                        waker: waker_slot.clone(),
-                    }),
-                    listen_address,
-                )
-            });
+    let stream_activator = config.proxy.raw.as_ref().map(|raw| {
+        crate::adapters::proxy::StreamActivator::new(
+            state.clone(),
+            Arc::new(DeferredWaker {
+                waker: waker_slot.clone(),
+            }),
+            raw.listen_address,
+        )
+    });
 
     let exports: Arc<dyn crate::domain::exports::store::ExportStore> = Arc::new(
         crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)
@@ -195,17 +189,11 @@ pub fn host_versions(host: &Host) -> HostVersions {
 }
 
 pub fn serve_proxy(host: &Arc<Host>) {
-    let Some((http, listen_address)) = host
-        .config
-        .proxy
-        .http
-        .clone()
-        .zip(host.config.proxy.listen_address)
-    else {
+    let Some(http) = host.config.proxy.http.clone() else {
         return;
     };
     let router = host.router.clone();
-    let address = SocketAddr::new(listen_address, http.port);
+    let address = SocketAddr::new(http.listen_address, http.port);
     tokio::spawn(async move {
         // One listener, and what it is depends on whether this host was given the material to
         // encrypt with. Nothing here redirects, so a second plain port beside a TLS one would

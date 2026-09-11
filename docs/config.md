@@ -19,7 +19,7 @@ does is what this file says.
 **An unknown key is refused too.** A mistyped key and a missing one are different errors, which is
 the thing an environment variable could never do for you.
 
-**A whole *section* is what may be absent** — `[proxy.http.tls]`, `[metrics]`, `[volumes.zerofs]`. A
+**A whole *section* is what may be absent** — `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]`. A
 section that is present is filled in completely, so there is no half-configured listener to warn
 about at startup because there is no way to write one.
 
@@ -105,15 +105,15 @@ last of them.
 
 ## What this host serves
 
-Every way in is a section under `[proxy]`, and each is absent or complete.
+Every way in is a section under `[proxy]`, and each is absent or complete. Each binds an address
+of its own, because each faces a different machine.
 
 | Section | Key | What |
 | --- | --- | --- |
-| `[proxy]` | `listen_address` | where every listener below binds |
-| `[proxy.http]` | `port` | the one HTTP listener |
+| `[proxy.http]` | `listen_address`, `port` | the one HTTP listener, where the edge reaches it |
 | `[proxy.http.tls]` | `certificate`, `key` | serve that port encrypted, with this material |
 | `[proxy.http.tls.client_ca]` | `certificate` | a PEM trust pool |
-| `[proxy.raw]` | `max_ports_per_app` | how many ports may reach an app unread |
+| `[proxy.raw]` | `listen_address`, `max_ports_per_guest` | ports carried to a guest unread, where the relay reaches them |
 
 **One HTTP listener, not a plain one and a TLS one.** Nothing here redirects, so two would serve
 every app unencrypted and encrypted at once, forever, with nothing moving a visitor from the first
@@ -136,10 +136,21 @@ cannot reach it yourself without one, so turn it on after the plain path is prov
 A connection whose handshake named one app and whose request names another gets a **421**. That is
 the only thing standing between two tenants that share a certificate.
 
-**`[proxy.raw]` is the way in for a protocol this host does not read** — ssh, in practice. Such a
-port carries bytes and nothing else, so nothing can route it by name and it is reached at a port
-of its own. `max_ports_per_app` is bounded by what a slot reserves beside the HTTP port, which is
-seven. Absent offers none.
+**One HTTP port per guest.** A guest's hostname resolves to this host, and `[proxy.http]` carries
+it to the one port that guest answers HTTP on. That is what the subdomain means, so there is no
+second.
+
+**`[proxy.raw]` is the way in for a protocol this host does not read** — ssh, DNS, WireGuard.
+Such a port carries bytes and nothing else, so nothing can route it by name and it is reached at
+a port of its own. Which protocol carries each, `tcp` or `udp`, is the document's to name, port by
+port; `max_ports_per_guest` is how many, bounded by what a slot reserves past the HTTP port, which
+is seven. Absent carries nothing raw.
+
+**A raw port is never published from this host.** An address a tenant hands to its own users is
+published by definition, and publishing this host's would put every guest on it in front of one
+tenant's users. So the relay that publishes it is a machine of its own, and `proxy.raw.
+listen_address` is where that relay reaches this host — a private address, never the world's.
+Binding it to `0.0.0.0` is a choice this file lets you make and says out loud.
 
 **A document asking for what this host does not serve is refused by name**, and the instance is
 reported `failed` saying so, rather than started somewhere nothing could reach it: a hostname on a

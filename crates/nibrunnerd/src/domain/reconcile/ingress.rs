@@ -21,7 +21,7 @@ pub fn ingress_refusal(desired: &DesiredInstance, config: &HostConfig) -> Option
     }
 
     let named = desired.config.ports.len();
-    let allowed = config.proxy.raw.as_ref().map_or(0, |tcp| tcp.max_ports_per_app);
+    let allowed = config.proxy.raw.as_ref().map_or(0, |raw| raw.max_ports_per_guest);
     if named > allowed {
         return Some(match allowed {
             0 => format!(
@@ -59,15 +59,15 @@ mod tests {
         config
     }
 
-    fn listening() -> Option<std::net::IpAddr> {
-        Some(std::net::Ipv4Addr::LOCALHOST.into())
+    fn here() -> std::net::IpAddr {
+        std::net::Ipv4Addr::LOCALHOST.into()
     }
 
     /// A host that serves HTTP and offers no port beside it.
     fn serving_http() -> ProxyConfig {
         ProxyConfig {
-            listen_address: listening(),
             http: Some(HttpListener {
+                listen_address: here(),
                 port: 8080,
                 tls: None,
             }),
@@ -75,12 +75,19 @@ mod tests {
         }
     }
 
-    /// The same host, with one port an app may name beside its HTTP one.
-    fn and_one_more() -> ProxyConfig {
+    /// The same host, allowing each guest this many ports beside its HTTP one.
+    fn allowing(max_ports_per_guest: usize) -> ProxyConfig {
         ProxyConfig {
-            raw: Some(RawPorts { max_ports_per_app: 1 }),
+            raw: Some(RawPorts {
+                listen_address: here(),
+                max_ports_per_guest,
+            }),
             ..serving_http()
         }
+    }
+
+    fn and_one_more() -> ProxyConfig {
+        allowing(1)
     }
 
     fn serving_nothing() -> ProxyConfig {
@@ -132,11 +139,7 @@ mod tests {
         assert!(refusal.contains("allows 1"), "{refusal}");
 
         // The same document on a host that allows two is not a document to refuse.
-        let roomier = ProxyConfig {
-            raw: Some(RawPorts { max_ports_per_app: 2 }),
-            ..serving_http()
-        };
-        assert_eq!(ingress_refusal(&greedy, &config_with(roomier)), None);
+        assert_eq!(ingress_refusal(&greedy, &config_with(allowing(2))), None);
     }
 
     #[test]

@@ -325,12 +325,15 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
     // A host that serves apps under hostnames runs a proxy and binds the ports beside it, and an
     // app is refused on a host that does neither.
     config.proxy = crate::config::ProxyConfig {
-        listen_address: Some(std::net::Ipv4Addr::LOCALHOST.into()),
         http: Some(crate::config::HttpListener {
+            listen_address: std::net::Ipv4Addr::LOCALHOST.into(),
             port: 8080,
             tls: None,
         }),
-        raw: Some(crate::config::RawPorts { max_ports_per_app: 1 }),
+        raw: Some(crate::config::RawPorts {
+            listen_address: std::net::Ipv4Addr::LOCALHOST.into(),
+            max_ports_per_guest: 1,
+        }),
     };
     let state = HostState::shared();
     let (commands, command_log) = mocks::commands_succeeding();
