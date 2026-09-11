@@ -151,6 +151,8 @@ five minutes, and everything else does not sleep.
 
 ## Testing
 
+`mise install` puts `just` on the path at the version `mise.toml` pins.
+
 ```bash
 just test          # everything that needs no kernel
 just integration   # everything that does: root, Linux, nft, mke2fs, /dev/net/tun
