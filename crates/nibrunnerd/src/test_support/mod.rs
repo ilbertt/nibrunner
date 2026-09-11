@@ -172,6 +172,7 @@ pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedIn
         last_healthy_at: None,
         last_exit_code: None,
         compute: None,
+        meters: Default::default(),
         message: None,
     };
     edit(&mut value);

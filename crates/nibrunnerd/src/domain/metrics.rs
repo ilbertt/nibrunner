@@ -86,6 +86,12 @@ fn escaped(value: &str) -> String {
     out
 }
 
+// Prometheus counts time in seconds and this host meters it in milliseconds. Rendered rather than
+// rounded, so a series that is read back and multiplied out is the figure the report carries.
+fn as_seconds(ms: u64) -> String {
+    format!("{}.{:03}", ms / 1_000, ms % 1_000)
+}
+
 struct Page(String);
 
 impl Page {
@@ -205,6 +211,76 @@ pub fn render(report: &HostReportedState, proxy: &ProxyMetrics) -> String {
                 "nibrunner_instance_cpu_share",
                 &[("app", instance.app_id.as_str())],
                 share,
+            );
+        }
+    }
+
+    // The same numbers the report carries, for looking at rather than for billing from: a scrape
+    // that was missed is a stretch a rate over these interpolates, and `reported.json` is where
+    // the figures nobody may guess at are read from.
+    page.metric(
+        "nibrunner_instance_time_seconds_total",
+        "How long an app has been held, by what it was holding: memory while it runs, a snapshot on disk while it sleeps.",
+        "counter",
+    );
+    for instance in &report.instances {
+        for (holding, ms) in [
+            ("running", instance.meters.running_ms),
+            ("idle", instance.meters.idle_ms),
+        ] {
+            page.value(
+                "nibrunner_instance_time_seconds_total",
+                &[("app", instance.app_id.as_str()), ("holding", holding)],
+                as_seconds(ms),
+            );
+        }
+    }
+
+    page.metric(
+        "nibrunner_instance_cpu_seconds_total",
+        "What an app's guest has reported spending, summed across the vCPUs it was given.",
+        "counter",
+    );
+    for instance in &report.instances {
+        page.value(
+            "nibrunner_instance_cpu_seconds_total",
+            &[("app", instance.app_id.as_str())],
+            as_seconds(instance.meters.cpu_ms),
+        );
+    }
+
+    page.metric(
+        "nibrunner_instance_network_bytes_total",
+        "What has crossed an app's tap, by which way it went. Only what was let out is counted as sent.",
+        "counter",
+    );
+    for instance in &report.instances {
+        for (direction, bytes) in [("rx", instance.meters.rx_bytes), ("tx", instance.meters.tx_bytes)] {
+            page.value(
+                "nibrunner_instance_network_bytes_total",
+                &[("app", instance.app_id.as_str()), ("direction", direction)],
+                bytes,
+            );
+        }
+    }
+
+    // Mebibyte-seconds rather than bytes, and named for it: what a volume holds is a level, so
+    // what accumulates is that level multiplied by how long it was held, and the byte-milliseconds
+    // that would be the base-unit form of it outrun a 64-bit counter on a large volume.
+    page.metric(
+        "nibrunner_instance_disk_mib_seconds_total",
+        "What an app has held on disk over time: what was set aside for it, and what its guest reported filling.",
+        "counter",
+    );
+    for instance in &report.instances {
+        for (disk, held) in [
+            ("provisioned", instance.meters.disk_provisioned_mib_seconds),
+            ("used", instance.meters.disk_used_mib_seconds),
+        ] {
+            page.value(
+                "nibrunner_instance_disk_mib_seconds_total",
+                &[("app", instance.app_id.as_str()), ("disk", disk)],
+                held,
             );
         }
     }
@@ -362,6 +438,56 @@ mod tests {
             .any(|line| line.contains("state=\"idle\"") && line.ends_with(" 1")));
         assert!(lines_for(&page, "nibrunner_instance_restarts_total")[0].ends_with(" 2"));
         assert!(lines_for(&page, "nibrunner_instance_cpu_share")[0].ends_with(" 0.25"));
+    }
+
+    #[test]
+    fn what_an_app_has_used_is_exposed_as_counters_in_the_units_a_scraper_reads() {
+        let mut state = report();
+        state.instances = vec![crate::test_support::reported_instance(|instance| {
+            instance.meters = protocol::UsageMeters {
+                running_ms: 3_600_000,
+                idle_ms: 1_500,
+                cpu_ms: 42_150,
+                rx_bytes: 1_073_741_824,
+                tx_bytes: 2_147_483_648,
+                disk_provisioned_mib_seconds: 29_491_200,
+                disk_used_mib_seconds: 5_242_880,
+            };
+        })];
+        let page = render(&state, &ProxyMetrics::new());
+
+        let time = lines_for(&page, "nibrunner_instance_time_seconds_total");
+        assert_eq!(time.len(), 2, "memory and disk are counted apart: {time:?}");
+        assert!(time
+            .iter()
+            .any(|line| line.contains("holding=\"running\"") && line.ends_with(" 3600.000")));
+        assert!(time
+            .iter()
+            .any(|line| line.contains("holding=\"idle\"") && line.ends_with(" 1.500")));
+        assert!(lines_for(&page, "nibrunner_instance_cpu_seconds_total")[0].ends_with(" 42.150"));
+        let network = lines_for(&page, "nibrunner_instance_network_bytes_total");
+        assert_eq!(network.len(), 2, "each way is counted apart: {network:?}");
+        assert!(network
+            .iter()
+            .any(|line| line.contains("direction=\"rx\"") && line.ends_with(" 1073741824")));
+        assert!(network
+            .iter()
+            .any(|line| line.contains("direction=\"tx\"") && line.ends_with(" 2147483648")));
+    }
+
+    #[test]
+    fn an_app_that_has_used_nothing_is_a_zero_rather_than_a_missing_series() {
+        let mut state = report();
+        state.instances = vec![crate::test_support::reported_instance(|_| {})];
+        let page = render(&state, &ProxyMetrics::new());
+        for name in [
+            "nibrunner_instance_time_seconds_total",
+            "nibrunner_instance_cpu_seconds_total",
+            "nibrunner_instance_network_bytes_total",
+            "nibrunner_instance_disk_mib_seconds_total",
+        ] {
+            assert!(!lines_for(&page, name).is_empty(), "{name} is missing");
+        }
     }
 
     #[test]
