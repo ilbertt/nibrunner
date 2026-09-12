@@ -6,8 +6,9 @@ use hyper::header::{HeaderName, HeaderValue, CONNECTION, UPGRADE};
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use std::net::IpAddr;
+use std::time::Duration;
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
 
@@ -28,10 +29,25 @@ fn strip_hop_by_hop(headers: &mut hyper::HeaderMap) {
     }
 }
 
+// A connection the pool keeps to a guest is one that guest's kernel probes when nothing is on it,
+// and this host's answer is counted as traffic addressed to the app — Go servers probe every
+// fifteen seconds, so an app written in one never slept. It is also pinned to that guest by
+// conntrack, so a request reusing it after the guest was snapshotted would go to a paused machine
+// rather than to the activator. The pool evicts somewhere between once and twice this, which is
+// before the first probe and long before an idle window runs out.
+const UPSTREAM_IDLE: Duration = Duration::from_secs(5);
+
 pub fn upstream_client() -> Client<HttpConnector, Incoming> {
+    upstream_client_dropping_idle_after(UPSTREAM_IDLE)
+}
+
+fn upstream_client_dropping_idle_after(idle: Duration) -> Client<HttpConnector, Incoming> {
     let mut connector = HttpConnector::new();
     connector.set_nodelay(true);
-    Client::builder(TokioExecutor::new()).build(connector)
+    Client::builder(TokioExecutor::new())
+        .pool_timer(TokioTimer::new())
+        .pool_idle_timeout(idle)
+        .build(connector)
 }
 
 fn rewritten(uri: &Uri, host: &str, port: u16) -> Uri {
@@ -387,12 +403,21 @@ mod tests {
     }
 
     async fn proxying(host: &'static str, port: u16, keep_alive: bool) -> u16 {
+        proxying_with(upstream_client(), host, port, keep_alive).await
+    }
+
+    async fn proxying_with(
+        client: Client<HttpConnector, Incoming>,
+        host: &'static str,
+        port: u16,
+        keep_alive: bool,
+    ) -> u16 {
         let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
         let listening_on = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            let client = std::sync::Arc::new(upstream_client());
+            let client = std::sync::Arc::new(client);
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
@@ -419,6 +444,54 @@ mod tests {
 
     fn empty() -> ProxyBody {
         Full::new(Bytes::new()).map_err(|never| match never {}).boxed()
+    }
+
+    /// Answers one request on the connection and then reports how the connection ended: the
+    /// bytes read next, so `0` is the peer closing it.
+    async fn answering_once_then_listening_for_the_close() -> (u16, tokio::sync::oneshot::Receiver<usize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ended, ending) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut heard = [0u8; 1024];
+            let _ = stream.read(&mut heard).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await;
+            let _ = ended.send(stream.read(&mut heard).await.unwrap_or(0));
+        });
+        (port, ending)
+    }
+
+    // The pool evicts on a timer and nothing else: without one, a connection nobody was using
+    // lived until the next request for that guest — or, for a guest left alone, until the guest
+    // closed it. While it lived, the guest's keepalive probes and this host's answers kept the
+    // app's traffic counters moving, and the app never slept.
+    #[tokio::test]
+    async fn an_upstream_connection_nothing_is_using_is_closed_without_waiting_for_another_request() {
+        let (upstream, ending) = answering_once_then_listening_for_the_close().await;
+        let proxy = proxying_with(
+            upstream_client_dropping_idle_after(Duration::from_millis(100)),
+            "127.0.0.1",
+            upstream,
+            true,
+        )
+        .await;
+
+        let answer = asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.example.com\r\n\r\n").await;
+        assert_eq!(answer, "", "the one answer came back through the proxy");
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), ending)
+            .await
+            .expect("the pool closed the idle connection on its own")
+            .unwrap();
+        assert_eq!(ended, 0, "the upstream saw the connection closed, not reused");
     }
 
     async fn echoing_once_it_is_no_longer_http() -> u16 {
