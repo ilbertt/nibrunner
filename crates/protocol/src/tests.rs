@@ -11,14 +11,12 @@ fn instance_json() -> serde_json::Value {
             {
                 "kind": "filesystem",
                 "digest": "b".repeat(64),
-                "sizeBytes": 31457280,
                 "objectKey": "layers/debian-apphost"
             },
             {
                 "kind": "executable",
                 "destinationPath": "/app/server",
                 "digest": "a".repeat(64),
-                "sizeBytes": 27,
                 "objectKey": "artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45"
             }
         ],
@@ -69,6 +67,19 @@ fn unknown_fields_are_tolerated_and_mistyped_ones_are_not() {
     let mut document = instance_json();
     document["config"]["httpPort"] = serde_json::json!("3000");
     assert!(serde_json::from_value::<DesiredInstance>(document).is_err());
+}
+
+// A layer used to declare its size beside its digest, and every document written then still says
+// so. The digest was always the whole of the check, so the number is read past rather than
+// refused.
+#[test]
+fn a_layer_that_still_declares_its_size_is_read_as_one_that_does_not() {
+    let mut document = instance_json();
+    document["layers"][1]["sizeBytes"] = serde_json::json!(27);
+    let parsed: DesiredInstance = serde_json::from_value(document).expect("parses");
+    assert_eq!(parsed.layers[1].object().digest.as_str(), "a".repeat(64));
+    let written = serde_json::to_value(&parsed).expect("serialises");
+    assert!(written["layers"][1].get("sizeBytes").is_none());
 }
 
 #[test]

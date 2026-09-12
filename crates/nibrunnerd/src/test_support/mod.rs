@@ -90,7 +90,6 @@ pub fn tenant_environment(values: &[(&str, &str)]) -> TenantEnvironment {
 pub fn layer(edit: impl FnOnce(&mut LayerObject)) -> DesiredLayer {
     let mut object = LayerObject {
         digest: Sha256Digest::parse(ARTIFACT_DIGEST).unwrap(),
-        size_bytes: ARTIFACT_BYTES.len() as u64,
         object_key: ObjectKey::parse("artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45").unwrap(),
     };
     edit(&mut object);
@@ -105,7 +104,6 @@ pub fn base_layer() -> DesiredLayer {
     DesiredLayer::Filesystem {
         object: LayerObject {
             digest: Sha256Digest::parse(BASE_LAYER_DIGEST).unwrap(),
-            size_bytes: BASE_LAYER_BYTES.len() as u64,
             object_key: ObjectKey::parse("layers/debian").unwrap(),
         },
     }

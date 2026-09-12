@@ -59,7 +59,6 @@ below into `paths.desired_state_file`. Everything past that is the daemon conver
           "kind": "executable",
           "destinationPath": "/app/server",
           "digest": "<sha256 of the binary, lowercase hex>",
-          "sizeBytes": 12345678,
           "objectKey": "my-server"
         }
       ],

@@ -43,13 +43,13 @@ pub enum DesiredPresence {
 pub const MAX_LAYERS: usize = 8;
 
 /// An object in the store the host's `artifacts.store_url` names, checked against `digest`
-/// before anything boots from it.
+/// before anything boots from it. The digest is the whole of what is checked: a `sizeBytes`
+/// beside it, which a document used to carry, is read past.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LayerObject {
     pub digest: Sha256Digest,
-    pub size_bytes: u64,
     /// Where the object lives in the store.
     pub object_key: ObjectKey,
 }
