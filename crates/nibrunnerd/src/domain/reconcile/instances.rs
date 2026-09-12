@@ -12,6 +12,7 @@ use crate::domain::health::{
     LifecycleInputs,
 };
 use crate::domain::metrics::converge;
+use crate::domain::metrics::health::Failure;
 use crate::domain::metrics::sleep_wake::SleepOutcome;
 use crate::domain::reconcile::plan::{InstancePlan, ReconcilePlan};
 use crate::domain::report::instance_record::{InstanceRecord, RecordFields};
@@ -183,15 +184,25 @@ async fn say_it_is_out_of_restarts(host: &Host, app_id: &AppId, attempted: u32, 
     let said = StateMessage::new(format!(
         "out of restarts: {attempted} starts attempted against a budget of {allowed},          and this instance will not be started again until it is deployed afresh"
     ));
+    if say(host, app_id, said).await {
+        host.metrics.health.failed(app_id, Failure::OutOfRestarts);
+    }
+}
+
+/// Puts a sentence on the record, and says whether it is news. The status loop passes every
+/// second, and a record written every second is a write per second that says what the last one
+/// did — and a failure counted every second is one failure counted for ever.
+async fn say(host: &Host, app_id: &AppId, said: StateMessage) -> bool {
+    let mut news = false;
     host.state
         .update_record(app_id, |record| {
-            // The status loop passes every second, and a record written every second is a write
-            // per second that says what the last one did.
-            if record.message.as_ref() != Some(&said) {
-                record.message = Some(said.clone());
+            news = record.message.as_ref() != Some(&said);
+            if news {
+                record.message = Some(said);
             }
         })
         .await;
+    news
 }
 
 pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
@@ -229,11 +240,15 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         return;
     }
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
-        host.state
-            .update_record(&desired.app_id, |record| {
-                record.message = Some(StateMessage::new("this host has no slot left"));
-            })
-            .await;
+        if say(
+            host,
+            &desired.app_id,
+            StateMessage::new("this host has no slot left"),
+        )
+        .await
+        {
+            host.metrics.health.failed(&desired.app_id, Failure::NoSlot);
+        }
         return;
     };
 
@@ -267,12 +282,13 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                 record.message = Some(StateMessage::new(refusal.clone()));
             })
             .await;
+        host.metrics.health.failed(&desired.app_id, Failure::Refused);
         tracing::error!(app_id = %desired.app_id, refusal, "instance refused before it was started");
         return;
     }
 
     let booted = match host.payloads.prepare(&desired.layers).await {
-        Err(error) => Err(error.message()),
+        Err(error) => Err((Failure::Layers, error.message())),
         Ok(payload) => {
             let data_device_path = match host.volumes.attach(&desired.volume_id, &desired.app_id).await {
                 Ok(attached) => {
@@ -290,6 +306,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                             record.message = Some(StateMessage::new(error.message()));
                         })
                         .await;
+                    host.metrics.health.failed(&desired.app_id, Failure::Volume);
                     tracing::error!(app_id = %desired.app_id, error = %error.message(), "instance start failed");
                     return;
                 }
@@ -302,7 +319,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                     payload,
                 })
                 .await
-                .map_err(|error| error.message())
+                .map_err(|error| (Failure::Boot, error.message()))
         }
     };
 
@@ -326,13 +343,14 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
             host.state.probe_at_once(&desired.app_id).await;
             tracing::info!(app_id = %desired.app_id, host_port = %attempted.host_port, guest_ipv4 = %attempted.guest_ipv4, "instance started");
         }
-        Err(reason) => {
+        Err((failure, reason)) => {
             host.state
                 .update_record(&desired.app_id, |record| {
                     record.state = InstanceState::Failed;
                     record.message = Some(StateMessage::new(reason.clone()));
                 })
                 .await;
+            host.metrics.health.failed(&desired.app_id, failure);
             tracing::error!(app_id = %desired.app_id, attempt = attempted.start_attempts.attempts, reason, "instance start failed");
         }
     }
@@ -445,6 +463,7 @@ async fn settle(
     now_ms: i64,
 ) {
     let health = if status.active && due {
+        let probed = std::time::Instant::now();
         let healthy = if crate::domain::activation::probes_a_port(record.readiness) {
             crate::domain::health::probe::probe_instance(
                 &record.guest_ipv4,
@@ -457,6 +476,9 @@ async fn settle(
             // its microVM is still up is the whole of what this host can observe about it.
             true
         };
+        host.metrics
+            .health
+            .probed(&record.app_id, healthy, probed.elapsed());
         let delay = next_probe_delay_ms(&record.health, &record.grace_inputs(now_ms));
         host.state
             .modify(|snapshot| {
@@ -493,6 +515,14 @@ async fn settle(
             .update_record(&record.app_id, |latest| latest.health = health)
             .await;
         return;
+    }
+    match state {
+        InstanceState::Failed if status.active => {
+            host.metrics.health.failed(&record.app_id, Failure::NeverAnswered)
+        }
+        InstanceState::Failed => host.metrics.health.failed(&record.app_id, Failure::Exited),
+        InstanceState::Unhealthy => host.metrics.health.went_unhealthy(&record.app_id),
+        _ => {}
     }
     let message = verdict(host, state, &status, &health, &record).await;
     host.state
@@ -683,6 +713,36 @@ mod tests {
             "the attempts the decision was made on are missing: {}",
             said.as_str()
         );
+
+        start_instance(&host, &desired).await;
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("out_of_restarts", 1)]),
+            "said once, counted once, however many passes say it again"
+        );
+    }
+
+    fn failures(counted: &[(&str, u64)]) -> [u64; 8] {
+        let mut failures = [0; 8];
+        for (index, reason) in [
+            "refused",
+            "no_slot",
+            "layers",
+            "volume",
+            "boot",
+            "exited",
+            "never_answered",
+            "out_of_restarts",
+        ]
+        .iter()
+        .enumerate()
+        {
+            failures[index] = counted
+                .iter()
+                .find(|(each, _)| each == reason)
+                .map_or(0, |(_, count)| *count);
+        }
+        failures
     }
 
     #[test]
@@ -826,6 +886,10 @@ mod tests {
             .as_str()
             .contains("the object store is down"));
         assert!(host.vms.calls().is_empty());
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("layers", 1)])
+        );
     }
 
     #[tokio::test]
@@ -947,6 +1011,45 @@ mod tests {
         assert_eq!(record.state, InstanceState::Failed);
         assert_eq!(record.last_exit_code, Some(137));
         assert!(record.message.unwrap().as_str().contains("exit code 137"));
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("exited", 1)])
+        );
+
+        refresh_states(host.arc()).await;
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("exited", 1)]),
+            "a state that has not moved is not a failure that happened again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_is_counted_on_the_app_with_what_it_found() {
+        let host = test_host().await;
+        host.vms.set_status(VmStatus {
+            loaded: true,
+            active: true,
+            failed: false,
+            started_this_boot: true,
+            exit_code: None,
+        });
+        host.state
+            .put_record(instance_record(|record| {
+                record.readiness = protocol::ReadinessPolicy::BootCompleted;
+                record.state = InstanceState::Starting;
+                record.started_at = Some(now_timestamp());
+            }))
+            .await;
+
+        refresh_states(host.arc()).await;
+
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Running
+        );
+        let health = host.metrics.health.of(&app_id());
+        assert_eq!((health.probes_healthy, health.probes_unhealthy), (1, 0));
     }
 
     #[tokio::test]
