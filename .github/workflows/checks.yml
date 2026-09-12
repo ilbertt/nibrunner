@@ -78,10 +78,11 @@ jobs:
           cache: enabled
           prepare_for_build: enabled
 
-      - name: Install what the lane drives
-        run: |
-          sudo apt-get install -y nftables
-          ls -l /dev/net/tun /dev/kvm
+      - name: Check the machine can host
+        run: ls -l /dev/net/tun /dev/kvm
+
+      - name: Install nftables
+        run: sudo apt-get install -y nftables
 
       - name: Build the integration tests
         run: cargo test -p nibrunnerd --test integration --no-run
