@@ -99,7 +99,7 @@ jobs:
   checks-passed:
     if: always()
     name: checks:required
-    needs: [codestyle, lint, tests, generated]
+    needs: [codestyle, lint, tests, generated, integration]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
