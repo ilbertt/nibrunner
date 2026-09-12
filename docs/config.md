@@ -67,8 +67,7 @@ The `flush` that is the durability point becomes the host's page cache rather th
 has to be asked, and an export is **refused** rather than written, because a checkpoint is
 something only an object store can cut.
 
-What it buys is density. A host is bounded by the 1000 loopback ports a slot takes, and one AX41
-has held 752 tenants on it.
+What it buys is density. A host is bounded by the 1000 loopback ports a slot takes.
 
 ### `backend = "zerofs"`
 
