@@ -254,7 +254,7 @@ fn compute() -> Vec<u8> {
     })
 }
 
-fn meminfo_kb(meminfo: &str, field: &str) -> u64 {
+pub(crate) fn meminfo_kb(meminfo: &str, field: &str) -> u64 {
     meminfo
         .lines()
         .find(|line| line.starts_with(field))

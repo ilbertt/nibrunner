@@ -7,8 +7,10 @@ use nix::sys::signal::{SigSet, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{ForkResult, Gid, Pid, Uid};
 
+use crate::ceiling::{self, Verdict, Watch};
 use crate::guest::log;
 use crate::guest::logs::Forwarder;
+use crate::guest::memory::{self, Ceiling};
 use crate::supervise::{backoff_ms, budget_resets, Outcome, SHUTDOWN_GRACE_MS};
 
 pub(crate) use crate::supervise::Outcome as Ended;
@@ -29,21 +31,21 @@ fn waited_signals() -> SigSet {
     set
 }
 
-pub(crate) fn supervise(config: &InstanceConfig) -> Ended {
+pub(crate) fn supervise(config: &InstanceConfig, ceiling: &Ceiling) -> Ended {
     let mut restarts = 0u32;
     let mut forwarder = Forwarder::new();
     loop {
         let started = Instant::now();
-        let Some(started_tenant) = spawn(config) else {
+        let Some(started_tenant) = spawn(config, ceiling) else {
             return Outcome::SpawnFailed;
         };
         let Tenant { pid: tenant, output } = started_tenant;
-        match watch(tenant, output, &mut forwarder) {
+        match watch(tenant, output, &mut forwarder, ceiling) {
             Watched::ShutdownRequested => {
                 stop(tenant);
                 return Outcome::ShutdownRequested;
             }
-            Watched::Exited { status } => {
+            Watched::Exited { status, because } => {
                 let uptime_ms = started.elapsed().as_millis() as u64;
                 if budget_resets(config, uptime_ms) {
                     restarts = 0;
@@ -54,7 +56,7 @@ pub(crate) fn supervise(config: &InstanceConfig) -> Ended {
                 let delay = backoff_ms(config, restarts);
                 restarts += 1;
                 log(&format!(
-                    "the tenant exited ({status}); restart {restarts} of {} in {delay}ms",
+                    "the tenant exited ({status}){because}; restart {restarts} of {} in {delay}ms",
                     config.max_restarts
                 ));
                 if wait_for_signal(Duration::from_millis(u64::from(delay))) == Arrived::Shutdown {
@@ -65,13 +67,24 @@ pub(crate) fn supervise(config: &InstanceConfig) -> Ended {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Watched {
     ShutdownRequested,
-    Exited { status: i32 },
+    /// `because` is what this runtime knows about the exit that the status does not say: empty,
+    /// or a clause naming the memory ceiling.
+    Exited {
+        status: i32,
+        because: String,
+    },
 }
 
-fn watch(tenant: Pid, mut output: TenantOutput, forwarder: &mut Forwarder) -> Watched {
+fn watch(tenant: Pid, mut output: TenantOutput, forwarder: &mut Forwarder, ceiling: &Ceiling) -> Watched {
+    let mut memory = Watch::new(ceiling.limit_bytes);
+    // The kernel's OOM counter is the cgroup's for life, so what says the kernel killed this
+    // tenant is the counter having moved since this one started.
+    let at_start = memory::read();
+    let mut sampled = Instant::now();
+    let mut killed_for = None;
     loop {
         output.forward(forwarder);
         match wait_for_signal(POLL_INTERVAL) {
@@ -79,8 +92,38 @@ fn watch(tenant: Pid, mut output: TenantOutput, forwarder: &mut Forwarder) -> Wa
             Arrived::ChildDied | Arrived::Nothing => {
                 if let Some(status) = reap_until(tenant) {
                     output.forward(forwarder);
-                    return Watched::Exited { status };
+                    let because = killed_for.take().unwrap_or_else(|| {
+                        match (at_start, memory::read()) {
+                            (Some(before), Some(after)) if Watch::kernel_killed_between(&before, &after) => {
+                                format!(
+                                    ": the kernel killed it for running out of memory at its ceiling of {} MiB",
+                                    ceiling::mib(ceiling.limit_bytes)
+                                )
+                            }
+                            _ => String::new(),
+                        }
+                    });
+                    return Watched::Exited { status, because };
                 }
+            }
+        }
+        if sampled.elapsed() < ceiling::SAMPLE_INTERVAL || killed_for.is_some() {
+            continue;
+        }
+        sampled = Instant::now();
+        let Some(reading) = memory::read() else {
+            continue;
+        };
+        if let Verdict::Thrashing { faults_per_second } = memory.observe(reading, sampled) {
+            let because = format!(
+                ": killed at its memory ceiling, {} of {} MiB and reading its own code back in at {faults_per_second} faults a second",
+                ceiling::mib(reading.current_bytes),
+                ceiling::mib(ceiling.limit_bytes)
+            );
+            log(&format!("the tenant is thrashing{because}"));
+            match memory::kill_everything() {
+                Ok(()) => killed_for = Some(because),
+                Err(error) => log(&format!("the tenant could not be killed: {error}")),
             }
         }
     }
@@ -168,7 +211,8 @@ fn stop(tenant: Pid) {
     let _ = waitpid(tenant, None);
 }
 
-fn spawn(config: &InstanceConfig) -> Option<Tenant> {
+fn spawn(config: &InstanceConfig, ceiling: &Ceiling) -> Option<Tenant> {
+    let procs_file = ceiling.procs_file();
     let root = CString::new(paths::ROOT_MOUNT).ok()?;
     let working_directory = CString::new(config.working_directory.as_str()).ok()?;
     let executable = CString::new(config.program.as_str()).ok()?;
@@ -209,6 +253,9 @@ fn spawn(config: &InstanceConfig) -> Option<Tenant> {
             let _ = SigSet::all().thread_unblock();
             let _ = nix::unistd::dup2_stdout(&stdout_write).map_err(failed);
             let _ = nix::unistd::dup2_stderr(&stderr_write).map_err(failed);
+            // Into the cgroup before the root changes, since the cgroup filesystem is only in
+            // this one; and before anything is allocated, since the ceiling is on all of it.
+            let _ = memory::join(procs_file).map_err(failed);
             // Into the stacked root before the privileges go: chroot is root's to call, and a
             // process that is 65534 in a root it cannot leave is the whole of the isolation.
             let _ = nix::unistd::chroot(root.as_c_str()).map_err(failed);

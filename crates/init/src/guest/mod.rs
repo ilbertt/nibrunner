@@ -2,6 +2,7 @@ mod channels;
 mod control;
 mod filesystem;
 mod logs;
+mod memory;
 mod mounts;
 mod supervisor;
 mod vsock;
@@ -23,8 +24,8 @@ pub(crate) fn run() -> ExitCode {
     supervisor::block_signals();
     route_ctrl_alt_del_here();
 
-    let config = match boot() {
-        Ok(config) => config,
+    let (config, ceiling) = match boot() {
+        Ok(booted) => booted,
         Err(reason) => {
             log(&reason);
             return shutdown(None);
@@ -34,12 +35,13 @@ pub(crate) fn run() -> ExitCode {
     let channels = channels::start();
 
     log(&format!(
-        "starting {} as uid {} in {}",
+        "starting {} as uid {} in {}, with {} MiB to spend",
         config.program,
         paths::TENANT_UID,
-        config.working_directory
+        config.working_directory,
+        crate::ceiling::mib(ceiling.limit_bytes)
     ));
-    match supervisor::supervise(&config) {
+    match supervisor::supervise(&config, &ceiling) {
         supervisor::Ended::ShutdownRequested => log("the tenant has stopped; shutting the guest down"),
         supervisor::Ended::RestartBudgetExhausted => log(&format!(
             "the tenant used its {} restarts without staying up; shutting the guest down",
@@ -52,13 +54,20 @@ pub(crate) fn run() -> ExitCode {
     shutdown(Some(&channels))
 }
 
-fn boot() -> Result<InstanceConfig, String> {
+fn boot() -> Result<(InstanceConfig, memory::Ceiling), String> {
     unsafe { libc::umask(TENANT_UMASK) };
     mounts::pseudo_filesystems().map_err(|error| error.to_string())?;
+    memory::mount().map_err(|error| error.to_string())?;
+    let ceiling = memory::prepare(guest_memory_bytes())?;
     let config = read_instance_config()?;
     stack_root(&config)?;
     write_resolv_conf(&config)?;
-    Ok(config)
+    Ok((config, ceiling))
+}
+
+fn guest_memory_bytes() -> u64 {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    filesystem::meminfo_kb(&meminfo, "MemTotal:") * 1024
 }
 
 fn read_instance_config() -> Result<InstanceConfig, String> {
