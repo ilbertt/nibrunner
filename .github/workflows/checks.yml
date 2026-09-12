@@ -76,12 +76,11 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: enabled
-          prepare_for_build: disabled
+          prepare_for_build: enabled
 
       - name: Install what the lane drives
         run: |
-          sudo apt-get update
-          sudo apt-get install -y nftables e2fsprogs
+          sudo apt-get install -y nftables
           ls -l /dev/net/tun
           ls -l /dev/kvm || echo "no /dev/kvm on this runner"
 
