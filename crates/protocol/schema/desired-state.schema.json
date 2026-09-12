@@ -349,17 +349,11 @@
             "objectKey": {
               "description": "Where the object lives in the store.",
               "$ref": "#/$defs/ObjectKey"
-            },
-            "sizeBytes": {
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 0
             }
           },
           "required": [
             "kind",
             "digest",
-            "sizeBytes",
             "objectKey"
           ]
         },
@@ -380,17 +374,11 @@
             "objectKey": {
               "description": "Where the object lives in the store.",
               "$ref": "#/$defs/ObjectKey"
-            },
-            "sizeBytes": {
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 0
             }
           },
           "required": [
             "kind",
             "digest",
-            "sizeBytes",
             "objectKey",
             "destinationPath"
           ]

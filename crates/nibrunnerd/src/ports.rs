@@ -192,8 +192,6 @@ pub enum ArtifactError {
     Transfer(String),
     #[error("the layer hashes to {actual}, not to the {expected} it claims")]
     DigestMismatch { expected: Sha256Digest, actual: String },
-    #[error("the layer is {actual} bytes, not the {expected} its document declares")]
-    SizeMismatch { expected: u64, actual: u64 },
     #[error("the layer {digest} is neither a squashfs nor an ext4 image")]
     NotAnImage { digest: Sha256Digest },
     #[error("the layer image could not be built: {0}")]
@@ -240,12 +238,6 @@ impl<T: ArtifactStore + ?Sized> ArtifactStoreExt for T {
             return Err(ArtifactError::DigestMismatch {
                 expected: object.digest.clone(),
                 actual,
-            });
-        }
-        if bytes.len() as u64 != object.size_bytes {
-            return Err(ArtifactError::SizeMismatch {
-                expected: object.size_bytes,
-                actual: bytes.len() as u64,
             });
         }
         Ok(bytes)

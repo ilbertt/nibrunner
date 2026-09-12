@@ -116,11 +116,9 @@ impl PayloadBuilder for LayerImages {
         let mut layer_image_paths = Vec::with_capacity(layers.len());
         let mut fetched_bytes = 0;
         for layer in layers {
-            let cached = layer_image_path(&self.cache_dir, layer).exists();
-            layer_image_paths.push(ensure_layer_image(&self.store, &self.cache_dir, layer).await?);
-            if !cached {
-                fetched_bytes += layer.object().size_bytes;
-            }
+            let image = ensure_layer_image(&self.store, &self.cache_dir, layer).await?;
+            layer_image_paths.push(image.path);
+            fetched_bytes += image.fetched_bytes;
         }
         Ok(PreparedPayload {
             layer_image_paths,
@@ -129,11 +127,18 @@ impl PayloadBuilder for LayerImages {
     }
 }
 
+/// A layer's image in the cache, and what putting it there cost: nothing for one already held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerImage {
+    pub path: PathBuf,
+    pub fetched_bytes: u64,
+}
+
 pub async fn ensure_layer_image(
     store: &Arc<dyn ArtifactStore>,
     cache_dir: &Path,
     layer: &DesiredLayer,
-) -> Result<PathBuf, ArtifactError> {
+) -> Result<LayerImage, ArtifactError> {
     let image_path = layer_image_path(cache_dir, layer);
     if image_path.exists() {
         let _ = std::fs::File::open(&image_path).and_then(|file| {
@@ -143,10 +148,14 @@ pub async fn ensure_layer_image(
                     .set_modified(std::time::SystemTime::now()),
             )
         });
-        return Ok(image_path);
+        return Ok(LayerImage {
+            path: image_path,
+            fetched_bytes: 0,
+        });
     }
 
     let bytes = store.read_verified(layer.object()).await?;
+    let fetched_bytes = bytes.len() as u64;
     let image = match layer {
         DesiredLayer::Filesystem { .. } if is_filesystem_image(&bytes) => bytes,
         DesiredLayer::Filesystem { object } => {
@@ -173,12 +182,15 @@ pub async fn ensure_layer_image(
     std::fs::rename(&staged, &image_path).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     tracing::info!(
         digest = %layer.object().digest,
-        size_bytes = layer.object().size_bytes,
+        size_bytes = fetched_bytes,
         image_bytes = image.len(),
         packed = matches!(layer, DesiredLayer::Executable { .. }),
         "layer image ready"
     );
-    Ok(image_path)
+    Ok(LayerImage {
+        path: image_path,
+        fetched_bytes,
+    })
 }
 
 pub fn build_instance_config_image(working_dir: &Path, rendered: &str) -> Result<PathBuf, ArtifactError> {
@@ -247,10 +259,16 @@ mod tests {
     async fn an_executable_is_packed_once_per_digest_and_holds_the_program_where_the_guest_runs_it() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(artifact_bytes());
-        let image_path = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
+        let fetched = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
             .await
             .unwrap();
+        let image_path = fetched.path.clone();
         assert!(image_path.starts_with(directory.path().join(ARTIFACT_DIGEST)));
+        assert_eq!(
+            fetched.fetched_bytes,
+            ARTIFACT_BYTES.len() as u64,
+            "what was pulled is what the store held, not what the image packed it into"
+        );
         let image = std::fs::read(&image_path).unwrap();
         assert_eq!(&image[..4], b"hsqs");
         assert_eq!(read_back(&image, "/app/server"), artifact_bytes());
@@ -259,7 +277,8 @@ mod tests {
         let again = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
             .await
             .unwrap();
-        assert_eq!(again, image_path);
+        assert_eq!(again.path, image_path);
+        assert_eq!(again.fetched_bytes, 0, "a cache hit pulls nothing");
         assert_eq!(std::fs::metadata(&image_path).unwrap().len(), before);
         let siblings = std::fs::read_dir(image_path.parent().unwrap()).unwrap().count();
         assert_eq!(siblings, 1);
@@ -271,7 +290,8 @@ mod tests {
         let deep = placed_at(layer(|_| {}), "/usr/local/bin/server");
         let image_path = ensure_layer_image(&store(artifact_bytes()), directory.path(), &deep)
             .await
-            .unwrap();
+            .unwrap()
+            .path;
         let image = std::fs::read(&image_path).unwrap();
         assert_eq!(read_back(&image, "/usr/local/bin/server"), artifact_bytes());
         assert_ne!(image_path, layer_image_path(directory.path(), &layer(|_| {})));
@@ -283,7 +303,8 @@ mod tests {
         let image_path =
             ensure_layer_image(&store(BASE_LAYER_BYTES.to_vec()), directory.path(), &base_layer())
                 .await
-                .unwrap();
+                .unwrap()
+                .path;
         assert!(image_path.ends_with(VERBATIM_IMAGE_FILENAME));
         assert_eq!(std::fs::read(&image_path).unwrap(), BASE_LAYER_BYTES);
     }
@@ -321,13 +342,6 @@ mod tests {
         assert!(matches!(error, ArtifactError::DigestMismatch { .. }));
         assert!(error.message().contains("not to the"));
         assert!(!layer_image_path(directory.path(), &layer(|_| {})).exists());
-
-        let store = store(artifact_bytes());
-        let mismatched = layer(|object| object.size_bytes = 1);
-        let error = ensure_layer_image(&store, directory.path(), &mismatched)
-            .await
-            .unwrap_err();
-        assert!(matches!(error, ArtifactError::SizeMismatch { .. }));
     }
 
     #[test]
@@ -406,6 +420,14 @@ mod tests {
             ]
         );
         assert!(prepared.layer_image_paths.iter().all(|path| path.exists()));
+        assert_eq!(
+            prepared.fetched_bytes,
+            (BASE_LAYER_BYTES.len() + ARTIFACT_BYTES.len()) as u64,
+            "what was pulled is counted as it was read, layer by layer"
+        );
+
+        let again = images.prepare(&[base_layer(), layer(|_| {})]).await.unwrap();
+        assert_eq!(again.fetched_bytes, 0, "the cache held both");
     }
 
     #[test]
@@ -474,7 +496,8 @@ mod tests {
         let store = store(artifact_bytes());
         let image_path = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
             .await
-            .unwrap();
+            .unwrap()
+            .path;
         let backdated = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
         std::fs::File::options()
             .write(true)
