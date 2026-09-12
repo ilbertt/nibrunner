@@ -4,12 +4,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use protocol::{DesiredVolume, ObjectKey, VolumeId};
 
+use crate::adapters::volumes::initial_contents::{ContentsStaging, StagedRoot};
 use crate::adapters::volumes::{
-    align_to_sector, has_ext_magic, AttachedVolume, ObservedBacking, VolumeBackend, VolumeError,
-    FILESYSTEM_LABEL, SUPERBLOCK_MAGIC_OFFSET,
+    align_to_sector, format_request, has_ext_magic, AttachedVolume, ObservedBacking, VolumeBackend,
+    VolumeError, SUPERBLOCK_MAGIC_OFFSET,
 };
 use crate::json_store::make_directory;
-use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
+use crate::ports::{CommandRunner, CommandRunnerExt};
 
 const VOLUME_DIR_MODE: u32 = 0o700;
 const VOLUME_FILE_MODE: u32 = 0o600;
@@ -18,14 +19,21 @@ pub struct LocalFileVolumes {
     directory: PathBuf,
     storage_prefix: ObjectKey,
     commands: Arc<dyn CommandRunner>,
+    contents: ContentsStaging,
 }
 
 impl LocalFileVolumes {
-    pub fn new(directory: PathBuf, storage_prefix: ObjectKey, commands: Arc<dyn CommandRunner>) -> Self {
+    pub fn new(
+        directory: PathBuf,
+        storage_prefix: ObjectKey,
+        commands: Arc<dyn CommandRunner>,
+        contents: ContentsStaging,
+    ) -> Self {
         Self {
             directory,
             storage_prefix,
             commands,
+            contents,
         }
     }
 
@@ -96,25 +104,13 @@ impl LocalFileVolumes {
         }
     }
 
-    async fn format_once(&self, volume_id: &VolumeId) -> Result<bool, VolumeError> {
-        if self.is_formatted(volume_id)? {
-            return Ok(false);
-        }
-        let path = self.path_for(volume_id);
+    async fn format(&self, volume_id: &VolumeId, contents: Option<&StagedRoot>) -> Result<(), VolumeError> {
+        let path = self.path_for(volume_id).display().to_string();
         self.commands
-            .stdout_of(CommandRequest::new(&[
-                "mke2fs",
-                "-q",
-                "-t",
-                "ext4",
-                "-F",
-                "-L",
-                FILESYSTEM_LABEL,
-                &path.display().to_string(),
-            ]))
+            .stdout_of(format_request(&path, contents, true))
             .await
             .map_err(|error| VolumeError::Unusable(error.message()))?;
-        Ok(true)
+        Ok(())
     }
 
     fn attached(&self, volume_id: &VolumeId, size_bytes: u64) -> AttachedVolume {
@@ -131,8 +127,14 @@ impl LocalFileVolumes {
 impl VolumeBackend for LocalFileVolumes {
     async fn provision(&self, desired: &DesiredVolume) -> Result<AttachedVolume, VolumeError> {
         let size_bytes = self.ensure_file(&desired.volume_id, desired.size_bytes)?;
-        if self.format_once(&desired.volume_id).await? {
-            tracing::info!(volume_id = %desired.volume_id, "volume formatted");
+        if !self.is_formatted(&desired.volume_id)? {
+            let contents = self.contents.stage_for(desired).await?;
+            self.format(&desired.volume_id, contents.as_ref()).await?;
+            tracing::info!(
+                volume_id = %desired.volume_id,
+                seeded = contents.is_some(),
+                "volume formatted"
+            );
         }
         Ok(self.attached(&desired.volume_id, size_bytes))
     }
@@ -211,36 +213,45 @@ impl VolumeBackend for LocalFileVolumes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::{CommandResult, MockCommandRunner};
+    use crate::adapters::volumes::initial_contents::tests as seed;
+    use crate::adapters::volumes::FILESYSTEM_LABEL;
+    use crate::ports::{CommandRequest, CommandResult, MockCommandRunner};
     use crate::test_support::mocks;
-    use crate::test_support::{app_id, checkpoint_id, desired_volume, volume_id, VOLUME_SIZE_BYTES};
+    use crate::test_support::{
+        app_id, checkpoint_id, desired_volume, initial_contents, volume_id, VOLUME_SIZE_BYTES,
+    };
 
     fn backend(directory: &Path, commands: Arc<MockCommandRunner>) -> LocalFileVolumes {
         LocalFileVolumes::new(
             directory.to_path_buf(),
             ObjectKey::parse("volumes").unwrap(),
             commands,
+            seed::staging(&directory.join("staging"), seed::archive()),
         )
+    }
+
+    /// What the real tool leaves: a superblock, which is what "formatted" is read from.
+    fn formatted(request: &CommandRequest) -> Result<CommandResult, crate::ports::CommandError> {
+        let path = request.command.last().expect("a path to format");
+        let mut image = std::fs::read(path).unwrap_or_default();
+        image.resize(4096, 0);
+        image[SUPERBLOCK_MAGIC_OFFSET as usize..SUPERBLOCK_MAGIC_OFFSET as usize + 2]
+            .copy_from_slice(&0xef53u16.to_le_bytes());
+        std::fs::write(path, image).unwrap();
+        Ok(CommandResult::succeeded())
     }
 
     #[tokio::test]
     async fn a_volume_is_formatted_once_and_never_again() {
         let directory = tempfile::tempdir().unwrap();
-        let (commands, log) = mocks::commands_answering(|request| {
-            let path = request.command.last().expect("a path to format");
-            let mut image = std::fs::read(path).unwrap_or_default();
-            image.resize(4096, 0);
-            image[SUPERBLOCK_MAGIC_OFFSET as usize..SUPERBLOCK_MAGIC_OFFSET as usize + 2]
-                .copy_from_slice(&0xef53u16.to_le_bytes());
-            std::fs::write(path, image).unwrap();
-            Ok(CommandResult::succeeded())
-        });
+        let (commands, log) = mocks::commands_answering(formatted);
         let volumes = backend(directory.path(), commands);
         let attached = volumes.provision(&desired_volume(|_| {})).await.unwrap();
         assert_eq!(attached.size_bytes, VOLUME_SIZE_BYTES);
         assert_eq!(log.executables(), vec!["mke2fs"]);
         assert!(log.calls()[0].command.contains(&"-L".to_string()));
         assert!(log.calls()[0].command.contains(&FILESYSTEM_LABEL.to_string()));
+        assert!(!log.calls()[0].command.contains(&"-d".to_string()));
 
         volumes.provision(&desired_volume(|_| {})).await.unwrap();
         assert_eq!(
@@ -248,6 +259,69 @@ mod tests {
             1,
             "a formatted volume is not formatted again"
         );
+    }
+
+    #[tokio::test]
+    async fn a_volume_with_initial_contents_is_formatted_holding_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let held = Arc::new(std::sync::Mutex::new(None));
+        let seen = held.clone();
+        let (commands, log) = mocks::commands_answering(move |request| {
+            let root = request
+                .command
+                .iter()
+                .position(|part| part == "-d")
+                .map(|at| PathBuf::from(&request.command[at + 1]));
+            *seen.lock().unwrap() = root.map(|root| {
+                (
+                    root.clone(),
+                    std::fs::read(root.join("upper/app/data/nested").join(seed::SEEDED_FILE)).ok(),
+                )
+            });
+            formatted(request)
+        });
+        let volumes = backend(directory.path(), commands);
+        let seeded = desired_volume(|volume| {
+            volume.initial_contents = Some(initial_contents(&seed::archive(), "/app/data"))
+        });
+
+        volumes.provision(&seeded).await.unwrap();
+
+        let (root, contents) = held.lock().unwrap().take().expect("mke2fs was given a root");
+        assert_eq!(
+            contents.as_deref(),
+            Some(seed::SEEDED_BYTES),
+            "the tool read the archive laid out"
+        );
+        assert!(!root.exists(), "the root is gone once the format has read it");
+        assert_eq!(log.calls()[0].timeout, super::super::SEEDED_FORMAT_TIMEOUT);
+        assert_eq!(
+            *log.calls()[0].command.last().unwrap(),
+            volumes.path_for(&volume_id()).display().to_string(),
+            "the device is still the last word"
+        );
+
+        volumes.provision(&seeded).await.unwrap();
+        assert_eq!(
+            log.executables().len(),
+            1,
+            "a formatted volume is not seeded again"
+        );
+    }
+
+    #[tokio::test]
+    async fn contents_that_cannot_be_laid_out_leave_the_volume_unformatted_for_the_next_pass() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_answering(formatted);
+        let volumes = backend(directory.path(), commands);
+        // The store holds the archive; the document names a digest of something else.
+        let contents = initial_contents(&seed::gzipped(&seed::archive()), "/app/data");
+        let seeded = desired_volume(|volume| volume.initial_contents = Some(contents));
+
+        let error = volumes.provision(&seeded).await.unwrap_err();
+        assert!(matches!(error, VolumeError::ContentsUnusable(_)), "{error}");
+        assert!(log.calls().is_empty(), "nothing was formatted");
+        assert!(!volumes.is_formatted(&volume_id()).unwrap());
     }
 
     #[tokio::test]

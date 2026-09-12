@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
-use protocol::{AppId, DeploymentId, DesiredInstance, DesiredLayer, LayerObject, ObjectKey, Sha256Digest};
+use protocol::{AppId, DeploymentId, DesiredInstance, DesiredLayer, ObjectKey, Sha256Digest, StoredObject};
 
 use crate::adapters::vm::VmStatus;
 
@@ -188,9 +188,9 @@ pub trait Vmm: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArtifactError {
-    #[error("the layer could not be fetched: {0}")]
+    #[error("the object could not be fetched: {0}")]
     Transfer(String),
-    #[error("the layer hashes to {actual}, not to the {expected} it claims")]
+    #[error("the object hashes to {actual}, not to the {expected} it claims")]
     DigestMismatch { expected: Sha256Digest, actual: String },
     #[error("the layer {digest} is neither a squashfs nor an ext4 image")]
     NotAnImage { digest: Sha256Digest },
@@ -224,12 +224,12 @@ pub trait ArtifactStore: Send + Sync {
 
 #[async_trait]
 pub trait ArtifactStoreExt {
-    async fn read_verified(&self, object: &LayerObject) -> Result<Vec<u8>, ArtifactError>;
+    async fn read_verified(&self, object: &StoredObject) -> Result<Vec<u8>, ArtifactError>;
 }
 
 #[async_trait]
 impl<T: ArtifactStore + ?Sized> ArtifactStoreExt for T {
-    async fn read_verified(&self, object: &LayerObject) -> Result<Vec<u8>, ArtifactError> {
+    async fn read_verified(&self, object: &StoredObject) -> Result<Vec<u8>, ArtifactError> {
         use sha2::Digest;
 
         let bytes = self.read(&object.object_key).await?;
