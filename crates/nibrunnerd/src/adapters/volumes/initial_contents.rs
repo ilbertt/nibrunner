@@ -21,6 +21,11 @@ const ROOT_DIR_MODE: u32 = 0o755;
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 const USTAR_MAGIC_OFFSET: usize = 257;
 const USTAR_MAGIC: &[u8; 5] = b"ustar";
+/// A zip opens with its first entry's header, or with the end-of-directory record when it has none.
+const ZIP_MAGICS: [[u8; 4]; 2] = [*b"PK\x03\x04", *b"PK\x05\x06"];
+
+/// What a zip entry gets when the zip does not say: one made on Windows says nothing.
+const ZIP_FILE_MODE: u32 = 0o644;
 
 pub struct ContentsStaging {
     artifacts: Arc<dyn ArtifactStore>,
@@ -69,7 +74,7 @@ impl ContentsStaging {
             .map_err(|error| unusable(error.message()))?;
         let format = archive_format(&bytes).ok_or_else(|| {
             unusable(format!(
-                "{} is neither a tar archive nor a gzipped one",
+                "{} is not a tar, a gzipped tar or a zip",
                 contents.object.digest
             ))
         })?;
@@ -86,6 +91,7 @@ impl ContentsStaging {
             ArchiveFormat::GzippedTar => {
                 unpack_tar(flate2::read::GzDecoder::new(bytes.as_slice()), &destination)
             }
+            ArchiveFormat::Zip => unpack_zip(&bytes, &destination),
         }
         .map_err(unusable)?;
         give_to(&destination, self.owner).map_err(|error| {
@@ -137,11 +143,15 @@ impl Drop for StagedRoot {
 enum ArchiveFormat {
     Tar,
     GzippedTar,
+    Zip,
 }
 
 fn archive_format(bytes: &[u8]) -> Option<ArchiveFormat> {
     if bytes.starts_with(&GZIP_MAGIC) {
         return Some(ArchiveFormat::GzippedTar);
+    }
+    if ZIP_MAGICS.iter().any(|magic| bytes.starts_with(magic)) {
+        return Some(ArchiveFormat::Zip);
     }
     bytes
         .get(USTAR_MAGIC_OFFSET..USTAR_MAGIC_OFFSET + USTAR_MAGIC.len())
@@ -170,6 +180,52 @@ fn unpack_tar(reader: impl std::io::Read, into: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// The same rules, for a zip: a name that climbs out is refused, and so is a symlink, which the
+// zip crate would otherwise plant for a later entry to be written through — a zip is what a
+// laptop's archiver writes, and those write none. Nothing else is then ever followed, so a
+// name that stays inside stays inside.
+fn unpack_zip(bytes: &[u8], into: &Path) -> Result<(), String> {
+    let unreadable = |error: zip::result::ZipError| format!("the archive could not be read: {error}");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(unreadable)?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(unreadable)?;
+        let name = entry.name().to_string();
+        let Some(inside) = entry.enclosed_name() else {
+            return Err(format!(
+                "{name} reaches outside the directory it is unpacked into"
+            ));
+        };
+        if entry.is_symlink() {
+            return Err(format!("{name} is a symlink, which a zip does not carry here"));
+        }
+        let path = into.join(inside);
+        let mode = entry.unix_mode().map(|mode| mode & 0o777);
+        let written = if entry.is_dir() {
+            make_directory(&path, mode.unwrap_or(ROOT_DIR_MODE))
+        } else {
+            write_entry(&mut entry, &path, mode.unwrap_or(ZIP_FILE_MODE))
+        };
+        written.map_err(|error| format!("{name} could not be unpacked: {error}"))?;
+    }
+    Ok(())
+}
+
+fn write_entry(entry: &mut impl std::io::Read, path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    // Only a directory no entry has made yet: one an entry did make keeps the mode it gave.
+    if let Some(parent) = path.parent().filter(|parent| !parent.exists()) {
+        make_directory(parent, ROOT_DIR_MODE)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)?;
+    std::io::copy(entry, &mut file)?;
+    // The umask had a say in the mode the file was opened with, and has none here.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 fn give_to(path: &Path, (uid, gid): (u32, u32)) -> std::io::Result<()> {
@@ -231,6 +287,29 @@ pub(crate) mod tests {
         builder.into_inner().unwrap()
     }
 
+    /// The same tree as [`archive`], less the symlink, as `zip -r` on that laptop writes it.
+    pub(crate) fn zipped() -> Vec<u8> {
+        use std::io::Write;
+        let deflated =
+            || zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .add_directory("nested/", deflated().unix_permissions(0o755))
+            .unwrap();
+        writer
+            .start_file(
+                format!("nested/{SEEDED_FILE}"),
+                deflated().unix_permissions(0o644),
+            )
+            .unwrap();
+        writer.write_all(SEEDED_BYTES).unwrap();
+        writer
+            .start_file("run.sh", deflated().unix_permissions(0o755))
+            .unwrap();
+        writer.write_all(b"#!").unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
     pub(crate) fn gzipped(bytes: &[u8]) -> Vec<u8> {
         use std::io::Write;
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -281,25 +360,59 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn everything_under_the_destination_is_the_tenants() {
+    async fn a_zip_lands_the_same_way_with_the_modes_it_carries() {
         let directory = tempfile::tempdir().unwrap();
-        let bytes = archive();
-        let (uid, gid) = me(directory.path());
+        let bytes = zipped();
         let staged = staging(directory.path(), bytes.clone())
             .stage(&volume_id(), &initial_contents(&bytes, "/app/data"))
             .await
             .unwrap();
         let data = staged.path().join("upper/app/data");
-        for path in [
-            data.clone(),
-            data.join("nested"),
-            data.join("nested").join(SEEDED_FILE),
-            data.join("run.sh"),
-            data.join("latest"),
-        ] {
-            let owner = std::fs::symlink_metadata(&path).unwrap();
-            assert_eq!((owner.uid(), owner.gid()), (uid, gid), "{}", path.display());
+        assert_eq!(
+            std::fs::read(data.join("nested").join(SEEDED_FILE)).unwrap(),
+            SEEDED_BYTES
+        );
+        assert_eq!(mode_of(&data.join("nested")), 0o755);
+        assert_eq!(mode_of(&data.join("nested").join(SEEDED_FILE)), 0o644);
+        assert_eq!(mode_of(&data.join("run.sh")), 0o755);
+        assert_eq!(mode_of(&staged.path().join("upper/app")), ROOT_DIR_MODE);
+    }
+
+    #[tokio::test]
+    async fn everything_under_the_destination_is_the_tenants() {
+        let (uid, gid) = {
+            let directory = tempfile::tempdir().unwrap();
+            me(directory.path())
+        };
+        for bytes in [archive(), zipped()] {
+            let directory = tempfile::tempdir().unwrap();
+            let staged = staging(directory.path(), bytes.clone())
+                .stage(&volume_id(), &initial_contents(&bytes, "/app/data"))
+                .await
+                .unwrap();
+            let data = staged.path().join("upper/app/data");
+            for path in [
+                data.clone(),
+                data.join("nested"),
+                data.join("nested").join(SEEDED_FILE),
+                data.join("run.sh"),
+            ] {
+                let owner = std::fs::symlink_metadata(&path).unwrap();
+                assert_eq!((owner.uid(), owner.gid()), (uid, gid), "{}", path.display());
+            }
         }
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = archive();
+        let staged = staging(directory.path(), bytes.clone())
+            .stage(&volume_id(), &initial_contents(&bytes, "/app/data"))
+            .await
+            .unwrap();
+        let link = std::fs::symlink_metadata(staged.path().join("upper/app/data/latest")).unwrap();
+        assert_eq!(
+            (link.uid(), link.gid()),
+            (uid, gid),
+            "the symlink itself, not what it points at"
+        );
     }
 
     #[tokio::test]
@@ -385,6 +498,40 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_zip_entry_that_climbs_out_or_is_a_symlink_fails_the_archive() {
+        let escaping = {
+            use std::io::Write;
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file("../escaped", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"x").unwrap();
+            writer.finish().unwrap().into_inner()
+        };
+        let linking = {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .add_symlink("latest", "/etc/passwd", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.finish().unwrap().into_inner()
+        };
+        for (bytes, refused_for) in [(escaping, "reaches outside"), (linking, "is a symlink")] {
+            let directory = tempfile::tempdir().unwrap();
+            let error = staging(directory.path(), bytes.clone())
+                .stage(&volume_id(), &initial_contents(&bytes, "/app/data"))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, VolumeError::ContentsUnusable(_)), "{error}");
+            assert!(error.message().contains(refused_for), "{error}");
+            assert!(!directory.path().join("escaped").exists());
+            assert!(
+                !directory.path().join("vol-1").exists(),
+                "nothing half-staged is left"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn bytes_that_are_no_archive_are_refused_by_digest() {
         let directory = tempfile::tempdir().unwrap();
         let bytes = b"\x7fELF and then a program".to_vec();
@@ -392,7 +539,10 @@ pub(crate) mod tests {
             .stage(&volume_id(), &initial_contents(&bytes, "/app/data"))
             .await
             .unwrap_err();
-        assert!(error.message().contains("neither a tar archive"), "{error}");
+        assert!(
+            error.message().contains("is not a tar, a gzipped tar or a zip"),
+            "{error}"
+        );
         assert!(!directory.path().join("vol-1").exists());
     }
 
@@ -416,8 +566,14 @@ pub(crate) mod tests {
             archive_format(&gzipped(b"anything")),
             Some(ArchiveFormat::GzippedTar)
         );
+        assert_eq!(archive_format(&zipped()), Some(ArchiveFormat::Zip));
+        let empty_zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()))
+            .finish()
+            .unwrap()
+            .into_inner();
+        assert_eq!(archive_format(&empty_zip), Some(ArchiveFormat::Zip));
         assert_eq!(archive_format(b""), None);
         assert_eq!(archive_format(&vec![0u8; 10240]), None);
-        assert_eq!(archive_format(b"PK\x03\x04 a zip"), None);
+        assert_eq!(archive_format(b"\x7fELF"), None);
     }
 }

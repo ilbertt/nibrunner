@@ -126,13 +126,13 @@ an archive in the store and where to unpack it:
 ]
 ```
 
-The archive is a tar, gzipped or not — what `tar -cz` writes. Its entries land under
-`destinationPath` as the program will see them, so an entry `nested/hello.txt` is
+The archive is a tar, gzipped or not, or a zip — what `tar -cz` or `zip -r` writes. Its entries
+land under `destinationPath` as the program will see them, so an entry `nested/hello.txt` is
 `/app/data/nested/hello.txt` in the root above, and they are the program's: the directory and
 everything unpacked into it are given to uid 65534, whatever the archive said, with set-id bits
 dropped. The directories above it are made the way init makes the working directory. An entry
-that reaches outside the directory it is unpacked into fails the volume by name, and so does an
-archive that does not fit.
+that reaches outside the directory it is unpacked into fails the volume by name, as does a
+symlink in a zip, and so does an archive that does not fit.
 
 The copy happens as the volume is formatted, which is once: a volume already formatted is its
 app's, and a document that changes or drops `initialContents` on one changes nothing about it.

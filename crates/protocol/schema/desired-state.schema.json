@@ -522,7 +522,7 @@
       "minimum": 60000
     },
     "InitialContents": {
-      "description": "What a volume holds before its app has written a byte: a tar archive in the store, gzipped or\nnot, unpacked under `destinationPath` in the app's root as the volume is formatted. That\nhappens once, so this is read once: a volume already formatted is its app's, and a change here\ndoes nothing to it.",
+      "description": "What a volume holds before its app has written a byte: an archive in the store — a tar,\ngzipped or not, or a zip — unpacked under `destinationPath` in the app's root as the volume is\nformatted. That happens once, so this is read once: a volume already formatted is its app's,\nand a change here does nothing to it.",
       "type": "object",
       "properties": {
         "destinationPath": {

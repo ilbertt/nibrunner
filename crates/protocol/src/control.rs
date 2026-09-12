@@ -241,10 +241,10 @@ fn desired_instance_rules(schema: &mut schemars::Schema) {
     }
 }
 
-/// What a volume holds before its app has written a byte: a tar archive in the store, gzipped or
-/// not, unpacked under `destinationPath` in the app's root as the volume is formatted. That
-/// happens once, so this is read once: a volume already formatted is its app's, and a change here
-/// does nothing to it.
+/// What a volume holds before its app has written a byte: an archive in the store — a tar,
+/// gzipped or not, or a zip — unpacked under `destinationPath` in the app's root as the volume is
+/// formatted. That happens once, so this is read once: a volume already formatted is its app's,
+/// and a change here does nothing to it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
