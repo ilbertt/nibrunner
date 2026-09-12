@@ -125,6 +125,20 @@ pub(crate) fn pseudo_filesystems() -> Result<(), MountFailed> {
     )
 }
 
+/// Where the tenant's ceiling is set. Mounted here, in this runtime's root, and never in the
+/// tenant's: what it may spend is not its to change.
+pub(crate) fn cgroup2(target: &str) -> Result<(), MountFailed> {
+    mounted(
+        "the cgroup filesystem",
+        "cgroup2",
+        target,
+        "cgroup2",
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+        None,
+        Existing::Tolerate,
+    )
+}
+
 fn squashfs(what: &'static str, device: &str, target: &str, extra: MsFlags) -> Result<(), MountFailed> {
     wait_for_device(device)?;
     ensure_directory(target, 0o755)?;

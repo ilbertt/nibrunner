@@ -4,6 +4,11 @@
     not(target_os = "linux"),
     allow(dead_code, reason = "only the Linux guest reads any of it")
 )]
+mod ceiling;
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "only the Linux guest reads any of it")
+)]
 mod supervise;
 
 #[cfg(target_os = "linux")]
