@@ -37,6 +37,7 @@ impl HostMetrics {
     pub fn forget(&self, app_id: &protocol::AppId) {
         self.sleep_wake.forget(app_id);
         self.health.forget(app_id);
+        self.proxy.forget(app_id);
     }
 }
 
@@ -319,7 +320,7 @@ pub fn render(
         }
     }
 
-    proxy::render(&mut page, &metrics.proxy);
+    proxy::render(&mut page, &metrics.proxy, snapshot);
     sleep_wake::render(&mut page, &metrics.sleep_wake, snapshot);
     passes::render(&mut page, report, &metrics.passes, snapshot);
     converge::render(&mut page, report, &metrics.converge, &snapshot.deploys, now_ms);
@@ -402,6 +403,24 @@ pub(crate) mod tests {
         assert!(page.contains("nibrunner_instance_restore_duration_seconds_sum 0.008"));
     }
 
+    /// A snapshot holding a record for each app named, since every per-app series is keyed by
+    /// the records the host holds.
+    fn holding(app_ids: &[&str]) -> HostSnapshot {
+        HostSnapshot {
+            records: app_ids
+                .iter()
+                .map(|app_id| {
+                    let app_id = protocol::AppId::parse(*app_id).unwrap();
+                    (
+                        app_id.clone(),
+                        crate::test_support::instance_record(|record| record.app_id = app_id),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn what_one_app_cost_is_a_sum_and_a_count_rather_than_a_distribution_of_its_own() {
         let metrics = HostMetrics::new();
@@ -412,7 +431,7 @@ pub(crate) mod tests {
         metrics
             .proxy
             .answered(Outcome::Served, Duration::from_millis(30), Some(&app));
-        let page = rendered(&report(), &metrics);
+        let page = render(&report(), &metrics, &holding(&["app-1"]), 0);
 
         assert!(page.contains(r#"nibrunner_app_request_duration_seconds_count{app="app-1"} 2"#));
         assert!(page.contains(r#"nibrunner_app_request_duration_seconds_sum{app="app-1"} 0.04"#));
@@ -437,11 +456,16 @@ pub(crate) mod tests {
             .proxy
             .answered(Outcome::Served, Duration::from_millis(10), Some(&kept));
 
-        metrics.proxy.retain_apps(std::slice::from_ref(&kept));
-        let page = rendered(&report(), &metrics);
+        metrics.forget(&gone);
+        let page = render(&report(), &metrics, &holding(&["app-2"]), 0);
 
         assert!(!page.contains(r#"app="app-1""#), "a departed app kept a series");
-        assert!(page.contains(r#"app="app-2""#));
+        assert!(page.contains(r#"nibrunner_app_request_duration_seconds_count{app="app-2"} 1"#));
+        assert_eq!(
+            metrics.proxy.of(&gone),
+            proxy::AppProxy::default(),
+            "and nothing of its own is kept"
+        );
         // What it cost is still in the host-wide total; only its own line goes.
         assert!(page.contains("nibrunner_proxy_request_duration_seconds_count 2"));
     }

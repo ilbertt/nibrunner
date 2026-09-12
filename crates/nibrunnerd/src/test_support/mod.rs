@@ -387,17 +387,19 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
         firewall: Arc::new(HostFirewall::new(commands.clone())),
         router: Router::new(metrics.clone()),
         activator: AppActivator::new(state.clone(), Arc::new(NeverWoken), metrics.clone()),
-        metrics,
         stream_activator: Some(crate::adapters::proxy::StreamActivator::new(
             state.clone(),
             Arc::new(NeverWoken),
+            metrics.clone(),
             std::net::Ipv4Addr::LOCALHOST.into(),
         )),
         datagram_activator: Some(crate::adapters::proxy::DatagramActivator::new(
             state,
             Arc::new(NeverWoken),
+            metrics.clone(),
             std::net::Ipv4Addr::LOCALHOST.into(),
         )),
+        metrics,
         config,
     });
     TestHost {

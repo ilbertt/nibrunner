@@ -152,10 +152,17 @@ pub async fn forward(
         }
         Err(error) => {
             tracing::warn!(%error, host, port, "an upstream would not answer");
-            say(StatusCode::BAD_GATEWAY, "This app could not be reached.\n")
+            let mut response = say(StatusCode::BAD_GATEWAY, "This app could not be reached.\n");
+            response.extensions_mut().insert(Unreachable);
+            response
         }
     }
 }
+
+/// On a response the proxy wrote itself because nothing answered, so that a 502 of its own can
+/// be told from one the app sent.
+#[derive(Debug, Clone, Copy)]
+pub struct Unreachable;
 
 // What the visitor's own connection looked like, for a tenant that only ever sees a loopback one.
 // An edge in front of this host has already written down the leg it terminated, and that account is

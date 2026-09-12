@@ -18,7 +18,8 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::domain::metrics::{HostMetrics, Outcome};
 use tokio::sync::RwLock;
 
-use crate::adapters::proxy::forward::{forward, hostname_of, note_the_hop, say, ProxyBody};
+use crate::adapters::proxy::forward::{forward, hostname_of, note_the_hop, say, ProxyBody, Unreachable};
+use crate::domain::metrics::proxy::Handshake;
 use crate::domain::report::routes::RouteTarget;
 
 const LOOPBACK: &str = "127.0.0.1";
@@ -67,17 +68,6 @@ impl RouteTable {
         self.by_hostname.get(hostname).cloned()
     }
 
-    pub fn app_ids(&self) -> Vec<AppId> {
-        let mut held: Vec<AppId> = self
-            .by_hostname
-            .values()
-            .map(|route| route.app_id.clone())
-            .collect();
-        held.sort();
-        held.dedup();
-        held
-    }
-
     pub fn port_for(&self, hostname: &str) -> Option<HostPort> {
         self.by_hostname.get(hostname).map(|route| route.host_port)
     }
@@ -117,9 +107,6 @@ impl Router {
     }
 
     pub async fn apply(&self, table: RouteTable) {
-        // The routes are the apps this host serves, so they are also the only ones whose timings
-        // are still worth a series.
-        self.metrics.proxy.retain_apps(&table.app_ids());
         *self.routes.write().await = Arc::new(table);
     }
 
@@ -135,10 +122,12 @@ impl Router {
         let http2 = request.version() == hyper::Version::HTTP_2;
         let started = std::time::Instant::now();
         let metrics = self.metrics.clone();
+        metrics.proxy.began();
         let (mut response, outcome, app_id) = self.route(request, arrival).await;
         metrics
             .proxy
             .answered(outcome, started.elapsed(), app_id.as_ref());
+        metrics.proxy.ended();
         if http2 {
             // Illegal over HTTP/2, and hyper logs a warning for each one it has to strip.
             response.headers_mut().remove(hyper::header::CONNECTION);
@@ -185,11 +174,13 @@ impl Router {
             );
         };
         note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
-        (
-            forward(&self.client, request, LOOPBACK, route.host_port.get(), true).await,
-            Outcome::Served,
-            Some(route.app_id),
-        )
+        let response = forward(&self.client, request, LOOPBACK, route.host_port.get(), true).await;
+        self.metrics.proxy.app_answered(
+            &route.app_id,
+            response.status(),
+            response.extensions().get::<Unreachable>().is_none(),
+        );
+        (response, Outcome::Served, Some(route.app_id))
     }
 }
 
@@ -259,9 +250,18 @@ pub async fn serve_https(
         let router = router.clone();
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
-            let Ok(Ok(stream)) = tokio::time::timeout(GREETING_TIMEOUT, acceptor.accept(stream)).await else {
-                return;
+            let stream = match tokio::time::timeout(GREETING_TIMEOUT, acceptor.accept(stream)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(_)) => {
+                    router.metrics.proxy.handshake(Handshake::Failed);
+                    return;
+                }
+                Err(_) => {
+                    router.metrics.proxy.handshake(Handshake::TimedOut);
+                    return;
+                }
             };
+            router.metrics.proxy.handshake(Handshake::Completed);
             let arrival = Arrival {
                 server_name: stream.get_ref().1.server_name().map(Arc::from),
                 peer: peer.ip(),

@@ -118,10 +118,20 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     };
     // One budget covers both, so a host that carries anything raw binds for either.
     let stream_activator = config.proxy.raw.as_ref().map(|raw| {
-        crate::adapters::proxy::StreamActivator::new(state.clone(), deferred(), raw.listen_address)
+        crate::adapters::proxy::StreamActivator::new(
+            state.clone(),
+            deferred(),
+            metrics.clone(),
+            raw.listen_address,
+        )
     });
     let datagram_activator = config.proxy.raw.as_ref().map(|raw| {
-        crate::adapters::proxy::DatagramActivator::new(state.clone(), deferred(), raw.listen_address)
+        crate::adapters::proxy::DatagramActivator::new(
+            state.clone(),
+            deferred(),
+            metrics.clone(),
+            raw.listen_address,
+        )
     });
 
     let exports: Arc<dyn crate::domain::exports::store::ExportStore> = Arc::new(

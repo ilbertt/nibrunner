@@ -8,6 +8,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 use crate::adapters::proxy::stream_activator::StreamBinding;
+use crate::domain::metrics::proxy::{Protocol, RawOutcome};
+use crate::domain::metrics::HostMetrics;
 use crate::ports::Waker;
 use crate::state::SharedState;
 
@@ -42,15 +44,22 @@ struct Listener {
 pub struct DatagramActivator {
     state: SharedState,
     waker: Arc<dyn Waker>,
+    metrics: Arc<HostMetrics>,
     listen_address: IpAddr,
     listeners: Mutex<BTreeMap<(AppId, PortName), Listener>>,
 }
 
 impl DatagramActivator {
-    pub fn new(state: SharedState, waker: Arc<dyn Waker>, listen_address: IpAddr) -> Arc<Self> {
+    pub fn new(
+        state: SharedState,
+        waker: Arc<dyn Waker>,
+        metrics: Arc<HostMetrics>,
+        listen_address: IpAddr,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state,
             waker,
+            metrics,
             listen_address,
             listeners: Mutex::new(BTreeMap::new()),
         })
@@ -117,33 +126,47 @@ impl DatagramActivator {
         self.listeners.lock().await.keys().cloned().collect()
     }
 
-    /// Where a woken app's datagram port is, or nothing if it would not wake.
-    async fn upstream(&self, app_id: &AppId, guest_port: GuestPort) -> Option<SocketAddr> {
-        let record = self.state.record(app_id).await?;
+    /// Where a woken app's datagram port is, or why there is nowhere to send to.
+    async fn upstream(&self, app_id: &AppId, guest_port: GuestPort) -> Result<SocketAddr, RawOutcome> {
+        let Some(record) = self.state.record(app_id).await else {
+            return Err(RawOutcome::Down);
+        };
         if !record.on_request || !record.desired_running {
-            return None;
+            return Err(RawOutcome::Down);
         }
         self.state.mark_active(app_id, crate::clock::now_ms()).await;
 
         let started = std::time::Instant::now();
         if let Err(refusal) = self.waker.wake(app_id).await {
             tracing::warn!(%app_id, ?refusal, "a datagram could not be given an app");
-            return None;
+            return Err(RawOutcome::Refused);
         }
-        let woken = self.state.record(app_id).await?;
-        let address = woken.guest_ipv4.as_str().parse().ok()?;
+        let Some(woken) = self.state.record(app_id).await else {
+            return Err(RawOutcome::Down);
+        };
+        let address = woken
+            .guest_ipv4
+            .as_str()
+            .parse()
+            .map_err(|_| RawOutcome::Unreachable)?;
         tracing::info!(
             %app_id,
             woke_ms = started.elapsed().as_millis(),
             "app woken by a datagram"
         );
-        Some(SocketAddr::new(address, guest_port.get()))
+        Ok(SocketAddr::new(address, guest_port.get()))
     }
 }
 
 /// One client's side of the relay: everything the guest sends back goes to the address the first
 /// datagram came from, until nobody has used it for [`SESSION_IDLE`].
-async fn relay_replies(guest: Arc<UdpSocket>, inbound: Arc<UdpSocket>, client: SocketAddr) {
+async fn relay_replies(
+    guest: Arc<UdpSocket>,
+    inbound: Arc<UdpSocket>,
+    client: SocketAddr,
+    activator: Arc<DatagramActivator>,
+    app_id: AppId,
+) {
     let mut buffer = vec![0u8; MAX_DATAGRAM];
     loop {
         let read = tokio::time::timeout(SESSION_IDLE, guest.recv(&mut buffer)).await;
@@ -153,6 +176,10 @@ async fn relay_replies(guest: Arc<UdpSocket>, inbound: Arc<UdpSocket>, client: S
         if inbound.send_to(&buffer[..length], client).await.is_err() {
             return;
         }
+        activator
+            .metrics
+            .proxy
+            .raw_bytes(&app_id, Protocol::Udp, 0, length as u64);
     }
 }
 
@@ -173,29 +200,67 @@ async fn receive(
         let datagram = &buffer[..length];
 
         if let Some(guest) = sessions.get(&client) {
-            let _ = guest.send(datagram).await;
+            if guest.send(datagram).await.is_ok() {
+                activator
+                    .metrics
+                    .proxy
+                    .raw_bytes(&app_id, Protocol::Udp, length as u64, 0);
+            }
             continue;
         }
 
         // The datagram is held for exactly as long as the wake takes, and then delivered.
-        let Some(upstream) = activator.upstream(&app_id, guest_port).await else {
-            continue;
+        let upstream = match activator.upstream(&app_id, guest_port).await {
+            Ok(upstream) => upstream,
+            Err(outcome) => {
+                activator
+                    .metrics
+                    .proxy
+                    .raw_session(&app_id, Protocol::Udp, outcome);
+                continue;
+            }
         };
         let unspecified = match upstream {
             SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
             SocketAddr::V6(_) => SocketAddr::from(([0u16; 8], 0)),
         };
         let Ok(guest) = UdpSocket::bind(unspecified).await else {
+            activator
+                .metrics
+                .proxy
+                .raw_session(&app_id, Protocol::Udp, RawOutcome::Unreachable);
             continue;
         };
         if guest.connect(upstream).await.is_err() {
+            activator
+                .metrics
+                .proxy
+                .raw_session(&app_id, Protocol::Udp, RawOutcome::Unreachable);
             continue;
         }
         let guest = Arc::new(guest);
         if guest.send(datagram).await.is_err() {
+            activator
+                .metrics
+                .proxy
+                .raw_session(&app_id, Protocol::Udp, RawOutcome::Unreachable);
             continue;
         }
-        tokio::spawn(relay_replies(guest.clone(), inbound.clone(), client));
+        activator
+            .metrics
+            .proxy
+            .raw_session(&app_id, Protocol::Udp, RawOutcome::Served);
+        activator
+            .metrics
+            .proxy
+            .raw_bytes(&app_id, Protocol::Udp, length as u64, 0);
+        tokio::spawn(relay_replies(
+            guest.clone(),
+            inbound.clone(),
+            client,
+            activator.clone(),
+            app_id.clone(),
+        ));
         sessions.insert(client, guest);
     }
 }
@@ -229,6 +294,7 @@ mod tests {
         DatagramActivator::new(
             host.state.clone(),
             Arc::new(AlwaysWakes),
+            host.metrics.clone(),
             std::net::Ipv4Addr::LOCALHOST.into(),
         )
     }
@@ -312,6 +378,20 @@ mod tests {
             b"answer",
             "a reply reaches the client that sent the first datagram"
         );
+
+        let counted = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let app = host.metrics.proxy.of(&app_id());
+                if app.raw_bytes_out[1] == 6 {
+                    return app;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the reply was counted once it was relayed");
+        assert_eq!(counted.raw_sessions[1][0], 1, "one session, served");
+        assert_eq!(counted.raw_bytes_in[1], 5);
     }
 
     #[tokio::test]
