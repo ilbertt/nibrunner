@@ -67,9 +67,6 @@ jobs:
       - name: Check the example configuration is current
         run: just check-config-example
 
-  # The lane `just integration` names: root, `nft`, `mke2fs` and `/dev/net/tun`, all of which the
-  # hosted runner has. Built as the runner so nothing under target/ is root's when the cache is
-  # saved, then run as root.
   integration:
     runs-on: ubuntu-latest
     steps:
