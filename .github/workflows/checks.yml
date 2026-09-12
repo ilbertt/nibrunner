@@ -67,6 +67,35 @@ jobs:
       - name: Check the example configuration is current
         run: just check-config-example
 
+  # The lane `just integration` names: root, `nft`, `mke2fs` and `/dev/net/tun`, all of which the
+  # hosted runner has. Built as the runner so nothing under target/ is root's when the cache is
+  # saved, then run as root.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/prepare
+        with:
+          cache: enabled
+          prepare_for_build: disabled
+
+      - name: Install what the lane drives
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables e2fsprogs
+          ls -l /dev/net/tun
+          ls -l /dev/kvm || echo "no /dev/kvm on this runner"
+
+      - name: Build the integration tests
+        run: cargo test -p nibrunnerd --test integration --no-run
+
+      - name: Run the integration tests
+        # sudo's secure_path drops the runner's PATH, so it is handed back; -E keeps HOME, which is
+        # where rustup, cargo and mise live.
+        run: sudo -E env "PATH=$PATH" just integration
+
   checks-passed:
     if: always()
     name: checks:required
