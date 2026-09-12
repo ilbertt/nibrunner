@@ -41,7 +41,17 @@ fn instance_json() -> serde_json::Value {
 fn desired_json() -> serde_json::Value {
     serde_json::json!({
         "hostId": "host-1",
-        "volumes": [{ "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 4096, "desiredState": "present" }],
+        "volumes": [{
+            "volumeId": "vol-1",
+            "appId": "app-1",
+            "sizeBytes": 4096,
+            "desiredState": "present",
+            "initialContents": {
+                "digest": "c".repeat(64),
+                "objectKey": "seeds/app-1",
+                "destinationPath": "/app/data"
+            }
+        }],
         "instances": [instance_json()],
         "checkpoints": [],
         "exports": []
@@ -56,10 +66,30 @@ fn a_desired_state_round_trips_with_its_wire_names() {
         parsed.instances[0].idle_timeout_ms.map(|t| t.get()),
         Some(300_000)
     );
+    let contents = parsed.volumes[0]
+        .initial_contents
+        .as_ref()
+        .expect("the volume starts with something");
+    assert_eq!(contents.destination_path.as_str(), "/app/data");
+    assert_eq!(contents.object.object_key.as_str(), "seeds/app-1");
     let written = serde_json::to_value(&parsed).expect("serialises");
     assert_eq!(written["instances"][0]["config"]["httpPort"], 3000);
     assert_eq!(written["instances"][0]["desiredState"], "on-request");
     assert!(written["instances"][0].get("somethingNewer").is_none());
+    assert_eq!(written["volumes"][0]["initialContents"]["digest"], "c".repeat(64));
+}
+
+#[test]
+fn a_volume_that_starts_empty_says_nothing_about_it() {
+    let mut document = desired_json();
+    document["volumes"][0]
+        .as_object_mut()
+        .expect("a volume")
+        .remove("initialContents");
+    let parsed: HostDesiredState = serde_json::from_value(document).expect("parses");
+    assert_eq!(parsed.volumes[0].initial_contents, None);
+    let written = serde_json::to_value(&parsed).expect("serialises");
+    assert!(written["volumes"][0].get("initialContents").is_none());
 }
 
 #[test]
@@ -621,6 +651,12 @@ mod schema {
                 serde_json::json!("vanity"),
             ),
             with(desired_json(), "/volumes/0/sizeBytes", serde_json::json!(-1)),
+            with(
+                desired_json(),
+                "/volumes/0/initialContents/destinationPath",
+                serde_json::json!("app/data"),
+            ),
+            without(desired_json(), "/volumes/0/initialContents/digest"),
             with(
                 desired_json(),
                 "/volumes/0/desiredState",

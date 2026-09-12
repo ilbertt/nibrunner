@@ -21,6 +21,105 @@ fn commands() -> Arc<dyn CommandRunner> {
     Arc::new(nibrunnerd::adapters::exec::HostCommands)
 }
 
+/// Volumes as files under `directory`, over a store holding `archive` for whichever volume asks.
+fn local_volumes(
+    directory: &std::path::Path,
+    commands: Arc<dyn CommandRunner>,
+    archive: Vec<u8>,
+) -> nibrunnerd::adapters::volumes::local_file::LocalFileVolumes {
+    nibrunnerd::adapters::volumes::local_file::LocalFileVolumes::new(
+        directory.join("volumes"),
+        protocol::ObjectKey::parse("volumes").unwrap(),
+        commands.clone(),
+        nibrunnerd::adapters::volumes::initial_contents::ContentsStaging::new(
+            mocks::artifacts_holding(archive),
+            directory.join("initial-contents"),
+        ),
+    )
+}
+
+/// One `debugfs` request against the volume, answered from the filesystem without mounting it.
+async fn debugfs(device: &std::path::Path, request: &str) -> String {
+    commands()
+        .stdout_of(nibrunnerd::ports::CommandRequest::new(&[
+            "debugfs",
+            "-R",
+            request,
+            &device.display().to_string(),
+        ]))
+        .await
+        .expect("debugfs answers")
+}
+
+// The real tool copies the archive in as it formats, and what it copied is read back off the
+// device the way an export reads it: by debugfs, so nothing here mounts a tenant's volume.
+#[tokio::test]
+async fn a_volume_is_formatted_holding_the_contents_the_document_gave_it() {
+    if !enabled() {
+        return;
+    }
+    require_root();
+    let directory = tempfile::tempdir().unwrap();
+    let archive = {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_uid(1000);
+        header.set_gid(1000);
+        header.set_size(6);
+        builder
+            .append_data(&mut header, "nested/hello.txt", &b"hello\n"[..])
+            .unwrap();
+        builder.into_inner().unwrap()
+    };
+    let volumes = local_volumes(directory.path(), commands(), archive.clone());
+    let desired = protocol::DesiredVolume {
+        volume_id: protocol::VolumeId::parse("vol-1").unwrap(),
+        app_id: protocol::AppId::parse("app-1").unwrap(),
+        size_bytes: 16 * 1024 * 1024,
+        desired_state: protocol::DesiredPresence::Present,
+        initial_contents: Some(nibrunnerd::test_support::initial_contents(&archive, "/app/data")),
+    };
+
+    use nibrunnerd::adapters::volumes::VolumeBackend;
+    let attached = volumes.provision(&desired).await.expect("the volume is made");
+    let device = std::path::PathBuf::from(&attached.device_path);
+
+    let listed = debugfs(&device, "ls -l /upper/app/data/nested").await;
+    assert!(listed.contains("hello.txt"), "{listed}");
+    let shown = debugfs(&device, "cat /upper/app/data/nested/hello.txt").await;
+    assert_eq!(shown, "hello\n");
+    // debugfs prints the owner five wide: `User: 65534`, and `User:     0` for root.
+    let tenant = format!("User: {:>5}", guest_contract::paths::TENANT_UID);
+    let owner = debugfs(&device, "stat /upper/app/data/nested/hello.txt").await;
+    assert!(owner.contains(&tenant), "the file is not the tenant's: {owner}");
+    let given = debugfs(&device, "stat /upper/app/data").await;
+    assert!(
+        given.contains(&tenant),
+        "the destination is not the tenant's: {given}"
+    );
+    let above = debugfs(&device, "stat /upper/app").await;
+    assert!(
+        above.contains("User:     0"),
+        "the directory above is not root's: {above}"
+    );
+    assert!(
+        !directory.path().join("initial-contents/vol-1").exists(),
+        "the staging is gone once the format has read it"
+    );
+
+    let (recorded, log) = mocks::commands_succeeding();
+    let second = local_volumes(directory.path(), recorded, archive);
+    second
+        .provision(&desired)
+        .await
+        .expect("a converged volume needs nothing");
+    assert!(
+        log.executables().is_empty(),
+        "a formatted volume must never be seeded again"
+    );
+}
+
 #[tokio::test]
 async fn the_isolation_ruleset_loads_into_the_kernel() {
     if !enabled() {
@@ -83,16 +182,13 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     }
     require_root();
     let directory = tempfile::tempdir().unwrap();
-    let volumes = nibrunnerd::adapters::volumes::local_file::LocalFileVolumes::new(
-        directory.path().to_path_buf(),
-        protocol::ObjectKey::parse("volumes").unwrap(),
-        commands(),
-    );
+    let volumes = local_volumes(directory.path(), commands(), Vec::new());
     let desired = protocol::DesiredVolume {
         volume_id: protocol::VolumeId::parse("vol-1").unwrap(),
         app_id: protocol::AppId::parse("app-1").unwrap(),
         size_bytes: 16 * 1024 * 1024,
         desired_state: protocol::DesiredPresence::Present,
+        initial_contents: None,
     };
 
     use nibrunnerd::adapters::volumes::VolumeBackend;
@@ -100,11 +196,7 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     assert_eq!(attached.size_bytes, desired.size_bytes);
 
     let (recorded, log) = mocks::commands_succeeding();
-    let second = nibrunnerd::adapters::volumes::local_file::LocalFileVolumes::new(
-        directory.path().to_path_buf(),
-        protocol::ObjectKey::parse("volumes").unwrap(),
-        recorded,
-    );
+    let second = local_volumes(directory.path(), recorded, Vec::new());
     second
         .provision(&desired)
         .await
