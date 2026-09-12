@@ -8,11 +8,14 @@ pub async fn probe_instance(
     http_port: HttpPort,
     health_check: &HealthCheck,
 ) -> bool {
-    let timeout = Duration::from_millis(health_check.timeout_ms);
+    let timeout = Duration::from_millis(health_check.probe().timeout_ms);
     let address = SocketAddr::from((guest_ipv4.addr(), http_port.get()));
-    match &health_check.path {
-        None => probe_tcp(address, timeout).await,
-        Some(path) => probe_http(address, path, timeout).await,
+    match health_check {
+        HealthCheck::Http { path, .. } => probe_http(address, path, timeout).await,
+        HealthCheck::Tcp { .. } => probe_tcp(address, timeout).await,
+        // A guest this host did not build answers no port it was never told about; that its
+        // microVM is up is read elsewhere, and asked here is always well.
+        HealthCheck::BootCompleted => true,
     }
 }
 
@@ -54,7 +57,8 @@ pub fn loopback() -> Ipv4Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::DEFAULT_HEALTH_CHECK;
+    use crate::test_support::TCP_HEALTH_CHECK;
+    use protocol::Probe;
 
     async fn listening(answer: hyper::StatusCode) -> HttpPort {
         use http_body_util::Full;
@@ -86,19 +90,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_default_probe_asks_only_whether_the_tenant_accepts_a_connection() {
+    async fn a_tcp_check_asks_only_whether_the_tenant_accepts_a_connection() {
         let port = listening(hyper::StatusCode::OK).await;
-        assert!(probe_instance(&loopback(), port, &DEFAULT_HEALTH_CHECK).await);
+        assert!(probe_instance(&loopback(), port, &TCP_HEALTH_CHECK).await);
         let closed = HttpPort::new(1).unwrap();
-        assert!(!probe_instance(&loopback(), closed, &DEFAULT_HEALTH_CHECK).await);
+        assert!(!probe_instance(&loopback(), closed, &TCP_HEALTH_CHECK).await);
+    }
+
+    // Nothing is asked of a guest this host did not build, and a port that does not exist is no
+    // verdict on it.
+    #[tokio::test]
+    async fn a_boot_completed_check_asks_nothing_and_is_always_well() {
+        let closed = HttpPort::new(1).unwrap();
+        assert!(probe_instance(&loopback(), closed, &HealthCheck::BootCompleted).await);
+    }
+
+    fn http(path: &str, timeout_ms: u64) -> HealthCheck {
+        HealthCheck::Http {
+            path: path.to_string(),
+            probe: Probe {
+                timeout_ms,
+                ..TCP_HEALTH_CHECK.probe().clone()
+            },
+        }
     }
 
     #[tokio::test]
-    async fn a_declared_path_upgrades_the_probe_to_an_http_get() {
-        let with_path = HealthCheck {
-            path: Some("/health".into()),
-            ..DEFAULT_HEALTH_CHECK
-        };
+    async fn an_http_check_asks_its_path_and_takes_a_success_for_an_answer() {
+        let with_path = http("/health", 2_000);
         let healthy = listening(hyper::StatusCode::OK).await;
         assert!(probe_instance(&loopback(), healthy, &with_path).await);
         let unwell = listening(hyper::StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -107,10 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_tenant_that_answers_a_path_with_anything_but_success_is_not_healthy() {
-        let with_path = HealthCheck {
-            path: Some("/health".into()),
-            ..DEFAULT_HEALTH_CHECK
-        };
+        let with_path = http("/health", 2_000);
         for answer in [
             hyper::StatusCode::NOT_FOUND,
             hyper::StatusCode::UNAUTHORIZED,
@@ -140,13 +156,9 @@ mod tests {
             }
         });
 
-        let silent = HealthCheck {
-            path: Some("/health".into()),
-            timeout_ms: 100,
-            ..DEFAULT_HEALTH_CHECK
-        };
+        let silent = http("/health", 100);
         assert!(!probe_instance(&loopback(), port, &silent).await);
-        assert!(probe_instance(&loopback(), port, &DEFAULT_HEALTH_CHECK).await);
+        assert!(probe_instance(&loopback(), port, &TCP_HEALTH_CHECK).await);
         held.abort();
     }
 }

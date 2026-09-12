@@ -180,7 +180,7 @@ impl StreamActivator {
             },
             guest_port.get(),
         );
-        let deadline = Instant::now() + Duration::from_millis(woken.health_check.grace_period_ms);
+        let deadline = Instant::now() + Duration::from_millis(woken.health_check.probe().grace_period_ms);
         let Some(mut guest) = dial_until(upstream, deadline).await else {
             tracing::warn!(%app_id, %upstream, "a woken app would not take the stream");
             return RawOutcome::Unreachable;
@@ -375,7 +375,7 @@ mod tests {
                 record.desired_running = true;
                 record.state = InstanceState::Idle;
                 record.guest_ipv4 = crate::domain::health::probe::loopback();
-                record.health_check.grace_period_ms = 2_000;
+                record.health_check.probe_mut().unwrap().grace_period_ms = 2_000;
             }))
             .await;
 
@@ -423,7 +423,7 @@ mod tests {
                 record.desired_running = true;
                 record.state = InstanceState::Idle;
                 record.guest_ipv4 = crate::domain::health::probe::loopback();
-                record.health_check.grace_period_ms = 200;
+                record.health_check.probe_mut().unwrap().grace_period_ms = 200;
             }))
             .await;
         let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

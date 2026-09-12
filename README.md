@@ -66,7 +66,7 @@ below into `paths.desired_state_file`. Everything past that is the daemon conver
         "httpPort": 3000,
         "command": { "program": "/app/server", "args": [], "workingDirectory": "/app", "environment": {} },
         "resources": { "vcpuCount": 1, "memoryMib": 256 },
-        "healthCheck": { "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
+        "healthCheck": { "kind": "http", "path": "/healthz", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
         "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
       },
       "hostnames": [{ "hostname": "app-1.example.com", "kind": "platform" }]
@@ -138,17 +138,37 @@ datagram has no connection to hold, so the datagram itself is kept and delivered
 The host must name a `[proxy.raw]` section to bind such a port, and a `[proxy.http]` one to
 serve a hostname. A document that asks for what this host does not serve is refused by name and
 the instance is reported `failed` saying so.
+### Health
+
+What tells this host an instance is well is the instance's to name, and every document names it —
+there is no default, because the one that looks obvious lies. `config.healthCheck` is one of
+three kinds:
+
+| `healthCheck` | Healthy means |
+| --- | --- |
+| `{ "kind": "http", "path": "/healthz", ...timing }` | `path`, requested on `httpPort`, answers 2xx. |
+| `{ "kind": "tcp", ...timing }` | A connection to `httpPort` is accepted. Only that — for a port that does not speak HTTP. |
+| `{ "kind": "boot-completed" }` | The microVM is up. Nothing inside it is probed: a guest this host did not build answers no port it was not told about. |
+
+`...timing` is `intervalMs`, `timeoutMs`, `gracePeriodMs`, `healthyThreshold` and
+`unhealthyThreshold`, as in the document above; `boot-completed` carries none, having nothing to
+time. The same check is what a wake waits for before a caller is handed on, and what liveness is
+read from after that.
+
+Why `tcp` is not the default: a TCP connect is answered by the guest kernel's accept queue whether
+or not the process behind it will ever read the request, so a program that has stopped answering
+passes it for as long as it lives. It is there for the port that cannot be asked over HTTP, and the
+document says so.
+
 ### Activation
 
-What puts an instance back to sleep, and what tells this host it is ready for a caller, are the
-instance's to name. `activation` names them:
+What puts an instance back to sleep is the instance's to name. `activation` names it:
 
 ```json
 {
   "desiredState": "on-request",
   "activation": {
-    "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 },
-    "readyWhen": { "kind": "boot-completed" }
+    "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 }
   }
 }
 ```
@@ -158,11 +178,6 @@ instance's to name. `activation` names them:
 | `{ "kind": "never" }` | Never. The document is the only thing that takes it down. |
 | `{ "kind": "traffic-idle", "timeoutMs": N }` | Nothing has been sent to it for `N` ms. |
 | `{ "kind": "max-lifetime", "ttlMs": N }` | It has been up for `N` ms, however busy it still is. |
-
-| `readyWhen` | What a wake waits for, and what liveness is then read from |
-| --- | --- |
-| `{ "kind": "port-answers" }` | The health check answers on `httpPort`. The default. |
-| `{ "kind": "boot-completed" }` | The microVM started. Nothing inside it is probed. |
 
 Only an `on-request` instance may name a `sleepWhen` other than `never`: nothing on this host
 would wake anything else again, and the next reconcile pass would bring it straight back up. A

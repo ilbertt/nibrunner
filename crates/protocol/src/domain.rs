@@ -489,28 +489,11 @@ pub enum SleepPolicy {
     MaxLifetime { ttl_ms: MaxLifetimeMs },
 }
 
-/// What tells this host a microVM is ready to be given a caller, and what its liveness is read
-/// from afterwards. A guest this host did not build answers no port it was not told about, so
-/// `boot-completed` measures both from the microVM itself.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum ReadinessPolicy {
-    #[default]
-    PortAnswers,
-    BootCompleted,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ActivationPolicy {
     pub sleep_when: SleepPolicy,
-    // Every instance written before this field existed answers a port, so leaving it out keeps
-    // meaning what it has always meant. What puts an instance to sleep has no such single answer,
-    // and is named rather than assumed.
-    #[serde(default)]
-    pub ready_when: ReadinessPolicy,
 }
 
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
@@ -543,13 +526,36 @@ pub const DEFAULT_INSTANCE_RESOURCES: InstanceResources = InstanceResources {
     memory_mib: 256,
 };
 
+/// What tells this host an instance is well — and so what a wake waits for before it hands the
+/// caller on, and what the instance's liveness is read from after that. Named in every document:
+/// a default would be a kind nobody chose, and the one that looks obvious lies. A TCP connect is
+/// answered by the guest kernel's accept queue whether or not the process behind it will ever
+/// read the request, so a program that has stopped answering passes it for as long as it lives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub enum HealthCheck {
+    /// `path`, requested on `httpPort`, answers 2xx.
+    Http {
+        path: String,
+        #[serde(flatten)]
+        probe: Probe,
+    },
+    /// A connection to `httpPort` is accepted. Only that — for a port that does not speak HTTP.
+    Tcp {
+        #[serde(flatten)]
+        probe: Probe,
+    },
+    /// The microVM is up. Nothing inside it is probed: a guest this host did not build answers
+    /// no port it was not told about.
+    BootCompleted,
+}
+
+/// How a port is asked, and how many answers either way it takes to change the verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct HealthCheck {
-    /// The path an HTTP probe requests on `httpPort`. Absent, the probe is a TCP connect.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+pub struct Probe {
     pub interval_ms: u64,
     pub timeout_ms: u64,
     pub grace_period_ms: u64,
@@ -557,14 +563,44 @@ pub struct HealthCheck {
     pub unhealthy_threshold: u32,
 }
 
-pub const DEFAULT_HEALTH_CHECK: HealthCheck = HealthCheck {
-    path: None,
+/// A microVM is up or it is not, and one reading either way says which. What `boot-completed`
+/// runs the same state machine on as a probed port.
+const OF_THE_MICROVM: Probe = Probe {
     interval_ms: 5_000,
-    timeout_ms: 2_000,
-    grace_period_ms: 30_000,
+    timeout_ms: 0,
+    grace_period_ms: 0,
     healthy_threshold: 1,
-    unhealthy_threshold: 3,
+    unhealthy_threshold: 1,
 };
+
+impl HealthCheck {
+    /// Whether liveness is read from a port inside the guest, or from the microVM being up.
+    pub fn probes_a_port(&self) -> bool {
+        !matches!(self, HealthCheck::BootCompleted)
+    }
+
+    pub fn probe(&self) -> &Probe {
+        match self {
+            HealthCheck::Http { probe, .. } | HealthCheck::Tcp { probe } => probe,
+            HealthCheck::BootCompleted => &OF_THE_MICROVM,
+        }
+    }
+
+    pub fn probe_mut(&mut self) -> Option<&mut Probe> {
+        match self {
+            HealthCheck::Http { probe, .. } | HealthCheck::Tcp { probe } => Some(probe),
+            HealthCheck::BootCompleted => None,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            HealthCheck::Http { .. } => "http",
+            HealthCheck::Tcp { .. } => "tcp",
+            HealthCheck::BootCompleted => "boot-completed",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

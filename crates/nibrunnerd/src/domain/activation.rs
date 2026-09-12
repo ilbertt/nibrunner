@@ -1,4 +1,4 @@
-use protocol::{ActivationPolicy, InstanceState, ReadinessPolicy, SleepPolicy};
+use protocol::{ActivationPolicy, InstanceState, SleepPolicy};
 
 use crate::domain::report::InstanceRecord;
 
@@ -52,13 +52,6 @@ pub fn should_sleep(
     }
 }
 
-/// Whether readiness and liveness are read from a port inside the guest, or from the microVM
-/// itself. A guest this host did not build answers no port it was never told about, and probing
-/// one would read as an app that never came up.
-pub fn probes_a_port(policy: ReadinessPolicy) -> bool {
-    matches!(policy, ReadinessPolicy::PortAnswers)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,7 +67,6 @@ mod tests {
             sleep_when: SleepPolicy::TrafficIdle {
                 timeout_ms: IdleTimeoutMs::try_from(TIMEOUT_MS).unwrap(),
             },
-            ready_when: ReadinessPolicy::PortAnswers,
         }
     }
 
@@ -83,14 +75,12 @@ mod tests {
             sleep_when: SleepPolicy::MaxLifetime {
                 ttl_ms: MaxLifetimeMs::try_from(TTL_MS).unwrap(),
             },
-            ready_when: ReadinessPolicy::PortAnswers,
         }
     }
 
     fn never() -> ActivationPolicy {
         ActivationPolicy {
             sleep_when: SleepPolicy::Never,
-            ready_when: ReadinessPolicy::PortAnswers,
         }
     }
 
@@ -222,11 +212,5 @@ mod tests {
     fn what_each_reason_is_called_is_what_the_report_reads() {
         assert_eq!(SleepReason::Quiet.as_str(), "idle");
         assert_eq!(SleepReason::LivedLongEnough.as_str(), "max-lifetime");
-    }
-
-    #[test]
-    fn a_port_is_probed_for_the_readiness_that_names_one_and_for_no_other() {
-        assert!(probes_a_port(ReadinessPolicy::PortAnswers));
-        assert!(!probes_a_port(ReadinessPolicy::BootCompleted));
     }
 }

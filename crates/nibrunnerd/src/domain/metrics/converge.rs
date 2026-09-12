@@ -399,7 +399,7 @@ mod tests {
     use crate::domain::metrics::HostMetrics;
     use crate::state::HostSnapshot;
     use crate::test_support::*;
-    use protocol::{ActivationPolicy, ReadinessPolicy, SleepPolicy};
+    use protocol::{ActivationPolicy, HealthCheck, SleepPolicy};
 
     const DETECTED: i64 = 1_000_000;
 
@@ -717,8 +717,8 @@ mod tests {
             state.instances = vec![desired_instance(|instance| {
                 instance.activation = Some(ActivationPolicy {
                     sleep_when: SleepPolicy::Never,
-                    ready_when: ReadinessPolicy::BootCompleted,
                 });
+                instance.config.health_check = HealthCheck::BootCompleted;
             })];
         });
         host.cache.lock().await.accept(desired.clone());

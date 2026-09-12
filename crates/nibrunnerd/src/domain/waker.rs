@@ -121,8 +121,9 @@ impl AppWaker {
 
         // A caller is handed on once the guest is ready for it, and what ready means is the
         // instance's to say: a port that answers, or a microVM that started at all.
-        if crate::domain::activation::probes_a_port(record.readiness) {
-            let deadline = Instant::now() + Duration::from_millis(record.health_check.grace_period_ms);
+        if record.health_check.probes_a_port() {
+            let deadline =
+                Instant::now() + Duration::from_millis(record.health_check.probe().grace_period_ms);
             loop {
                 if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check).await {
                     break;
@@ -221,7 +222,7 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
-                record.health_check.grace_period_ms = 50;
+                record.health_check.probe_mut().unwrap().grace_period_ms = 50;
             }))
             .await;
         let on_request =
@@ -425,8 +426,9 @@ mod tests {
                 record.state = InstanceState::Idle;
                 record.guest_ipv4 = crate::domain::health::probe::loopback();
                 record.http_port = protocol::HttpPort::new(1).unwrap();
-                record.health_check.grace_period_ms = 20;
-                record.health_check.timeout_ms = 50;
+                let probe = record.health_check.probe_mut().unwrap();
+                probe.grace_period_ms = 20;
+                probe.timeout_ms = 50;
             }))
             .await;
         let on_request =
@@ -470,11 +472,9 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
-                record.readiness = protocol::ReadinessPolicy::BootCompleted;
+                record.health_check = protocol::HealthCheck::BootCompleted;
                 record.guest_ipv4 = crate::domain::health::probe::loopback();
                 record.http_port = protocol::HttpPort::new(1).unwrap();
-                record.health_check.grace_period_ms = 20;
-                record.health_check.timeout_ms = 50;
             }))
             .await;
         let on_request =

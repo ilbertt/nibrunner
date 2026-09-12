@@ -30,7 +30,7 @@ fn instance_json() -> serde_json::Value {
                 "environment": { "DSN": "postgres://u:p@h/db", "PORT_HINT": "${NIBRUN_HTTP_PORT}" }
             },
             "resources": { "vcpuCount": 1, "memoryMib": 256 },
-            "healthCheck": { "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
+            "healthCheck": { "kind": "http", "path": "/healthz", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
             "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
         },
         "hostnames": [{ "hostname": "app-1.apps.example.com", "kind": "platform" }],
@@ -215,8 +215,7 @@ fn read(document: serde_json::Value) -> Result<DesiredInstance, serde_json::Erro
 fn an_activation_policy_round_trips_with_its_wire_names() {
     let instance = read(instance_with(|document| {
         document["activation"] = serde_json::json!({
-            "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 },
-            "readyWhen": { "kind": "boot-completed" }
+            "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 }
         });
     }))
     .expect("parses");
@@ -228,23 +227,102 @@ fn an_activation_policy_round_trips_with_its_wire_names() {
             timeout_ms: IdleTimeoutMs::try_from(900_000).unwrap()
         }
     );
-    assert_eq!(policy.ready_when, ReadinessPolicy::BootCompleted);
 
     let written = serde_json::to_value(&instance).expect("serialises");
     assert_eq!(written["activation"]["sleepWhen"]["kind"], "traffic-idle");
     assert_eq!(written["activation"]["sleepWhen"]["timeoutMs"], 900_000);
-    assert_eq!(written["activation"]["readyWhen"]["kind"], "boot-completed");
     assert!(written.get("idleTimeoutMs").is_none());
 }
 
-#[test]
-fn a_readiness_left_out_is_the_one_every_instance_written_before_it_had() {
-    let instance = read(instance_with(|document| {
-        document["activation"] = serde_json::json!({ "sleepWhen": { "kind": "never" } });
+fn health_check_of(document: serde_json::Value) -> Result<HealthCheck, serde_json::Error> {
+    read(instance_with(|instance| {
+        instance["config"]["healthCheck"] = document;
     }))
-    .expect("parses");
-    assert_eq!(instance.activation().ready_when, ReadinessPolicy::PortAnswers);
-    assert_eq!(instance.activation().sleep_when, SleepPolicy::Never);
+    .map(|instance| instance.config.health_check)
+}
+
+#[test]
+fn a_health_check_is_one_of_three_kinds_each_spelled_out() {
+    let probe = Probe {
+        interval_ms: 5_000,
+        timeout_ms: 2_000,
+        grace_period_ms: 30_000,
+        healthy_threshold: 1,
+        unhealthy_threshold: 3,
+    };
+    let timing = serde_json::json!({ "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 });
+
+    let mut http = timing.clone();
+    http["kind"] = "http".into();
+    http["path"] = "/api/health".into();
+    assert_eq!(
+        health_check_of(http).expect("parses"),
+        HealthCheck::Http {
+            path: "/api/health".into(),
+            probe: probe.clone()
+        }
+    );
+
+    let mut tcp = timing;
+    tcp["kind"] = "tcp".into();
+    assert_eq!(health_check_of(tcp).expect("parses"), HealthCheck::Tcp { probe });
+
+    assert_eq!(
+        health_check_of(serde_json::json!({ "kind": "boot-completed" })).expect("parses"),
+        HealthCheck::BootCompleted
+    );
+}
+
+// The one that looks like a sensible default is the one that lies: a kernel accepts connections
+// for a process that will never answer them. So nothing is assumed, and the document says.
+#[test]
+fn a_health_check_that_names_no_kind_is_refused_by_that_name() {
+    let error = health_check_of(serde_json::json!({
+        "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("kind"), "{error}");
+}
+
+#[test]
+fn an_http_check_names_the_path_it_asks_for() {
+    let error = health_check_of(serde_json::json!({
+        "kind": "http", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("path"), "{error}");
+}
+
+#[test]
+fn a_health_check_writes_back_as_it_was_read() {
+    for document in [
+        serde_json::json!({ "kind": "http", "path": "/healthz", "intervalMs": 1000, "timeoutMs": 500, "gracePeriodMs": 3000, "healthyThreshold": 1, "unhealthyThreshold": 2 }),
+        serde_json::json!({ "kind": "tcp", "intervalMs": 1000, "timeoutMs": 500, "gracePeriodMs": 3000, "healthyThreshold": 1, "unhealthyThreshold": 2 }),
+        serde_json::json!({ "kind": "boot-completed" }),
+    ] {
+        let parsed = health_check_of(document.clone()).expect("parses");
+        assert_eq!(serde_json::to_value(&parsed).expect("serialises"), document);
+    }
+}
+
+#[test]
+fn only_a_check_of_a_port_probes_one_and_a_microvm_is_judged_by_one_reading() {
+    assert!(!HealthCheck::BootCompleted.probes_a_port());
+    assert_eq!(HealthCheck::BootCompleted.probe().unhealthy_threshold, 1);
+    assert_eq!(HealthCheck::BootCompleted.probe().grace_period_ms, 0);
+    let tcp = HealthCheck::Tcp {
+        probe: Probe {
+            interval_ms: 1,
+            timeout_ms: 1,
+            grace_period_ms: 7,
+            healthy_threshold: 1,
+            unhealthy_threshold: 1,
+        },
+    };
+    assert!(tcp.probes_a_port());
+    assert_eq!(tcp.probe().grace_period_ms, 7);
 }
 
 #[test]
@@ -324,10 +402,7 @@ fn a_policy_this_host_does_not_offer_is_refused_by_name_rather_than_ignored() {
     .is_err());
 
     assert!(read(instance_with(|document| {
-        document["activation"] = serde_json::json!({
-            "sleepWhen": { "kind": "never" },
-            "readyWhen": { "kind": "agent-ready" }
-        });
+        document["config"]["healthCheck"] = serde_json::json!({ "kind": "agent-ready" });
     }))
     .is_err());
 
@@ -640,8 +715,20 @@ mod schema {
             ),
             activated(serde_json::json!({ "sleepWhen": { "kind": "no-sessions" } })),
             activated(serde_json::json!({ "sleepWhen": { "kind": "max-lifetime", "ttlMs": 1000 } })),
-            activated(
-                serde_json::json!({ "sleepWhen": { "kind": "never" }, "readyWhen": { "kind": "prayer" } }),
+            with(
+                desired_json(),
+                "/instances/0/config/healthCheck",
+                serde_json::json!({ "kind": "prayer" }),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/healthCheck",
+                serde_json::json!({ "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 }),
+            ),
+            with(
+                desired_json(),
+                "/instances/0/config/healthCheck",
+                serde_json::json!({ "kind": "http", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 }),
             ),
         ];
         for document in broken {

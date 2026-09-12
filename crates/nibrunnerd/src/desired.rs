@@ -244,7 +244,7 @@ mod tests {
         let renamed = desired_state(|state| {
             state.instances = vec![desired_instance(|instance| {
                 instance.hostnames = vec![crate::test_support::app_hostname()];
-                instance.config.health_check.interval_ms = 1;
+                instance.config.health_check.probe_mut().unwrap().interval_ms = 1;
             })]
         });
         assert_eq!(cache.changes_in(&renamed), Changes::default());
