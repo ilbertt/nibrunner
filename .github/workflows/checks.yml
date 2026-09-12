@@ -81,8 +81,7 @@ jobs:
       - name: Install what the lane drives
         run: |
           sudo apt-get install -y nftables
-          ls -l /dev/net/tun
-          ls -l /dev/kvm || echo "no /dev/kvm on this runner"
+          ls -l /dev/net/tun /dev/kvm
 
       - name: Build the integration tests
         run: cargo test -p nibrunnerd --test integration --no-run
