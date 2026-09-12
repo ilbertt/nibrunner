@@ -17,9 +17,21 @@ set -eu
 
 REPO=${NIBRUNNER_REPO:-ilbertt/nibrunner}
 BINARY=/usr/local/bin/nibrunnerd
+# The superset of both volume backends. Which one this host wants is in a configuration that need
+# not exist yet, and nbd-client and fuse3 are a few hundred kilobytes on a host that turns out not
+# to want them.
+PACKAGES="nftables e2fsprogs nbd-client fuse3 kmod passwd curl ca-certificates"
 
-say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
+say() { printf '\n\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
+
+welcome() {
+    printf '\033[1mWelcome to the nibrunner installer\033[0m\n\n'
+    printf "Now we're going to:\n"
+    printf '  - apt-get install %s\n' "$PACKAGES"
+    printf '  - install nibrunnerd %s to %s\n' "$1" "$BINARY"
+    printf '  - set up nibrunnerd\n'
+}
 
 refuse_unless_this_machine_can_host() {
     [ "$(id -u)" = 0 ] || die "run this as root: it installs a system daemon"
@@ -27,18 +39,15 @@ refuse_unless_this_machine_can_host() {
     [ "$(uname -m)" = x86_64 ] || die "the release ships for x86_64 only; this is $(uname -m)"
 }
 
-# The superset of both volume backends. Which one this host wants is in a configuration that need
-# not exist yet, and nbd-client and fuse3 are a few hundred kilobytes on a host that turns out not
-# to want them.
 packages() {
-    set -- nftables e2fsprogs nbd-client fuse3 kmod passwd curl ca-certificates
     if ! command -v apt-get >/dev/null 2>&1; then
-        die "this installs packages with apt-get, which is not here. Install these and re-run: $*"
+        die "this installs packages with apt-get, which is not here. Install these and re-run: $PACKAGES"
     fi
     say "apt-get update"
     DEBIAN_FRONTEND=noninteractive apt-get update -q
-    say "apt-get install $*"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@"
+    say "apt-get install $PACKAGES"
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q $PACKAGES
 }
 
 # Releases are cut as prereleases, which /releases/latest does not answer with — so the newest is
@@ -72,6 +81,7 @@ main() {
     refuse_unless_this_machine_can_host
     version=${NIBRUNNER_VERSION:-$(newest_release)}
     [ -n "$version" ] || die "no release could be found for $REPO; name one in NIBRUNNER_VERSION"
+    welcome "$version"
 
     packages
 
@@ -80,8 +90,8 @@ main() {
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT INT TERM
 
-    # Said here rather than before the packages, which scroll anything said before them off the
-    # screen: the version goes next to the downloads it names.
+    # The header is off the screen by now, behind apt-get: the version goes again next to the
+    # downloads it names.
     say "release $version — https://github.com/$REPO/releases/tag/$version"
     fetch_release "https://github.com/$REPO/releases/download/$version" "$work"
 
