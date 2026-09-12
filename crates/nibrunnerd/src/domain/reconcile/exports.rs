@@ -6,6 +6,7 @@ use protocol::{
 use crate::domain::exports::bundle::{dump_volume, write_bundle};
 use crate::domain::exports::freeze::frozen;
 use crate::domain::exports::reader::ReaderDevice;
+use crate::domain::metrics::resources::Operation;
 use crate::domain::reconcile::plan::{ExportPlan, ObservedExport, ReconcilePlan};
 use crate::host::Host;
 
@@ -66,7 +67,11 @@ async fn write(host: &Host, desired: &DesiredExport) -> ReportedExport {
     };
     let staging_dir = host.config.export_staging_dir.join(desired.export_id.as_str());
 
+    let writing = std::time::Instant::now();
     let written = write_inner(host, desired, &checkpoint_id, &staging_dir).await;
+    host.metrics
+        .resources
+        .done(Operation::ExportWrite, written.is_ok(), writing.elapsed());
 
     let _ = std::fs::remove_dir_all(&staging_dir);
 

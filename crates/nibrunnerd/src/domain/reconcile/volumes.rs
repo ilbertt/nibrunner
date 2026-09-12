@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use protocol::{AppId, HostDesiredState, ReportedVolume, StateMessage, VolumeId, VolumeState};
 
+use crate::domain::metrics::resources::Operation;
 use crate::domain::reconcile::plan::{ObservedState, ObservedVolume, ReconcilePlan, VolumePlan};
 use crate::domain::report::InstanceRecord;
 use crate::host::Host;
@@ -67,7 +68,14 @@ pub async fn apply_volumes(
     for action in &plan.volumes {
         match action {
             VolumePlan::Provision { desired } => {
-                let report = match host.volumes.provision(desired).await {
+                let provisioning = std::time::Instant::now();
+                let provisioned = host.volumes.provision(desired).await;
+                host.metrics.resources.done(
+                    Operation::VolumeProvision,
+                    provisioned.is_ok(),
+                    provisioning.elapsed(),
+                );
+                let report = match provisioned {
                     Ok(attached) => ReportedVolume {
                         volume_id: attached.volume_id,
                         app_id: desired.app_id.clone(),
@@ -127,7 +135,14 @@ pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
         let VolumePlan::Teardown { desired } = action else {
             continue;
         };
-        match host.volumes.teardown(&desired.volume_id, &desired.app_id).await {
+        let tearing_down = std::time::Instant::now();
+        let torn_down = host.volumes.teardown(&desired.volume_id, &desired.app_id).await;
+        host.metrics.resources.done(
+            Operation::VolumeTeardown,
+            torn_down.is_ok(),
+            tearing_down.elapsed(),
+        );
+        match torn_down {
             Ok(()) => {
                 // The tap goes with the slot rather than with the microVM, because a stopped app
                 // keeps both and only an app that is leaving gives them up. Taking it here is also
@@ -327,6 +342,15 @@ mod tests {
         assert_eq!(reports[0].size_bytes, VOLUME_SIZE_BYTES);
         assert!(reports[0].device_path.is_some());
         assert!(reports[0].storage_prefix.is_some());
+        let page = crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        );
+        assert!(page.contains(
+            "nibrunner_storage_operation_seconds_count{operation=\"volume_provision\",outcome=\"ok\"} 1\n"
+        ));
     }
 
     #[tokio::test]

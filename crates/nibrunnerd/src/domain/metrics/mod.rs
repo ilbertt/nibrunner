@@ -2,6 +2,7 @@ pub mod converge;
 pub mod health;
 pub mod passes;
 pub mod proxy;
+pub mod resources;
 pub mod sleep_wake;
 
 pub use proxy::{Outcome, ProxyMetrics};
@@ -14,6 +15,7 @@ use protocol::{HostReportedState, INSTANCE_STATES};
 use crate::domain::metrics::converge::ConvergeMetrics;
 use crate::domain::metrics::health::HealthMetrics;
 use crate::domain::metrics::passes::PassMetrics;
+use crate::domain::metrics::resources::ResourceMetrics;
 use crate::domain::metrics::sleep_wake::SleepWakeMetrics;
 use crate::state::HostSnapshot;
 
@@ -26,6 +28,17 @@ pub struct HostMetrics {
     pub converge: ConvergeMetrics,
     pub passes: PassMetrics,
     pub health: HealthMetrics,
+    pub resources: ResourceMetrics,
+}
+
+/// What a scrape is rendered from besides what the daemon counted: the report as it stands, the
+/// snapshot it was built from, and what only the moment of the scrape can say.
+pub struct Scrape<'a> {
+    pub report: &'a HostReportedState,
+    pub snapshot: &'a HostSnapshot,
+    pub now_ms: i64,
+    pub slots_used: usize,
+    pub memory_available_bytes: Option<u64>,
 }
 
 impl HostMetrics {
@@ -149,12 +162,8 @@ impl Page {
     }
 }
 
-pub fn render(
-    report: &HostReportedState,
-    metrics: &HostMetrics,
-    snapshot: &HostSnapshot,
-    now_ms: i64,
-) -> String {
+pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
+    let (report, snapshot, now_ms) = (scrape.report, scrape.snapshot, scrape.now_ms);
     let mut page = Page::new();
 
     page.metric(
@@ -325,6 +334,7 @@ pub fn render(
     passes::render(&mut page, report, &metrics.passes, snapshot);
     converge::render(&mut page, report, &metrics.converge, &snapshot.deploys, now_ms);
     health::render(&mut page, report, &metrics.health, snapshot);
+    resources::render(&mut page, &metrics.resources, scrape);
 
     page.0
 }
@@ -364,8 +374,27 @@ pub(crate) mod tests {
         }
     }
 
+    /// A page rendered as a scrape would render it, with nothing the scrape alone can say.
+    pub(crate) fn page(
+        report: &HostReportedState,
+        metrics: &HostMetrics,
+        snapshot: &HostSnapshot,
+        now_ms: i64,
+    ) -> String {
+        render(
+            metrics,
+            &Scrape {
+                report,
+                snapshot,
+                now_ms,
+                slots_used: 0,
+                memory_available_bytes: None,
+            },
+        )
+    }
+
     fn rendered(report: &HostReportedState, metrics: &HostMetrics) -> String {
-        render(report, metrics, &HostSnapshot::default(), 0)
+        page(report, metrics, &HostSnapshot::default(), 0)
     }
 
     fn lines_for<'a>(page: &'a str, name: &str) -> Vec<&'a str> {
@@ -431,7 +460,7 @@ pub(crate) mod tests {
         metrics
             .proxy
             .answered(Outcome::Served, Duration::from_millis(30), Some(&app));
-        let page = render(&report(), &metrics, &holding(&["app-1"]), 0);
+        let page = page(&report(), &metrics, &holding(&["app-1"]), 0);
 
         assert!(page.contains(r#"nibrunner_app_request_duration_seconds_count{app="app-1"} 2"#));
         assert!(page.contains(r#"nibrunner_app_request_duration_seconds_sum{app="app-1"} 0.04"#));
@@ -457,7 +486,7 @@ pub(crate) mod tests {
             .answered(Outcome::Served, Duration::from_millis(10), Some(&kept));
 
         metrics.forget(&gone);
-        let page = render(&report(), &metrics, &holding(&["app-2"]), 0);
+        let page = page(&report(), &metrics, &holding(&["app-2"]), 0);
 
         assert!(!page.contains(r#"app="app-1""#), "a departed app kept a series");
         assert!(page.contains(r#"nibrunner_app_request_duration_seconds_count{app="app-2"} 1"#));
@@ -490,6 +519,45 @@ pub(crate) mod tests {
             );
             assert!(page.contains(&format!("# HELP {name} ")), "{name} has no HELP");
         }
+    }
+
+    // A family introduced twice is a page Prometheus refuses whole, and a sample is one of its
+    // family only under its family's name — so a page with everything on it is checked for both.
+    #[test]
+    fn no_family_is_introduced_twice_and_every_sample_sits_under_its_own_family() {
+        let mut report = report();
+        report.instances = vec![crate::test_support::reported_instance(|_| {})];
+        report.volumes = vec![crate::test_support::reported_volume(|_| {})];
+        let snapshot = HostSnapshot {
+            records: std::collections::BTreeMap::from([(
+                crate::test_support::app_id(),
+                crate::test_support::instance_record(|_| {}),
+            )]),
+            ..Default::default()
+        };
+        let page = page(&report, &HostMetrics::default(), &snapshot, 0);
+
+        let mut families = Vec::new();
+        let mut current: Option<String> = None;
+        for line in page.lines().filter(|line| !line.is_empty()) {
+            if let Some(rest) = line.strip_prefix("# TYPE ") {
+                let name = rest.split(' ').next().unwrap().to_string();
+                assert!(!families.contains(&name), "{name} is introduced twice");
+                families.push(name.clone());
+                current = Some(name);
+            } else if !line.starts_with('#') {
+                let family = current.as_deref().expect("a sample under a family");
+                let name = line.split(['{', ' ']).next().unwrap();
+                assert!(
+                    name == family
+                        || name.strip_suffix("_bucket") == Some(family)
+                        || name.strip_suffix("_sum") == Some(family)
+                        || name.strip_suffix("_count") == Some(family),
+                    "{name} sits under {family}"
+                );
+            }
+        }
+        assert!(families.len() > 40, "{}", families.len());
     }
 
     #[test]

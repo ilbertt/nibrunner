@@ -259,7 +259,8 @@ pub(super) fn render(
 mod tests {
     use super::*;
     use crate::domain::metrics::converge::Cause;
-    use crate::domain::metrics::{render, HostMetrics};
+    use crate::domain::metrics::tests::page;
+    use crate::domain::metrics::HostMetrics;
     use crate::test_support::*;
     use protocol::DesiredInstanceState;
 
@@ -301,7 +302,7 @@ mod tests {
             isolated: false,
             ..Default::default()
         };
-        let page = render(&report, &metrics, &snapshot, 0);
+        let page = page(&report, &metrics, &snapshot, 0);
 
         assert_eq!(
             lines_for(&page, "nibrunner_build_info"),
@@ -339,15 +340,15 @@ mod tests {
         ];
 
         let nothing_asked = HostSnapshot::default();
-        assert!(render(&report, &metrics, &nothing_asked, 0).contains("nibrunner_host_converged 1\n"));
+        assert!(page(&report, &metrics, &nothing_asked, 0).contains("nibrunner_host_converged 1\n"));
 
         let one_on_its_way = HostSnapshot {
             deploys: BTreeMap::from([deploy(app_id(), true), deploy(other.clone(), false)]),
             ..Default::default()
         };
-        assert!(render(&report, &metrics, &one_on_its_way, 0).contains("nibrunner_host_converged 0\n"));
+        assert!(page(&report, &metrics, &one_on_its_way, 0).contains("nibrunner_host_converged 0\n"));
 
         report.instances[1].state = InstanceState::Running;
-        assert!(render(&report, &metrics, &one_on_its_way, 0).contains("nibrunner_host_converged 1\n"));
+        assert!(page(&report, &metrics, &one_on_its_way, 0).contains("nibrunner_host_converged 1\n"));
     }
 }

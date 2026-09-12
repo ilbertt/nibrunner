@@ -97,7 +97,7 @@ mod tests {
 
         let controller = StatusController::new(host.arc().clone(), Arc::new(reconciler), Arc::new(reports));
         assert_eq!(controller.status_once().await, STATUS_TICK);
-        let page = crate::domain::metrics::render(
+        let page = crate::domain::metrics::tests::page(
             &crate::domain::metrics::tests::report(),
             &host.metrics,
             &crate::state::HostSnapshot::default(),

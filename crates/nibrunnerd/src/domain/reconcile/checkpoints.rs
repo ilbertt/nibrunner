@@ -2,6 +2,7 @@ use protocol::{
     CheckpointState, DesiredCheckpoint, HostDesiredState, ReportedCheckpoint, StateMessage, Timestamp,
 };
 
+use crate::domain::metrics::resources::Operation;
 use crate::domain::reconcile::plan::{CheckpointPlan, ObservedCheckpoint, ReconcilePlan};
 use crate::host::Host;
 
@@ -37,7 +38,12 @@ pub async fn apply_checkpoints(host: &Host, plan: &ReconcilePlan) {
 }
 
 async fn cut(host: &Host, desired: &DesiredCheckpoint) -> ReportedCheckpoint {
-    match host.volumes.create_checkpoint(&desired.checkpoint_id).await {
+    let cutting = std::time::Instant::now();
+    let cut = host.volumes.create_checkpoint(&desired.checkpoint_id).await;
+    host.metrics
+        .resources
+        .done(Operation::CheckpointCreate, cut.is_ok(), cutting.elapsed());
+    match cut {
         Ok(()) => {
             tracing::info!(
                 checkpoint_id = %desired.checkpoint_id,
@@ -58,7 +64,12 @@ async fn cut(host: &Host, desired: &DesiredCheckpoint) -> ReportedCheckpoint {
 }
 
 async fn release(host: &Host, desired: &DesiredCheckpoint) {
-    if let Err(error) = host.volumes.delete_checkpoint(&desired.checkpoint_id).await {
+    let releasing = std::time::Instant::now();
+    let released = host.volumes.delete_checkpoint(&desired.checkpoint_id).await;
+    host.metrics
+        .resources
+        .done(Operation::CheckpointDelete, released.is_ok(), releasing.elapsed());
+    if let Err(error) = released {
         tracing::error!(
             checkpoint_id = %desired.checkpoint_id,
             error = %error.message(),

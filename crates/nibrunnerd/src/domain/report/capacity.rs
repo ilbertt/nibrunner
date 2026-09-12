@@ -60,6 +60,10 @@ pub fn read_host_memory_mib() -> u64 {
     read_meminfo_kib("MemTotal:").map_or(0, |kib| (kib * 1024) / BYTES_PER_MIB)
 }
 
+pub fn read_memory_available_bytes() -> Option<u64> {
+    read_meminfo_kib("MemAvailable:").map(|kib| kib * 1024)
+}
+
 #[cfg(target_os = "linux")]
 fn read_meminfo_kib(field: &str) -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;

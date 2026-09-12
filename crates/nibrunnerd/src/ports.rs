@@ -256,6 +256,9 @@ impl<T: ArtifactStore + ?Sized> ArtifactStoreExt for T {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedPayload {
     pub layer_image_paths: Vec<PathBuf>,
+    /// What was pulled from the store to prepare these, as the store sized it. 0 when every
+    /// layer was already in the cache.
+    pub fetched_bytes: u64,
 }
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]

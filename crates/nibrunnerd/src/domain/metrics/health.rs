@@ -233,7 +233,8 @@ pub(super) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::metrics::{render, HostMetrics};
+    use crate::domain::metrics::tests::page;
+    use crate::domain::metrics::HostMetrics;
     use crate::test_support::*;
     use protocol::Timestamp;
 
@@ -264,7 +265,7 @@ mod tests {
         report.instances = vec![reported_instance(|instance| {
             instance.last_healthy_at = Some(Timestamp::from_epoch_ms(1_700_000_000_250));
         })];
-        let page = render(&report, &host.metrics, &host.state.snapshot().await, 0);
+        let page = page(&report, &host.metrics, &host.state.snapshot().await, 0);
 
         assert_eq!(
             lines_for(&page, "nibrunner_instance_health_probes_total"),
@@ -296,7 +297,7 @@ mod tests {
         let metrics = HostMetrics::default();
         let mut report = crate::domain::metrics::tests::report();
         report.instances = vec![reported_instance(|_| {})];
-        let page = render(&report, &metrics, &HostSnapshot::default(), 0);
+        let page = page(&report, &metrics, &HostSnapshot::default(), 0);
         assert!(page.contains("nibrunner_instance_last_healthy_timestamp_seconds{app=\"app-1\"} 0.000\n"));
     }
 

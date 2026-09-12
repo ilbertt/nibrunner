@@ -489,6 +489,7 @@ mod tests {
             data_device_path: "/dev/loop0".into(),
             payload: crate::ports::PreparedPayload {
                 layer_image_paths: vec![PathBuf::from("/cache/abc/executable-0123456789abcdef.squashfs")],
+                fetched_bytes: 0,
             },
         }
     }
