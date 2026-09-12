@@ -16,6 +16,7 @@ use crate::adapters::proxy::{router, Router};
 use crate::adapters::vm::layers::LayerImages;
 use crate::adapters::vm::manager::{verify_guest_image, VmManager};
 use crate::adapters::vm::process::{extract_firecracker, VmProcesses, FIRECRACKER_VERSION};
+use crate::adapters::volumes::initial_contents::ContentsStaging;
 use crate::adapters::volumes::local_file::LocalFileVolumes;
 use crate::adapters::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
 use crate::config::HostConfig;
@@ -57,13 +58,19 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     }
     let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
 
+    let artifacts = Arc::new(
+        ObjectArtifactStore::open(&config.artifact_store_url)
+            .map_err(|error| StartupError::Config(error.message()))?,
+    );
     let storage_prefix = ObjectKey::parse(&config.storage_prefix)
         .map_err(|_| StartupError::Config("volumes.storage_prefix is not a key".into()))?;
+    let contents = ContentsStaging::new(artifacts.clone(), config.initial_contents_dir());
     let volumes: Arc<dyn crate::adapters::volumes::VolumeBackend> = match config.volumes.zerofs() {
         None => Arc::new(LocalFileVolumes::new(
             config.volumes_dir(),
             storage_prefix,
             commands.clone(),
+            contents,
         )),
         Some(settings) => Arc::new(ZerofsVolumes::new(
             ZerofsFilesystem {
@@ -76,12 +83,9 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             },
             allocator.clone(),
             commands.clone(),
+            contents,
         )),
     };
-    let artifacts = Arc::new(
-        ObjectArtifactStore::open(&config.artifact_store_url)
-            .map_err(|error| StartupError::Config(error.message()))?,
-    );
     let payloads = LayerImages::new(artifacts.clone(), config.artifact_cache_dir());
     let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let network = open_network()?;

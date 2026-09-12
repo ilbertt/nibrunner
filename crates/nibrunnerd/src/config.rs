@@ -212,6 +212,11 @@ impl HostConfig {
         self.in_state_dir("volumes")
     }
 
+    /// Where a volume's initial contents are laid out for the format that copies them in.
+    pub fn initial_contents_dir(&self) -> PathBuf {
+        self.in_state_dir("initial-contents")
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.in_state_dir("logs")
     }

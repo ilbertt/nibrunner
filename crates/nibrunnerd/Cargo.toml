@@ -30,6 +30,7 @@ sqlx.workspace = true
 toml.workspace = true
 tar.workspace = true
 flate2.workspace = true
+zip.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 tokio.workspace = true

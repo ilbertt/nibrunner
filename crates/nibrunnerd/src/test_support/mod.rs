@@ -87,8 +87,8 @@ pub fn tenant_environment(values: &[(&str, &str)]) -> TenantEnvironment {
 }
 
 /// The app's own layer: one program the host packs.
-pub fn layer(edit: impl FnOnce(&mut LayerObject)) -> DesiredLayer {
-    let mut object = LayerObject {
+pub fn layer(edit: impl FnOnce(&mut StoredObject)) -> DesiredLayer {
+    let mut object = StoredObject {
         digest: Sha256Digest::parse(ARTIFACT_DIGEST).unwrap(),
         object_key: ObjectKey::parse("artifacts/9f1c2f0e-0d4e-4a1b-9c3a-1f8b6d2e7a45").unwrap(),
     };
@@ -102,7 +102,7 @@ pub fn layer(edit: impl FnOnce(&mut LayerObject)) -> DesiredLayer {
 /// A layer uploaded whole, attached as it is.
 pub fn base_layer() -> DesiredLayer {
     DesiredLayer::Filesystem {
-        object: LayerObject {
+        object: StoredObject {
             digest: Sha256Digest::parse(BASE_LAYER_DIGEST).unwrap(),
             object_key: ObjectKey::parse("layers/debian").unwrap(),
         },
@@ -149,9 +149,22 @@ pub fn desired_volume(edit: impl FnOnce(&mut DesiredVolume)) -> DesiredVolume {
         app_id: app_id(),
         size_bytes: VOLUME_SIZE_BYTES,
         desired_state: DesiredPresence::Present,
+        initial_contents: None,
     };
     edit(&mut value);
     value
+}
+
+/// What a volume starts with: this archive, unpacked at `destination_path`.
+pub fn initial_contents(archive: &[u8], destination_path: &str) -> InitialContents {
+    use sha2::Digest;
+    InitialContents {
+        object: StoredObject {
+            digest: Sha256Digest::parse(hex::encode(sha2::Sha256::digest(archive))).unwrap(),
+            object_key: ObjectKey::parse("seeds/app-1").unwrap(),
+        },
+        destination_path: GuestPath::parse(destination_path).unwrap(),
+    }
 }
 
 pub fn desired_checkpoint(edit: impl FnOnce(&mut DesiredCheckpoint)) -> DesiredCheckpoint {
@@ -374,6 +387,10 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
             config.volumes_dir(),
             ObjectKey::parse(&config.storage_prefix).expect("a storage prefix"),
             commands.clone(),
+            crate::adapters::volumes::initial_contents::ContentsStaging::new(
+                artifacts.clone(),
+                config.initial_contents_dir(),
+            ),
         )),
         artifacts: artifacts.clone(),
         payloads: crate::adapters::vm::layers::LayerImages::new(artifacts, config.artifact_cache_dir()),

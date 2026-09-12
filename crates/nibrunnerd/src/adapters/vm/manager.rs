@@ -453,6 +453,10 @@ mod tests {
                 root.join("volumes"),
                 ObjectKey::parse("volumes").unwrap(),
                 mocks::commands_succeeding().0,
+                crate::adapters::volumes::initial_contents::ContentsStaging::new(
+                    mocks::artifacts_holding(Vec::new()),
+                    root.join("initial-contents"),
+                ),
             )),
             logs: TenantLogReceiver::new(),
             sink: Arc::new(FileLogSink::new(root.join("logs"))),

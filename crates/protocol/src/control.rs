@@ -43,12 +43,12 @@ pub enum DesiredPresence {
 pub const MAX_LAYERS: usize = 8;
 
 /// An object in the store the host's `artifacts.store_url` names, checked against `digest`
-/// before anything boots from it. The digest is the whole of what is checked: a `sizeBytes`
+/// before anything is made from it. The digest is the whole of what is checked: a `sizeBytes`
 /// beside it, which a document used to carry, is read past.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct LayerObject {
+pub struct StoredObject {
     pub digest: Sha256Digest,
     /// Where the object lives in the store.
     pub object_key: ObjectKey,
@@ -64,19 +64,19 @@ pub enum DesiredLayer {
     /// A squashfs or ext4 image, attached as it was uploaded.
     Filesystem {
         #[serde(flatten)]
-        object: LayerObject,
+        object: StoredObject,
     },
     /// One program, packed into an image at `destinationPath` and run the way this host has
     /// always run one: by the guest's own init, with the app's arguments and environment.
     Executable {
         #[serde(flatten)]
-        object: LayerObject,
+        object: StoredObject,
         destination_path: ExecutablePath,
     },
 }
 
 impl DesiredLayer {
-    pub fn object(&self) -> &LayerObject {
+    pub fn object(&self) -> &StoredObject {
         match self {
             DesiredLayer::Filesystem { object } | DesiredLayer::Executable { object, .. } => object,
         }
@@ -241,6 +241,21 @@ fn desired_instance_rules(schema: &mut schemars::Schema) {
     }
 }
 
+/// What a volume holds before its app has written a byte: an archive in the store — a tar,
+/// gzipped or not, or a zip — unpacked under `destinationPath` in the app's root as the volume is
+/// formatted. That happens once, so this is read once: a volume already formatted is its app's,
+/// and a change here does nothing to it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct InitialContents {
+    #[serde(flatten)]
+    pub object: StoredObject,
+    /// The directory the archive's entries land under, as the app sees it. Made if no layer holds
+    /// it, and given — with everything unpacked into it — to the uid the program runs as.
+    pub destination_path: GuestPath,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -249,6 +264,9 @@ pub struct DesiredVolume {
     pub app_id: AppId,
     pub size_bytes: u64,
     pub desired_state: DesiredPresence,
+    /// Absent for a volume that starts empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_contents: Option<InitialContents>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

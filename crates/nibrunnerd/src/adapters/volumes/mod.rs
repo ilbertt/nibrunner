@@ -1,11 +1,16 @@
+pub mod initial_contents;
 pub mod local_file;
 pub mod nbd;
 pub mod zerofs;
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use protocol::{AppId, CheckpointId, DesiredVolume, ObjectKey, VolumeId};
+
+use crate::adapters::volumes::initial_contents::StagedRoot;
+use crate::ports::CommandRequest;
 
 pub const SECTOR_SIZE_BYTES: u64 = 512;
 
@@ -21,6 +26,8 @@ pub enum VolumeError {
     SuperblockUnreadable { device_path: String },
     #[error("the volume could not be made ready: {0}")]
     Unusable(String),
+    #[error("the initial contents could not be laid out: {0}")]
+    ContentsUnusable(String),
     #[error("this host does not serve {volume_id}")]
     NotHere { volume_id: VolumeId },
     #[error("{what} cannot be checkpointed")]
@@ -96,6 +103,34 @@ pub fn has_ext_magic(bytes: &[u8]) -> bool {
 }
 
 pub const FILESYSTEM_LABEL: &str = "nibrun-data";
+
+/// A format that copies contents in is as long as the contents; one that does not is seconds.
+const SEEDED_FORMAT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// One ext4 over `device_path`, holding `contents` from the start when there are any. `-F`
+/// is for a regular file, which mke2fs otherwise stops to ask about.
+pub(crate) fn format_request(
+    device_path: &str,
+    contents: Option<&StagedRoot>,
+    regular_file: bool,
+) -> CommandRequest {
+    let mut command = vec!["mke2fs", "-q", "-t", "ext4"];
+    if regular_file {
+        command.push("-F");
+    }
+    command.extend(["-L", FILESYSTEM_LABEL]);
+    let root;
+    if let Some(staged) = contents {
+        root = staged.path().display().to_string();
+        command.extend(["-d", root.as_str()]);
+    }
+    command.push(device_path);
+    let mut request = CommandRequest::new(&command);
+    if contents.is_some() {
+        request.timeout = SEEDED_FORMAT_TIMEOUT;
+    }
+    request
+}
 
 #[cfg(test)]
 mod tests {
@@ -184,6 +219,47 @@ mod tests {
             VolumeError::Unusable("the device would not open".into()).message(),
             "the volume could not be made ready: the device would not open"
         );
+        assert_eq!(
+            VolumeError::ContentsUnusable("the archive could not be read".into()).message(),
+            "the initial contents could not be laid out: the archive could not be read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_format_names_the_label_the_device_last_and_a_root_only_when_it_has_one() {
+        let plain = format_request("/dev/nbd0", None, false);
+        assert_eq!(
+            plain.command,
+            ["mke2fs", "-q", "-t", "ext4", "-L", FILESYSTEM_LABEL, "/dev/nbd0"]
+        );
+        assert_eq!(plain.timeout, CommandRequest::new(&[]).timeout);
+
+        let directory = tempfile::tempdir().unwrap();
+        let archive = initial_contents::tests::archive();
+        let staged = initial_contents::tests::staging(directory.path(), archive.clone())
+            .stage(
+                &VolumeId::parse("vol-1").unwrap(),
+                &crate::test_support::initial_contents(&archive, "/"),
+            )
+            .await
+            .unwrap();
+        let seeded = format_request("/var/lib/nibrunner/volumes/vol-1", Some(&staged), true);
+        assert_eq!(
+            seeded.command,
+            [
+                "mke2fs",
+                "-q",
+                "-t",
+                "ext4",
+                "-F",
+                "-L",
+                FILESYSTEM_LABEL,
+                "-d",
+                &staged.path().display().to_string(),
+                "/var/lib/nibrunner/volumes/vol-1"
+            ]
+        );
+        assert_eq!(seeded.timeout, SEEDED_FORMAT_TIMEOUT);
     }
 
     #[test]
