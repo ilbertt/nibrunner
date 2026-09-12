@@ -18,8 +18,7 @@ pub const MODPROBE_FILE: &str = "/etc/modprobe.d/nibrunner-nbd.conf";
 const IP_FORWARD: &str = "/proc/sys/net/ipv4/ip_forward";
 const NBDS_MAX: &str = "/sys/module/nbd/parameters/nbds_max";
 
-/// What the file asks for. More than this host can use, deliberately: it costs nothing, and it is
-/// what every measured run of this has been done on.
+/// What the file asks for. More than this host can use, deliberately: it costs nothing.
 const NBDS_MAX_REQUESTED: u32 = 1024;
 
 /// Slot N takes /dev/nbdN and the export reader holds the last of them, so the minors this host
