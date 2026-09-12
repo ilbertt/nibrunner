@@ -35,7 +35,12 @@ impl ReportService for HostReporter {
 
     async fn publish(&self) {
         let report = self.build().await;
-        writer::write(&self.path, &report);
+        if writer::write(&self.path, &report) {
+            self.host
+                .metrics
+                .passes
+                .report_written(report.reported_at.epoch_ms());
+        }
     }
 }
 
@@ -82,6 +87,13 @@ mod tests {
             .expect("the report was written where the reporter named");
         assert_eq!(written.instances.len(), 1);
         assert_eq!(written.instances[0].app_id, app_id());
+        assert!(
+            page(&host, &written).contains(&format!(
+                "nibrunner_report_written_timestamp_seconds {}\n",
+                crate::domain::metrics::as_seconds(written.reported_at.epoch_ms() as u64)
+            )),
+            "the scrape says when the file was last written"
+        );
     }
 
     #[tokio::test]
@@ -106,6 +118,12 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         reporter(&host).publish().await;
         assert!(path.is_dir());
+        let report = reporter(&host).build().await;
+        assert!(page(&host, &report).contains("nibrunner_report_written_timestamp_seconds 0.000\n"));
+    }
+
+    fn page(host: &TestHost, report: &HostReportedState) -> String {
+        crate::domain::metrics::render(report, &host.metrics, &crate::state::HostSnapshot::default(), 0)
     }
 
     fn reporter(host: &TestHost) -> Arc<dyn ReportService> {

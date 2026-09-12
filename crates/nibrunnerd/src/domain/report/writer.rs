@@ -47,9 +47,13 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     })
 }
 
-pub fn write(path: &Path, report: &HostReportedState) {
-    if let Err(error) = crate::json_store::write_json(path, report) {
-        tracing::warn!(error = %error.message(), "this host could not write down what it observed");
+pub fn write(path: &Path, report: &HostReportedState) -> bool {
+    match crate::json_store::write_json(path, report) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(error = %error.message(), "this host could not write down what it observed");
+            false
+        }
     }
 }
 
@@ -102,7 +106,7 @@ mod tests {
         host.state.put_record(instance_record(|_| {})).await;
         let report = build(&host, versions()).await;
         let path = reported_state_file(&host);
-        write(&path, &report);
+        assert!(write(&path, &report));
         let read_back: HostReportedState = crate::json_store::read_json(&path)
             .unwrap()
             .expect("the report is there");
@@ -115,7 +119,7 @@ mod tests {
         let host = test_host().await;
         let path = reported_state_file(&host);
         std::fs::create_dir_all(&path).unwrap();
-        write(&path, &build(&host, versions()).await);
+        assert!(!write(&path, &build(&host, versions()).await));
         assert!(path.is_dir());
     }
 }

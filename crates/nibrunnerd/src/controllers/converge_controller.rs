@@ -7,6 +7,7 @@ use protocol::HostDesiredState;
 use crate::controllers::Controller;
 use crate::desired::{Changes, DesiredStateWatch};
 use crate::domain::metrics::converge::{self, Cause};
+use crate::domain::metrics::passes::Trigger;
 use crate::host::Host;
 use crate::services::reconcile_service::ReconcileService;
 
@@ -28,33 +29,44 @@ impl ConvergeController {
             return false;
         };
         converge::detected(&self.host, &changes, Cause::Restart, crate::clock::now_ms()).await;
-        self.reconciler.reconcile(&cached).await;
+        self.reconcile(&cached, Trigger::Restart).await;
         true
     }
 
     pub async fn converge_once(&self) -> bool {
         match crate::desired::read_desired_state(&self.host.config.desired_state_file) {
             Ok(Some(desired)) => {
-                match self.accept(&desired).await {
+                let trigger = match self.accept(&desired).await {
                     Some(changes) => {
                         converge::detected(&self.host, &changes, Cause::Change, crate::clock::now_ms()).await;
                         let _ = crate::desired::cache_desired_state(
                             &self.host.config.cached_desired_state_file(),
                             &desired,
                         );
+                        Trigger::Change
                     }
                     None if !self.host.state.snapshot().await.deferred_work => return false,
-                    None => {}
-                }
-                self.reconciler.reconcile(&desired).await;
+                    None => Trigger::Deferred,
+                };
+                self.reconcile(&desired, trigger).await;
                 true
             }
             Ok(None) => false,
             Err(error) => {
+                self.host.metrics.passes.desired_state_unreadable();
                 tracing::error!(error = %error.message(), "the desired state file was not read");
                 false
             }
         }
+    }
+
+    async fn reconcile(&self, desired: &HostDesiredState, trigger: Trigger) {
+        let started = std::time::Instant::now();
+        self.reconciler.reconcile(desired).await;
+        self.host
+            .metrics
+            .passes
+            .reconciled(trigger, started.elapsed(), crate::clock::now_ms());
     }
 
     /// What moved, when the document did; nothing when it stood still.
@@ -123,6 +135,12 @@ mod tests {
         assert_eq!(deploy.cause, Cause::Change);
         assert!(deploy.detected_at_ms >= before);
         assert!(deploy.is_open());
+        let page = page(&host).await;
+        assert!(
+            page.contains("nibrunner_reconcile_seconds_count{trigger=\"change\"} 1\n"),
+            "{page}"
+        );
+        assert!(!page.contains("nibrunner_reconcile_last_pass_timestamp_seconds 0.000\n"));
     }
 
     #[tokio::test]
@@ -138,6 +156,18 @@ mod tests {
             host.state.snapshot().await.deploys[&app_id()].cause,
             Cause::Restart
         );
+        assert!(page(&host)
+            .await
+            .contains("nibrunner_reconcile_seconds_count{trigger=\"restart\"} 1\n"));
+    }
+
+    async fn page(host: &TestHost) -> String {
+        crate::domain::metrics::render(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        )
     }
 
     #[tokio::test]
@@ -171,6 +201,9 @@ mod tests {
         assert!(controller.converge_once().await);
         host.state.modify(|snapshot| snapshot.deferred_work = true).await;
         assert!(controller.converge_once().await);
+        assert!(page(&host)
+            .await
+            .contains("nibrunner_reconcile_seconds_count{trigger=\"deferred\"} 1\n"));
     }
 
     #[tokio::test]
@@ -182,6 +215,9 @@ mod tests {
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().never();
         assert!(!controller(&host, reconciler).converge_once().await);
+        assert!(page(&host)
+            .await
+            .contains("nibrunner_desired_state_unreadable_total 1\n"));
     }
 
     #[tokio::test]

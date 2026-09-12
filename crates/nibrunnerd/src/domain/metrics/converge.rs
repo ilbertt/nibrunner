@@ -395,6 +395,7 @@ mod tests {
     use super::*;
     use crate::adapters::vm::VmStatus;
     use crate::domain::metrics::HostMetrics;
+    use crate::state::HostSnapshot;
     use crate::test_support::*;
     use protocol::{ActivationPolicy, ReadinessPolicy, SleepPolicy};
 
@@ -781,7 +782,11 @@ mod tests {
                 instance.state = InstanceState::Starting;
             }),
         ];
-        let page = crate::domain::metrics::render(&report, &metrics, &deploys, DETECTED + 10_000);
+        let snapshot = HostSnapshot {
+            deploys,
+            ..Default::default()
+        };
+        let page = crate::domain::metrics::render(&report, &metrics, &snapshot, DETECTED + 10_000);
 
         let converged = lines_for(&page, "nibrunner_instance_converged");
         assert_eq!(
@@ -830,7 +835,11 @@ mod tests {
         report.instances = vec![reported_instance(|instance| {
             instance.state = InstanceState::Failed
         })];
-        let page = crate::domain::metrics::render(&report, &metrics, &deploys, DETECTED + 5_000);
+        let snapshot = HostSnapshot {
+            deploys,
+            ..Default::default()
+        };
+        let page = crate::domain::metrics::render(&report, &metrics, &snapshot, DETECTED + 5_000);
         assert_eq!(
             lines_for(&page, "nibrunner_instance_converged"),
             vec!["nibrunner_instance_converged{app=\"app-1\"} 0"]

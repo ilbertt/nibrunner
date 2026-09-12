@@ -282,8 +282,8 @@ async fn answer_scrape(host: &Arc<Host>, path: &str) -> hyper::Response<http_bod
             .expect("a constant response is always buildable");
     }
     let report = crate::domain::report::writer::build(host, host_versions(host)).await;
-    let deploys = host.state.snapshot().await.deploys;
-    let page = crate::domain::metrics::render(&report, &host.metrics, &deploys, crate::clock::now_ms());
+    let snapshot = host.state.snapshot().await;
+    let page = crate::domain::metrics::render(&report, &host.metrics, &snapshot, crate::clock::now_ms());
     hyper::Response::builder()
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(Full::new(bytes::Bytes::from(page)))
