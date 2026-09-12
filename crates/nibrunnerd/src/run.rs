@@ -152,7 +152,8 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         artifacts,
         payloads,
         firewall: Arc::new(HostFirewall::new(commands)),
-        router: Router::new(metrics),
+        router: Router::new(metrics.clone()),
+        metrics,
         activator,
         stream_activator,
         datagram_activator,
@@ -281,7 +282,8 @@ async fn answer_scrape(host: &Arc<Host>, path: &str) -> hyper::Response<http_bod
             .expect("a constant response is always buildable");
     }
     let report = crate::domain::report::writer::build(host, host_versions(host)).await;
-    let page = crate::domain::metrics::render(&report, &host.router.metrics());
+    let deploys = host.state.snapshot().await.deploys;
+    let page = crate::domain::metrics::render(&report, &host.metrics, &deploys, crate::clock::now_ms());
     hyper::Response::builder()
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(Full::new(bytes::Bytes::from(page)))

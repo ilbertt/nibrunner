@@ -49,6 +49,8 @@ pub struct InstanceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converged_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<StateMessage>,
@@ -95,6 +97,7 @@ impl InstanceRecord {
             restart_count: 0,
             stop_requested: false,
             started_at: None,
+            converged_at: None,
             last_exit_code: None,
             message: None,
         }

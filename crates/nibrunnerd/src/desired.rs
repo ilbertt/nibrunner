@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use protocol::HostDesiredState;
+use protocol::{AppId, DesiredInstance, HostDesiredState};
 
 use crate::json_store::{read_json, write_json, StoreError};
 
@@ -37,6 +37,15 @@ pub fn cache_desired_state(path: &Path, state: &HostDesiredState) -> Result<(), 
     write_json(path, state)
 }
 
+/// What a document asks for that the one before it did not: the apps whose deployment or
+/// desired state moved, or that are new, and the apps it no longer names. Everything else about
+/// an instance is taken up without starting anything, so is not a change to converge on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Changes {
+    pub wanted: Vec<DesiredInstance>,
+    pub gone: Vec<AppId>,
+}
+
 #[derive(Debug, Default)]
 pub struct DesiredStateCache {
     latest: Option<HostDesiredState>,
@@ -49,6 +58,34 @@ impl DesiredStateCache {
 
     pub fn latest(&self) -> Option<&HostDesiredState> {
         self.latest.as_ref()
+    }
+
+    pub fn changes_in(&self, next: &HostDesiredState) -> Changes {
+        let before: Vec<&DesiredInstance> = self
+            .latest
+            .as_ref()
+            .map(|latest| latest.instances.iter().collect())
+            .unwrap_or_default();
+        let same_ask = |wanted: &DesiredInstance| {
+            before.iter().any(|held| {
+                held.app_id == wanted.app_id
+                    && held.deployment_id == wanted.deployment_id
+                    && held.desired_state == wanted.desired_state
+            })
+        };
+        Changes {
+            wanted: next
+                .instances
+                .iter()
+                .filter(|wanted| !same_ask(wanted))
+                .cloned()
+                .collect(),
+            gone: before
+                .iter()
+                .filter(|held| !next.instances.iter().any(|wanted| wanted.app_id == held.app_id))
+                .map(|held| held.app_id.clone())
+                .collect(),
+        }
     }
 
     pub fn accept(&mut self, state: HostDesiredState) -> bool {
@@ -188,6 +225,52 @@ mod tests {
             .unwrap_err()
             .message()
             .contains("cannot read"));
+    }
+
+    #[test]
+    fn what_changed_is_the_ask_for_each_app_and_not_the_rest_of_its_document() {
+        let mut cache = DesiredStateCache::new();
+        let first = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
+        assert_eq!(
+            cache.changes_in(&first),
+            Changes {
+                wanted: first.instances.clone(),
+                gone: vec![]
+            },
+            "to a host that has seen nothing, every app is new"
+        );
+        cache.accept(first.clone());
+
+        let renamed = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.hostnames = vec![crate::test_support::app_hostname()];
+                instance.config.health_check.interval_ms = 1;
+            })]
+        });
+        assert_eq!(cache.changes_in(&renamed), Changes::default());
+
+        let redeployed = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.deployment_id = protocol::DeploymentId::parse("dep-2").unwrap();
+            })]
+        });
+        assert_eq!(cache.changes_in(&redeployed).wanted, redeployed.instances);
+
+        let stopped = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.desired_state = protocol::DesiredInstanceState::Stopped;
+            })]
+        });
+        assert_eq!(cache.changes_in(&stopped).wanted, stopped.instances);
+
+        let other = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.app_id = protocol::AppId::parse("app-2").unwrap();
+            })]
+        });
+        let changes = cache.changes_in(&other);
+        assert_eq!(changes.wanted, other.instances);
+        assert_eq!(changes.gone, vec![crate::test_support::app_id()]);
     }
 
     #[test]

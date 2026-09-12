@@ -128,7 +128,7 @@ impl AppActivator {
             };
         }
         let woke = started.elapsed();
-        self.metrics.woke(woke);
+        self.metrics.sleep_wake.woke(woke);
         let woke_ms = woke.as_millis();
 
         let Some(woken) = self.state.record(&app_id).await else {

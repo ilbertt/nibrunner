@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use protocol::{AppId, DesiredInstance, DesiredInstanceState, InstanceState, StateMessage};
@@ -9,6 +10,7 @@ use crate::domain::health::{
     apply_probe, describe_instance_failure, evaluate_instance_state, initial_tracker, next_probe_delay_ms,
     LifecycleInputs,
 };
+use crate::domain::metrics::converge;
 use crate::domain::reconcile::plan::{InstancePlan, ReconcilePlan};
 use crate::domain::report::instance_record::{InstanceRecord, RecordFields};
 use crate::host::Host;
@@ -254,7 +256,14 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         Err(error) => Err(error.message()),
         Ok(payload) => {
             let data_device_path = match host.volumes.attach(&desired.volume_id, &desired.app_id).await {
-                Ok(attached) => attached.device_path,
+                Ok(attached) => {
+                    let attached_at = now_ms();
+                    converge::stamp(&host.state, &desired.app_id, |deploy| {
+                        deploy.volume_ready_at_ms = Some(attached_at);
+                    })
+                    .await;
+                    attached.device_path
+                }
                 Err(error) => {
                     host.state
                         .update_record(&desired.app_id, |record| {
@@ -281,6 +290,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     match booted {
         Ok(()) => {
             let started_at = now_timestamp();
+            let booted_at = started_at.epoch_ms();
             host.state
                 .update_record(&desired.app_id, |record| {
                     record.started_at = Some(started_at);
@@ -290,6 +300,10 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                     record.message = None;
                 })
                 .await;
+            converge::stamp(&host.state, &desired.app_id, |deploy| {
+                deploy.booted_at_ms = Some(booted_at);
+            })
+            .await;
             host.state.probe_at_once(&desired.app_id).await;
             tracing::info!(app_id = %desired.app_id, host_port = %attempted.host_port, guest_ipv4 = %attempted.guest_ipv4, "instance started");
         }
@@ -487,24 +501,44 @@ async fn settle(
     host.state.signal_report();
 }
 
+fn starting(plan: &ReconcilePlan) -> impl Iterator<Item = &DesiredInstance> {
+    plan.instances.iter().filter_map(|action| match action {
+        InstancePlan::Start { desired } | InstancePlan::Replace { desired } => Some(desired),
+        _ => None,
+    })
+}
+
 pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
-    let mut seen = std::collections::BTreeSet::new();
-    plan.instances
-        .iter()
-        .filter_map(|action| match action {
-            InstancePlan::Start { desired } | InstancePlan::Replace { desired } => Some(&desired.layers),
-            _ => None,
-        })
-        .flatten()
+    let mut seen = BTreeSet::new();
+    starting(plan)
+        .flat_map(|desired| &desired.layers)
         .filter(|layer| seen.insert((*layer).clone()))
         .cloned()
         .collect()
 }
 
 pub async fn prefetch_layers(host: &Host, plan: &ReconcilePlan) {
+    let mut waiting: Vec<&DesiredInstance> = starting(plan).collect();
+    let mut prepared = BTreeSet::new();
     for layer in layers_to_start(plan) {
-        if let Err(error) = host.payloads.prepare(std::slice::from_ref(&layer)).await {
-            tracing::warn!(digest = %layer.object().digest, error = %error.message(), "layer prefetch failed");
+        match host.payloads.prepare(std::slice::from_ref(&layer)).await {
+            Ok(_) => {
+                prepared.insert(layer);
+            }
+            Err(error) => {
+                tracing::warn!(digest = %layer.object().digest, error = %error.message(), "layer prefetch failed");
+            }
+        }
+        let ready_at = now_ms();
+        let (ready, still_waiting): (Vec<_>, Vec<_>) = waiting
+            .into_iter()
+            .partition(|desired| desired.layers.iter().all(|layer| prepared.contains(layer)));
+        waiting = still_waiting;
+        for desired in ready {
+            converge::stamp(&host.state, &desired.app_id, |deploy| {
+                deploy.layers_ready_at_ms = Some(ready_at);
+            })
+            .await;
         }
     }
 }

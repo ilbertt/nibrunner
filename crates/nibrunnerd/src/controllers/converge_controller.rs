@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use protocol::HostDesiredState;
+
 use crate::controllers::Controller;
-use crate::desired::DesiredStateWatch;
+use crate::desired::{Changes, DesiredStateWatch};
+use crate::domain::metrics::converge::{self, Cause};
 use crate::host::Host;
 use crate::services::reconcile_service::ReconcileService;
 
@@ -21,9 +24,10 @@ impl ConvergeController {
         let Some(cached) = self.host.cached_desired_state().await else {
             return false;
         };
-        if !self.host.cache.lock().await.accept(cached.clone()) {
+        let Some(changes) = self.accept(&cached).await else {
             return false;
-        }
+        };
+        converge::detected(&self.host, &changes, Cause::Restart, crate::clock::now_ms()).await;
         self.reconciler.reconcile(&cached).await;
         true
     }
@@ -31,14 +35,16 @@ impl ConvergeController {
     pub async fn converge_once(&self) -> bool {
         match crate::desired::read_desired_state(&self.host.config.desired_state_file) {
             Ok(Some(desired)) => {
-                let news = self.host.cache.lock().await.accept(desired.clone());
-                if news {
-                    let _ = crate::desired::cache_desired_state(
-                        &self.host.config.cached_desired_state_file(),
-                        &desired,
-                    );
-                } else if !self.host.state.snapshot().await.deferred_work {
-                    return false;
+                match self.accept(&desired).await {
+                    Some(changes) => {
+                        converge::detected(&self.host, &changes, Cause::Change, crate::clock::now_ms()).await;
+                        let _ = crate::desired::cache_desired_state(
+                            &self.host.config.cached_desired_state_file(),
+                            &desired,
+                        );
+                    }
+                    None if !self.host.state.snapshot().await.deferred_work => return false,
+                    None => {}
                 }
                 self.reconciler.reconcile(&desired).await;
                 true
@@ -49,6 +55,13 @@ impl ConvergeController {
                 false
             }
         }
+    }
+
+    /// What moved, when the document did; nothing when it stood still.
+    async fn accept(&self, desired: &HostDesiredState) -> Option<Changes> {
+        let mut cache = self.host.cache.lock().await;
+        let changes = cache.changes_in(desired);
+        cache.accept(desired.clone()).then_some(changes)
     }
 }
 
@@ -93,6 +106,38 @@ mod tests {
             .returning(|_| ());
 
         assert!(controller(&host, reconciler).converge_once().await);
+    }
+
+    #[tokio::test]
+    async fn the_moment_a_change_is_noticed_is_written_down_before_the_pass_sets_out() {
+        let host = test_host().await;
+        let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
+        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().times(1).returning(|_| ());
+
+        let before = crate::clock::now_ms();
+        assert!(controller(&host, reconciler).converge_once().await);
+
+        let deploy = &host.state.snapshot().await.deploys[&app_id()];
+        assert_eq!(deploy.cause, Cause::Change);
+        assert!(deploy.detected_at_ms >= before);
+        assert!(deploy.is_open());
+    }
+
+    #[tokio::test]
+    async fn what_a_restart_sets_out_on_is_measured_as_a_restart() {
+        let host = test_host().await;
+        let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
+        crate::desired::cache_desired_state(&host.config.cached_desired_state_file(), &desired).unwrap();
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().times(1).returning(|_| ());
+
+        assert!(controller(&host, reconciler).converge_cached().await);
+        assert_eq!(
+            host.state.snapshot().await.deploys[&app_id()].cause,
+            Cause::Restart
+        );
     }
 
     #[tokio::test]
