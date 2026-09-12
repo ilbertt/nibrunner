@@ -293,13 +293,31 @@ mod tests {
             .put_record(instance_record(|record| record.on_request = true))
             .await;
 
-        instances::suspend_instance(&host, &app_id(), "idle").await;
+        instances::suspend_instance(&host, &app_id(), crate::domain::activation::SleepReason::Quiet).await;
 
         assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Idle);
         assert!(record.stop_requested);
         assert!(!host.state.snapshot().await.snapshotting.contains(&app_id()));
+        let page = metrics_page(&host).await;
+        assert!(page.contains("nibrunner_sleep_outcomes_total{reason=\"idle\",outcome=\"slept\"} 1\n"));
+        assert!(page.contains("nibrunner_sleep_phase_seconds_count{phase=\"flush\",reason=\"idle\"} 1\n"));
+        assert!(page.contains("nibrunner_sleep_phase_seconds_count{phase=\"total\",reason=\"idle\"} 1\n"));
+        assert!(page.contains("nibrunner_instance_sleeps_total{app=\"app-1\",outcome=\"slept\"} 1\n"));
+        assert!(
+            page.contains("nibrunner_instance_last_sleep_seconds{app=\"app-1\"} 0."),
+            "{page}"
+        );
+    }
+
+    async fn metrics_page(host: &TestHost) -> String {
+        crate::domain::metrics::render(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        )
     }
 
     #[tokio::test]
@@ -313,13 +331,19 @@ mod tests {
             .put_record(instance_record(|record| record.on_request = true))
             .await;
 
-        instances::suspend_instance(&host, &app_id(), "idle").await;
+        instances::suspend_instance(&host, &app_id(), crate::domain::activation::SleepReason::Quiet).await;
 
         assert_eq!(
             host.state.record(&app_id()).await.unwrap().state,
             InstanceState::Running
         );
         assert!(!host.state.snapshot().await.snapshotting.contains(&app_id()));
+        let page = metrics_page(&host).await;
+        assert!(page.contains("nibrunner_sleep_outcomes_total{reason=\"idle\",outcome=\"refused\"} 1\n"));
+        assert!(
+            page.contains("nibrunner_sleep_phase_seconds_count{phase=\"total\",reason=\"idle\"} 0\n"),
+            "a sleep that did not happen took no time"
+        );
     }
 
     #[tokio::test]
@@ -328,7 +352,7 @@ mod tests {
         host.state
             .put_record(instance_record(|record| record.on_request = true))
             .await;
-        instances::suspend_instance(&host, &app_id(), "idle").await;
+        instances::suspend_instance(&host, &app_id(), crate::domain::activation::SleepReason::Quiet).await;
         assert_eq!(host.vms.calls(), vec![VmCall::Stop]);
     }
 

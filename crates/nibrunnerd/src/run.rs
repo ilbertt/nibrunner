@@ -173,6 +173,7 @@ impl crate::ports::Waker for DeferredWaker {
         match self.waker.get() {
             Some(waker) => waker.wake(app_id).await,
             None => Err(crate::ports::WakeRefusal::Failed {
+                kind: crate::ports::WakeFailure::HostStarting,
                 reason: "this host is still starting".into(),
             }),
         }

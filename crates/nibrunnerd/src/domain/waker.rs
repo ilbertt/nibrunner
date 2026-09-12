@@ -8,7 +8,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::domain::health::probe::probe_instance;
 use crate::domain::report::capacity::{committed_resources, memory_shortfall_mib};
 use crate::host::Host;
-use crate::ports::{WakeRefusal, Waker};
+use crate::ports::{WakeFailure, WakeRefusal, Waker};
 
 const PROBE_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -63,16 +63,19 @@ impl AppWaker {
         };
         let Some(wanted) = wanted else {
             return Err(WakeRefusal::Failed {
+                kind: WakeFailure::NotNamed,
                 reason: "the control plane no longer names it".into(),
             });
         };
         if wanted.desired_state != DesiredInstanceState::OnRequest {
             return Err(WakeRefusal::Failed {
+                kind: WakeFailure::NotOnRequest,
                 reason: format!("it is {}", wanted.desired_state.as_str()),
             });
         }
         if !self.host.state.snapshot().await.isolated {
             return Err(WakeRefusal::Failed {
+                kind: WakeFailure::NotIsolated,
                 reason: "the isolation ruleset is not applied".into(),
             });
         }
@@ -93,10 +96,14 @@ impl AppWaker {
 
         let outcome = crate::domain::reconcile::instances::resume_instance(&self.host, &wanted)
             .await
-            .map_err(|reason| WakeRefusal::Failed { reason })?;
+            .map_err(|reason| WakeRefusal::Failed {
+                kind: WakeFailure::WouldNotStart,
+                reason,
+            })?;
 
         let Some(record) = self.host.state.record(app_id).await else {
             return Err(WakeRefusal::Failed {
+                kind: WakeFailure::WouldNotStart,
                 reason: "the microVM would not start".into(),
             });
         };
@@ -105,8 +112,12 @@ impl AppWaker {
                 || "the microVM would not start".to_string(),
                 |message| message.as_str().to_string(),
             );
-            return Err(WakeRefusal::Failed { reason });
+            return Err(WakeRefusal::Failed {
+                kind: WakeFailure::WouldNotStart,
+                reason,
+            });
         }
+        let restored = started.elapsed();
 
         // A caller is handed on once the guest is ready for it, and what ready means is the
         // instance's to say: a port that answers, or a microVM that started at all.
@@ -118,14 +129,20 @@ impl AppWaker {
                 }
                 if Instant::now() >= deadline {
                     return Err(WakeRefusal::Failed {
+                        kind: WakeFailure::NeverAnswered,
                         reason: format!("nothing answered on port {} inside the guest", record.http_port),
                     });
                 }
                 tokio::time::sleep(PROBE_INTERVAL).await;
             }
         }
+        let ready = started.elapsed() - restored;
 
         self.host.state.signal_refresh();
+        self.host
+            .metrics
+            .sleep_wake
+            .woken(app_id, outcome, started.elapsed(), ready);
         let joined = self
             .in_flight
             .lock()
@@ -136,6 +153,8 @@ impl AppWaker {
             %app_id,
             outcome = outcome.as_str(),
             waited_ms = started.elapsed().as_millis(),
+            restored_ms = restored.as_millis(),
+            ready_ms = ready.as_millis(),
             coalesced = joined,
             "app woken by a request"
         );
@@ -146,6 +165,7 @@ impl AppWaker {
 #[async_trait::async_trait]
 impl Waker for AppWaker {
     async fn wake(&self, app_id: &AppId) -> Result<(), WakeRefusal> {
+        let started = Instant::now();
         let joined = {
             let mut in_flight = self.in_flight.lock().await;
             match in_flight.get_mut(app_id) {
@@ -160,16 +180,24 @@ impl Waker for AppWaker {
                 }
             }
         };
+        let metrics = &self.host.metrics.sleep_wake;
         if let Some(mut waiting) = joined {
-            return match waiting.recv().await {
+            let outcome = match waiting.recv().await {
                 Ok(outcome) => outcome,
                 Err(_) => Err(WakeRefusal::Failed {
+                    kind: WakeFailure::Abandoned,
                     reason: "the wake was abandoned".into(),
                 }),
             };
+            metrics.woke(started.elapsed(), true);
+            return outcome;
         }
 
         let outcome = self.boot(app_id).await;
+        if let Err(refusal) = &outcome {
+            metrics.wake_refused(refusal);
+        }
+        metrics.woke(started.elapsed(), false);
         let mut in_flight = self.in_flight.lock().await;
         if let Some((sender, _)) = in_flight.remove(app_id) {
             let _ = sender.send(outcome.clone());
@@ -270,6 +298,23 @@ mod tests {
 
         assert!(outcomes.iter().all(Result::is_ok));
         assert_eq!(counted.taken(), vec![9]);
+
+        let page = page(&host).await;
+        assert!(
+            page.contains("nibrunner_wake_requests_coalesced_total 9\n"),
+            "{page}"
+        );
+        assert!(
+            page.contains("nibrunner_wake_duration_seconds_count 10\n"),
+            "every request waited"
+        );
+        assert!(page.contains("nibrunner_wake_phase_seconds_count{phase=\"total\",outcome=\"restored\"} 1\n"));
+        assert!(page.contains("nibrunner_wake_phase_seconds_count{phase=\"ready\",outcome=\"restored\"} 1\n"));
+        assert!(page.contains("nibrunner_instance_wakes_total{app=\"app-1\",outcome=\"restored\"} 1\n"));
+        assert!(
+            page.contains("nibrunner_instance_last_wake_seconds{app=\"app-1\"} 0."),
+            "{page}"
+        );
     }
 
     /// Both tests below reach the log line a finished wake writes, and only one of them may be the
@@ -391,11 +436,28 @@ mod tests {
             .await
             .accept(desired_state(|state| state.instances = vec![on_request]));
 
-        let Err(WakeRefusal::Failed { reason }) = AppWaker::new(host.arc().clone()).wake(&app_id()).await
+        let Err(WakeRefusal::Failed { kind, reason }) =
+            AppWaker::new(host.arc().clone()).wake(&app_id()).await
         else {
             panic!("a guest that never answered was reported as woken");
         };
         assert!(reason.contains("nothing answered on port 1"), "{reason}");
+        assert_eq!(kind, WakeFailure::NeverAnswered);
+        assert!(
+            page(&host)
+                .await
+                .contains("nibrunner_wake_refusals_total{reason=\"never_answered\"} 1\n"),
+            "the refusal is counted under its reason"
+        );
+    }
+
+    async fn page(host: &TestHost) -> String {
+        crate::domain::metrics::render(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        )
     }
 
     #[tokio::test]
@@ -448,6 +510,7 @@ mod tests {
         assert_eq!(
             refusal,
             WakeRefusal::Failed {
+                kind: WakeFailure::WouldNotStart,
                 reason: "the microVM would not start".into()
             }
         );
@@ -462,6 +525,7 @@ mod tests {
         assert_eq!(
             refusal,
             WakeRefusal::Failed {
+                kind: WakeFailure::NotNamed,
                 reason: "the control plane no longer names it".into()
             }
         );
@@ -481,6 +545,7 @@ mod tests {
         assert_eq!(
             refusal,
             WakeRefusal::Failed {
+                kind: WakeFailure::NotIsolated,
                 reason: "the isolation ruleset is not applied".into()
             }
         );
@@ -499,6 +564,7 @@ mod tests {
         assert_eq!(
             waker.wake(&app_id()).await.unwrap_err(),
             WakeRefusal::Failed {
+                kind: WakeFailure::NotOnRequest,
                 reason: "it is stopped".into()
             }
         );

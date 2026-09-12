@@ -29,6 +29,11 @@ impl HostMetrics {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// The document no longer names the app, so nothing kept per app is kept for it.
+    pub fn forget(&self, app_id: &protocol::AppId) {
+        self.sleep_wake.forget(app_id);
+    }
 }
 
 /// Counts by bucket, the way Prometheus reads a histogram back: cumulative, with the ones that
@@ -311,7 +316,7 @@ pub fn render(
     }
 
     proxy::render(&mut page, &metrics.proxy);
-    sleep_wake::render(&mut page, &metrics.sleep_wake);
+    sleep_wake::render(&mut page, &metrics.sleep_wake, snapshot);
     passes::render(&mut page, report, &metrics.passes, snapshot);
     converge::render(&mut page, report, &metrics.converge, &snapshot.deploys, now_ms);
 
@@ -372,7 +377,7 @@ pub(crate) mod tests {
         metrics
             .proxy
             .answered(Outcome::Served, Duration::from_millis(150), None);
-        metrics.sleep_wake.woke(Duration::from_millis(148));
+        metrics.sleep_wake.woke(Duration::from_millis(148), false);
         let page = rendered(&report(), &metrics);
 
         assert!(page.contains("nibrunner_wake_duration_seconds_count 1"));
