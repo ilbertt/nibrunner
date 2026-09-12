@@ -836,7 +836,7 @@ mod tests {
         std::fs::write(directory.join(GUEST_ROOTFS_FILENAME), rootfs).unwrap();
         let digest = |bytes: &[u8]| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes));
         let manifest = serde_json::json!({
-            "version": "6.1.180-nibrunner-init",
+            "version": "6.1.180-aaaa",
             "artifacts": [
                 {"name": GUEST_KERNEL_FILENAME, "sha256": digest(kernel)},
                 {"name": GUEST_ROOTFS_FILENAME, "sha256": digest(rootfs)},
@@ -847,7 +847,7 @@ mod tests {
             serde_json::to_string(&manifest).unwrap(),
         )
         .unwrap();
-        "6.1.180-nibrunner-init".to_string()
+        "6.1.180-aaaa".to_string()
     }
 
     #[test]
