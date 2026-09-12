@@ -85,7 +85,7 @@ jobs:
         run: sudo apt-get install -y nftables
 
       - name: Build the integration tests
-        run: cargo test -p nibrunnerd --test integration --no-run
+        run: just integration --no-run
 
       - name: Run the integration tests
         # sudo's secure_path drops the runner's PATH, so it is handed back; -E keeps HOME, which is

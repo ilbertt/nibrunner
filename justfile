@@ -59,8 +59,9 @@ test:
     cargo test --workspace
 
 # The tests that need a kernel. Root, Linux, and `nft`, `mke2fs` and `/dev/net/tun` on the box.
-integration:
-    NIBRUNNER_INTEGRATION=1 cargo test -p nibrunnerd --test integration -- --test-threads 1 --nocapture
+# `just integration --no-run` builds them, which needs none of that.
+integration *args:
+    NIBRUNNER_INTEGRATION=1 cargo test --workspace --test integration {{args}} -- --test-threads 1 --nocapture
 
 # `just fmt --check` refuses instead of rewriting.
 fmt *args:
