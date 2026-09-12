@@ -150,20 +150,28 @@ pub(super) fn render(
         &metrics.probe_unhealthy,
     );
 
+    // Labelled with the kind of check from the record rather than the report, because the report
+    // does not carry it — and it is the label that says whether a run of healthy answers came
+    // from a path answering 2xx or from a kernel accepting connections for a process that may
+    // have stopped reading them.
     page.metric(
         "nibrunner_instance_health_probes_total",
-        "Probes of an app, by what they found. For an app that promised only to boot, a probe is the microVM being up.",
+        "Probes of an app, by the kind of check and what it found. For a boot-completed check, a probe is the microVM being up.",
         "counter",
     );
-    for instance in &report.instances {
-        let app = metrics.of(&instance.app_id);
+    for record in snapshot.records.values() {
+        let app = metrics.of(&record.app_id);
         for (result, count) in [
             ("healthy", app.probes_healthy),
             ("unhealthy", app.probes_unhealthy),
         ] {
             page.value(
                 "nibrunner_instance_health_probes_total",
-                &[("app", instance.app_id.as_str()), ("result", result)],
+                &[
+                    ("app", record.app_id.as_str()),
+                    ("kind", record.health_check.kind()),
+                    ("result", result),
+                ],
                 count,
             );
         }
@@ -187,14 +195,17 @@ pub(super) fn render(
 
     page.metric(
         "nibrunner_instance_unhealthy_total",
-        "Times an app that had been answering stopped, for long enough to be called unhealthy.",
+        "Times an app that had been answering stopped, for long enough to be called unhealthy, by the kind of check that said so.",
         "counter",
     );
-    for instance in &report.instances {
+    for record in snapshot.records.values() {
         page.value(
             "nibrunner_instance_unhealthy_total",
-            &[("app", instance.app_id.as_str())],
-            metrics.of(&instance.app_id).went_unhealthy,
+            &[
+                ("app", record.app_id.as_str()),
+                ("kind", record.health_check.kind()),
+            ],
+            metrics.of(&record.app_id).went_unhealthy,
         );
     }
 
@@ -270,8 +281,8 @@ mod tests {
         assert_eq!(
             lines_for(&page, "nibrunner_instance_health_probes_total"),
             vec![
-                "nibrunner_instance_health_probes_total{app=\"app-1\",result=\"healthy\"} 2",
-                "nibrunner_instance_health_probes_total{app=\"app-1\",result=\"unhealthy\"} 1",
+                "nibrunner_instance_health_probes_total{app=\"app-1\",kind=\"tcp\",result=\"healthy\"} 2",
+                "nibrunner_instance_health_probes_total{app=\"app-1\",kind=\"tcp\",result=\"unhealthy\"} 1",
             ]
         );
         assert!(page.contains("nibrunner_health_probe_seconds_count{result=\"healthy\"} 2\n"));
@@ -286,10 +297,31 @@ mod tests {
         assert!(failures
             .contains(&"nibrunner_instance_failures_total{app=\"app-1\",reason=\"out_of_restarts\"} 1"));
         assert!(failures.contains(&"nibrunner_instance_failures_total{app=\"app-1\",reason=\"boot\"} 0"));
-        assert!(page.contains("nibrunner_instance_unhealthy_total{app=\"app-1\"} 1\n"));
+        assert!(page.contains("nibrunner_instance_unhealthy_total{app=\"app-1\",kind=\"tcp\"} 1\n"));
         assert!(page
             .contains("nibrunner_instance_last_healthy_timestamp_seconds{app=\"app-1\"} 1700000000.250\n"));
         assert!(page.contains("nibrunner_instance_start_attempts{app=\"app-1\"} 3\n"));
+    }
+
+    #[tokio::test]
+    async fn the_kind_of_check_is_on_every_count_so_a_run_of_healthy_says_what_it_proves() {
+        let host = test_host().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.health_check = protocol::HealthCheck::BootCompleted;
+            }))
+            .await;
+        host.metrics
+            .health
+            .probed(&app_id(), true, Duration::from_millis(1));
+        let report = crate::domain::metrics::tests::report();
+        let page = page(&report, &host.metrics, &host.state.snapshot().await, 0);
+        assert!(page.contains(
+            "nibrunner_instance_health_probes_total{app=\"app-1\",kind=\"boot-completed\",result=\"healthy\"} 1\n"
+        ));
+        assert!(
+            page.contains("nibrunner_instance_unhealthy_total{app=\"app-1\",kind=\"boot-completed\"} 0\n")
+        );
     }
 
     #[test]

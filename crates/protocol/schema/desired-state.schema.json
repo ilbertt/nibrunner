@@ -44,12 +44,6 @@
     "ActivationPolicy": {
       "type": "object",
       "properties": {
-        "readyWhen": {
-          "$ref": "#/$defs/ReadinessPolicy",
-          "default": {
-            "kind": "port-answers"
-          }
-        },
         "sleepWhen": {
           "$ref": "#/$defs/SleepPolicy"
         }
@@ -457,47 +451,111 @@
       "minimum": 1
     },
     "HealthCheck": {
-      "type": "object",
-      "properties": {
-        "gracePeriodMs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "healthyThreshold": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "intervalMs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "path": {
-          "description": "The path an HTTP probe requests on `httpPort`. Absent, the probe is a TCP connect.",
-          "type": [
-            "string",
-            "null"
+      "description": "What tells this host an instance is well — and so what a wake waits for before it hands the\ncaller on, and what the instance's liveness is read from after that. Named in every document:\na default would be a kind nobody chose, and the one that looks obvious lies. A TCP connect is\nanswered by the guest kernel's accept queue whether or not the process behind it will ever\nread the request, so a program that has stopped answering passes it for as long as it lives.",
+      "oneOf": [
+        {
+          "description": "`path`, requested on `httpPort`, answers 2xx.",
+          "type": "object",
+          "properties": {
+            "gracePeriodMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "healthyThreshold": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "intervalMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "http"
+            },
+            "path": {
+              "type": "string"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "unhealthyThreshold": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "intervalMs",
+            "timeoutMs",
+            "gracePeriodMs",
+            "healthyThreshold",
+            "unhealthyThreshold"
           ]
         },
-        "timeoutMs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
+        {
+          "description": "A connection to `httpPort` is accepted. Only that — for a port that does not speak HTTP.",
+          "type": "object",
+          "properties": {
+            "gracePeriodMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "healthyThreshold": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "intervalMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "tcp"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "unhealthyThreshold": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "intervalMs",
+            "timeoutMs",
+            "gracePeriodMs",
+            "healthyThreshold",
+            "unhealthyThreshold"
+          ]
         },
-        "unhealthyThreshold": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
+        {
+          "description": "The microVM is up. Nothing inside it is probed: a guest this host did not build answers\nno port it was not told about.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "boot-completed"
+            }
+          },
+          "required": [
+            "kind"
+          ]
         }
-      },
-      "required": [
-        "intervalMs",
-        "timeoutMs",
-        "gracePeriodMs",
-        "healthyThreshold",
-        "unhealthyThreshold"
       ]
     },
     "HostId": {
@@ -593,35 +651,6 @@
       "description": "lowercase letters, digits and dashes, starting with a letter",
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{0,15}$"
-    },
-    "ReadinessPolicy": {
-      "description": "What tells this host a microVM is ready to be given a caller, and what its liveness is read\nfrom afterwards. A guest this host did not build answers no port it was not told about, so\n`boot-completed` measures both from the microVM itself.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "port-answers"
-            }
-          },
-          "required": [
-            "kind"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "boot-completed"
-            }
-          },
-          "required": [
-            "kind"
-          ]
-        }
-      ]
     },
     "RestartPolicy": {
       "type": "object",

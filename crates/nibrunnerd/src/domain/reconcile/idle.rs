@@ -507,7 +507,6 @@ mod sleep_tests {
             sleep_when: protocol::SleepPolicy::MaxLifetime {
                 ttl_ms: protocol::MaxLifetimeMs::try_from(ttl_ms).unwrap(),
             },
-            ready_when: protocol::ReadinessPolicy::PortAnswers,
         }
     }
 
@@ -553,7 +552,6 @@ mod sleep_tests {
     async fn an_app_told_never_to_sleep_is_kept_up_where_a_timeout_would_have_let_it_go() {
         let never = protocol::ActivationPolicy {
             sleep_when: protocol::SleepPolicy::Never,
-            ready_when: protocol::ReadinessPolicy::PortAnswers,
         };
         let host = host_under(never).await;
         last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;

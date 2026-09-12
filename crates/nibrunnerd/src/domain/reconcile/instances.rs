@@ -60,7 +60,6 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
             .collect(),
         health_check: desired.config.health_check.clone(),
         resources: desired.config.resources,
-        readiness: desired.activation().ready_when,
         desired_running: true,
         on_request: desired.desired_state == DesiredInstanceState::OnRequest,
     }
@@ -470,7 +469,7 @@ async fn settle(
 ) {
     let health = if status.active && due {
         let probed = std::time::Instant::now();
-        let healthy = if crate::domain::activation::probes_a_port(record.readiness) {
+        let healthy = if record.health_check.probes_a_port() {
             crate::domain::health::probe::probe_instance(
                 &record.guest_ipv4,
                 record.http_port,
@@ -497,7 +496,7 @@ async fn settle(
             &record.health,
             healthy,
             &now_timestamp(),
-            record.health_check.healthy_threshold,
+            record.health_check.probe().healthy_threshold,
         )
     } else {
         record.health.clone()
@@ -1093,7 +1092,7 @@ mod tests {
         });
         host.state
             .put_record(instance_record(|record| {
-                record.readiness = protocol::ReadinessPolicy::BootCompleted;
+                record.health_check = protocol::HealthCheck::BootCompleted;
                 record.state = InstanceState::Starting;
                 record.started_at = Some(now_timestamp());
             }))

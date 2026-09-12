@@ -143,7 +143,6 @@ impl DesiredInstance {
                 },
                 DesiredInstanceState::Running | DesiredInstanceState::Stopped => SleepPolicy::Never,
             },
-            ready_when: ReadinessPolicy::PortAnswers,
         })
     }
 }

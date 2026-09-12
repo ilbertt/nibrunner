@@ -109,6 +109,17 @@ pub fn base_layer() -> DesiredLayer {
     }
 }
 
+/// What every fixture checks with: a port that accepts, which is what the tests' listeners do.
+pub const TCP_HEALTH_CHECK: HealthCheck = HealthCheck::Tcp {
+    probe: Probe {
+        interval_ms: 5_000,
+        timeout_ms: 2_000,
+        grace_period_ms: 30_000,
+        healthy_threshold: 1,
+        unhealthy_threshold: 3,
+    },
+};
+
 pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
     let mut value = AppConfig {
         ports: vec![],
@@ -120,7 +131,7 @@ pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
             environment: TenantEnvironment::default(),
         },
         resources: DEFAULT_INSTANCE_RESOURCES,
-        health_check: DEFAULT_HEALTH_CHECK,
+        health_check: TCP_HEALTH_CHECK,
         restart_policy: DEFAULT_RESTART_POLICY,
     };
     edit(&mut value);
@@ -282,9 +293,8 @@ pub fn record_fields() -> RecordFields {
         http_port: DEFAULT_HTTP_PORT,
         guest_ipv4: slot.guest_ipv4,
         layer_digests: vec![Sha256Digest::parse(ARTIFACT_DIGEST).unwrap()],
-        health_check: DEFAULT_HEALTH_CHECK,
+        health_check: TCP_HEALTH_CHECK,
         resources: DEFAULT_INSTANCE_RESOURCES,
-        readiness: protocol::ReadinessPolicy::PortAnswers,
         desired_running: true,
         on_request: false,
     }

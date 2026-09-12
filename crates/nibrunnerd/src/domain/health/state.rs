@@ -51,7 +51,9 @@ pub struct GraceInputs<'a> {
 pub fn is_within_grace_period(grace: &GraceInputs<'_>) -> bool {
     match grace.started_at_ms {
         None => true,
-        Some(started_at_ms) => grace.now_ms - started_at_ms < grace.health_check.grace_period_ms as i64,
+        Some(started_at_ms) => {
+            grace.now_ms - started_at_ms < grace.health_check.probe().grace_period_ms as i64
+        }
     }
 }
 
@@ -61,9 +63,9 @@ pub fn is_on_startup_grid(tracker: &HealthTracker, grace: &GraceInputs<'_>) -> b
 
 pub fn next_probe_delay_ms(tracker: &HealthTracker, grace: &GraceInputs<'_>) -> u64 {
     if is_on_startup_grid(tracker, grace) {
-        STARTUP_PROBE_INTERVAL_MS.min(grace.health_check.interval_ms)
+        STARTUP_PROBE_INTERVAL_MS.min(grace.health_check.probe().interval_ms)
     } else {
-        grace.health_check.interval_ms
+        grace.health_check.probe().interval_ms
     }
 }
 
@@ -85,7 +87,7 @@ pub fn describe_instance_failure(
     }
     format!(
         "nothing answered on port {http_port} inside the guest: {} health probes failed after the {}ms grace period",
-        tracker.consecutive_failures, health_check.grace_period_ms
+        tracker.consecutive_failures, health_check.probe().grace_period_ms
     )
 }
 
@@ -132,7 +134,7 @@ pub fn evaluate_instance_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
     if inputs.stop_requested {
         return InstanceState::Stopping;
     }
-    if inputs.tracker.consecutive_successes >= inputs.health_check.healthy_threshold {
+    if inputs.tracker.consecutive_successes >= inputs.health_check.probe().healthy_threshold {
         return InstanceState::Running;
     }
     let within_grace = is_within_grace_period(&GraceInputs {
@@ -140,7 +142,8 @@ pub fn evaluate_instance_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
         started_at_ms: inputs.started_at_ms,
         now_ms: inputs.now_ms,
     });
-    if inputs.tracker.consecutive_failures >= inputs.health_check.unhealthy_threshold && !within_grace {
+    if inputs.tracker.consecutive_failures >= inputs.health_check.probe().unhealthy_threshold && !within_grace
+    {
         return if inputs.tracker.ever_healthy {
             InstanceState::Unhealthy
         } else {
@@ -158,13 +161,14 @@ pub fn evaluate_instance_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
 mod tests {
     use super::*;
     use crate::adapters::vm::UNKNOWN_VM;
-    use protocol::{DEFAULT_HEALTH_CHECK, DEFAULT_HTTP_PORT};
+    use crate::test_support::TCP_HEALTH_CHECK;
+    use protocol::{Probe, DEFAULT_HTTP_PORT};
 
     const STARTED_AT_MS: i64 = 1_000_000;
     const OBSERVED_AT: &str = "2026-08-03T10:00:00.000Z";
 
     fn grace_ms() -> i64 {
-        DEFAULT_HEALTH_CHECK.grace_period_ms as i64
+        TCP_HEALTH_CHECK.probe().grace_period_ms as i64
     }
 
     fn within_grace() -> i64 {
@@ -252,7 +256,7 @@ mod tests {
                 unit: active(),
                 tracker: initial_tracker(),
                 now_ms: within_grace(),
-                health_check: DEFAULT_HEALTH_CHECK,
+                health_check: TCP_HEALTH_CHECK,
                 stop_requested: false,
                 desired_running: true,
                 on_request: false,
@@ -292,22 +296,27 @@ mod tests {
     #[test]
     fn how_soon_a_tenant_is_asked_again() {
         assert_eq!(
-            delay(&initial_tracker(), within_grace(), &DEFAULT_HEALTH_CHECK),
+            delay(&initial_tracker(), within_grace(), &TCP_HEALTH_CHECK),
             STARTUP_PROBE_INTERVAL_MS
         );
         assert_eq!(
-            delay(&healthy_then(0), within_grace(), &DEFAULT_HEALTH_CHECK),
-            DEFAULT_HEALTH_CHECK.interval_ms
+            delay(&healthy_then(0), within_grace(), &TCP_HEALTH_CHECK),
+            TCP_HEALTH_CHECK.probe().interval_ms
         );
         assert_eq!(
-            delay(&initial_tracker(), past_grace(), &DEFAULT_HEALTH_CHECK),
-            DEFAULT_HEALTH_CHECK.interval_ms
+            delay(&initial_tracker(), past_grace(), &TCP_HEALTH_CHECK),
+            TCP_HEALTH_CHECK.probe().interval_ms
         );
-        let fast = HealthCheck {
-            interval_ms: STARTUP_PROBE_INTERVAL_MS - 1,
-            ..DEFAULT_HEALTH_CHECK
+        let fast = HealthCheck::Tcp {
+            probe: Probe {
+                interval_ms: STARTUP_PROBE_INTERVAL_MS - 1,
+                ..TCP_HEALTH_CHECK.probe().clone()
+            },
         };
-        assert_eq!(delay(&initial_tracker(), within_grace(), &fast), fast.interval_ms);
+        assert_eq!(
+            delay(&initial_tracker(), within_grace(), &fast),
+            fast.probe().interval_ms
+        );
     }
 
     #[test]
@@ -345,7 +354,7 @@ mod tests {
             is_on_startup_grid(
                 tracker,
                 &GraceInputs {
-                    health_check: &DEFAULT_HEALTH_CHECK,
+                    health_check: &TCP_HEALTH_CHECK,
                     started_at_ms: Some(STARTED_AT_MS),
                     now_ms,
                 },
@@ -359,7 +368,7 @@ mod tests {
         assert!(is_on_startup_grid(
             &initial_tracker(),
             &GraceInputs {
-                health_check: &DEFAULT_HEALTH_CHECK,
+                health_check: &TCP_HEALTH_CHECK,
                 started_at_ms: None,
                 now_ms: past_grace(),
             }
@@ -385,7 +394,7 @@ mod tests {
         );
         assert_eq!(
             evaluate(Evaluate {
-                tracker: failing(DEFAULT_HEALTH_CHECK.unhealthy_threshold),
+                tracker: failing(TCP_HEALTH_CHECK.probe().unhealthy_threshold),
                 now_ms: past_grace(),
                 ..Default::default()
             }),
@@ -393,7 +402,7 @@ mod tests {
         );
         assert_eq!(
             evaluate(Evaluate {
-                tracker: healthy_then(DEFAULT_HEALTH_CHECK.unhealthy_threshold),
+                tracker: healthy_then(TCP_HEALTH_CHECK.probe().unhealthy_threshold),
                 now_ms: past_grace(),
                 ..Default::default()
             }),
@@ -545,9 +554,11 @@ mod tests {
 
     #[test]
     fn thresholds_are_honoured() {
-        let two = HealthCheck {
-            healthy_threshold: 2,
-            ..DEFAULT_HEALTH_CHECK
+        let two = HealthCheck::Tcp {
+            probe: Probe {
+                healthy_threshold: 2,
+                ..TCP_HEALTH_CHECK.probe().clone()
+            },
         };
         let once = probe(&initial_tracker(), true, 2);
         assert_eq!(
@@ -572,7 +583,7 @@ mod tests {
     #[test]
     fn a_failure_accounts_for_itself() {
         let failure = |unit: &VmStatus, tracker: &HealthTracker, verdict: Option<&str>| {
-            describe_instance_failure(unit, tracker, &DEFAULT_HEALTH_CHECK, DEFAULT_HTTP_PORT, verdict)
+            describe_instance_failure(unit, tracker, &TCP_HEALTH_CHECK, DEFAULT_HTTP_PORT, verdict)
         };
         assert_eq!(
             failure(&exited(), &initial_tracker(), None),
@@ -598,12 +609,12 @@ mod tests {
             "the tenant used its 5 restarts without staying up; shutting the guest down"
         );
         let unreachable = HealthTracker {
-            consecutive_failures: DEFAULT_HEALTH_CHECK.unhealthy_threshold,
+            consecutive_failures: TCP_HEALTH_CHECK.probe().unhealthy_threshold,
             ..initial_tracker()
         };
         let expected = format!(
             "nothing answered on port {DEFAULT_HTTP_PORT} inside the guest: {} health probes failed after the {}ms grace period",
-            DEFAULT_HEALTH_CHECK.unhealthy_threshold, DEFAULT_HEALTH_CHECK.grace_period_ms
+            TCP_HEALTH_CHECK.probe().unhealthy_threshold, TCP_HEALTH_CHECK.probe().grace_period_ms
         );
         assert_eq!(
             failure(
