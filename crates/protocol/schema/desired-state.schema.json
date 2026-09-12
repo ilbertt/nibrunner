@@ -395,6 +395,17 @@
         "desiredState": {
           "$ref": "#/$defs/DesiredPresence"
         },
+        "initialContents": {
+          "description": "Absent for a volume that starts empty.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InitialContents"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "sizeBytes": {
           "type": "integer",
           "format": "uint64",
@@ -567,6 +578,28 @@
       "type": "integer",
       "maximum": 86400000,
       "minimum": 60000
+    },
+    "InitialContents": {
+      "description": "What a volume holds before its app has written a byte: an archive in the store — a tar,\ngzipped or not, or a zip — unpacked under `destinationPath` in the app's root as the volume is\nformatted. That happens once, so this is read once: a volume already formatted is its app's,\nand a change here does nothing to it.",
+      "type": "object",
+      "properties": {
+        "destinationPath": {
+          "description": "The directory the archive's entries land under, as the app sees it. Made if no layer holds\nit, and given — with everything unpacked into it — to the uid the program runs as.",
+          "$ref": "#/$defs/GuestPath"
+        },
+        "digest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "objectKey": {
+          "description": "Where the object lives in the store.",
+          "$ref": "#/$defs/ObjectKey"
+        }
+      },
+      "required": [
+        "digest",
+        "objectKey",
+        "destinationPath"
+      ]
     },
     "InstancePort": {
       "description": "A port a guest answers on beside its HTTP one, carried to it unread.\n\nIt carries whatever arrives, tcp or udp: a port is a port, the relay in front of a host\nforwards both for every one in its range, and a guest that listens on only one of them\nanswers the other with a port-unreachable the way any host would.",

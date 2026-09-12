@@ -6,10 +6,11 @@ use protocol::{DesiredVolume, ObjectKey, VolumeId};
 use tokio::sync::Mutex;
 
 use crate::adapters::net::allocator::SlotAllocator;
+use crate::adapters::volumes::initial_contents::{ContentsStaging, StagedRoot};
 use crate::adapters::volumes::nbd::{NbdDevices, NbdTarget};
 use crate::adapters::volumes::{
-    align_to_sector, has_ext_magic, AttachedVolume, CacheReservation, ObservedBacking, VolumeBackend,
-    VolumeError, FILESYSTEM_LABEL, SUPERBLOCK_MAGIC_OFFSET,
+    align_to_sector, format_request, has_ext_magic, AttachedVolume, CacheReservation, ObservedBacking,
+    VolumeBackend, VolumeError, SUPERBLOCK_MAGIC_OFFSET,
 };
 use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
@@ -47,6 +48,7 @@ pub struct ZerofsVolumes {
     devices: NbdDevices,
     allocator: Arc<Mutex<SlotAllocator>>,
     commands: Arc<dyn CommandRunner>,
+    contents: ContentsStaging,
 }
 
 impl ZerofsVolumes {
@@ -54,12 +56,14 @@ impl ZerofsVolumes {
         filesystem: ZerofsFilesystem,
         allocator: Arc<Mutex<SlotAllocator>>,
         commands: Arc<dyn CommandRunner>,
+        contents: ContentsStaging,
     ) -> Self {
         Self {
             filesystem,
             devices: NbdDevices::new(commands.clone()),
             allocator,
             commands,
+            contents,
         }
     }
 
@@ -127,23 +131,12 @@ impl ZerofsVolumes {
         }
     }
 
-    async fn format_once(&self, device_path: &str) -> Result<bool, VolumeError> {
-        if self.is_formatted(device_path).await? {
-            return Ok(false);
-        }
+    async fn format(&self, device_path: &str, contents: Option<&StagedRoot>) -> Result<(), VolumeError> {
         self.commands
-            .stdout_of(CommandRequest::new(&[
-                "mke2fs",
-                "-q",
-                "-t",
-                "ext4",
-                "-L",
-                FILESYSTEM_LABEL,
-                device_path,
-            ]))
+            .stdout_of(format_request(device_path, contents, false))
             .await
             .map_err(|error| VolumeError::Unusable(error.message()))?;
-        Ok(true)
+        Ok(())
     }
 
     pub fn cache_disk_bytes(&self) -> Option<u64> {
@@ -245,10 +238,13 @@ impl VolumeBackend for ZerofsVolumes {
         if !self.devices.is_usable(&slot.nbd_device_path).await {
             self.devices.reattach(&target).await?;
         }
-        if self.format_once(&slot.nbd_device_path).await? {
+        if !self.is_formatted(&slot.nbd_device_path).await? {
+            let contents = self.contents.stage_for(desired).await?;
+            self.format(&slot.nbd_device_path, contents.as_ref()).await?;
             tracing::info!(
                 volume_id = %desired.volume_id,
                 device = %slot.nbd_device_path,
+                seeded = contents.is_some(),
                 "volume formatted"
             );
         }
@@ -406,8 +402,13 @@ impl VolumeBackend for ZerofsVolumes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::volumes::initial_contents::tests as seed;
     use crate::test_support::mocks;
     use crate::test_support::{app_id, desired_volume};
+
+    fn staging(root: &Path) -> ContentsStaging {
+        seed::staging(&root.join("staging"), seed::archive())
+    }
 
     fn filesystem(root: &Path) -> ZerofsFilesystem {
         ZerofsFilesystem {
@@ -494,6 +495,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             mocks::commands_succeeding().0,
+            staging(root.path()),
         );
         let volume_id = VolumeId::parse("vol-1").unwrap();
         assert_eq!(volumes.ensure_device_file(&volume_id, 1024).unwrap(), 1024);
@@ -515,6 +517,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             commands.clone(),
+            staging(root.path()),
         );
         let volume_id = VolumeId::parse("vol-1").unwrap();
         volumes.ensure_device_file(&volume_id, 1024).unwrap();
@@ -538,7 +541,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (commands, log) = mocks::commands_succeeding();
         let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
-        let volumes = ZerofsVolumes::new(filesystem(root.path()), allocator, commands.clone());
+        let volumes = ZerofsVolumes::new(
+            filesystem(root.path()),
+            allocator,
+            commands.clone(),
+            staging(root.path()),
+        );
         let volume_id = VolumeId::parse("vol-1").unwrap();
         volumes.ensure_device_file(&volume_id, 1024).unwrap();
         let _ = volumes.flush().await;
@@ -569,6 +577,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             mocks::commands_succeeding().0,
+            staging(root.path()),
         );
         let volume_id = VolumeId::parse("vol-nowhere").unwrap();
         assert_eq!(
@@ -586,6 +595,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             mocks::commands_succeeding().0,
+            staging(root.path()),
         );
         assert!(volumes.observe(&Default::default()).await.is_empty());
     }
@@ -602,6 +612,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             mocks::commands_succeeding().0,
+            staging(root.path()),
         );
         let reserved = volumes.reserved_cache();
         assert_eq!(reserved.disk_bytes, 64 * 1_073_741_824);
@@ -615,6 +626,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             mocks::commands_succeeding().0,
+            staging(root.path()),
         );
         assert_eq!(volumes.reserved_cache().memory_mib(), 2048);
         assert_eq!(volumes.reserved_cache().disk_bytes, ASSUMED_CACHE_BYTES);
@@ -629,6 +641,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             commands.clone(),
+            staging(root.path()),
         )
         .with_devices(NbdDevices::with_sysfs(
             sysfs.path().to_path_buf(),
@@ -665,6 +678,7 @@ mod tests {
             filesystem(root),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             commands.clone(),
+            staging(root),
         )
         .with_devices(NbdDevices::with_sysfs(sysfs.to_path_buf(), commands))
     }
@@ -687,6 +701,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             commands,
+            staging(root.path()),
         );
         volumes
             .detach(&VolumeId::parse("vol-1").unwrap(), &app_id())
@@ -702,6 +717,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             mocks::commands_succeeding().0,
+            staging(root.path()),
         );
         let volume_id = VolumeId::parse("vol-1").unwrap();
         volumes.ensure_device_file(&volume_id, 1024).unwrap();
@@ -740,8 +756,13 @@ mod tests {
         let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
         let slot = allocator.lock().await.allocate(&app_id()).unwrap();
         let sysfs = tempfile::tempdir().unwrap();
-        let volumes = ZerofsVolumes::new(filesystem(root.path()), allocator, commands.clone())
-            .with_devices(NbdDevices::with_sysfs(sysfs.path().to_path_buf(), commands));
+        let volumes = ZerofsVolumes::new(
+            filesystem(root.path()),
+            allocator,
+            commands.clone(),
+            staging(root.path()),
+        )
+        .with_devices(NbdDevices::with_sysfs(sysfs.path().to_path_buf(), commands));
         let held = VolumeId::parse("vol-1").unwrap();
         volumes.ensure_device_file(&held, 4096).unwrap();
 
@@ -768,6 +789,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             commands,
+            staging(root.path()),
         );
         for refused in [
             volumes
@@ -799,6 +821,7 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             commands,
+            staging(root.path()),
         );
         volumes
             .create_checkpoint(&crate::test_support::checkpoint_id())
@@ -835,6 +858,7 @@ mod tests {
             filesystem,
             Arc::new(Mutex::new(SlotAllocator::empty())),
             mocks::commands_succeeding().0,
+            staging(root.path()),
         );
         let error = volumes
             .ensure_device_file(&VolumeId::parse("vol-1").unwrap(), 1024)
@@ -898,9 +922,10 @@ mod tests {
             filesystem(root.path()),
             Arc::new(Mutex::new(SlotAllocator::empty())),
             commands,
+            staging(root.path()),
         );
         let error = volumes
-            .format_once("/dev/nbd-that-is-not-there")
+            .is_formatted("/dev/nbd-that-is-not-there")
             .await
             .unwrap_err();
         assert_eq!(
@@ -909,9 +934,6 @@ mod tests {
                 device_path: "/dev/nbd-that-is-not-there".to_string()
             }
         );
-        assert!(
-            log.calls().is_empty(),
-            "nothing was written to a device it could not read"
-        );
+        assert!(log.calls().is_empty(), "reading a superblock runs no tool");
     }
 }
