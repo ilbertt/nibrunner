@@ -1,5 +1,4 @@
 {
-  "version": "6.1.180-98db6df338f0",
   "artifacts": [
     {
       "name": "vmlinux",
@@ -21,6 +20,8 @@
     "debian_image": "debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd",
     "debian_snapshot": "20260714T000000Z",
     "source_date_epoch": 1783987200,
+    "rootfs_uuid": "6e696272-756e-4e65-b200-000000000001",
+    "rootfs_hash_seed": "6e696272-756e-4e65-b200-000000000002",
     "rootfs_packages": {
       "ca-certificates": "20250419",
       "libc6": "2.41-12+deb13u3",

@@ -193,16 +193,11 @@ b6ada6ce51628084d1ba1d8b0b9b7a9785d183ab34e3824cf408b274a86ef221  vmlinux
     fn a_directory_with_nothing_in_it_takes_the_release() {
         let from = tempfile::tempdir().unwrap();
         let into = tempfile::tempdir().unwrap();
-        image(
-            from.path(),
-            "6.1.180+nibrunner-init.aaaa",
-            b"a kernel",
-            b"a filesystem",
-        );
+        image(from.path(), "6.1.180-aaaa", b"a kernel", b"a filesystem");
 
         let laid = ensure(&into.path().join("guest"), from.path()).unwrap();
         assert!(
-            matches!(laid, Laid::Taken(ref version) if version == "6.1.180+nibrunner-init.aaaa"),
+            matches!(laid, Laid::Taken(ref version) if version == "6.1.180-aaaa"),
             "{laid:?}"
         );
         assert_eq!(
@@ -215,12 +210,7 @@ b6ada6ce51628084d1ba1d8b0b9b7a9785d183ab34e3824cf408b274a86ef221  vmlinux
     fn a_directory_already_holding_the_release_is_left_alone() {
         let from = tempfile::tempdir().unwrap();
         let into = tempfile::tempdir().unwrap();
-        image(
-            from.path(),
-            "6.1.180+nibrunner-init.aaaa",
-            b"a kernel",
-            b"a filesystem",
-        );
+        image(from.path(), "6.1.180-aaaa", b"a kernel", b"a filesystem");
         ensure(into.path(), from.path()).unwrap();
 
         let laid = ensure(into.path(), from.path()).unwrap();
@@ -235,23 +225,13 @@ b6ada6ce51628084d1ba1d8b0b9b7a9785d183ab34e3824cf408b274a86ef221  vmlinux
         let old = tempfile::tempdir().unwrap();
         let new = tempfile::tempdir().unwrap();
         let into = tempfile::tempdir().unwrap();
-        image(
-            old.path(),
-            "6.1.180+nibrunner-init",
-            b"a kernel",
-            b"the old filesystem",
-        );
-        image(
-            new.path(),
-            "6.1.180+nibrunner-init",
-            b"a kernel",
-            b"the new filesystem",
-        );
+        image(old.path(), "6.1.180", b"a kernel", b"the old filesystem");
+        image(new.path(), "6.1.180", b"a kernel", b"the new filesystem");
         ensure(into.path(), old.path()).unwrap();
 
         let laid = ensure(into.path(), new.path()).unwrap();
         assert!(
-            matches!(laid, Laid::Replaced { ref was, ref now } if was == "6.1.180+nibrunner-init" && now == was),
+            matches!(laid, Laid::Replaced { ref was, ref now } if was == "6.1.180" && now == was),
             "{laid:?}"
         );
         assert_eq!(
@@ -260,7 +240,7 @@ b6ada6ce51628084d1ba1d8b0b9b7a9785d183ab34e3824cf408b274a86ef221  vmlinux
         );
         assert_eq!(
             super::super::prerequisites::verify(into.path()).unwrap(),
-            "6.1.180+nibrunner-init"
+            "6.1.180"
         );
     }
 
@@ -270,12 +250,7 @@ b6ada6ce51628084d1ba1d8b0b9b7a9785d183ab34e3824cf408b274a86ef221  vmlinux
     fn a_directory_that_holds_the_release_but_more_besides_is_still_left_alone() {
         let from = tempfile::tempdir().unwrap();
         let into = tempfile::tempdir().unwrap();
-        image(
-            from.path(),
-            "6.1.180+nibrunner-init.aaaa",
-            b"a kernel",
-            b"a filesystem",
-        );
+        image(from.path(), "6.1.180-aaaa", b"a kernel", b"a filesystem");
         ensure(into.path(), from.path()).unwrap();
         std::fs::write(into.path().join("kernel.config"), b"CONFIG_KVM=y").unwrap();
 

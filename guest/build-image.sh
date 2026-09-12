@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds guest/rootfs.ext4 from the pins in guest/manifest.json, with crates/init as /init,
-# and rewrites the manifest to describe what came out. Linux, root, docker and e2fsprogs.
+# and rewrites the manifest to describe what came out, named by a digest of what went in.
+# Linux, root, docker and e2fsprogs.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -10,10 +11,10 @@ init=$root/target/x86_64-unknown-linux-musl/release/nibrunner-init
 
 [[ -x $init ]] || { echo "build crates/init first: cargo build -p nibrunner-init --target x86_64-unknown-linux-musl --release" >&2; exit 1; }
 
-read -r base snapshot epoch < <(python3 -c "
+read -r base snapshot epoch uuid seed < <(python3 -c "
 import json
 i = json.load(open('$here/manifest.json'))['inputs']
-print(i['debian_image'], i['debian_snapshot'], i['source_date_epoch'])
+print(i['debian_image'], i['debian_snapshot'], i['source_date_epoch'], i['rootfs_uuid'], i['rootfs_hash_seed'])
 ")
 
 # http, not https: the base image carries no ca-certificates yet, and the archive is signed.
@@ -47,27 +48,36 @@ chmod 1777 "$work/rootfs/tmp"
 install -m 0755 "$init" "$work/rootfs/init"
 find "$work/rootfs" -exec touch -h -d "@$epoch" {} +
 
-# -d populates from a directory, so this host never mounts the image it is writing.
+# -d populates from a directory, so this host never mounts the image it is writing. The UUID and
+# hash seed are pinned because mke2fs would otherwise draw both at random, and the version is a
+# digest of inputs: two builds of the same inputs have to come out the same bytes.
 content=$(du -sb "$work/rootfs" | cut -f1)
 truncate -s $(( (content * 3 / 2 + 8 * 1024 * 1024) / 1048576 * 1048576 )) "$here/rootfs.ext4"
-mke2fs -t ext4 -F -q -m 0 -E root_owner=0:0 -d "$work/rootfs" "$here/rootfs.ext4"
+SOURCE_DATE_EPOCH=$epoch mke2fs -t ext4 -F -q -m 0 -U "$uuid" -E "root_owner=0:0,hash_seed=$seed" \
+    -d "$work/rootfs" "$here/rootfs.ext4"
 
-python3 - "$here" "$init" <<'PY'
+python3 - "$here" "$init" "$here/$(basename "$0")" <<'PY'
 import hashlib, json, pathlib, sys
-guest, init = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+guest, init, recipe = map(pathlib.Path, sys.argv[1:])
+sha256 = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
 manifest = json.loads((guest / "manifest.json").read_text())
-image = (guest / "rootfs.ext4").read_bytes()
-digest = hashlib.sha256(image).hexdigest()
-# Part of the name: the daemon compares versions to decide whether a snapshot was taken on the
-# image it is about to restore into, so two images that boot differently must not share one.
-manifest["version"] = manifest["version"].split("+")[0] + "+nibrunner-init." + digest[:12]
+manifest["inputs"]["init_sha256"] = sha256(init)
+# A digest of what the build read, not of what it wrote: the daemon compares versions to decide
+# whether a snapshot was taken on the image it is about to restore into, so two images that boot
+# differently must not share one, and two builds of the same inputs may.
+read = "\n".join([
+    "recipe " + sha256(recipe),
+    "vmlinux " + sha256(guest / "vmlinux"),
+    "inputs " + hashlib.sha256(json.dumps(manifest["inputs"], sort_keys=True).encode()).hexdigest(),
+])
+manifest["version"] = manifest["inputs"]["kernel_version"] + "-" + hashlib.sha256(read.encode()).hexdigest()[:12]
+image = guest / "rootfs.ext4"
 manifest["artifacts"] = [a for a in manifest["artifacts"] if a["name"] != "rootfs.ext4"]
 manifest["artifacts"].append({
     "name": "rootfs.ext4",
-    "bytes": len(image),
-    "sha256": digest,
+    "bytes": image.stat().st_size,
+    "sha256": sha256(image),
 })
-manifest["inputs"]["init_sha256"] = hashlib.sha256(init.read_bytes()).hexdigest()
 (guest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-print(manifest["version"], len(image), "bytes")
+print(manifest["version"], image.stat().st_size, "bytes")
 PY
