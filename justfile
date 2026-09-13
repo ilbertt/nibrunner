@@ -63,39 +63,25 @@ test:
 integration *args:
     NIBRUNNER_INTEGRATION=1 cargo test --workspace --test integration {{args}} -- --test-threads 1 --nocapture
 
-# `just fmt --check` refuses instead of rewriting.
+# Rust and the docs site both; `just fmt --check` refuses instead of rewriting. Biome runs from the
+# package.json scripts, which name their config: docs/biome.json is `root: false` so that an editor
+# opened on the repo applies it, and a Biome started inside docs/ then has to be told where it is.
 fmt *args:
     cargo fmt --all {{args}}
+    cd docs && bun run {{ if args =~ "--check" { "check:format" } else { "fix:format" } }}
 
 lint:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cd docs && bun run check:types
+    cd docs && bun run check:lint
 
-# The docs site under docs/ is a Fumadocs app on Bun, which mise.toml pins. Once, before the rest:
-docs-install:
-    cd docs && bun install --frozen-lockfile
-
-# Serves it on http://localhost:3000, rebuilding as docs/ changes.
+# The docs site under docs/ is a Fumadocs app on Bun, which mise.toml pins; `bun install` in there first.
 docs-dev:
     cd docs && bun run dev
 
 # The static site, into docs/.output/public.
 docs-build:
     cd docs && bun run build
-
-# Through bun rather than the node shim, so a machine without node can run it. From the root and
-# pointed at docs/, never from inside it: docs/biome.json says `root: false` so that an editor
-# opened on the repo applies it, and a Biome started inside docs/ then finds no root and uses none
-# of it.
-biome := "bun docs/node_modules/@biomejs/biome/bin/biome"
-
-# Types over the docs site, then Biome — lint, formatting, import order — over docs/.
-docs-check:
-    cd docs && bun run --bun tsc --noEmit
-    {{biome}} check docs
-
-# Rewrites what `docs-check` would refuse, where Biome has a fix for it.
-docs-fix:
-    {{biome}} check --write docs
 
 # The JSON Schemas in crates/protocol/schema, written afresh from the protocol crate's types.
 schema:

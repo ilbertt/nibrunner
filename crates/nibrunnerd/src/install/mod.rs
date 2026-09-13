@@ -31,7 +31,7 @@ const READABLE_FILE_MODE: u32 = 0o644;
 
 pub const SYSTEMD_DIR: &str = "/etc/systemd/system";
 
-const CONFIG_DOCS_URL: &str = "https://github.com/ilbertt/nibrunner/blob/main/docs/content/docs/config.md";
+const CONFIG_DOCS_URL: &str = "https://nibrunner.dev/docs/config";
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {

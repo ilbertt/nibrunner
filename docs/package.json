@@ -7,7 +7,12 @@
     "dev": "bun run --bun vite dev",
     "build": "bun run --bun vite build",
     "start": "serve .output/public --config ../../serve.json",
-    "preview": "bun run --bun vite preview"
+    "preview": "bun run --bun vite preview",
+    "check:types": "tsc --noEmit",
+    "check:lint": "bun run --bun biome check --formatter-enabled=false --config-path=biome.json",
+    "check:format": "bun run --bun biome format --config-path=biome.json",
+    "fix:lint": "bun run --bun biome check --formatter-enabled=false --write --config-path=biome.json",
+    "fix:format": "bun run --bun biome format --write --config-path=biome.json"
   },
   "dependencies": {
     "@tanstack/react-router": "1.170.36",

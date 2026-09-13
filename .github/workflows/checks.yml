@@ -49,23 +49,6 @@ jobs:
       - name: Run Tests
         run: just test
 
-  docs:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: ./.github/actions/prepare
-        with:
-          cache: disabled
-          prepare_for_build: disabled
-
-      - name: Install the docs site's dependencies
-        run: just docs-install
-
-      - name: Check the docs site
-        run: just docs-check
-
   # Every file in the tree that is written from the code rather than by hand.
   generated:
     runs-on: ubuntu-latest
@@ -112,7 +95,7 @@ jobs:
   checks-passed:
     if: always()
     name: checks:required
-    needs: [codestyle, lint, tests, generated, integration, docs]
+    needs: [codestyle, lint, tests, generated, integration]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
