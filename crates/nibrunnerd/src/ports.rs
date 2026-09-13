@@ -182,6 +182,10 @@ pub trait Vmm: Send + Sync {
     async fn tap_names(&self) -> Vec<String>;
     async fn statuses(&self, app_ids: &[AppId]) -> BTreeMap<AppId, VmStatus>;
     async fn adopted_app_ids(&self) -> Vec<AppId>;
+    /// Listen again for the log output of a microVM adopted from an earlier daemon run. The
+    /// guest keeps its end of the socket across a daemon restart, but a fresh receiver never
+    /// bound the host end, so without this its output would go nowhere for the rest of its life.
+    async fn readopt(&self, app_id: &AppId) -> Result<(), VmError>;
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String>;
     fn working_dir(&self, app_id: &AppId) -> PathBuf;
 }
