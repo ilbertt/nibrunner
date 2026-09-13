@@ -132,7 +132,9 @@ land under `destinationPath` as the program will see them, so an entry `nested/h
 everything unpacked into it are given to uid 65534, whatever the archive said, with set-id bits
 dropped. The directories above it are made the way init makes the working directory. An entry
 that reaches outside the directory it is unpacked into fails the volume by name, as does a
-symlink in a zip, and so does an archive that does not fit.
+symlink in a zip, and so does an archive that does not fit. What the archiver added of its own
+accord — Finder's `.DS_Store` and `__MACOSX`, Explorer's `Thumbs.db`, an editor's swap file — is
+passed over rather than unpacked.
 
 The copy happens as the volume is formatted, which is once: a volume already formatted is its
 app's, and a document that changes or drops `initialContents` on one changes nothing about it.
