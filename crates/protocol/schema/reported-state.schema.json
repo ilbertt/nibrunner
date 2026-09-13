@@ -43,7 +43,8 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "default": null
     },
     "reportedAt": {
       "$ref": "#/$defs/Timestamp"
