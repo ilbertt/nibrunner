@@ -132,6 +132,29 @@ pub(crate) fn format_request(
     request
 }
 
+/// Zero the bytes an ext filesystem's magic lives in. A seeded format lays the superblock down
+/// and only then copies the contents in, so a `mke2fs -d` that fails partway can leave the magic
+/// behind on a filesystem that was never finished. Wiping it means the superblock short-circuit
+/// reads the device as unformatted and the next pass formats it afresh, rather than taking a
+/// half-made filesystem as done and booting a guest onto it.
+pub(crate) fn discard_superblock(device_path: &str) {
+    use std::io::{Seek, SeekFrom, Write};
+    let wiped = std::fs::OpenOptions::new()
+        .write(true)
+        .open(device_path)
+        .and_then(|mut device| {
+            device.seek(SeekFrom::Start(SUPERBLOCK_MAGIC_OFFSET))?;
+            device.write_all(&[0u8; 2])
+        });
+    if let Err(error) = wiped {
+        tracing::warn!(
+            device = %device_path,
+            %error,
+            "a failed format's superblock could not be wiped; a stale one may be read as formatted"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

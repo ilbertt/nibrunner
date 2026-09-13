@@ -159,16 +159,48 @@ fn archive_format(bytes: &[u8]) -> Option<ArchiveFormat> {
         .then_some(ArchiveFormat::Tar)
 }
 
+/// Whether the laptop's archiver added the entry of its own accord: Finder's `.DS_Store` and
+/// the resource forks it files under `__MACOSX`, Explorer's `Thumbs.db`, an editor's swap file.
+/// The names are sindresorhus/junk's, less its rule against a name ending in `~`: an editor's
+/// backup on a laptop, and just as well a tenant's file on a volume.
+fn is_junk(path: &Path) -> bool {
+    path.components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .any(|name| {
+            matches!(
+                name,
+                "npm-debug.log"
+                    | ".DS_Store"
+                    | ".AppleDouble"
+                    | ".LSOverride"
+                    | "Icon\r"
+                    | ".Spotlight-V100"
+                    | "__MACOSX"
+                    | "Thumbs.db"
+                    | "ehthumbs.db"
+                    | "Desktop.ini"
+                    | "desktop.ini"
+            ) || name.starts_with("._")
+                || name.strip_prefix('.').is_some_and(|rest| rest.ends_with(".swp"))
+                || name.contains(".Trashes")
+                || name.ends_with("@eaDir")
+        })
+}
+
 // The archive is a tenant's, unpacked by root on the host: an entry that climbs out of the
 // directory it is given, by name or through a symlink an earlier entry planted, fails the whole
 // archive rather than being passed over. Set-id bits are dropped on the way, and ownership is
 // not read from the archive at all — it is given afterwards, to the one uid that runs there.
+// What the archiver added of its own accord is passed over before any of that is asked of it.
 fn unpack_tar(reader: impl std::io::Read, into: &Path) -> Result<(), String> {
     let unreadable = |error: std::io::Error| format!("the archive could not be read: {error}");
     let mut archive = tar::Archive::new(reader);
     for entry in archive.entries().map_err(unreadable)? {
         let mut entry = entry.map_err(unreadable)?;
         let path = entry.path().map_err(unreadable)?.into_owned();
+        if is_junk(&path) {
+            continue;
+        }
         let inside = entry
             .unpack_in(into)
             .map_err(|error| format!("{} could not be unpacked: {error}", path.display()))?;
@@ -192,6 +224,9 @@ fn unpack_zip(bytes: &[u8], into: &Path) -> Result<(), String> {
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(unreadable)?;
         let name = entry.name().to_string();
+        if is_junk(Path::new(&name)) {
+            continue;
+        }
         let Some(inside) = entry.enclosed_name() else {
             return Err(format!(
                 "{name} reaches outside the directory it is unpacked into"
@@ -307,6 +342,57 @@ pub(crate) mod tests {
             .start_file("run.sh", deflated().unix_permissions(0o755))
             .unwrap();
         writer.write_all(b"#!").unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// The files of [`archive`] with what Finder leaves in a tree it has compressed: a
+    /// `.DS_Store` in each directory, every entry's resource fork under `__MACOSX`, and an
+    /// Explorer thumbnail cache for good measure. `notes~` is none of that, whatever its name.
+    fn littered() -> Vec<(String, &'static [u8])> {
+        vec![
+            (format!("nested/{SEEDED_FILE}"), SEEDED_BYTES),
+            ("notes~".into(), &b"kept"[..]),
+            (".DS_Store".into(), &b"Bud1"[..]),
+            ("nested/.DS_Store".into(), &b"Bud1"[..]),
+            ("__MACOSX/._nested".into(), &b"\x00\x05\x16\x07"[..]),
+            (
+                format!("__MACOSX/nested/._{SEEDED_FILE}"),
+                &b"\x00\x05\x16\x07"[..],
+            ),
+            ("Thumbs.db".into(), &b""[..]),
+        ]
+    }
+    const LITTERED_DIRECTORIES: [&str; 3] = ["nested", "__MACOSX", "__MACOSX/nested"];
+
+    fn littered_tar() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for name in LITTERED_DIRECTORIES {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_mode(0o755);
+            header.set_size(0);
+            builder.append_data(&mut header, name, std::io::empty()).unwrap();
+        }
+        for (name, bytes) in littered() {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(bytes.len() as u64);
+            builder.append_data(&mut header, name, bytes).unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    fn littered_zip() -> Vec<u8> {
+        use std::io::Write;
+        let options = zip::write::SimpleFileOptions::default();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in LITTERED_DIRECTORIES {
+            writer.add_directory(name, options).unwrap();
+        }
+        for (name, bytes) in littered() {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
         writer.finish().unwrap().into_inner()
     }
 
@@ -427,6 +513,63 @@ pub(crate) mod tests {
             std::fs::read(staged.path().join("upper/nested").join(SEEDED_FILE)).unwrap(),
             SEEDED_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn what_the_archiver_added_of_its_own_accord_never_lands() {
+        for bytes in [littered_tar(), gzipped(&littered_tar()), littered_zip()] {
+            let directory = tempfile::tempdir().unwrap();
+            let staged = staging(directory.path(), bytes.clone())
+                .stage(&volume_id(), &initial_contents(&bytes, "/app/data"))
+                .await
+                .unwrap();
+            let data = staged.path().join("upper/app/data");
+            assert_eq!(
+                std::fs::read(data.join("nested").join(SEEDED_FILE)).unwrap(),
+                SEEDED_BYTES
+            );
+            assert_eq!(std::fs::read(data.join("notes~")).unwrap(), b"kept");
+            for junk in ["__MACOSX", ".DS_Store", "nested/.DS_Store", "Thumbs.db"] {
+                assert!(!data.join(junk).exists(), "{junk} landed");
+            }
+        }
+    }
+
+    #[test]
+    fn junk_is_known_by_any_part_of_its_path() {
+        for junk in [
+            ".DS_Store",
+            "nested/.DS_Store",
+            "__MACOSX",
+            "__MACOSX/nested/._hello.txt",
+            "._hello.txt",
+            ".AppleDouble",
+            ".LSOverride",
+            "Icon\r",
+            ".Spotlight-V100/store",
+            "disk/.Trashes/501/gone",
+            "Thumbs.db",
+            "ehthumbs.db",
+            "Desktop.ini",
+            "desktop.ini",
+            "npm-debug.log",
+            ".hello.txt.swp",
+            "photos/@eaDir/thumb",
+        ] {
+            assert!(is_junk(Path::new(junk)), "{junk:?}");
+        }
+        for kept in [
+            "notes~",
+            ".gitignore",
+            ".env",
+            "Icon.png",
+            "hello.swp",
+            "macosx/x",
+            "ds_store",
+            "src/Thumbs.db.bak",
+        ] {
+            assert!(!is_junk(Path::new(kept)), "{kept:?}");
+        }
     }
 
     #[tokio::test]
