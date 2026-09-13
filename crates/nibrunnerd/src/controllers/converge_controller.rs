@@ -36,6 +36,8 @@ impl ConvergeController {
     pub async fn converge_once(&self) -> bool {
         match crate::desired::read_desired_state(&self.host.config.desired_state_file) {
             Ok(Some(desired)) => {
+                // A readable document clears any refusal the report was still carrying.
+                self.forget_refusal().await;
                 let trigger = match self.accept(&desired).await {
                     Some(changes) => {
                         converge::detected(&self.host, &changes, Cause::Change, crate::clock::now_ms()).await;
@@ -54,10 +56,29 @@ impl ConvergeController {
             Ok(None) => false,
             Err(error) => {
                 self.host.metrics.passes.desired_state_unreadable();
-                tracing::error!(error = %error.message(), "the desired state file was not read");
+                let message = error.message();
+                tracing::error!(error = %message, "the desired state file was not read");
+                self.note_refusal(message).await;
                 false
             }
         }
+    }
+
+    /// Records that the last document was refused, so the next report carries it. The counter
+    /// says how often; this says which document and why, for an operator reading only the file.
+    async fn note_refusal(&self, why: String) {
+        let message = protocol::StateMessage::new(why);
+        self.host
+            .state
+            .modify(|snapshot| snapshot.desired_refusal = Some(message))
+            .await;
+    }
+
+    async fn forget_refusal(&self) {
+        self.host
+            .state
+            .modify(|snapshot| snapshot.desired_refusal = None)
+            .await;
     }
 
     async fn reconcile(&self, desired: &HostDesiredState, trigger: Trigger) {
@@ -218,6 +239,41 @@ mod tests {
         assert!(page(&host)
             .await
             .contains("nibrunner_desired_state_unreadable_total 1\n"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_document_is_left_on_the_report_until_a_readable_one_replaces_it() {
+        let host = test_host().await;
+        crate::json_store::make_directory(host.config.desired_state_file.parent().unwrap(), 0o700).unwrap();
+        // Valid JSON, but not the document this host reads.
+        std::fs::write(&host.config.desired_state_file, br#"{"hostId":"host-1"}"#).unwrap();
+
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().never();
+        assert!(!controller(&host, reconciler).converge_once().await);
+
+        let refusal = host
+            .state
+            .snapshot()
+            .await
+            .desired_refusal
+            .expect("the refusal is surfaced on the report, not just in the log and the counter");
+        assert!(
+            refusal.as_str().contains("cannot read"),
+            "the reason the document was refused is there: {}",
+            refusal.as_str()
+        );
+
+        // A readable document clears it, so the report stops claiming the last write did not land.
+        crate::desired::cache_desired_state(
+            &host.config.desired_state_file,
+            &desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
+        )
+        .unwrap();
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().times(1).returning(|_| ());
+        assert!(controller(&host, reconciler).converge_once().await);
+        assert!(host.state.snapshot().await.desired_refusal.is_none());
     }
 
     #[tokio::test]

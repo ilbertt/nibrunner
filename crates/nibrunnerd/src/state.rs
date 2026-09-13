@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use nft_render::AppTraffic;
-use protocol::{AppId, ComputeUsage, FilesystemUsage, ReportedVolume, UsageMeters, VolumeId};
+use protocol::{AppId, ComputeUsage, FilesystemUsage, ReportedVolume, StateMessage, UsageMeters, VolumeId};
 use tokio::sync::{Notify, RwLock};
 
 use crate::domain::metrics::converge::Deploy;
@@ -32,6 +32,10 @@ pub struct HostSnapshot {
     pub converged: bool,
     pub deferred_work: bool,
     pub isolated: bool,
+    // The last document handed to this host was refused, and why; cleared when a readable one is
+    // taken up. Surfaced at the top of `reported.json` so a control plane reading only that file
+    // sees that its last write did not land.
+    pub desired_refusal: Option<StateMessage>,
 }
 
 pub type SharedState = Arc<HostState>;

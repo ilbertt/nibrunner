@@ -911,6 +911,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_on_request_first_start_that_failed_stays_failed_through_the_status_loop() {
+        let mut host = test_host().await;
+        refuse_artifacts(&mut host, "the object store 403'd the executable layer");
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+
+        // The very first start of an on-request app, and its layer will not fetch.
+        start_instance(&host, &on_request()).await;
+        let failed = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(failed.state, InstanceState::Failed);
+        assert!(failed.started_at.is_none(), "the microVM never came up");
+        assert!(failed.message.as_ref().unwrap().as_str().contains("403"));
+
+        // The status loop used to read the never-booted on-request record as Idle with no
+        // message: an app asleep and well. It must keep the failure it observed.
+        refresh_states(host.arc()).await;
+
+        let settled = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(
+            settled.state,
+            InstanceState::Failed,
+            "a failed first start is not an app that is merely asleep"
+        );
+        assert!(
+            settled.message.as_ref().unwrap().as_str().contains("403"),
+            "the reason the start failed is kept: {:?}",
+            settled.message
+        );
+    }
+
+    #[tokio::test]
     async fn a_boot_over_a_microvm_nobody_asked_to_stop_counts_as_a_restart() {
         let host = test_host().await;
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();

@@ -34,6 +34,18 @@
         "$ref": "#/$defs/ReportedInstance"
       }
     },
+    "message": {
+      "description": "Set when the last document this host was handed was refused — malformed, or not the\ndocument this host reads — and cleared when a readable one is taken up. A control plane\nthat only reads this file learns from it that its last write did not land, and why.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StateMessage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "reportedAt": {
       "$ref": "#/$defs/Timestamp"
     },
