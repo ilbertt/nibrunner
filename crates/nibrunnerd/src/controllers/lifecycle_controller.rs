@@ -30,6 +30,11 @@ impl LifecycleController {
         let adopted = self.host.vms.adopted_app_ids().await;
         if !adopted.is_empty() {
             tracing::info!(adopted = adopted.len(), "microVMs from an earlier daemon adopted");
+            for app_id in &adopted {
+                if let Err(error) = self.host.vms.readopt(app_id).await {
+                    tracing::warn!(%app_id, %error, "an adopted microVM's log forwarding could not be re-established");
+                }
+            }
         }
         crate::domain::reconcile::network::reclaim_stranded_taps(&self.host).await;
         crate::domain::reconcile::network::apply_activators(&self.host).await;

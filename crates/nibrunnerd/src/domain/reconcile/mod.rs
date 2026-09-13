@@ -76,6 +76,15 @@ async fn apply_stops(host: &Host, plan: &ReconcilePlan) {
                 let _ = host.vms.discard(&desired.app_id).await;
                 host.state.drop_record(&desired.app_id).await;
             }
+            InstancePlan::Recover { desired } => {
+                // Same clean teardown as a replacement — stop, discard, forget the record — so the
+                // start below is a fresh boot that re-attaches the volume, rather than a wake onto
+                // the snapshot whose disk is already dead. The slot (and its device) is kept.
+                instances::stop_instance(host, &desired.app_id, InstanceStopReason::VolumeLost.as_str())
+                    .await;
+                let _ = host.vms.discard(&desired.app_id).await;
+                host.state.drop_record(&desired.app_id).await;
+            }
             InstancePlan::Forget { app_id } => {
                 let _ = host.vms.discard(app_id).await;
                 host.state.drop_record(app_id).await;
@@ -98,7 +107,9 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
         .instances
         .iter()
         .filter_map(|action| match action {
-            InstancePlan::Start { desired } | InstancePlan::Replace { desired } => Some(desired),
+            InstancePlan::Start { desired }
+            | InstancePlan::Replace { desired }
+            | InstancePlan::Recover { desired } => Some(desired),
             _ => None,
         })
         .collect();
@@ -654,6 +665,41 @@ mod tests {
 
         assert_eq!(host.vms.calls(), vec![VmCall::Stop, VmCall::Discard]);
         assert!(host.state.record(&app_id()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_recovery_takes_the_guest_with_the_dead_disk_down_and_forgets_its_record() {
+        let host = test_host().await;
+        host.state.put_record(instance_record(|_| {})).await;
+        let plan = ReconcilePlan {
+            instances: vec![InstancePlan::Recover {
+                desired: desired_instance(|_| {}),
+            }],
+            ..Default::default()
+        };
+
+        apply_stops(&host, &plan).await;
+
+        // The record is dropped so the start below is a cold boot, not a wake onto a dead snapshot.
+        assert_eq!(host.vms.calls(), vec![VmCall::Stop, VmCall::Discard]);
+        assert!(host.state.record(&app_id()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_recovery_boots_the_guest_back_onto_its_re_attached_disk() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        let plan = ReconcilePlan {
+            instances: vec![InstancePlan::Recover {
+                desired: desired_instance(|_| {}),
+            }],
+            ..Default::default()
+        };
+
+        apply_starts(&host, &plan).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
     }
 
     #[tokio::test]

@@ -29,7 +29,12 @@ impl Channels {
 fn fork_channel(what: &'static str, serve: fn() -> !) -> Option<Pid> {
     match unsafe { nix::unistd::fork() } {
         Ok(ForkResult::Parent { child }) => Some(child),
-        Ok(ForkResult::Child) => serve(),
+        Ok(ForkResult::Child) => {
+            // The guest blocks SIGTERM before forking us; left blocked, Channels::stop() would
+            // SIGTERM this child and then waitpid on it forever, so the guest never reboots.
+            let _ = nix::sys::signal::SigSet::all().thread_unblock();
+            serve()
+        }
         Err(error) => {
             log(&format!("the {what} channel could not be started: {error}"));
             None

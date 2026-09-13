@@ -177,6 +177,7 @@ pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
     });
     let adopted = spy.adopted.clone();
     vms.expect_adopted_app_ids().returning(move || held(&adopted));
+    vms.expect_readopt().returning(|_: &AppId| Ok(()));
     let verdict = spy.verdict.clone();
     vms.expect_guest_verdict().returning(move |_| held(&verdict));
     vms.expect_working_dir()

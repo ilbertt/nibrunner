@@ -557,7 +557,9 @@ async fn settle(
 
 fn starting(plan: &ReconcilePlan) -> impl Iterator<Item = &DesiredInstance> {
     plan.instances.iter().filter_map(|action| match action {
-        InstancePlan::Start { desired } | InstancePlan::Replace { desired } => Some(desired),
+        InstancePlan::Start { desired }
+        | InstancePlan::Replace { desired }
+        | InstancePlan::Recover { desired } => Some(desired),
         _ => None,
     })
 }
