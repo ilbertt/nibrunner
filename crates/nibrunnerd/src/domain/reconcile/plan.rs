@@ -51,6 +51,7 @@ pub enum InstanceStopReason {
     NotDesired,
     Superseded,
     Idle,
+    VolumeLost,
 }
 
 impl InstanceStopReason {
@@ -60,6 +61,7 @@ impl InstanceStopReason {
             InstanceStopReason::NotDesired => "not-desired",
             InstanceStopReason::Superseded => "superseded",
             InstanceStopReason::Idle => "idle",
+            InstanceStopReason::VolumeLost => "volume-lost",
         }
     }
 }
@@ -70,6 +72,13 @@ pub enum InstancePlan {
         desired: DesiredInstance,
     },
     Replace {
+        desired: DesiredInstance,
+    },
+    /// Cold-restart an instance whose data volume backing was pulled out from under it (a ZeroFS
+    /// restart yanks the NBD device the guest was reading). The host re-attaches the device and
+    /// the guest is booted afresh onto it, since a running guest cannot pick a yanked disk back up
+    /// in place.
+    Recover {
         desired: DesiredInstance,
     },
     Sleep {
@@ -143,7 +152,16 @@ pub fn plan_reconcile(desired: &HostDesiredState, observed: &ObservedState) -> R
     }
 }
 
-fn plan_instance(wanted: &DesiredInstance, current: Option<&ObservedInstance>) -> InstancePlan {
+fn plan_instance(
+    wanted: &DesiredInstance,
+    current: Option<&ObservedInstance>,
+    volume_lost: bool,
+) -> InstancePlan {
+    // A guest whose disk was yanked keeps a dead virtio-blk device even after the host re-attaches
+    // the NBD device, so the only way back is a fresh boot onto the recovered device.
+    let recover = || InstancePlan::Recover {
+        desired: wanted.clone(),
+    };
     if wanted.desired_state == DesiredInstanceState::Stopped {
         return if current.is_some_and(|instance| instance.running) {
             InstancePlan::Stop {
@@ -167,9 +185,15 @@ fn plan_instance(wanted: &DesiredInstance, current: Option<&ObservedInstance>) -
                 desired: wanted.clone(),
             };
         }
+        // An idle on-request app has no live guest to recover: its device reading as gone is only
+        // the outage, and it is left asleep to be woken (and re-attached) when it is next asked for.
         return if current.running {
-            InstancePlan::None {
-                app_id: wanted.app_id.clone(),
+            if volume_lost {
+                recover()
+            } else {
+                InstancePlan::None {
+                    app_id: wanted.app_id.clone(),
+                }
             }
         } else {
             InstancePlan::Sleep {
@@ -187,19 +211,19 @@ fn plan_instance(wanted: &DesiredInstance, current: Option<&ObservedInstance>) -
             desired: wanted.clone(),
         };
     }
-    if current.running {
-        return InstancePlan::None {
-            app_id: wanted.app_id.clone(),
+    // A running guest and one that has already exited under the outage both need the same fresh
+    // boot; only a guest that neither ran nor exited (a cold record) is a plain start.
+    if current.running || current.exited {
+        return if volume_lost {
+            recover()
+        } else {
+            InstancePlan::None {
+                app_id: wanted.app_id.clone(),
+            }
         };
     }
-    if current.exited {
-        InstancePlan::None {
-            app_id: wanted.app_id.clone(),
-        }
-    } else {
-        InstancePlan::Start {
-            desired: wanted.clone(),
-        }
+    InstancePlan::Start {
+        desired: wanted.clone(),
     }
 }
 
@@ -209,6 +233,14 @@ fn plan_instances(desired: &HostDesiredState, observed: &ObservedState) -> Vec<I
         .iter()
         .map(|instance| (&instance.app_id, instance))
         .collect();
+    // A volume this host serves but can no longer read (the NBD device is dead because ZeroFS was
+    // restarted under it) is a backing that has been pulled out from under whatever holds it.
+    let lost_volumes: BTreeSet<&VolumeId> = observed
+        .volumes
+        .iter()
+        .filter(|volume| !volume.attached)
+        .map(|volume| &volume.volume_id)
+        .collect();
     let desired_ids: BTreeSet<&AppId> = desired
         .instances
         .iter()
@@ -217,7 +249,13 @@ fn plan_instances(desired: &HostDesiredState, observed: &ObservedState) -> Vec<I
     let mut plans: Vec<InstancePlan> = desired
         .instances
         .iter()
-        .map(|wanted| plan_instance(wanted, observed_by_id.get(&wanted.app_id).copied()))
+        .map(|wanted| {
+            plan_instance(
+                wanted,
+                observed_by_id.get(&wanted.app_id).copied(),
+                lost_volumes.contains(&wanted.volume_id),
+            )
+        })
         .collect();
     plans.extend(
         observed
@@ -601,6 +639,162 @@ mod tests {
         }
     }
 
+    mod a_volume_pulled_out_from_under_a_running_guest {
+        use super::*;
+
+        fn detached_volume() -> ObservedVolume {
+            observed_volume(|volume| volume.attached = false)
+        }
+
+        fn on_request() -> DesiredInstance {
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest)
+        }
+
+        #[test]
+        fn a_running_guest_whose_disk_is_gone_is_recovered_rather_than_left_running_broken() {
+            let result = plan(
+                desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|_| {})];
+                    state.volumes = vec![detached_volume()];
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Recover {
+                    desired: desired_instance(|_| {})
+                }]
+            );
+        }
+
+        #[test]
+        fn one_whose_disk_is_still_there_is_left_exactly_as_it_was() {
+            let result = plan(
+                desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|_| {})];
+                    state.volumes = vec![observed_volume(|_| {})];
+                }),
+            );
+            assert_eq!(result.instances, vec![InstancePlan::None { app_id: app_id() }]);
+        }
+
+        #[test]
+        fn a_guest_that_already_exited_under_the_outage_is_booted_again_not_left_down() {
+            // Without a lost volume this exited guest would be left alone; the yanked disk is what
+            // turns "it stopped on its own, leave it" into "its backing died, bring it back".
+            let exited = observed_state(|state| {
+                state.instances = vec![observed_instance(|instance| {
+                    instance.running = false;
+                    instance.exited = true;
+                })];
+                state.volumes = vec![detached_volume()];
+            });
+            let result = plan(
+                desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
+                exited,
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Recover {
+                    desired: desired_instance(|_| {})
+                }]
+            );
+        }
+
+        #[test]
+        fn an_idle_on_request_app_is_left_asleep_since_it_has_no_live_guest_to_recover() {
+            let result = plan(
+                desired_state(|state| state.instances = vec![on_request()]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.running = false;
+                        instance.exited = false;
+                    })];
+                    state.volumes = vec![detached_volume()];
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Sleep {
+                    desired: on_request()
+                }]
+            );
+        }
+
+        #[test]
+        fn a_woken_on_request_guest_with_a_dead_disk_is_recovered_like_any_other() {
+            let result = plan(
+                desired_state(|state| state.instances = vec![on_request()]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|_| {})];
+                    state.volumes = vec![detached_volume()];
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Recover {
+                    desired: on_request()
+                }]
+            );
+        }
+
+        #[test]
+        fn only_the_guest_whose_own_volume_died_is_recovered() {
+            let other_app = AppId::parse("app-2").unwrap();
+            let result = plan(
+                desired_state(|state| {
+                    state.instances = vec![
+                        desired_instance(|_| {}),
+                        desired_instance(|instance| {
+                            instance.app_id = AppId::parse("app-2").unwrap();
+                            instance.volume_id = VolumeId::parse("vol-2").unwrap();
+                        }),
+                    ]
+                }),
+                observed_state(|state| {
+                    state.instances = vec![
+                        observed_instance(|_| {}),
+                        observed_instance(|instance| {
+                            instance.app_id = AppId::parse("app-2").unwrap();
+                            instance.volume_id = Some(VolumeId::parse("vol-2").unwrap());
+                        }),
+                    ];
+                    // Only the first app's volume is gone; the second one's is fine.
+                    state.volumes = vec![
+                        detached_volume(),
+                        observed_volume(|volume| volume.volume_id = VolumeId::parse("vol-2").unwrap()),
+                    ];
+                }),
+            );
+            assert!(matches!(result.instances[0], InstancePlan::Recover { .. }));
+            assert_eq!(result.instances[1], InstancePlan::None { app_id: other_app });
+        }
+
+        #[test]
+        fn a_disk_that_died_under_an_app_asked_to_stop_still_only_stops_it() {
+            // Recovery is for apps meant to be up; a lost disk never boots one the document wants down.
+            let result = plan(
+                desired_state(|state| {
+                    state.instances = vec![desired_instance(|instance| {
+                        instance.desired_state = DesiredInstanceState::Stopped
+                    })]
+                }),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|_| {})];
+                    state.volumes = vec![detached_volume()];
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Stop {
+                    app_id: app_id(),
+                    reason: InstanceStopReason::DesiredStopped
+                }]
+            );
+        }
+    }
+
     mod volumes_are_not_authoritative {
         use super::*;
 
@@ -843,6 +1037,7 @@ mod tests {
         assert_eq!(InstanceStopReason::NotDesired.as_str(), "not-desired");
         assert_eq!(InstanceStopReason::Superseded.as_str(), "superseded");
         assert_eq!(InstanceStopReason::Idle.as_str(), "idle");
+        assert_eq!(InstanceStopReason::VolumeLost.as_str(), "volume-lost");
     }
 
     #[test]
