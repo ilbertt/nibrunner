@@ -6,8 +6,8 @@ use protocol::{DesiredVolume, ObjectKey, VolumeId};
 
 use crate::adapters::volumes::initial_contents::{ContentsStaging, StagedRoot};
 use crate::adapters::volumes::{
-    align_to_sector, format_request, has_ext_magic, AttachedVolume, ObservedBacking, VolumeBackend,
-    VolumeError, SUPERBLOCK_MAGIC_OFFSET,
+    align_to_sector, discard_superblock, format_request, has_ext_magic, AttachedVolume, ObservedBacking,
+    VolumeBackend, VolumeError, SUPERBLOCK_MAGIC_OFFSET,
 };
 use crate::json_store::make_directory;
 use crate::ports::{CommandRunner, CommandRunnerExt};
@@ -109,7 +109,10 @@ impl LocalFileVolumes {
         self.commands
             .stdout_of(format_request(&path, contents, true))
             .await
-            .map_err(|error| VolumeError::Unusable(error.message()))?;
+            .map_err(|error| {
+                discard_superblock(&path);
+                VolumeError::Unusable(error.message())
+            })?;
         Ok(())
     }
 
@@ -322,6 +325,33 @@ mod tests {
         assert!(matches!(error, VolumeError::ContentsUnusable(_)), "{error}");
         assert!(log.calls().is_empty(), "nothing was formatted");
         assert!(!volumes.is_formatted(&volume_id()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_format_that_writes_a_superblock_before_it_fails_leaves_the_volume_unformatted() {
+        let directory = tempfile::tempdir().unwrap();
+        // `mke2fs -d` lays the superblock down and only then copies the contents in, so a seed
+        // that errors partway leaves the magic behind on a filesystem it never finished.
+        let (commands, log) = mocks::commands_answering(|request| {
+            formatted(request).unwrap();
+            Ok(CommandResult {
+                code: 1,
+                stdout: String::new(),
+                stderr: "the initial contents could not be copied in".into(),
+            })
+        });
+        let volumes = backend(directory.path(), commands);
+        let seeded = desired_volume(|volume| {
+            volume.initial_contents = Some(initial_contents(&seed::archive(), "/app/data"))
+        });
+
+        let error = volumes.provision(&seeded).await.unwrap_err();
+        assert!(matches!(error, VolumeError::Unusable(_)), "{error}");
+        assert_eq!(log.executables(), vec!["mke2fs"]);
+        assert!(
+            !volumes.is_formatted(&volume_id()).unwrap(),
+            "a failed format is left for the next pass to redo, not mistaken for a finished one"
+        );
     }
 
     #[tokio::test]
