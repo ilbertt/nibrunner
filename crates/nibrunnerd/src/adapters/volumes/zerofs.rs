@@ -9,8 +9,8 @@ use crate::adapters::net::allocator::SlotAllocator;
 use crate::adapters::volumes::initial_contents::{ContentsStaging, StagedRoot};
 use crate::adapters::volumes::nbd::{NbdDevices, NbdTarget};
 use crate::adapters::volumes::{
-    align_to_sector, format_request, has_ext_magic, AttachedVolume, CacheReservation, ObservedBacking,
-    VolumeBackend, VolumeError, SUPERBLOCK_MAGIC_OFFSET,
+    align_to_sector, discard_superblock, format_request, has_ext_magic, AttachedVolume, CacheReservation,
+    ObservedBacking, VolumeBackend, VolumeError, SUPERBLOCK_MAGIC_OFFSET,
 };
 use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
@@ -135,7 +135,10 @@ impl ZerofsVolumes {
         self.commands
             .stdout_of(format_request(device_path, contents, false))
             .await
-            .map_err(|error| VolumeError::Unusable(error.message()))?;
+            .map_err(|error| {
+                discard_superblock(device_path);
+                VolumeError::Unusable(error.message())
+            })?;
         Ok(())
     }
 
