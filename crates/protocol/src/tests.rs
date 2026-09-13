@@ -574,6 +574,9 @@ mod schema {
                 ready_at: Some(now),
                 message: None,
             }],
+            message: Some(StateMessage::new(
+                "the last document named a volume this host does not hold",
+            )),
         };
         serde_json::to_value(state).unwrap()
     }

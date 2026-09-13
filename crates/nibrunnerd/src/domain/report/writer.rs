@@ -44,6 +44,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
         meters: &snapshot.meters,
         checkpoints: snapshot.checkpoint_reports.clone(),
         exports: snapshot.export_reports.clone(),
+        message: snapshot.desired_refusal.clone(),
     })
 }
 
@@ -87,6 +88,24 @@ mod tests {
             report.allocatable.memory_mib,
             host.guest_memory_mib - u64::from(protocol::DEFAULT_INSTANCE_RESOURCES.memory_mib)
         );
+    }
+
+    #[tokio::test]
+    async fn a_refused_document_this_host_is_still_holding_is_named_at_the_top_of_the_report() {
+        let host = test_host().await;
+        host.state
+            .modify(|snapshot| {
+                snapshot.desired_refusal = Some(protocol::StateMessage::new(
+                    "desired.json holds a document this host cannot read: missing field `instances`",
+                ))
+            })
+            .await;
+
+        let message = build(&host, versions())
+            .await
+            .message
+            .expect("the refusal reaches the report");
+        assert!(message.as_str().contains("missing field `instances`"));
     }
 
     #[tokio::test]

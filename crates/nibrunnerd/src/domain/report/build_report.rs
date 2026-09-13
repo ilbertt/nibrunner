@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use protocol::{
     AppId, ComputeUsage, FilesystemUsage, HostCapacity, HostId, HostReportedState, HostState, HostVersions,
-    ReportedCheckpoint, ReportedExport, ReportedInstance, ReportedVolume, Timestamp, UsageMeters,
+    ReportedCheckpoint, ReportedExport, ReportedInstance, ReportedVolume, StateMessage, Timestamp,
+    UsageMeters,
 };
 
 use crate::domain::report::InstanceRecord;
@@ -54,6 +55,7 @@ pub struct ReportInputs<'a> {
     pub meters: &'a BTreeMap<AppId, UsageMeters>,
     pub checkpoints: Vec<ReportedCheckpoint>,
     pub exports: Vec<ReportedExport>,
+    pub message: Option<StateMessage>,
 }
 
 pub fn build_reported_state(inputs: ReportInputs<'_>) -> HostReportedState {
@@ -85,6 +87,7 @@ pub fn build_reported_state(inputs: ReportInputs<'_>) -> HostReportedState {
             .collect(),
         checkpoints: inputs.checkpoints,
         exports: inputs.exports,
+        message: inputs.message,
     }
 }
 
@@ -144,6 +147,7 @@ mod tests {
             meters: &BTreeMap::new(),
             checkpoints,
             exports,
+            message: None,
         })
     }
 
@@ -172,6 +176,7 @@ mod tests {
             meters: &BTreeMap::new(),
             checkpoints: vec![],
             exports: vec![],
+            message: None,
         })
     }
 

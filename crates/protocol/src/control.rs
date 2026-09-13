@@ -408,6 +408,11 @@ pub struct HostReportedState {
     pub instances: Vec<ReportedInstance>,
     pub checkpoints: Vec<ReportedCheckpoint>,
     pub exports: Vec<ReportedExport>,
+    /// Set when the last document this host was handed was refused — malformed, or not the
+    /// document this host reads — and cleared when a readable one is taken up. A control plane
+    /// that only reads this file learns from it that its last write did not land, and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<StateMessage>,
 }
 
 pub const MIN_POLL_INTERVAL_MS: u64 = 100;
