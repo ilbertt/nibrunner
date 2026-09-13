@@ -23,7 +23,7 @@ Laid out; nothing started. What is left:
 
   1. edit /etc/nibrunner/config.toml
      written just now: volumes as files on this disk, plain HTTP on :80, nothing in an
-     object store. Every key: https://github.com/ilbertt/nibrunner/blob/main/docs/config.md
+     object store. Every key: https://github.com/ilbertt/nibrunner/blob/main/docs/content/docs/config.md
   2. edit /etc/nibrunner/host.env
      the secrets that configuration needs, each named in the file
   3. nibrunnerd start
@@ -33,7 +33,7 @@ Laid out; nothing started. What is left:
 needs is still empty, and then starts — or restarts — the units that file names. It is also every
 later change: edit, `nibrunnerd start`.
 
-**[docs/config.md](docs/config.md) is every key in that file.** `deploy/config.example.toml` is
+**[docs/content/docs/config.md](docs/content/docs/config.md) is every key in that file.** `deploy/config.example.toml` is
 one with every section: volumes in an object store, TLS behind an edge, raw ports, metrics. A host
 given its configuration before the script runs is asked only for the secrets it needs.
 

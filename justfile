@@ -70,6 +70,33 @@ fmt *args:
 lint:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+# The docs site under docs/ is a Fumadocs app on Bun, which mise.toml pins. Once, before the rest:
+docs-install:
+    cd docs && bun install --frozen-lockfile
+
+# Serves it on http://localhost:3000, rebuilding as docs/ changes.
+docs-dev:
+    cd docs && bun run dev
+
+# The static site, into docs/.output/public.
+docs-build:
+    cd docs && bun run build
+
+# Through bun rather than the node shim, so a machine without node can run it. From the root and
+# pointed at docs/, never from inside it: docs/biome.json says `root: false` so that an editor
+# opened on the repo applies it, and a Biome started inside docs/ then finds no root and uses none
+# of it.
+biome := "bun docs/node_modules/@biomejs/biome/bin/biome"
+
+# Types over the docs site, then Biome — lint, formatting, import order — over docs/.
+docs-check:
+    cd docs && bun run --bun tsc --noEmit
+    {{biome}} check docs
+
+# Rewrites what `docs-check` would refuse, where Biome has a fix for it.
+docs-fix:
+    {{biome}} check --write docs
+
 # The JSON Schemas in crates/protocol/schema, written afresh from the protocol crate's types.
 schema:
     cargo run -q -p nibrunner-protocol --features schema --bin protocol-schema -- crates/protocol/schema

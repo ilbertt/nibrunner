@@ -1,4 +1,7 @@
-# Configuring a host
+---
+title: Configuring a host
+description: What every key in a host's config.toml is, and the three rules that explain every refusal.
+---
 
 `nibrunnerd install` laid this host out and left you a `config.toml` to make its own. This is what
 every key in that file is.
