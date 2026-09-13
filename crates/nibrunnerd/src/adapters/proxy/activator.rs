@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use crate::adapters::proxy::forward::{forward, say, ProxyBody};
 use crate::domain::metrics::sleep_wake::Answer;
 use crate::domain::metrics::HostMetrics;
-use crate::ports::{WakeRefusal, Waker};
+use crate::ports::{WakeFailure, WakeRefusal, Waker};
 use crate::state::SharedState;
 
 const LOOPBACK: &str = "127.0.0.1";
@@ -122,17 +122,36 @@ impl AppActivator {
         self.state.mark_active(&app_id, crate::clock::now_ms()).await;
 
         let started = std::time::Instant::now();
-        if let Err(refusal) = self.waker.wake(&app_id).await {
-            return match refusal {
-                WakeRefusal::NoRoom { shortfall_mib } => {
-                    tracing::warn!(%app_id, shortfall_mib, "a request could not be given an app");
-                    (host_is_full(), Answer::HostFull)
+        // An idle guest is asleep and has to be woken. Any other guest that reaches the activator
+        // is one the firewall stopped forwarding because it is no longer Running, yet it may well
+        // still be serving its port — an app the health tracker moved to Unhealthy is the case that
+        // brought this here. Health is report-only, so if such a guest already accepts a connection
+        // the request is handed straight to it rather than waking it onto a health check it is
+        // currently failing (which would wait out the whole grace period and then refuse). A guest
+        // that is genuinely down still takes the wake path.
+        let guest = SocketAddr::from((record.guest_ipv4.addr(), record.http_port.get()));
+        if record.is_idle() || !accepts_a_connection(guest).await {
+            if let Err(refusal) = self.waker.wake(&app_id).await {
+                match refusal {
+                    WakeRefusal::NoRoom { shortfall_mib } => {
+                        tracing::warn!(%app_id, shortfall_mib, "a request could not be given an app");
+                        return (host_is_full(), Answer::HostFull);
+                    }
+                    // The guest booted but its health probe stayed red through the grace window;
+                    // health is report-only, so forward to it anyway rather than manufacture an
+                    // outage. A port still not listening falls through to forward()'s bad gateway.
+                    WakeRefusal::Failed {
+                        kind: WakeFailure::NeverAnswered,
+                        reason,
+                    } => {
+                        tracing::debug!(%app_id, reason, "forwarding to an app whose health check is unmet");
+                    }
+                    WakeRefusal::Failed { reason, .. } => {
+                        tracing::warn!(%app_id, reason, "a request could not be given an app");
+                        return (app_would_not_start(), Answer::WouldNotStart);
+                    }
                 }
-                WakeRefusal::Failed { reason, .. } => {
-                    tracing::warn!(%app_id, reason, "a request could not be given an app");
-                    (app_would_not_start(), Answer::WouldNotStart)
-                }
-            };
+            }
         }
         let woke_ms = started.elapsed().as_millis();
 
@@ -152,7 +171,7 @@ impl AppActivator {
         )
         .await;
         self.metrics.sleep_wake.first_response(served.elapsed());
-        tracing::info!(
+        tracing::debug!(
             %app_id,
             woke_ms,
             served_ms = served.elapsed().as_millis(),
@@ -160,6 +179,20 @@ impl AppActivator {
         );
         (response, Answer::Served)
     }
+}
+
+/// Whether the guest is already listening. The kernel completes this connection even while the
+/// app behind the port is unhealthy, and the wait is bounded so an unreachable guest does not hold
+/// the request up before it falls through to the wake path.
+async fn accepts_a_connection(address: SocketAddr) -> bool {
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await,
+        Ok(Ok(_))
+    )
 }
 
 async fn accept(listener: TcpListener, activator: Arc<AppActivator>, app_id: AppId) {
@@ -254,7 +287,7 @@ mod tests {
             .expect("the activator answers")
     }
 
-    async fn guest(state: &SharedState, body: &'static str) -> HostPort {
+    async fn guest(state: &SharedState, in_state: InstanceState, body: &'static str) -> HostPort {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
@@ -277,7 +310,7 @@ mod tests {
         state
             .put_record(instance_record(|record| {
                 record.on_request = true;
-                record.state = InstanceState::Idle;
+                record.state = in_state;
                 record.guest_ipv4 = Ipv4Address::parse("127.0.0.1").unwrap();
                 record.http_port = HttpPort::new(port).unwrap();
             }))
@@ -301,7 +334,7 @@ mod tests {
     #[tokio::test]
     async fn the_request_waits_for_the_wake_and_is_answered_by_the_guest_that_comes_up() {
         let state = HostState::shared();
-        guest(&state, "served by the tenant\n").await;
+        guest(&state, InstanceState::Idle, "served by the tenant\n").await;
         let waker = CountingWaker::allowing();
         let activator = AppActivator::new(state, waker.clone(), Arc::default());
         let host_port = serving(&activator, &app_id()).await;
@@ -369,6 +402,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_app_that_is_up_but_unhealthy_is_served_without_being_woken() {
+        // A guest the health tracker has marked unhealthy is still listening, but the firewall
+        // stops forwarding it, so its traffic reaches the activator. Health is report-only, so the
+        // request must be handed to the port that answers rather than wait out a wake that would
+        // hang on a health check it never passes.
+        let state = HostState::shared();
+        guest(&state, InstanceState::Unhealthy, "served though unhealthy\n").await;
+        let waker = CountingWaker::allowing();
+        let activator = AppActivator::new(state, waker.clone(), Arc::default());
+        let host_port = serving(&activator, &app_id()).await;
+
+        let response = get(host_port).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "served though unhealthy\n");
+        assert_eq!(waker.count(), 0, "an app already answering its port is not woken");
+    }
+
+    /// Wakes by bringing the guest up on the port the record names, then reports the health check
+    /// as unmet — a cold guest that comes up serving but never goes green.
+    struct WakingBringsUpAnUnhealthyGuest {
+        port: HostPort,
+        body: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Waker for WakingBringsUpAnUnhealthyGuest {
+        async fn wake(&self, _app_id: &AppId) -> Result<(), WakeRefusal> {
+            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], self.port.get())))
+                .await
+                .unwrap();
+            let body = self.body;
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    tokio::spawn(async move {
+                        let service = service_fn(move |_request: Request<Incoming>| async move {
+                            Ok::<_, std::convert::Infallible>(say(StatusCode::OK, body))
+                        });
+                        let _ = http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    });
+                }
+            });
+            Err(WakeRefusal::Failed {
+                kind: WakeFailure::NeverAnswered,
+                reason: "the health check is unmet".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_woken_guest_that_comes_up_unhealthy_is_forwarded_to_rather_than_refused() {
+        // Cold path: nothing is listening when the request arrives, so the guest is woken. It comes
+        // up serving its port but never passes its health check (NeverAnswered). Health is
+        // report-only, so the request is still forwarded to the port that is now up.
+        let state = HostState::shared();
+        let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+                record.guest_ipv4 = Ipv4Address::parse("127.0.0.1").unwrap();
+                record.http_port = HttpPort::new(port).unwrap();
+            }))
+            .await;
+        let waker = WakingBringsUpAnUnhealthyGuest {
+            port: HostPort::new(port).unwrap(),
+            body: "up but unhealthy\n",
+        };
+        let activator = AppActivator::new(state, Arc::new(waker), Arc::default());
+        let host_port = serving(&activator, &app_id()).await;
+
+        let response = get(host_port).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "up but unhealthy\n");
+    }
+
+    #[tokio::test]
     async fn a_suspended_app_is_not_woken_by_somebody_finding_its_hostname() {
         let state = HostState::shared();
         state
@@ -423,7 +541,7 @@ mod tests {
     #[tokio::test]
     async fn a_connection_that_would_be_upgraded_is_told_to_come_back_once_the_app_is_up() {
         let state = HostState::shared();
-        guest(&state, "served by the tenant\n").await;
+        guest(&state, InstanceState::Idle, "served by the tenant\n").await;
         let waker = CountingWaker::allowing();
         let activator = AppActivator::new(state, waker.clone(), Arc::default());
         let host_port = serving(&activator, &app_id()).await;
@@ -445,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn a_request_that_woke_an_app_counts_as_the_app_having_been_used() {
         let state = HostState::shared();
-        guest(&state, "served by the tenant\n").await;
+        guest(&state, InstanceState::Idle, "served by the tenant\n").await;
         let before = crate::clock::now_ms();
         let activator = AppActivator::new(state.clone(), CountingWaker::allowing(), Arc::default());
         let host_port = serving(&activator, &app_id()).await;

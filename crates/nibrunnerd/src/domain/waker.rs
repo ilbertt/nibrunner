@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use protocol::{AppId, DesiredInstanceState};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 
 use crate::domain::health::probe::probe_instance;
 use crate::domain::report::capacity::{committed_resources, memory_shortfall_mib};
@@ -13,10 +13,16 @@ use crate::ports::{WakeFailure, WakeRefusal, Waker};
 const PROBE_INTERVAL: Duration = Duration::from_millis(5);
 
 type Outcome = Result<(), WakeRefusal>;
+type Coalescing = BTreeMap<AppId, (broadcast::Sender<Outcome>, u64)>;
+type InFlight = Mutex<Coalescing>;
+
+fn lock(in_flight: &InFlight) -> std::sync::MutexGuard<'_, Coalescing> {
+    in_flight.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub struct AppWaker {
     host: Arc<Host>,
-    in_flight: Mutex<BTreeMap<AppId, (broadcast::Sender<Outcome>, u64)>>,
+    in_flight: InFlight,
 }
 
 impl AppWaker {
@@ -144,13 +150,8 @@ impl AppWaker {
             .metrics
             .sleep_wake
             .woken(app_id, outcome, started.elapsed(), ready);
-        let joined = self
-            .in_flight
-            .lock()
-            .await
-            .get(app_id)
-            .map_or(0, |(_, count)| *count);
-        tracing::info!(
+        let joined = lock(&self.in_flight).get(app_id).map_or(0, |(_, count)| *count);
+        tracing::debug!(
             %app_id,
             outcome = outcome.as_str(),
             waited_ms = started.elapsed().as_millis(),
@@ -163,47 +164,94 @@ impl AppWaker {
     }
 }
 
+enum Role<'a> {
+    Follower(broadcast::Receiver<Outcome>),
+    Leader(Leader<'a>),
+}
+
+/// A leader owns its app's `in_flight` entry until it broadcasts the boot's outcome to the
+/// followers. Should the leader's future be dropped before then — its caller gave up mid-boot —
+/// the entry is still released and the followers told, so the next wake of this app leads a fresh
+/// one instead of subscribing to a sender that would never fire.
+struct Leader<'a> {
+    in_flight: &'a InFlight,
+    app_id: &'a AppId,
+    settled: bool,
+}
+
+impl<'a> Leader<'a> {
+    fn new(in_flight: &'a InFlight, app_id: &'a AppId) -> Self {
+        Self {
+            in_flight,
+            app_id,
+            settled: false,
+        }
+    }
+
+    fn settle(mut self, outcome: Outcome) {
+        self.broadcast(outcome);
+        self.settled = true;
+    }
+
+    fn broadcast(&self, outcome: Outcome) {
+        if let Some((sender, _)) = lock(self.in_flight).remove(self.app_id) {
+            let _ = sender.send(outcome);
+        }
+    }
+}
+
+impl Drop for Leader<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.broadcast(Err(WakeRefusal::Failed {
+                kind: WakeFailure::Abandoned,
+                reason: "the wake was abandoned".into(),
+            }));
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Waker for AppWaker {
     async fn wake(&self, app_id: &AppId) -> Result<(), WakeRefusal> {
         let started = Instant::now();
-        let joined = {
-            let mut in_flight = self.in_flight.lock().await;
+        let role = {
+            let mut in_flight = lock(&self.in_flight);
             match in_flight.get_mut(app_id) {
                 Some((sender, count)) => {
                     *count += 1;
-                    Some(sender.subscribe())
+                    Role::Follower(sender.subscribe())
                 }
                 None => {
                     let (sender, _) = broadcast::channel(1);
                     in_flight.insert(app_id.clone(), (sender, 0));
-                    None
+                    Role::Leader(Leader::new(&self.in_flight, app_id))
                 }
             }
         };
         let metrics = &self.host.metrics.sleep_wake;
-        if let Some(mut waiting) = joined {
-            let outcome = match waiting.recv().await {
-                Ok(outcome) => outcome,
-                Err(_) => Err(WakeRefusal::Failed {
-                    kind: WakeFailure::Abandoned,
-                    reason: "the wake was abandoned".into(),
-                }),
-            };
-            metrics.woke(started.elapsed(), true);
-            return outcome;
+        match role {
+            Role::Follower(mut waiting) => {
+                let outcome = match waiting.recv().await {
+                    Ok(outcome) => outcome,
+                    Err(_) => Err(WakeRefusal::Failed {
+                        kind: WakeFailure::Abandoned,
+                        reason: "the wake was abandoned".into(),
+                    }),
+                };
+                metrics.woke(started.elapsed(), true);
+                outcome
+            }
+            Role::Leader(leader) => {
+                let outcome = self.boot(app_id).await;
+                if let Err(refusal) = &outcome {
+                    metrics.wake_refused(refusal);
+                }
+                metrics.woke(started.elapsed(), false);
+                leader.settle(outcome.clone());
+                outcome
+            }
         }
-
-        let outcome = self.boot(app_id).await;
-        if let Err(refusal) = &outcome {
-            metrics.wake_refused(refusal);
-        }
-        metrics.woke(started.elapsed(), false);
-        let mut in_flight = self.in_flight.lock().await;
-        if let Some((sender, _)) = in_flight.remove(app_id) {
-            let _ = sender.send(outcome.clone());
-        }
-        outcome
     }
 }
 
@@ -248,6 +296,55 @@ mod tests {
                 .filter(|call| **call == crate::ports::VmCall::Wake)
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_leader_dropped_mid_boot_does_not_wedge_the_next_wake() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.http_port = protocol::HttpPort::new(1).unwrap();
+                let probe = record.health_check.probe_mut().unwrap();
+                probe.grace_period_ms = 200;
+                probe.timeout_ms = 50;
+            }))
+            .await;
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
+
+        let waker = AppWaker::new(host.arc().clone());
+
+        // The leader's caller gives up while the boot is still probing an unanswered port.
+        let abandoned = tokio::time::timeout(Duration::from_millis(40), waker.wake(&app_id())).await;
+        assert!(
+            abandoned.is_err(),
+            "the leader should still be booting when its caller gives up"
+        );
+
+        // The next request must lead its own wake rather than subscribe to the abandoned leader's
+        // sender, which would never fire. A regression hangs here until the generous timeout.
+        let next = tokio::time::timeout(Duration::from_secs(2), waker.wake(&app_id()))
+            .await
+            .expect("a dropped leader wedged the next wake");
+        assert!(
+            matches!(
+                next,
+                Err(WakeRefusal::Failed {
+                    kind: WakeFailure::NeverAnswered,
+                    ..
+                })
+            ),
+            "{next:?}"
         );
     }
 
