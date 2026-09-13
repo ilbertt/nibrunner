@@ -338,6 +338,25 @@ impl Vmm for VmManager {
         self.processes.adopted_app_ids()
     }
 
+    async fn readopt(&self, app_id: &AppId) -> Result<(), VmError> {
+        // The deployment its output should be stamped with is the one the record remembers. A
+        // guest this host holds no record of has nothing to attribute its lines to, so it is left
+        // for the reconcile pass, which discards a microVM it was never told to keep.
+        let Some(record) = self.state.record(app_id).await else {
+            return Ok(());
+        };
+        let working_dir = self.working_dir_for(app_id);
+        self.logs
+            .attach(
+                app_id.clone(),
+                record.deployment_id,
+                tenant_log_socket_path(&working_dir),
+                self.sink.clone(),
+            )
+            .await
+            .map_err(|error| VmError::Host(error.to_string()))
+    }
+
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String> {
         let console = std::fs::read_to_string(self.processes.console_path(app_id)).ok()?;
         guest_contract::control::last_guest_line(&console)
@@ -684,6 +703,32 @@ mod tests {
             fixture.manager.logs.attached().await.is_empty(),
             "a socket nothing will write to is not left listening"
         );
+    }
+
+    #[tokio::test]
+    async fn an_adopted_microvm_is_listened_for_again_where_its_guest_reconnects() {
+        let fixture = fixture();
+        // A guest adopted from an earlier daemon still has a record; the deployment its lines are
+        // stamped with is read from it.
+        fixture.state.put_record(instance_record(|_| {})).await;
+
+        fixture.manager.readopt(&app_id()).await.unwrap();
+
+        assert_eq!(fixture.manager.logs.attached().await, vec![app_id()]);
+        let socket = crate::adapters::logs::receiver::tenant_log_socket_path(
+            &fixture.manager.working_dir_for(&app_id()),
+        );
+        assert!(
+            tokio::net::UnixStream::connect(&socket).await.is_ok(),
+            "the host is bound where the guest reconnects after a daemon restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn readopting_a_microvm_this_host_holds_no_record_of_is_a_no_op() {
+        let fixture = fixture();
+        fixture.manager.readopt(&app_id()).await.unwrap();
+        assert!(fixture.manager.logs.attached().await.is_empty());
     }
 
     #[tokio::test]
