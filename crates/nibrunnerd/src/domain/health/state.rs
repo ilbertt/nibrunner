@@ -117,6 +117,12 @@ fn evaluate_stopped_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
     if inputs.started_at_ms.is_some() {
         return InstanceState::Failed;
     }
+    // A start that failed before the microVM ever came up leaves the record Failed with the reason
+    // on it, but no started_at. Collapsing that to Idle would read as an on-request app asleep and
+    // well; it stays Failed until a fresh start attempt moves it off.
+    if inputs.current == InstanceState::Failed {
+        return InstanceState::Failed;
+    }
     if inputs.on_request && inputs.current != InstanceState::Pending {
         down
     } else {
@@ -546,6 +552,46 @@ mod tests {
                 on_request: true,
                 desired_running: false,
                 now_ms: past_grace(),
+                ..Default::default()
+            }),
+            InstanceState::Stopped
+        );
+    }
+
+    #[test]
+    fn a_first_start_that_failed_stays_failed_rather_than_reading_as_asleep_or_still_pending() {
+        // On-request, never booted (no started_at), nothing asked it to stop: the record is Failed
+        // only because its first start failed. It must not collapse to Idle or Pending.
+        let after_failed_start = Evaluate {
+            unit: absent(),
+            on_request: true,
+            started_at_ms: None,
+            now_ms: STARTED_AT_MS,
+            current: InstanceState::Failed,
+            ..Default::default()
+        };
+        assert_eq!(evaluate(after_failed_start), InstanceState::Failed);
+        // The same for an always-on app, whose failed first start used to read as Pending.
+        assert_eq!(
+            evaluate(Evaluate {
+                unit: absent(),
+                on_request: false,
+                started_at_ms: None,
+                now_ms: STARTED_AT_MS,
+                current: InstanceState::Failed,
+                ..Default::default()
+            }),
+            InstanceState::Failed
+        );
+        // A document that no longer wants it up still takes it down, Failed or not.
+        assert_eq!(
+            evaluate(Evaluate {
+                unit: absent(),
+                on_request: true,
+                desired_running: false,
+                started_at_ms: None,
+                now_ms: STARTED_AT_MS,
+                current: InstanceState::Failed,
                 ..Default::default()
             }),
             InstanceState::Stopped
