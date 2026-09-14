@@ -16,6 +16,7 @@ use crate::adapters::proxy::{router, Router};
 use crate::adapters::vm::layers::LayerImages;
 use crate::adapters::vm::manager::{verify_guest_image, VmManager};
 use crate::adapters::vm::process::{extract_firecracker, VmProcesses, FIRECRACKER_VERSION};
+use crate::adapters::vm::snapshot::reap_stale_snapshots;
 use crate::adapters::volumes::initial_contents::ContentsStaging;
 use crate::adapters::volumes::local_file::LocalFileVolumes;
 use crate::adapters::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
@@ -92,13 +93,23 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     let logs = TenantLogReceiver::new();
     let sink = Arc::new(FileLogSink::new(config.logs_dir()));
 
+    let processes = VmProcesses::new(config.runtime_dir.clone());
+    let reaped = reap_stale_snapshots(&config.snapshot_dir, processes.boot_id());
+    if reaped.snapshots > 0 {
+        tracing::info!(
+            snapshots = reaped.snapshots,
+            bytes = reaped.bytes,
+            "snapshots left by an earlier boot removed"
+        );
+    }
+
     let vms = Arc::new(VmManager {
         vm_dir: config.vm_dir(),
         snapshot_dir: config.snapshot_dir.clone(),
         guest_image_dir: config.guest_image_dir.clone(),
         guest_image_version: guest_image_version.clone(),
         firecracker,
-        processes: VmProcesses::new(config.runtime_dir.clone()),
+        processes,
         network,
         volumes: volumes.clone(),
         logs,
