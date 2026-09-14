@@ -201,21 +201,39 @@ fn traffic_chains_v4(state: &FirewallState) -> Vec<String> {
     lines
 }
 
+// Ahead of the established accept, so that a flow a guest opened before an address was denied is
+// cut on its next packet rather than carried by conntrack for as long as it stays warm. A tcp
+// packet is answered with a reset, which ends a connected socket at once; the ICMP unreachable a
+// plain reject sends is only a soft error on one, and would leave the guest retransmitting into
+// the deny until it timed out.
+fn denied_egress_rules(tap: &str, daddr: &str, cidrs: &[String]) -> Vec<String> {
+    cidrs
+        .iter()
+        .flat_map(|cidr| {
+            [
+                format!(
+                    "iifname {tap} {daddr} {cidr} meta l4proto tcp {DENY} with tcp reset comment \"denied egress\""
+                ),
+                format!("iifname {tap} {daddr} {cidr} {DENY} comment \"denied egress\""),
+            ]
+        })
+        .collect()
+}
+
 fn forward_chain_v4(state: &FirewallState) -> Vec<String> {
     let tap = tap_match();
-    let mut rules = vec![
-        "type filter hook forward priority filter; policy accept;".to_string(),
+    let mut rules = vec!["type filter hook forward priority filter; policy accept;".to_string()];
+    rules.extend(denied_egress_rules(
+        &tap,
+        "ip daddr",
+        &state.denied_egress_addresses_v4,
+    ));
+    rules.extend([
         "ct state established,related accept".to_string(),
         format!("iifname {tap} ip daddr {INSTANCE_METADATA_ADDRESS_V4} {DENY} comment \"instance metadata endpoint\""),
         format!("iifname {tap} oifname {tap} {DENY} comment \"guest to guest\""),
         format!("iifname {tap} ip daddr {GUEST_NETWORK_CIDR} {DENY} comment \"guest to guest\""),
-    ];
-    rules.extend(
-        state
-            .denied_egress_addresses_v4
-            .iter()
-            .map(|cidr| format!("iifname {tap} ip daddr {cidr} {DENY} comment \"denied egress\"")),
-    );
+    ]);
     rules.push(format!(
         "iifname {tap} ip daddr {} {DENY} comment \"private destinations\"",
         set(&PRIVATE_DESTINATIONS_V4)
@@ -237,18 +255,17 @@ fn input_chain_v4() -> Vec<String> {
 
 fn forward_chain_v6(state: &FirewallState) -> Vec<String> {
     let tap = tap_match();
-    let mut rules = vec![
-        "type filter hook forward priority filter; policy accept;".to_string(),
+    let mut rules = vec!["type filter hook forward priority filter; policy accept;".to_string()];
+    rules.extend(denied_egress_rules(
+        &tap,
+        "ip6 daddr",
+        &state.denied_egress_addresses_v6,
+    ));
+    rules.extend([
         "ct state established,related accept".to_string(),
         format!("iifname {tap} ip6 daddr {INSTANCE_METADATA_ADDRESS_V6} {DENY} comment \"instance metadata endpoint\""),
         format!("iifname {tap} oifname {tap} {DENY} comment \"guest to guest\""),
-    ];
-    rules.extend(
-        state
-            .denied_egress_addresses_v6
-            .iter()
-            .map(|cidr| format!("iifname {tap} ip6 daddr {cidr} {DENY} comment \"denied egress\"")),
-    );
+    ]);
     rules.push(format!(
         "iifname {tap} ip6 daddr {} {DENY} comment \"private destinations\"",
         set(&PRIVATE_DESTINATIONS_V6)
@@ -453,6 +470,64 @@ mod tests {
         assert!(!["::1", "fe80:", "fc", "fd"]
             .iter()
             .any(|range| vpc.starts_with(range)));
+    }
+
+    fn forward_chain(half: &str) -> Vec<&str> {
+        half.lines()
+            .map(str::trim)
+            .skip_while(|l| !l.starts_with("chain forward {"))
+            .skip(1)
+            .take_while(|l| *l != "}")
+            .collect()
+    }
+
+    // A guest that fetched an address two seconds before it was denied got a 200 through the deny
+    // on its keep-alive connection: conntrack carried the flow past a rule that only saw new ones.
+    #[test]
+    fn a_flow_a_guest_opened_before_its_address_was_denied_is_cut_on_the_next_packet() {
+        let v4 = "172.66.147.243/32";
+        let v6 = "2606:4700::6810:1a9a/128";
+        let ruleset = render_ruleset(&state(vec![instance()], &[v4], &[v6]));
+        for (chain, daddr, cidr) in [
+            (forward_chain(&ruleset), "ip daddr", v4),
+            (forward_chain(&v6_half(&ruleset)), "ip6 daddr", v6),
+        ] {
+            let established = chain
+                .iter()
+                .position(|l| l.starts_with("ct state established"))
+                .unwrap();
+            let denies: Vec<usize> = chain
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.contains("denied egress"))
+                .map(|(at, _)| at)
+                .collect();
+            assert!(
+                denies.iter().all(|at| *at < established),
+                "a deny behind the established accept only ever sees a new flow: {chain:#?}"
+            );
+            assert_eq!(denies.len(), 2);
+            assert_eq!(
+                chain[denies[0]],
+                format!("iifname \"nbr*\" {daddr} {cidr} meta l4proto tcp reject with tcp reset comment \"denied egress\""),
+                "a reset is what ends a connected tcp socket at once; an ICMP unreachable is only a soft error on one"
+            );
+            assert_eq!(
+                chain[denies[1]],
+                format!("iifname \"nbr*\" {daddr} {cidr} reject comment \"denied egress\""),
+                "whatever is not tcp is still refused"
+            );
+        }
+    }
+
+    #[test]
+    fn with_nothing_denied_by_name_the_established_accept_is_still_the_first_rule() {
+        let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
+        for chain in [forward_chain(&ruleset), forward_chain(&v6_half(&ruleset))] {
+            assert!(chain[0].starts_with("type filter hook forward"));
+            assert_eq!(chain[1], "ct state established,related accept");
+            assert!(!ruleset.contains("denied egress"));
+        }
     }
 
     #[test]
