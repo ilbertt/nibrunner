@@ -236,10 +236,27 @@ pub fn reap_stale_snapshots(snapshot_dir: &Path, host_boot_id: &str) -> Reaped {
 
 pub fn measure_snapshot_disk(snapshot_dir: &Path, cache_bytes: u64) -> std::io::Result<SnapshotDisk> {
     crate::json_store::make_directory(snapshot_dir, 0o700)?;
+    measure_disk_under(snapshot_dir, cache_bytes)
+}
+
+/// The disk the snapshots land on, whether or not there is a directory for them yet: one that is
+/// not there is measured at its nearest ancestor that is, which is the filesystem it would be
+/// made on. Nothing is made, so this is what `install` may size a host against before it has
+/// laid anything down.
+pub fn measure_disk_under(snapshot_dir: &Path, cache_bytes: u64) -> std::io::Result<SnapshotDisk> {
+    let landing = snapshot_dir
+        .ancestors()
+        .find(|ancestor| ancestor.exists())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("nothing of {} is there", snapshot_dir.display()),
+            )
+        })?;
     let FilesystemSpace {
         total_bytes,
         available_bytes,
-    } = crate::domain::report::capacity::read_filesystem_space(snapshot_dir)?;
+    } = crate::domain::report::capacity::read_filesystem_space(landing)?;
     Ok(SnapshotDisk {
         total_bytes,
         available_bytes,
@@ -474,6 +491,22 @@ mod tests {
 
         std::fs::write(snapshots.join("memory"), vec![b'x'; 2048]).unwrap();
         assert_eq!(measure_snapshot_disk(&snapshots, 0).unwrap().snapshot_bytes, 2048);
+    }
+
+    #[test]
+    fn a_snapshot_directory_not_made_yet_is_measured_on_the_disk_it_would_be_made_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let unmade = directory.path().join("state").join("snapshots");
+        let disk = measure_disk_under(&unmade, 4 * GIB).unwrap();
+        assert!(!unmade.exists());
+        assert!(!directory.path().join("state").exists());
+        assert_eq!(
+            disk.total_bytes,
+            measure_disk_under(directory.path(), 4 * GIB).unwrap().total_bytes
+        );
+        assert_eq!(disk.cache_bytes, 4 * GIB);
+        assert_eq!(disk.snapshot_bytes, 0);
+        assert!(measure_disk_under(Path::new("nowhere-relative"), 0).is_err());
     }
 
     #[test]

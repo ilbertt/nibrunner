@@ -182,10 +182,14 @@ async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
     std::process::ExitCode::FAILURE
 }
 
-/// Each step said itself as it happened; what is left to say is that there were none.
+/// Each step said itself as it happened; what is left to say is that there were none, and what
+/// this host holds against the number it is laid out for.
 fn print_laid(laid: &install::Laid) {
     if laid.done.is_empty() {
         println!("  nothing to change");
+    }
+    if let Some(measured) = &laid.measured {
+        println!("  {measured}");
     }
 }
 

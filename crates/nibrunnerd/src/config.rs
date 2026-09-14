@@ -142,6 +142,11 @@ pub struct MetricsConfig {
     pub listen_address: IpAddr,
 }
 
+/// Where the starting point keeps everything of this host's, which a Linux distribution would
+/// put here. Named so that what `install` measures before there is a configuration is the disk
+/// the configuration it then writes will name.
+pub const STARTER_STATE_DIR: &str = "/var/lib/nibrunner";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
     /// How many apps this host is laid out for. Everything that counts slots follows from it —
@@ -506,13 +511,17 @@ impl HostConfig {
     /// this machine's own disk, stores as directories on it, plain HTTP on :80 — because a host with
     /// no listener refuses a document that names a hostname, and a host that serves nothing is not
     /// a starting point. It is what `install` writes a host that has none — from here, so there is
-    /// no file in the repository to fall behind [`Self::from_document`].
-    pub fn starter() -> Self {
+    /// no file in the repository to fall behind [`Self::from_document`]. `max_apps` is the one
+    /// number in it that is this machine's rather than every machine's, so it is handed in:
+    /// `install` measures it.
+    pub fn starter(max_apps: u32) -> Self {
+        let state_dir = PathBuf::from(STARTER_STATE_DIR);
         let mut starter = Self::laid_out(
-            PathBuf::from("/var/lib/nibrunner"),
+            state_dir.clone(),
             PathBuf::from("/run/nibrunner"),
-            PathBuf::from("/var/lib/nibrunner/guest"),
+            state_dir.join("guest"),
         );
+        starter.max_apps = max_apps;
         starter.proxy.http = Some(HttpListener {
             listen_address: IpAddr::from([0, 0, 0, 0]),
             port: 80,
@@ -1586,7 +1595,7 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
     #[test]
     fn the_configuration_this_binary_carries_is_the_smallest_document_with_a_listener_rendered() {
         assert_eq!(
-            HostConfig::starter().to_toml(),
+            HostConfig::starter(1000).to_toml(),
             document(&[], &bound("\n[proxy.http]\nport = 80\n"))
         );
     }
@@ -1597,7 +1606,7 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
     #[test]
     fn a_configuration_rendered_is_the_configuration_read_back() {
         for config in [
-            HostConfig::starter(),
+            HostConfig::starter(320),
             HostConfig::example(),
             HostConfig::under(Path::new("/srv/one-host")),
         ] {

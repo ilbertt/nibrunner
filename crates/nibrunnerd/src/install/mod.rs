@@ -10,6 +10,7 @@
 
 pub mod guest_image;
 pub mod kernel;
+pub mod max_apps;
 pub mod prerequisites;
 pub mod render;
 pub mod secrets;
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use protocol::HostVersions;
 
-use crate::config::{HostConfig, VolumeBackend};
+use crate::config::{HostConfig, VolumeBackend, STARTER_STATE_DIR};
 use crate::json_store::{make_directory, write_text};
 
 const MEBIBYTES_PER_GIBIBYTE: u64 = 1024;
@@ -54,6 +55,9 @@ impl InstallError {
 pub struct Laid {
     pub done: Vec<String>,
     pub written: Vec<PathBuf>,
+    /// What this host holds against the `max_apps` it is laid out for: measured rather than
+    /// changed, so beside `done` rather than in it, and printed after it.
+    pub measured: Option<String>,
 }
 
 impl Laid {
@@ -108,6 +112,10 @@ pub async fn run(
         }),
     };
     let guest_image = refuse_unready(config, verified)?;
+    laid.measured = Some(max_apps::said(
+        config.max_apps,
+        &max_apps::measure(&config.snapshot_dir, &config.volumes),
+    ));
 
     let environment_file = environment_file(config_file);
 
@@ -234,18 +242,25 @@ pub fn next_steps(config: &HostConfig, config_file: &Path, origin: Origin) -> St
 /// The starting point this daemon carries, rendered by the code that reads it rather than carried
 /// as a file that would have to be kept abreast of that code by hand. It is not one of the files
 /// `write_generated` writes and must never read as one: this is the file the others are rendered
-/// *from*, and a re-run leaves it alone.
+/// *from*, and a re-run leaves it alone. `max_apps` is measured on this machine, and the line
+/// above it says so, so that nobody reads a measurement as a policy.
 pub fn write_starter_configuration(path: &Path) -> Result<(), crate::json_store::StoreError> {
-    let rendered = format!(
+    let bounds = max_apps::measure(Path::new(STARTER_STATE_DIR), &VolumeBackend::LocalFile);
+    write_text(path, &starter_configuration(&bounds), READABLE_FILE_MODE)
+}
+
+fn starter_configuration(bounds: &max_apps::Bounds) -> String {
+    let (max_apps, derived) = max_apps::starter(bounds);
+    format!(
         "# This host had no configuration, so this is the starting point: volumes as files on its own\n\
          # disk, stores as directories on it, plain HTTP on :80. It is yours from here — edit it, then\n\
          # `nibrunnerd start` — and nothing writes it for you again.\n\
          # What every key means: {CONFIG_DOCS_URL}\n\
          \n\
+         # {derived}\n\
          {}",
-        HostConfig::starter().to_toml()
-    );
-    write_text(path, &rendered, READABLE_FILE_MODE)
+        HostConfig::starter(max_apps).to_toml()
+    )
 }
 
 pub fn unit_path(unit: &str) -> PathBuf {
@@ -343,6 +358,14 @@ fn stamp_versions(config: &HostConfig, guest_image: String) -> Result<(), Instal
 mod tests {
     use super::*;
 
+    fn measured(memory: u32, disk: u32) -> max_apps::Bounds {
+        max_apps::Bounds {
+            memory: Ok(memory),
+            disk: Ok(disk),
+            ports: nft_render::most_apps_the_ports_fit(),
+        }
+    }
+
     // It is written to a host that then has to load it, and the next-steps block describes it. A
     // starting point this daemon refuses, or that serves nothing, leaves a fresh machine no better
     // off than having no configuration at all.
@@ -350,9 +373,9 @@ mod tests {
     fn the_configuration_this_binary_carries_is_one_it_would_accept_and_serve_on() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        write_starter_configuration(&path).unwrap();
+        std::fs::write(&path, starter_configuration(&measured(29, 320))).unwrap();
         let config = HostConfig::from_file(&path).expect("the starting configuration must load");
-        assert_eq!(config, HostConfig::starter());
+        assert_eq!(config, HostConfig::starter(29));
         assert!(matches!(config.volumes, VolumeBackend::LocalFile));
         assert!(secrets::of(&config).iter().all(|secret| !secret.needed));
         let http = config
@@ -372,6 +395,38 @@ mod tests {
         write_starter_configuration(&path).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.starts_with(render::GENERATED_MARKER), "{written}");
+    }
+
+    // The number is this machine's, so the line above it has to say it was measured — and it is
+    // above the key, not somewhere in a header the key is three sections away from.
+    #[test]
+    fn the_number_a_starter_is_laid_out_for_is_written_with_where_it_came_from_above_it() {
+        let written = starter_configuration(&measured(29, 320));
+        let lines: Vec<&str> = written.lines().collect();
+        let key = lines
+            .iter()
+            .position(|line| *line == "max_apps = 29")
+            .expect("the least bound is the key");
+        assert_eq!(
+            lines[key - 1],
+            "# To start, install assumed an app to be 1 vCPU, 256 MiB and 8 GiB, and measured how many this machine holds: memory 29, disk 320, ports 5567."
+        );
+        assert!(lines[key - 2].is_empty(), "{written}");
+    }
+
+    // What this machine measures is its own, so only what every machine's starter has in common is
+    // held to: a number the daemon accepts, whatever the disk under /var/lib turned out to be.
+    #[test]
+    fn a_host_with_no_configuration_is_written_one_it_accepts_whatever_it_measured() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        write_starter_configuration(&path).unwrap();
+        let config = HostConfig::from_file(&path).expect("the starting configuration must load");
+        assert_eq!(config, HostConfig::starter(config.max_apps));
+        assert!(config.max_apps >= 1);
+        assert!(config.max_apps <= nft_render::most_apps_the_ports_fit());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("install assumed an app to be"), "{written}");
     }
 
     #[test]
