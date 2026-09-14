@@ -58,9 +58,10 @@ const VOLUME_STATES: [VolumeState; 5] = [
     VolumeState::Failed,
 ];
 
-const CHECKPOINT_STATES: [CheckpointState; 3] = [
+const CHECKPOINT_STATES: [CheckpointState; 4] = [
     CheckpointState::Pending,
     CheckpointState::Ready,
+    CheckpointState::Deleted,
     CheckpointState::Failed,
 ];
 
@@ -86,6 +87,7 @@ fn checkpoint_state_str(state: CheckpointState) -> &'static str {
     match state {
         CheckpointState::Pending => "pending",
         CheckpointState::Ready => "ready",
+        CheckpointState::Deleted => "deleted",
         CheckpointState::Failed => "failed",
     }
 }

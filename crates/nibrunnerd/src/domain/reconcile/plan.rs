@@ -1177,6 +1177,15 @@ mod tests {
             held,
         );
         assert!(matches!(remove.checkpoints[0], CheckpointPlan::Delete { .. }));
+        let gone = plan(
+            desired_state(|state| {
+                state.checkpoints = vec![desired_checkpoint(|checkpoint| {
+                    checkpoint.desired_state = DesiredPresence::Absent
+                })]
+            }),
+            ObservedState::default(),
+        );
+        assert!(matches!(gone.checkpoints[0], CheckpointPlan::None { .. }));
     }
 
     mod exports {
