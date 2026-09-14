@@ -35,20 +35,22 @@ impl FileLogSink {
         self.directory.join(format!("{app_id}.log"))
     }
 
-    fn render(event: &TenantLogEvent) -> String {
+    /// One record per event: a header, then the line the tenant wrote or the gap in its place,
+    /// ended by the newline the receiver took off it.
+    fn render(event: &TenantLogEvent, out: &mut impl Write) -> std::io::Result<()> {
         match &event.body {
-            TenantLogBody::Data { stream, text } => {
-                format!(
-                    "{} {} {}/{} {}",
-                    event.observed_at,
-                    stream.as_str(),
-                    event.source_id,
-                    event.sequence,
-                    text
-                )
-            }
-            TenantLogBody::Gap { dropped_bytes } => format!(
-                "{} stderr {}/{} {GAP_MESSAGE}: {dropped_bytes} bytes\n",
+            TenantLogBody::Data { stream, text } => writeln!(
+                out,
+                "{} {} {}/{} {}",
+                event.observed_at,
+                stream.as_str(),
+                event.source_id,
+                event.sequence,
+                text
+            ),
+            TenantLogBody::Gap { dropped_bytes } => writeln!(
+                out,
+                "{} stderr {}/{} {GAP_MESSAGE}: {dropped_bytes} bytes",
                 event.observed_at, event.source_id, event.sequence
             ),
         }
@@ -64,7 +66,6 @@ impl LogSink for FileLogSink {
         let mut writers = self.writers.lock().expect("no panic holds the log writer lock");
         let mut touched: BTreeSet<AppId> = BTreeSet::new();
         for event in events {
-            let rendered = Self::render(&event);
             if !writers.contains_key(&event.app_id) {
                 if let Err(error) = make_directory(&self.directory, LOG_DIR_MODE) {
                     tracing::warn!(%error, "tenant logs have nowhere to go");
@@ -84,7 +85,7 @@ impl LogSink for FileLogSink {
             let Some(writer) = writers.get_mut(&event.app_id) else {
                 continue;
             };
-            match writer.write_all(rendered.as_bytes()) {
+            match Self::render(&event, writer) {
                 Ok(()) => {
                     touched.insert(event.app_id);
                 }
@@ -142,7 +143,7 @@ mod tests {
             event(
                 TenantLogBody::Data {
                     stream: TenantLogStream::Stdout,
-                    text: "listening\n".into(),
+                    text: "listening".into(),
                 },
                 0,
             ),
@@ -150,7 +151,7 @@ mod tests {
             event(
                 TenantLogBody::Data {
                     stream: TenantLogStream::Stderr,
-                    text: "warning\n".into(),
+                    text: "warning".into(),
                 },
                 2,
             ),
@@ -164,7 +165,7 @@ mod tests {
         sink.publish(vec![event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "again\n".into(),
+                text: "again".into(),
             },
             3,
         )])
@@ -195,7 +196,7 @@ mod tests {
             event(
                 TenantLogBody::Data {
                     stream: TenantLogStream::Stdout,
-                    text: "mine\n".into(),
+                    text: "mine".into(),
                 },
                 0,
             ),
@@ -204,7 +205,7 @@ mod tests {
                 ..event(
                     TenantLogBody::Data {
                         stream: TenantLogStream::Stdout,
-                        text: "theirs\n".into(),
+                        text: "theirs".into(),
                     },
                     1,
                 )
@@ -220,24 +221,36 @@ mod tests {
             .contains("theirs"));
     }
 
+    fn rendered(event: &TenantLogEvent) -> String {
+        let mut out = Vec::new();
+        FileLogSink::render(event, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
     #[test]
     fn a_gap_is_rendered_on_stderr_so_it_is_read_where_a_failure_would_be() {
-        let rendered = FileLogSink::render(&event(TenantLogBody::Gap { dropped_bytes: 0 }, 9));
+        let rendered = rendered(&event(TenantLogBody::Gap { dropped_bytes: 0 }, 9));
         assert!(rendered.starts_with(observed_at().as_str()), "{rendered}");
         assert!(rendered.contains("stderr source-1/9"), "{rendered}");
         assert!(rendered.ends_with('\n'), "{rendered}");
     }
 
     #[test]
-    fn what_a_tenant_wrote_is_passed_through_rather_than_reshaped() {
-        let rendered = FileLogSink::render(&event(
+    fn a_line_is_written_under_one_header_and_ended_by_the_sink() {
+        let rendered = rendered(&event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "no trailing newline".into(),
+                text: "  kept as it was, \r and all".into(),
             },
             0,
         ));
-        assert!(rendered.ends_with("no trailing newline"), "{rendered}");
+        assert_eq!(
+            rendered,
+            format!(
+                "{} stdout source-1/0   kept as it was, \r and all\n",
+                observed_at()
+            )
+        );
     }
 
     #[tokio::test]
@@ -253,7 +266,7 @@ mod tests {
                     event(
                         TenantLogBody::Data {
                             stream: TenantLogStream::Stdout,
-                            text: format!("line {at}\n"),
+                            text: format!("line {at}"),
                         },
                         at,
                     )
@@ -276,7 +289,7 @@ mod tests {
         sink.publish(vec![event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "before\n".into(),
+                text: "before".into(),
             },
             0,
         )])
@@ -289,7 +302,7 @@ mod tests {
         sink.publish(vec![event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "after\n".into(),
+                text: "after".into(),
             },
             1,
         )])
@@ -312,7 +325,7 @@ mod tests {
         sink.publish(vec![event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "last words\n".into(),
+                text: "last words".into(),
             },
             0,
         )])

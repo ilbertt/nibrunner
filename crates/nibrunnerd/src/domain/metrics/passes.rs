@@ -31,12 +31,14 @@ fn host_state_str(state: HostState) -> &'static str {
 }
 
 /// What set a reconcile pass going: the document moved, the last pass left work it could not
-/// do yet, or the daemon came up and set about the document it had cached.
+/// do yet, the daemon came up and set about the document it had cached, or the timer went off
+/// on a host whose document stood still.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     Change,
     Deferred,
     Restart,
+    Tick,
 }
 
 impl Trigger {
@@ -45,11 +47,17 @@ impl Trigger {
             Trigger::Change => "change",
             Trigger::Deferred => "deferred",
             Trigger::Restart => "restart",
+            Trigger::Tick => "tick",
         }
     }
 }
 
-const TRIGGERS: [Trigger; 3] = [Trigger::Change, Trigger::Deferred, Trigger::Restart];
+const TRIGGERS: [Trigger; 4] = [
+    Trigger::Change,
+    Trigger::Deferred,
+    Trigger::Restart,
+    Trigger::Tick,
+];
 
 /// How the loops that run this host are doing: how long each pass takes, when the last one
 /// ran, and what has kept one from running.
@@ -315,6 +323,7 @@ mod tests {
         assert!(page.contains("nibrunner_host_isolated 0\n"));
         assert!(page.contains("nibrunner_reconcile_seconds_count{trigger=\"change\"} 1\n"));
         assert!(page.contains("nibrunner_reconcile_seconds_count{trigger=\"restart\"} 0\n"));
+        assert!(page.contains("nibrunner_reconcile_seconds_count{trigger=\"tick\"} 0\n"));
         assert!(page.contains("nibrunner_reconcile_last_pass_timestamp_seconds 1700000000.250\n"));
         assert!(page.contains("nibrunner_refresh_seconds_count 1\n"));
         assert!(page.contains("nibrunner_desired_state_unreadable_total 1\n"));

@@ -143,6 +143,46 @@ pub fn read_snapshot_bytes(snapshot_dir: &Path) -> u64 {
     held
 }
 
+/// What reaping the snapshots of an earlier boot freed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reaped {
+    pub snapshots: usize,
+    pub bytes: u64,
+}
+
+/// Removes every snapshot under `snapshot_dir` that was not taken this boot: one stamped with
+/// another boot id, and one with no stamp this host can read. Neither can ever be woken from —
+/// a wake refuses them by name — and each holds the memory its app was promised, so left alone
+/// they are the disk a reboot leaves behind, for good. One stamped this boot is never touched,
+/// whatever else its stamp says: that is the wake's to judge, and to say why.
+pub fn reap_stale_snapshots(snapshot_dir: &Path, host_boot_id: &str) -> Reaped {
+    let mut reaped = Reaped::default();
+    let Ok(entries) = std::fs::read_dir(snapshot_dir) else {
+        return reaped;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let directory = entry.path();
+        let stamp: Option<SnapshotStamp> = read_json(&directory.join(SNAPSHOT_STAMP_FILENAME)).ok().flatten();
+        if stamp.is_some_and(|stamp| stamp.host_boot_id == host_boot_id) {
+            continue;
+        }
+        let bytes = read_snapshot_bytes(&directory);
+        match std::fs::remove_dir_all(&directory) {
+            Ok(()) => {
+                reaped.snapshots += 1;
+                reaped.bytes += bytes;
+            }
+            Err(error) => {
+                tracing::warn!(path = %directory.display(), %error, "a snapshot left by an earlier boot could not be removed");
+            }
+        }
+    }
+    reaped
+}
+
 pub fn measure_snapshot_disk(snapshot_dir: &Path, cache_bytes: u64) -> std::io::Result<SnapshotDisk> {
     crate::json_store::make_directory(snapshot_dir, 0o700)?;
     let FilesystemSpace {
@@ -430,6 +470,100 @@ mod tests {
         assert_eq!(snapshot_budget(&disk), 92 * GIB);
         assert_eq!(refusal_for_disk(&disk, 92 * GIB), None);
         assert!(refusal_for_disk(&disk, 92 * GIB + 1).is_some());
+    }
+
+    /// A snapshot as `sleep` leaves one: memory, state, and whatever stamp is handed in.
+    fn asleep(snapshot_dir: &Path, app: &str, memory_bytes: usize, stamp: Option<&str>) -> PathBuf {
+        let paths = snapshot_paths(snapshot_dir, &AppId::parse(app).unwrap());
+        std::fs::create_dir_all(&paths.directory).unwrap();
+        std::fs::write(&paths.memory_path, vec![b'x'; memory_bytes]).unwrap();
+        std::fs::write(&paths.state_path, b"vmstate").unwrap();
+        if let Some(stamp) = stamp {
+            std::fs::write(&paths.stamp_path, stamp).unwrap();
+        }
+        paths.directory
+    }
+
+    fn stamped_by(boot_id: &str) -> String {
+        serde_json::to_string(&SnapshotStamp {
+            host_boot_id: boot_id.into(),
+            ..stamp()
+        })
+        .unwrap()
+    }
+
+    // After a reboot every snapshot on the disk is of a kernel that is gone, and a wake refuses
+    // each by name — but nothing else ever removed them, and a host was found holding 9 GiB of
+    // them from the boot before.
+    #[test]
+    fn snapshots_left_by_an_earlier_boot_are_removed_and_those_of_this_boot_are_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let this_boot = stamp().host_boot_id;
+        let kept = asleep(directory.path(), "app-1", 100, Some(&stamped_by(&this_boot)));
+        let rebooted = asleep(
+            directory.path(),
+            "app-2",
+            1_000,
+            Some(&stamped_by("the-boot-before")),
+        );
+        let never_stamped = asleep(directory.path(), "app-3", 10_000, None);
+        let unreadable = asleep(directory.path(), "app-4", 100_000, Some("{ not a stamp"));
+        std::fs::write(directory.path().join("a-file"), b"not a snapshot").unwrap();
+
+        let reaped = reap_stale_snapshots(directory.path(), &this_boot);
+
+        assert_eq!(
+            reaped,
+            Reaped {
+                snapshots: 3,
+                bytes: 111_000
+                    + 3 * "vmstate".len() as u64
+                    + "{ not a stamp".len() as u64
+                    + stamped_by("the-boot-before").len() as u64,
+            }
+        );
+        for gone in [&rebooted, &never_stamped, &unreadable] {
+            assert!(!gone.exists(), "{}", gone.display());
+        }
+        assert!(kept.join(SNAPSHOT_MEMORY_FILENAME).is_file());
+        assert!(kept.join(SNAPSHOT_STATE_FILENAME).is_file());
+        assert!(kept.join(SNAPSHOT_STAMP_FILENAME).is_file());
+        assert!(directory.path().join("a-file").is_file());
+    }
+
+    // Deployed again, moved to another slot, taken under an older guest image: each is a reason
+    // the wake gives, with the snapshot in front of it, and none is this reaper's to give.
+    #[test]
+    fn a_snapshot_of_this_boot_is_kept_whatever_else_its_stamp_says() {
+        let directory = tempfile::tempdir().unwrap();
+        let this_boot = stamp().host_boot_id;
+        let drifted = serde_json::to_string(&SnapshotStamp {
+            deployment_id: DeploymentId::parse("dep-2").unwrap(),
+            guest_image_version: "older".into(),
+            slot: 8,
+            ..stamp()
+        })
+        .unwrap();
+        let kept = asleep(directory.path(), "app-1", 100, Some(&drifted));
+
+        assert_eq!(
+            reap_stale_snapshots(directory.path(), &this_boot),
+            Reaped::default()
+        );
+        assert!(kept.join(SNAPSHOT_STAMP_FILENAME).is_file());
+    }
+
+    #[test]
+    fn a_host_with_no_snapshots_yet_has_nothing_to_reap() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            reap_stale_snapshots(directory.path(), "boot-1"),
+            Reaped::default()
+        );
+        assert_eq!(
+            reap_stale_snapshots(&directory.path().join("nowhere"), "boot-1"),
+            Reaped::default()
+        );
     }
 
     #[test]

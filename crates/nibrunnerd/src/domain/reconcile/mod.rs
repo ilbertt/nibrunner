@@ -16,6 +16,7 @@ use protocol::{DesiredInstanceState, HostDesiredState};
 
 use crate::adapters::vm::UNKNOWN_VM;
 use crate::domain::metrics::converge;
+use crate::domain::metrics::passes::Trigger;
 use crate::host::Host;
 
 pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
@@ -128,7 +129,11 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
     }
 }
 
-pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
+/// One pass from the document to the host. Every step of it is written so that a pass over a
+/// host that is already what the document asks for changes nothing and says nothing, because the
+/// timer runs one whether or not anything moved: that is how a volume whose device died under a
+/// standing document gets noticed.
+pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Trigger) {
     let observed = observe(host, desired).await;
     let plan = plan_reconcile(desired, &observed);
     host.state
@@ -147,7 +152,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState) {
     apply_starts(host, &plan).await;
     volumes::apply_teardowns(host, &plan).await;
     checkpoints::apply_checkpoints(host, &plan).await;
-    exports::apply_exports(host, &plan).await;
+    exports::apply_exports(host, &plan, trigger).await;
     network::apply_activators(host).await;
     network::apply_network(host).await;
     network::apply_routes(host).await;
@@ -223,6 +228,7 @@ mod tests {
     #[tokio::test]
     async fn an_app_is_woken_by_putting_back_the_microvm_it_had() {
         let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.vms.set_status(stopped_vm());
         host.state
             .put_record(instance_record(|record| {
@@ -265,6 +271,7 @@ mod tests {
     #[tokio::test]
     async fn a_restore_is_not_a_restart_so_it_costs_the_app_nothing() {
         let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.vms.set_status(stopped_vm());
         host.state
             .put_record(instance_record(|record| {
@@ -411,7 +418,7 @@ mod tests {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
 
-        reconcile(host.arc(), &running_app()).await;
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
 
         assert!(host.slot_of(&app_id()).await.is_some());
         assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
@@ -434,7 +441,7 @@ mod tests {
     async fn the_port_an_app_is_reached_on_answers_from_the_pass_that_allocated_it() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
-        reconcile(host.arc(), &running_app()).await;
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
         assert_eq!(host.activator.listening_for().await, vec![app_id()]);
     }
 
@@ -442,10 +449,10 @@ mod tests {
     async fn an_instance_desired_state_stops_naming_is_stopped_then_forgotten() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
-        reconcile(host.arc(), &running_app()).await;
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
         host.vms.set_status(running_vm());
 
-        reconcile(host.arc(), &desired_state(|_| {})).await;
+        reconcile(host.arc(), &desired_state(|_| {}), Trigger::Change).await;
         assert!(host.vms.calls().contains(&VmCall::Stop));
         assert_eq!(
             host.state.record(&app_id()).await.unwrap().state,
@@ -453,7 +460,7 @@ mod tests {
         );
 
         host.vms.set_status(stopped_vm());
-        reconcile(host.arc(), &desired_state(|_| {})).await;
+        reconcile(host.arc(), &desired_state(|_| {}), Trigger::Change).await;
         assert!(host.state.record(&app_id()).await.is_none());
         assert!(host.vms.calls().contains(&VmCall::Discard));
     }
@@ -465,6 +472,7 @@ mod tests {
         reconcile(
             host.arc(),
             &desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
+            Trigger::Change,
         )
         .await;
         assert!(host.vms.calls().is_empty());
@@ -477,7 +485,7 @@ mod tests {
     async fn a_deploy_replaces_the_release_rather_than_restarting_it() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
-        reconcile(host.arc(), &running_app()).await;
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
         host.vms.set_status(running_vm());
 
         let newer = desired_state(|state| {
@@ -486,7 +494,7 @@ mod tests {
                 instance.deployment_id = protocol::DeploymentId::parse("dep-2").unwrap();
             })]
         });
-        reconcile(host.arc(), &newer).await;
+        reconcile(host.arc(), &newer, Trigger::Change).await;
 
         assert_eq!(
             host.state.record(&app_id()).await.unwrap().deployment_id.as_str(),
@@ -749,10 +757,10 @@ mod tests {
     async fn a_second_pass_over_a_converged_host_boots_nothing_a_second_time() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
-        reconcile(host.arc(), &running_app()).await;
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
         host.vms.set_status(running_vm());
 
-        reconcile(host.arc(), &running_app()).await;
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
 
         assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
         let snapshot = host.state.snapshot().await;
@@ -774,6 +782,7 @@ mod tests {
                     volume.desired_state = protocol::DesiredPresence::Absent
                 })]
             }),
+            Trigger::Change,
         )
         .await;
 

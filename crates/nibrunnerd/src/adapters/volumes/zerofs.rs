@@ -68,7 +68,7 @@ impl ZerofsVolumes {
     }
 
     #[cfg(test)]
-    fn with_devices(mut self, devices: NbdDevices) -> Self {
+    pub(crate) fn with_devices(mut self, devices: NbdDevices) -> Self {
         self.devices = devices;
         self
     }
@@ -777,6 +777,110 @@ mod tests {
             Some(slot.nbd_device_path.as_str())
         );
         assert!(!observed[0].attached, "nothing in sysfs holds the device");
+    }
+
+    fn sysfs_attribute(sysfs: &Path, device: &str, attribute: &str, value: &str) {
+        let directory = sysfs.join(device);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(attribute), value).unwrap();
+    }
+
+    /// A volume this host serves on the slot its app holds, over a command runner of the test's
+    /// choosing, with the kernel's view of the device in `sysfs`.
+    async fn held_volume(
+        root: &Path,
+        sysfs: &Path,
+        commands: Arc<crate::ports::MockCommandRunner>,
+    ) -> (ZerofsVolumes, VolumeId) {
+        let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
+        allocator.lock().await.allocate(&app_id()).unwrap();
+        let volumes = ZerofsVolumes::new(filesystem(root), allocator, commands.clone(), staging(root))
+            .with_devices(NbdDevices::with_sysfs(sysfs.to_path_buf(), commands));
+        let held = VolumeId::parse("vol-1").unwrap();
+        volumes.ensure_device_file(&held, 4096).unwrap();
+        (volumes, held)
+    }
+
+    #[tokio::test]
+    async fn a_device_the_kernel_still_holds_but_that_answers_no_read_is_observed_as_not_attached() {
+        let root = tempfile::tempdir().unwrap();
+        let sysfs = tempfile::tempdir().unwrap();
+        let (commands, _) = mocks::commands_succeeding();
+        let (volumes, held) = held_volume(root.path(), sysfs.path(), commands).await;
+        // What a device looks like once its server has gone: still configured, its size still
+        // told, and every read of it an error.
+        sysfs_attribute(sysfs.path(), "nbd0", "pid", "4123\n");
+        sysfs_attribute(sysfs.path(), "nbd0", "size", "8\n");
+
+        let owners = std::collections::BTreeMap::from([(held.clone(), app_id())]);
+        let observed = volumes.observe(&owners).await;
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].device_path.as_deref(), Some("/dev/nbd0"));
+        assert!(
+            !observed[0].attached,
+            "a device that answers no read is not one anything can be put on"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_attach_onto_a_device_that_does_not_answer_takes_it_down_and_attaches_again() {
+        let root = tempfile::tempdir().unwrap();
+        let sysfs = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_succeeding();
+        let (volumes, held) = held_volume(root.path(), sysfs.path(), commands).await;
+        sysfs_attribute(sysfs.path(), "nbd0", "pid", "4123\n");
+
+        let attached = volumes.attach(&held, &app_id()).await.unwrap();
+
+        assert_eq!(attached.device_path, "/dev/nbd0");
+        let asked = log.commands();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert_eq!(
+            asked[0],
+            vec!["nbd-client".to_string(), "-d".into(), "/dev/nbd0".into()]
+        );
+        assert_eq!(
+            asked[1][..6],
+            [
+                "nbd-client",
+                "-unix",
+                "/run/zerofs/nbd.sock",
+                "/dev/nbd0",
+                "-N",
+                "vol-1"
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_attach_whose_re_attach_is_refused_says_what_the_client_said() {
+        let root = tempfile::tempdir().unwrap();
+        let sysfs = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_answering(|request| {
+            if request.command.get(1).is_some_and(|word| word == "-d") {
+                return Ok(crate::ports::CommandResult::succeeded());
+            }
+            Ok(crate::ports::CommandResult {
+                code: 1,
+                stdout: String::new(),
+                stderr: "Error: Failed to setup device, check dmesg\nExiting.\n".into(),
+            })
+        });
+        let (volumes, held) = held_volume(root.path(), sysfs.path(), commands).await;
+        sysfs_attribute(sysfs.path(), "nbd0", "pid", "4123\n");
+
+        let error = volumes.attach(&held, &app_id()).await.unwrap_err();
+
+        assert!(
+            error.message().contains("Failed to setup device, check dmesg"),
+            "{error}"
+        );
+        assert_eq!(
+            log.commands().len(),
+            4,
+            "taken down and attached twice over: {:?}",
+            log.commands()
+        );
     }
 
     #[tokio::test]

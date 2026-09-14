@@ -8,8 +8,8 @@ use crate::clock::{now_ms, now_timestamp};
 use crate::domain::activation::SleepReason;
 use crate::domain::backoff::{is_ready_to_retry, next_attempt_window, BackoffPolicy, NO_START_ATTEMPTS};
 use crate::domain::health::{
-    apply_probe, describe_instance_failure, evaluate_instance_state, initial_tracker, next_probe_delay_ms,
-    LifecycleInputs,
+    apply_probe, describe_instance_failure, describe_unhealthy_instance, evaluate_instance_state,
+    initial_tracker, next_probe_delay_ms, HealthTracker, LifecycleInputs,
 };
 use crate::domain::metrics::converge;
 use crate::domain::metrics::health::Failure;
@@ -18,7 +18,7 @@ use crate::domain::metrics::sleep_wake::SleepOutcome;
 use crate::domain::reconcile::plan::{InstancePlan, ReconcilePlan};
 use crate::domain::report::instance_record::{InstanceRecord, RecordFields};
 use crate::host::Host;
-use crate::ports::{BootRequest, SuspendRequest, VmError, WakeOutcome};
+use crate::ports::{BootRequest, SuspendRequest, VmError, WakeFailure, WakeOutcome, WakeRefusal};
 
 /// The host ports a slot hands this app's extra ports, in the order the document named them.
 ///
@@ -252,6 +252,29 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         return;
     };
 
+    // Before anything is fetched or attached, and before it counts as an attempt: a microVM this
+    // host could not have put within reach is a cost paid for an app nobody could have reached,
+    // and the document that asked for it is wrong in a way no retry mends. So the window is left
+    // alone, the reason stays on the record for every pass that finds it, and it is said once.
+    if let Some(refusal) = crate::domain::reconcile::ingress::ingress_refusal(desired, &host.config) {
+        let mut refused = existing.unwrap_or_else(|| {
+            InstanceRecord::new(
+                record_fields(desired, &slot),
+                InstanceState::Failed,
+                initial_tracker(),
+            )
+        });
+        refused.adopt(record_fields(desired, &slot));
+        refused.state = InstanceState::Failed;
+        refused.stop_requested = false;
+        host.state.put_record(refused).await;
+        if say(host, &desired.app_id, StateMessage::new(refusal.clone())).await {
+            host.metrics.health.failed(&desired.app_id, Failure::Refused);
+            tracing::error!(app_id = %desired.app_id, refusal, "instance refused before it was started");
+        }
+        return;
+    }
+
     let mut attempted = match existing.clone() {
         Some(record) => record,
         None => InstanceRecord::new(
@@ -272,20 +295,6 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     attempted.stop_requested = false;
     host.state.put_record(attempted.clone()).await;
     host.state.mark_active(&desired.app_id, now).await;
-
-    // Before anything is fetched or attached: a microVM this host could not have put within
-    // reach is a cost paid for an app nobody could have reached.
-    if let Some(refusal) = crate::domain::reconcile::ingress::ingress_refusal(desired, &host.config) {
-        host.state
-            .update_record(&desired.app_id, |record| {
-                record.state = InstanceState::Failed;
-                record.message = Some(StateMessage::new(refusal.clone()));
-            })
-            .await;
-        host.metrics.health.failed(&desired.app_id, Failure::Refused);
-        tracing::error!(app_id = %desired.app_id, refusal, "instance refused before it was started");
-        return;
-    }
 
     let booted = match host.payloads.prepare(&desired.layers).await {
         Err(error) => Err((Failure::Layers, error.message())),
@@ -361,14 +370,40 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     }
 }
 
-pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<WakeOutcome, String> {
+pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<WakeOutcome, WakeRefusal> {
+    let would_not_start = |reason: String| WakeRefusal::Failed {
+        kind: WakeFailure::WouldNotStart,
+        reason,
+    };
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
-        return Err("this host has no slot left".to_string());
+        return Err(would_not_start("this host has no slot left".to_string()));
     };
 
     let status = host.vms.statuses(std::slice::from_ref(&desired.app_id)).await;
     if status.get(&desired.app_id).copied().unwrap_or(UNKNOWN_VM).active {
         return Ok(WakeOutcome::AlreadyRunning);
+    }
+
+    // The snapshot carries the guest's page cache, so a guest restored onto a device that no
+    // longer answers serves reads from memory and only finds out when it writes. The device is
+    // made to answer first — re-attached if it does not — or the wake is refused.
+    let attaching = std::time::Instant::now();
+    let attached = host.volumes.attach(&desired.volume_id, &desired.app_id).await;
+    host.metrics
+        .resources
+        .done(Operation::VolumeAttach, attached.is_ok(), attaching.elapsed());
+    if let Err(error) = attached {
+        let reason = error.message();
+        host.state
+            .update_record(&desired.app_id, |record| {
+                record.message = Some(StateMessage::new(reason.clone()));
+            })
+            .await;
+        tracing::error!(app_id = %desired.app_id, reason, "wake refused: the volume is not usable");
+        return Err(WakeRefusal::Failed {
+            kind: WakeFailure::VolumeUnusable,
+            reason,
+        });
     }
 
     host.state.mark_active(&desired.app_id, now_ms()).await;
@@ -404,20 +439,26 @@ pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<W
                     record.message = Some(StateMessage::new(reason.clone()));
                 })
                 .await;
-            Err(reason)
+            Err(would_not_start(reason))
         }
     }
+}
+
+/// The sentence an unhealthy instance carries, and nothing for any other state.
+fn unwell(state: InstanceState, health: &HealthTracker, record: &InstanceRecord) -> Option<StateMessage> {
+    (state == InstanceState::Unhealthy)
+        .then(|| StateMessage::new(describe_unhealthy_instance(health, &record.health_check)))
 }
 
 async fn verdict(
     host: &Host,
     state: InstanceState,
     status: &VmStatus,
-    health: &crate::domain::health::HealthTracker,
+    health: &HealthTracker,
     record: &InstanceRecord,
 ) -> Option<StateMessage> {
     if state != InstanceState::Failed {
-        return None;
+        return unwell(state, health, record);
     }
     let guest_verdict = if status.active || record.started_at.is_none() {
         None
@@ -469,7 +510,7 @@ async fn settle(
 ) {
     let health = if status.active && due {
         let probed = std::time::Instant::now();
-        let healthy = if record.health_check.probes_a_port() {
+        let outcome = if record.health_check.probes_a_port() {
             crate::domain::health::probe::probe_instance(
                 &record.guest_ipv4,
                 record.http_port,
@@ -479,11 +520,11 @@ async fn settle(
         } else {
             // A guest this host did not build answers no port it was never told about, so that
             // its microVM is still up is the whole of what this host can observe about it.
-            true
+            Ok(())
         };
         host.metrics
             .health
-            .probed(&record.app_id, healthy, probed.elapsed());
+            .probed(&record.app_id, outcome.is_ok(), probed.elapsed());
         let delay = next_probe_delay_ms(&record.health, &record.grace_inputs(now_ms));
         host.state
             .modify(|snapshot| {
@@ -494,7 +535,7 @@ async fn settle(
             .await;
         apply_probe(
             &record.health,
-            healthy,
+            outcome,
             &now_timestamp(),
             record.health_check.probe().healthy_threshold,
         )
@@ -516,8 +557,17 @@ async fn settle(
     });
 
     if state == record.state {
+        // An instance that stays unhealthy keeps its sentence current — the count grows and how
+        // the probes fail can change — but only a probe changes it, and the status loop passes
+        // every second.
+        let said = unwell(state, &health, &record);
         host.state
-            .update_record(&record.app_id, |latest| latest.health = health)
+            .update_record(&record.app_id, |latest| {
+                latest.health = health;
+                if said.is_some() && latest.message != said {
+                    latest.message = said;
+                }
+            })
             .await;
         return;
     }
@@ -565,8 +615,12 @@ fn starting(plan: &ReconcilePlan) -> impl Iterator<Item = &DesiredInstance> {
 }
 
 pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
+    layers_of(starting(plan))
+}
+
+fn layers_of<'a>(instances: impl Iterator<Item = &'a DesiredInstance>) -> Vec<protocol::DesiredLayer> {
     let mut seen = BTreeSet::new();
-    starting(plan)
+    instances
         .flat_map(|desired| &desired.layers)
         .filter(|layer| seen.insert((*layer).clone()))
         .cloned()
@@ -574,9 +628,13 @@ pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
 }
 
 pub async fn prefetch_layers(host: &Host, plan: &ReconcilePlan) {
-    let mut waiting: Vec<&DesiredInstance> = starting(plan).collect();
+    // An app the start below will refuse is not fetched for either: nothing it needs is worth
+    // having, and a pass that finds the same refusal standing would otherwise look it up again.
+    let mut waiting: Vec<&DesiredInstance> = starting(plan)
+        .filter(|desired| crate::domain::reconcile::ingress::ingress_refusal(desired, &host.config).is_none())
+        .collect();
     let mut prepared = BTreeSet::new();
-    for layer in layers_to_start(plan) {
+    for layer in layers_of(waiting.iter().copied()) {
         let fetching = std::time::Instant::now();
         match host.payloads.prepare(std::slice::from_ref(&layer)).await {
             Ok(payload) if payload.fetched_bytes > 0 => {
@@ -738,6 +796,68 @@ mod tests {
             failures(&[("out_of_restarts", 1)]),
             "said once, counted once, however many passes say it again"
         );
+    }
+
+    #[tokio::test]
+    async fn a_start_the_document_made_impossible_is_refused_once_and_takes_nothing_from_the_budget() {
+        let (said, _listening) = Said::listening();
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let port = |name: &str, number: u16| protocol::InstancePort {
+            name: protocol::PortName::parse(name).unwrap(),
+            guest_port: protocol::GuestPort::new(number).unwrap(),
+        };
+        // Two ports beside the HTTP one, on a host whose [proxy.raw] allows each guest one.
+        let asking_too_much =
+            desired_instance(|instance| instance.config.ports = vec![port("ssh", 22), port("git", 9418)]);
+        let budget = asking_too_much.config.restart_policy.max_restarts;
+
+        // Pass after pass over a document that stands still, past what the budget would allow,
+        // each fetching ahead of its starts the way a pass does.
+        for _ in 0..budget + 3 {
+            let plan = ReconcilePlan {
+                instances: vec![InstancePlan::Start {
+                    desired: asking_too_much.clone(),
+                }],
+                ..Default::default()
+            };
+            prefetch_layers(&host, &plan).await;
+            start_instance(&host, &asking_too_much).await;
+        }
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(
+            record.start_attempts, NO_START_ATTEMPTS,
+            "a refusal is the document's fault, not a start that failed"
+        );
+        let reason = record.message.unwrap();
+        assert!(
+            reason.as_str().contains("allows 1"),
+            "the refusal, not a budget, is what the record says: {}",
+            reason.as_str()
+        );
+        assert!(host.vms.calls().is_empty());
+        assert!(
+            !cached_image(&host).exists(),
+            "nothing is fetched for an app nobody could have reached"
+        );
+        let page = metrics_page(&host).await;
+        assert!(page.contains("nibrunner_layers_cached_total 0\n"), "{page}");
+        assert!(page.contains(
+            "nibrunner_storage_operation_seconds_count{operation=\"layer_fetch\",outcome=\"ok\"} 0\n"
+        ));
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("refused", 1)]),
+            "counted once, however many passes find it"
+        );
+        let refusals = said
+            .lines()
+            .into_iter()
+            .filter(|line| line.contains("refused before it was started"))
+            .count();
+        assert_eq!(refusals, 1, "said once: {:?}", said.lines());
     }
 
     fn failures(counted: &[(&str, u64)]) -> [u64; 8] {
@@ -980,6 +1100,7 @@ mod tests {
     #[tokio::test]
     async fn a_wake_that_failed_for_its_own_reason_says_so_rather_than_booting_the_app_cold() {
         let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.vms
             .refuse_wake(VmError::Host("the snapshot file is unreadable".to_string()));
         host.state
@@ -991,7 +1112,11 @@ mod tests {
 
         let refusal = resume_instance(&host, &on_request()).await.unwrap_err();
 
-        assert!(refusal.contains("the snapshot file is unreadable"));
+        let WakeRefusal::Failed { kind, reason } = refusal else {
+            panic!("a wake that failed is not a host short of memory: {refusal:?}");
+        };
+        assert_eq!(kind, WakeFailure::WouldNotStart);
+        assert!(reason.contains("the snapshot file is unreadable"), "{reason}");
         assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Wake]);
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Idle);
@@ -1138,6 +1263,89 @@ mod tests {
         );
         let health = host.metrics.health.of(&app_id());
         assert_eq!((health.probes_healthy, health.probes_unhealthy), (1, 0));
+    }
+
+    fn up() -> VmStatus {
+        VmStatus {
+            loaded: true,
+            active: true,
+            failed: false,
+            started_this_boot: true,
+            exit_code: None,
+        }
+    }
+
+    /// A record of an app that was well, checked on the loopback so a test can be the tenant.
+    fn well_until_now(http_port: protocol::HttpPort) -> InstanceRecord {
+        instance_record(|record| {
+            record.state = InstanceState::Running;
+            record.health.ever_healthy = true;
+            record.guest_ipv4 = crate::domain::health::probe::loopback();
+            record.http_port = http_port;
+            record.started_at = Some(protocol::Timestamp::from_epoch_ms(
+                now_ms() - 2 * TCP_HEALTH_CHECK.probe().grace_period_ms as i64,
+            ));
+        })
+    }
+
+    async fn probed(host: &TestHost) -> InstanceRecord {
+        host.state.probe_at_once(&app_id()).await;
+        refresh_states(host.arc()).await;
+        host.state.record(&app_id()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_app_that_stopped_answering_says_why_until_it_answers_again() {
+        let host = test_host().await;
+        host.vms.set_status(up());
+        let nobody_listening = protocol::HttpPort::new(1).unwrap();
+        host.state.put_record(well_until_now(nobody_listening)).await;
+        let threshold = TCP_HEALTH_CHECK.probe().unhealthy_threshold;
+
+        for _ in 1..threshold {
+            let record = probed(&host).await;
+            assert_eq!(record.state, InstanceState::Running);
+            assert_eq!(record.message, None, "not unhealthy yet, so nothing to explain");
+        }
+        let record = probed(&host).await;
+        assert_eq!(record.state, InstanceState::Unhealthy);
+        let said = record.message.expect("an unhealthy instance says why");
+        assert_eq!(
+            said.as_str(),
+            format!("{threshold} tcp probes failed in a row; the last tcp connect refused")
+        );
+        assert_eq!(host.metrics.health.of(&app_id()).went_unhealthy, 1);
+
+        // The status loop passes every second, and a probe is due every five: a pass without one
+        // has nothing new to say.
+        refresh_states(host.arc()).await;
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Unhealthy);
+        assert_eq!(record.message, Some(said));
+
+        let record = probed(&host).await;
+        assert_eq!(
+            record.message.unwrap().as_str(),
+            format!(
+                "{} tcp probes failed in a row; the last tcp connect refused",
+                threshold + 1
+            ),
+            "another failed probe is counted into the sentence"
+        );
+        assert_eq!(host.metrics.health.of(&app_id()).went_unhealthy, 1);
+
+        // The tenant is back: the port accepts again.
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let answering = protocol::HttpPort::new(listener.local_addr().unwrap().port()).unwrap();
+        host.state
+            .update_record(&app_id(), |record| record.http_port = answering)
+            .await;
+        let record = probed(&host).await;
+        assert_eq!(record.state, InstanceState::Running);
+        assert_eq!(record.message, None, "well again, so nothing left to explain");
+        assert_eq!(record.health.last_failure, None);
     }
 
     #[tokio::test]
