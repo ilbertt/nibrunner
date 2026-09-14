@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use protocol::{AppId, DesiredInstanceState};
+use protocol::{AppId, DesiredInstance, DesiredInstanceState, InstanceState};
 use tokio::sync::broadcast;
 
+use crate::domain::health::is_within_grace_period;
 use crate::domain::health::probe::probe_instance;
 use crate::domain::report::capacity::{committed_resources, memory_shortfall_mib};
 use crate::host::Host;
@@ -73,7 +74,7 @@ impl AppWaker {
                 reason: "the control plane no longer names it".into(),
             });
         };
-        if wanted.desired_state != DesiredInstanceState::OnRequest {
+        if wanted.desired_state == DesiredInstanceState::Stopped {
             return Err(WakeRefusal::Failed {
                 kind: WakeFailure::NotOnRequest,
                 reason: format!("it is {}", wanted.desired_state.as_str()),
@@ -84,6 +85,9 @@ impl AppWaker {
                 kind: WakeFailure::NotIsolated,
                 reason: "the isolation ruleset is not applied".into(),
             });
+        }
+        if wanted.desired_state == DesiredInstanceState::Running {
+            return self.hold(app_id, &wanted).await;
         }
         if let Some(refusal) = self.refusal_for_room(app_id, &wanted.config.resources).await {
             if let WakeRefusal::NoRoom { shortfall_mib } = &refusal {
@@ -166,6 +170,68 @@ impl AppWaker {
             "app woken by a request"
         );
         Ok(())
+    }
+
+    /// A running app is booted by the pass, not by a request, so a request only reaches here
+    /// while the pass is between guests: the last one is being stopped for its replacement, or
+    /// exited and is being booted again. The request waits for the guest that is coming the way
+    /// a wake waits for a restored one, unless the record says none is. The grace period is
+    /// counted from the boot, as the status loop counts it, so a slow stop does not eat into it
+    /// and a guest that has already had it is not given it again; until there is a boot to count
+    /// from, it is counted from the request.
+    async fn hold(&self, app_id: &AppId, wanted: &DesiredInstance) -> Outcome {
+        let arrived = Instant::now();
+        let grace = Duration::from_millis(wanted.config.health_check.probe().grace_period_ms);
+        loop {
+            let record = self.host.state.record(app_id).await;
+            if let Some(failed) = record
+                .as_ref()
+                .filter(|record| record.state == InstanceState::Failed)
+            {
+                let reason = failed.message.as_ref().map_or_else(
+                    || "the microVM would not start".to_string(),
+                    |message| message.as_str().to_string(),
+                );
+                return Err(WakeRefusal::Failed {
+                    kind: WakeFailure::WouldNotStart,
+                    reason,
+                });
+            }
+            let booted = record
+                .as_ref()
+                .filter(|record| record.started_at.is_some() && !record.stop_requested);
+            match booted {
+                Some(record) => {
+                    if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check)
+                        .await
+                        .is_ok()
+                    {
+                        let joined = lock(&self.in_flight).get(app_id).map_or(0, |(_, count)| *count);
+                        tracing::debug!(
+                            %app_id,
+                            waited_ms = arrived.elapsed().as_millis(),
+                            coalesced = joined,
+                            "app answered the request held through its boot"
+                        );
+                        return Ok(());
+                    }
+                    if !is_within_grace_period(&record.grace_inputs(crate::clock::now_ms())) {
+                        return Err(WakeRefusal::Failed {
+                            kind: WakeFailure::NeverAnswered,
+                            reason: format!("nothing answered on port {} inside the guest", record.http_port),
+                        });
+                    }
+                }
+                None if arrived.elapsed() >= grace => {
+                    return Err(WakeRefusal::Failed {
+                        kind: WakeFailure::WouldNotStart,
+                        reason: "no microVM came up for it in time".into(),
+                    });
+                }
+                None => {}
+            }
+            tokio::time::sleep(PROBE_INTERVAL).await;
+        }
     }
 }
 
@@ -852,6 +918,195 @@ mod tests {
                 kind: WakeFailure::NotIsolated,
                 reason: "the isolation ruleset is not applied".into()
             }
+        );
+    }
+
+    /// A host whose document keeps the app running, with the ruleset that lets it start anything.
+    async fn host_keeping_the_app_running() -> TestHost {
+        let host = test_host().await;
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        host.cache.lock().await.accept(desired_state(|state| {
+            state.instances = vec![desired_instance(|_| {})]
+        }));
+        host
+    }
+
+    /// A port on the loopback nothing is listening on yet.
+    async fn free_port() -> protocol::HttpPort {
+        let probe = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        protocol::HttpPort::new(probe.local_addr().unwrap().port()).unwrap()
+    }
+
+    /// The guest comes up on `port`: it accepts every connection from here on.
+    async fn guest_answers_on(port: protocol::HttpPort) {
+        let listener =
+            tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], port.get())))
+                .await
+                .unwrap();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+    }
+
+    /// A guest booted `ago_ms` ago on the loopback, at `port`, with its health still unproven.
+    fn booted(port: protocol::HttpPort, ago_ms: i64) -> crate::domain::report::InstanceRecord {
+        instance_record(|record| {
+            record.state = InstanceState::Starting;
+            record.started_at = Some(protocol::Timestamp::from_epoch_ms(
+                crate::clock::now_ms() - ago_ms,
+            ));
+            record.guest_ipv4 = crate::domain::health::probe::loopback();
+            record.http_port = port;
+        })
+    }
+
+    #[tokio::test]
+    async fn a_request_during_a_replacement_boot_is_held_and_served_once_the_guest_answers() {
+        let host = host_keeping_the_app_running().await;
+        let port = free_port().await;
+        // The pass has stopped the old guest for its replacement.
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Stopping;
+                record.stop_requested = true;
+                record.started_at = Some(observed_at());
+            }))
+            .await;
+
+        let waker = AppWaker::new(host.arc().clone());
+        let asked_for = app_id();
+        let mut held = std::pin::pin!(waker.wake(&asked_for));
+        let went_ahead = tokio::time::timeout(Duration::from_millis(50), &mut held).await;
+        assert!(
+            went_ahead.is_err(),
+            "the request was answered while the old guest was still going down: {went_ahead:?}"
+        );
+
+        // The pass forgets the old record and boots the replacement, which is not answering yet.
+        host.state.drop_record(&app_id()).await;
+        host.state.put_record(booted(port, 0)).await;
+        let went_ahead = tokio::time::timeout(Duration::from_millis(50), &mut held).await;
+        assert!(
+            went_ahead.is_err(),
+            "the request was answered before the replacement answered its port: {went_ahead:?}"
+        );
+
+        guest_answers_on(port).await;
+        tokio::time::timeout(Duration::from_secs(2), held)
+            .await
+            .expect("the request was still held after the replacement answered")
+            .expect("served by the replacement");
+        assert!(host.vms.calls().is_empty(), "a hold boots nothing of its own");
+    }
+
+    #[tokio::test]
+    async fn the_requests_that_arrive_during_one_boot_are_held_together_and_released_together() {
+        let host = host_keeping_the_app_running().await;
+        let port = free_port().await;
+        host.state.put_record(booted(port, 0)).await;
+        let waker = AppWaker::new(host.arc().clone());
+
+        let held = tokio::spawn(futures::future::join_all((0..10).map(|_| {
+            let waker = waker.clone();
+            let app_id = app_id();
+            async move { waker.wake(&app_id).await }
+        })));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !held.is_finished(),
+            "the requests went ahead before the guest answered"
+        );
+
+        guest_answers_on(port).await;
+        let outcomes = tokio::time::timeout(Duration::from_secs(2), held)
+            .await
+            .expect("the requests were still held after the guest answered")
+            .unwrap();
+        assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+        assert!(
+            page(&host)
+                .await
+                .contains("nibrunner_wake_requests_coalesced_total 9\n"),
+            "one request led the hold and the rest joined it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_to_an_app_that_is_out_of_restarts_is_refused_at_once() {
+        let host = host_keeping_the_app_running().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Failed;
+                record.started_at = Some(observed_at());
+                record.message = Some(protocol::StateMessage::new(
+                    "out of restarts: 6 starts attempted against a budget of 5, \
+                     and this instance will not be started again until it is deployed afresh",
+                ));
+            }))
+            .await;
+
+        let refusal = tokio::time::timeout(
+            Duration::from_secs(1),
+            AppWaker::new(host.arc().clone()).wake(&app_id()),
+        )
+        .await
+        .expect("refused at once rather than held for the grace period")
+        .unwrap_err();
+        let WakeRefusal::Failed { kind, reason } = refusal else {
+            panic!("refused for a reason of its own, not for want of memory: {refusal:?}");
+        };
+        assert_eq!(kind, WakeFailure::WouldNotStart);
+        assert!(reason.contains("out of restarts"), "{reason}");
+        assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_no_guest_comes_up_for_inside_the_grace_period_is_refused_rather_than_kept() {
+        let host = host_keeping_the_app_running().await;
+        host.cache.lock().await.accept(desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.config.health_check.probe_mut().unwrap().grace_period_ms = 20;
+            })]
+        }));
+        // Booted by nobody yet: the pass wrote the record and is still fetching what it boots from.
+        host.state
+            .put_record(instance_record(|record| record.state = InstanceState::Pending))
+            .await;
+
+        let refusal = AppWaker::new(host.arc().clone())
+            .wake(&app_id())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refusal,
+            WakeRefusal::Failed {
+                kind: WakeFailure::WouldNotStart,
+                reason: "no microVM came up for it in time".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_has_had_its_grace_period_and_still_does_not_answer_is_not_waited_on_again() {
+        let host = host_keeping_the_app_running().await;
+        let port = free_port().await;
+        let grace_ms = TCP_HEALTH_CHECK.probe().grace_period_ms as i64;
+        host.state.put_record(booted(port, grace_ms + 1)).await;
+
+        let refusal = tokio::time::timeout(
+            Duration::from_secs(1),
+            AppWaker::new(host.arc().clone()).wake(&app_id()),
+        )
+        .await
+        .expect("refused at once rather than given a second grace period")
+        .unwrap_err();
+        let WakeRefusal::Failed { kind, reason } = refusal else {
+            panic!("refused for a reason of its own, not for want of memory: {refusal:?}");
+        };
+        assert_eq!(kind, WakeFailure::NeverAnswered);
+        assert!(
+            reason.contains(&format!("nothing answered on port {port}")),
+            "{reason}"
         );
     }
 
