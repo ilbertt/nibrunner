@@ -52,6 +52,18 @@ impl HostFirewall {
         self.commands
             .stdout_of(CommandRequest::new(&["nft", "-f", "-"]).with_stdin(ruleset.clone()))
             .await?;
+        let denied: Vec<&str> = state
+            .denied_egress_addresses_v4
+            .iter()
+            .chain(&state.denied_egress_addresses_v6)
+            .map(String::as_str)
+            .collect();
+        if !denied.is_empty() {
+            tracing::info!(
+                denied = denied.join(", "),
+                "egress denies in place, flows already open to them included"
+            );
+        }
         *applied = self
             .kernel_tables()
             .await

@@ -118,8 +118,14 @@ fn watch(
     let mut sampled = Instant::now();
     let mut killed_for = None;
     loop {
-        output.wait(signals, POLL_INTERVAL);
+        // No longer than the forwarder's next dial is away, so a gap the host was down for
+        // reaches it as soon as it is back and not when the tenant next speaks.
+        let within = forwarder
+            .reconnect_due_in()
+            .map_or(POLL_INTERVAL, |due| due.min(POLL_INTERVAL));
+        output.wait(signals, within);
         output.forward(forwarder);
+        forwarder.reconnect_if_due();
         match wait_for_signal(Duration::ZERO) {
             Arrived::Shutdown => return Watched::ShutdownRequested,
             Arrived::ChildDied | Arrived::Nothing => {
@@ -198,9 +204,11 @@ impl TenantOutput {
         if let Some(signals) = signals {
             watched.push(PollFd::new(signals.as_fd(), PollFlags::POLLIN));
         }
+        // Whole milliseconds, rounded up: truncated, the last part of one would be no wait at all.
+        let millis = within.as_micros().div_ceil(1_000);
         let _ = poll(
             &mut watched,
-            PollTimeout::try_from(within).unwrap_or(PollTimeout::NONE),
+            PollTimeout::try_from(millis).unwrap_or(PollTimeout::NONE),
         );
     }
 
@@ -365,7 +373,9 @@ fn spawn(config: &InstanceConfig, ceiling: &Ceiling) -> Option<Tenant> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::sync::{Mutex, MutexGuard};
 
     use guest_contract::logs::{decode_frames, GuestLogFrame};
@@ -609,6 +619,60 @@ mod tests {
             "the signal took {took:?} to notice"
         );
         assert_eq!(payload_of(&frames_in(&sink), TenantLogStream::Stdout), b"up\n");
+    }
+
+    #[test]
+    fn a_gap_reaches_a_host_that_is_back_while_the_tenant_has_nothing_more_to_say() {
+        let _one = one_tenant_at_a_time();
+        let (_dir, sink) = sink();
+        let tenant = tenant_that(|stdout, _| {
+            say(stdout, b"up\n");
+            loop {
+                unsafe { libc::pause() };
+            }
+        });
+        let pid = tenant.pid;
+        block_signals();
+        // A host away for the tenant's one line, and back for good after that.
+        let dials = Rc::new(Cell::new(0));
+        let mut forwarder = {
+            let dials = Rc::clone(&dials);
+            let sink = sink.clone();
+            Forwarder::dialing(Box::new(move || {
+                dials.set(dials.get() + 1);
+                if dials.get() == 1 {
+                    return None;
+                }
+                std::fs::File::create(&sink).ok().map(OwnedFd::from)
+            }))
+        };
+        let signals = signals_as_fd();
+        let this_thread = unsafe { libc::pthread_self() } as usize;
+        let started = Instant::now();
+        let landed = {
+            let sink = sink.clone();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline && !std::fs::metadata(&sink).is_ok_and(|host| host.len() > 0)
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let landed = started.elapsed();
+                unsafe { libc::pthread_kill(this_thread as libc::pthread_t, libc::SIGTERM) };
+                landed
+            })
+        };
+        let ended = watch(pid, tenant.output, &mut forwarder, signals.as_ref(), 1 << 30);
+        let landed = landed.join().unwrap();
+        let _ = nix::sys::signal::kill(pid, Signal::SIGKILL);
+        let _ = waitpid(pid, None);
+        assert_eq!(ended, Watched::ShutdownRequested);
+        assert_eq!(dials.get(), 2);
+        assert_eq!(frames_in(&sink), vec![GuestLogFrame::Gap { dropped_bytes: 3 }]);
+        assert!(
+            landed < Duration::from_secs(1),
+            "the gap took {landed:?} to reach the host"
+        );
     }
 
     #[test]

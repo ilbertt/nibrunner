@@ -1,14 +1,16 @@
 //! `nibrunnerd start`: the host `install` laid out, asked of systemd. Everything before this point
 //! writes files; this is the one place that asks for them to be run, and it asks only after
 //! checking what a start would otherwise find out too late and say from too far away — a secret
-//! still empty in `host.env`, a certificate the configuration names that is not there. With those
-//! checked, a start that fails is one the configuration got wrong.
+//! still empty in `host.env`, a certificate the configuration names that is not there or that
+//! holds fewer certificates than it marks. With those checked, a start that fails is one the
+//! configuration got wrong.
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::adapters::proxy::pem::read_certificates;
 use crate::config::HostConfig;
 use crate::install::render::{DAEMON_UNIT, MOUNT_UNIT, ZEROFS_UNIT};
 use crate::install::{secrets, unit_path, Laid};
@@ -188,12 +190,16 @@ fn refuse_unstartable(config: &HostConfig, environment_file: &Path) -> Result<()
         .into_iter()
         .map(|name| format!("  {name} is not set in {}", environment_file.display()))
         .collect();
-    for (what, path) in tls_material(config) {
+    for (what, path, holds) in tls_material(config) {
         if !path.is_file() {
             reasons.push(format!(
                 "  [proxy.http.tls] {what} {} is not there",
                 path.display()
             ));
+        } else if holds == Holds::Certificates {
+            if let Err(error) = read_certificates(path) {
+                reasons.push(format!("  [proxy.http.tls] {what} {error}"));
+            }
         }
     }
     for (section, address) in listeners(config) {
@@ -230,16 +236,23 @@ fn this_host_has(address: IpAddr) -> bool {
     address.is_unspecified() || UdpSocket::bind(SocketAddr::new(address, 0)).is_ok()
 }
 
-fn tls_material(config: &HostConfig) -> Vec<(&'static str, &Path)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holds {
+    /// Read here the way the daemon reads it, because a file that is there can still be short.
+    Certificates,
+    Key,
+}
+
+fn tls_material(config: &HostConfig) -> Vec<(&'static str, &Path, Holds)> {
     let Some(tls) = config.proxy.http.as_ref().and_then(|http| http.tls.as_ref()) else {
         return Vec::new();
     };
     let mut material = vec![
-        ("certificate", tls.certificate.as_path()),
-        ("key", tls.key.as_path()),
+        ("certificate", tls.certificate.as_path(), Holds::Certificates),
+        ("key", tls.key.as_path(), Holds::Key),
     ];
     if let Some(client_ca) = &tls.client_ca {
-        material.push(("client_ca.certificate", client_ca.as_path()));
+        material.push(("client_ca.certificate", client_ca.as_path(), Holds::Certificates));
     }
     material
 }
@@ -527,27 +540,58 @@ mod tests {
         assert!(this_host_has("::".parse().unwrap()));
     }
 
-    // The daemon reads it once, at bind time, and a path that is not there is a failed unit and a
-    // journal to go and read — said here instead, before anything is asked of systemd.
-    #[test]
-    fn tls_material_the_configuration_names_has_to_be_there() {
-        let directory = tempfile::tempdir().unwrap();
-        let certificate = directory.path().join("origin.crt");
-        std::fs::write(&certificate, "cert").unwrap();
+    const A_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----";
+
+    fn serving_tls(directory: &Path, client_ca: Option<PathBuf>) -> HostConfig {
+        let certificate = directory.join("origin.crt");
+        std::fs::write(&certificate, A_CERTIFICATE).unwrap();
         let mut config = HostConfig::under(Path::new("/srv/nibrunner"));
         config.proxy.http = Some(HttpListener {
             listen_address: "0.0.0.0".parse().unwrap(),
             port: 443,
             tls: Some(TlsMaterial {
                 certificate,
-                key: directory.path().join("origin.key"),
-                client_ca: None,
+                key: directory.join("origin.key"),
+                client_ca,
             }),
         });
+        config
+    }
+
+    // The daemon reads it once, at bind time, and a path that is not there is a failed unit and a
+    // journal to go and read — said here instead, before anything is asked of systemd.
+    #[test]
+    fn tls_material_the_configuration_names_has_to_be_there() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = serving_tls(directory.path(), None);
 
         let error = refuse_unstartable(&config, &directory.path().join("host.env")).unwrap_err();
         let said = error.to_string();
         assert!(said.contains("[proxy.http.tls] key"), "{said}");
         assert!(!said.contains("[proxy.http.tls] certificate"), "{said}");
+    }
+
+    // Two CA files concatenated where the first has no trailing newline glue an END marker to the
+    // next BEGIN, and the daemon would load one certificate of the two without a word and refuse
+    // every caller the second one signed. Said here, with the counts, before it is started.
+    #[test]
+    fn a_trust_pool_short_of_what_it_marks_refuses_the_start_with_the_counts() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = directory.path().join("origin-pull-ca.pem");
+        std::fs::write(&pool, format!("{A_CERTIFICATE}{A_CERTIFICATE}\n")).unwrap();
+        std::fs::write(directory.path().join("origin.key"), "").unwrap();
+        let config = serving_tls(directory.path(), Some(pool.clone()));
+
+        let error = refuse_unstartable(&config, &directory.path().join("host.env")).unwrap_err();
+        let said = error.to_string();
+        assert!(
+            said.contains(&format!(
+                "  [proxy.http.tls] client_ca.certificate {} marks 2 certificates and 1 could be read",
+                pool.display()
+            )),
+            "{said}"
+        );
+        assert!(!said.contains("[proxy.http.tls] certificate"), "{said}");
+        assert!(!said.contains("[proxy.http.tls] key"), "{said}");
     }
 }

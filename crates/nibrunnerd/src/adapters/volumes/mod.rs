@@ -50,7 +50,9 @@ pub struct AttachedVolume {
 
 /// A volume as the host finds it. `attached` and `formatted` are two different facts: a device
 /// can answer reads and still carry no filesystem, which is what a seeded format that was refused
-/// leaves behind, and a guest booted onto that only dies failing to mount it.
+/// leaves behind, and a guest booted onto that only dies failing to mount it. `attached` is
+/// whether the device answers, not whether the host holds one: a `device_path` under a volume
+/// that is not attached is a device that stopped answering under whatever holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedBacking {
     pub volume_id: VolumeId,

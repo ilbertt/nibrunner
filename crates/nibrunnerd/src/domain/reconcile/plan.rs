@@ -13,6 +13,11 @@ pub struct ObservedInstance {
     pub present: bool,
     pub running: bool,
     pub exited: bool,
+    /// Whether the record is down from a start this host refused before spending an attempt on
+    /// it: its volume could not be made ready, or its document asked for what this host cannot
+    /// give. Nothing has been served under it, so it is not one asleep, nor one that spent its
+    /// budget: it is started the pass the refusal lifts, on request or not.
+    pub refused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +116,12 @@ pub enum VolumePlan {
         desired: DesiredVolume,
         blocked_by: Vec<AppId>,
     },
+    /// Let go of a volume the document no longer names: its device is taken down and the slot
+    /// its app held given back, and its data is kept. `absent` is the word for deleting that.
+    Detach {
+        volume_id: VolumeId,
+        app_id: AppId,
+    },
     None {
         volume_id: VolumeId,
     },
@@ -190,6 +201,8 @@ fn plan_instance(
         }
         // An idle on-request app has no live guest to recover: its device reading as gone is only
         // the outage, and it is left asleep to be woken (and re-attached) when it is next asked for.
+        // One refused before it was ever brought up is not asleep: a request would only find it
+        // failed, so it is started the way an app this host has never served is.
         return if current.running {
             if volume_lost {
                 recover()
@@ -197,6 +210,10 @@ fn plan_instance(
                 InstancePlan::None {
                     app_id: wanted.app_id.clone(),
                 }
+            }
+        } else if current.refused {
+            InstancePlan::Start {
+                desired: wanted.clone(),
             }
         } else {
             InstancePlan::Sleep {
@@ -308,8 +325,24 @@ fn plan_volumes(desired: &HostDesiredState, observed: &ObservedState) -> Vec<Vol
     for instance in &desired.instances {
         used_by.entry(instance.volume_id.clone()).or_default();
     }
+    // A volume the document no longer names goes the way an instance it no longer names does,
+    // once nothing needs it: a running guest keeps its disk until the stop has landed, and an app
+    // the document still names keeps its slot whatever it says of the app — an instance without a
+    // volume entry is the instance's own trouble, not a reason to move it.
+    let wanted_apps: BTreeSet<&AppId> = desired
+        .instances
+        .iter()
+        .map(|instance| &instance.app_id)
+        .collect();
+    let kept_for: BTreeSet<&VolumeId> = observed
+        .instances
+        .iter()
+        .filter(|instance| instance.running || wanted_apps.contains(&instance.app_id))
+        .filter_map(|instance| instance.volume_id.as_ref())
+        .collect();
+    let desired_ids: BTreeSet<&VolumeId> = desired.volumes.iter().map(|wanted| &wanted.volume_id).collect();
 
-    desired
+    let mut plans: Vec<VolumePlan> = desired
         .volumes
         .iter()
         .map(|wanted| {
@@ -348,7 +381,19 @@ fn plan_volumes(desired: &HostDesiredState, observed: &ObservedState) -> Vec<Vol
                 },
             }
         })
-        .collect()
+        .collect();
+    plans.extend(
+        observed
+            .volumes
+            .iter()
+            .filter(|current| current.attached && !desired_ids.contains(&current.volume_id))
+            .filter(|current| !kept_for.contains(&current.volume_id))
+            .map(|current| VolumePlan::Detach {
+                volume_id: current.volume_id.clone(),
+                app_id: current.app_id.clone(),
+            }),
+    );
+    plans
 }
 
 fn plan_exports(desired: &HostDesiredState, observed: &ObservedState) -> Vec<ExportPlan> {
@@ -632,6 +677,28 @@ mod tests {
         }
 
         #[test]
+        fn one_refused_before_it_was_ever_brought_up_is_started_rather_than_left_for_a_request() {
+            // What a refused seed leaves once the volume is put right: a failed record with no
+            // attempt spent, and nothing running under it. A request would only find it failed.
+            let result = plan(
+                desired_state(|state| state.instances = vec![on_request()]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.running = false;
+                        instance.exited = false;
+                        instance.refused = true;
+                    })]
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Start {
+                    desired: on_request()
+                }]
+            );
+        }
+
+        #[test]
         fn a_deploy_onto_one_that_is_asleep_replaces_it_rather_than_leaving_it_asleep() {
             let result = plan(
                 desired_state(|state| state.instances = vec![on_request()]),
@@ -843,11 +910,84 @@ mod tests {
             desired_volume(|volume| volume.desired_state = DesiredPresence::Absent)
         }
 
+        fn detach() -> VolumePlan {
+            VolumePlan::Detach {
+                volume_id: volume_id(),
+                app_id: app_id(),
+            }
+        }
+
         #[test]
-        fn a_volume_missing_from_desired_state_is_left_completely_alone() {
+        fn an_attached_volume_the_document_no_longer_names_is_detached_rather_than_left_on_its_slot() {
+            // What was measured: an entry deleted outright, rather than set absent, left the device
+            // attached and the slot taken for good, and the host filled up on volumes nobody named.
             let result = plan(
                 desired_state(|_| {}),
                 observed_state(|state| state.volumes = vec![observed_volume(|_| {})]),
+            );
+            assert_eq!(result.volumes, vec![detach()]);
+        }
+
+        #[test]
+        fn one_a_running_guest_still_reads_is_left_under_it_until_the_guest_has_stopped() {
+            let result = plan(
+                desired_state(|_| {}),
+                observed_state(|state| {
+                    state.volumes = vec![observed_volume(|_| {})];
+                    state.instances = vec![observed_instance(|_| {})];
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Stop {
+                    app_id: app_id(),
+                    reason: InstanceStopReason::NotDesired
+                }]
+            );
+            assert_eq!(result.volumes, vec![]);
+        }
+
+        #[test]
+        fn one_whose_guest_has_stopped_goes_the_pass_its_record_is_forgotten() {
+            let result = plan(
+                desired_state(|_| {}),
+                observed_state(|state| {
+                    state.volumes = vec![observed_volume(|_| {})];
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.running = false;
+                        instance.exited = true;
+                    })];
+                }),
+            );
+            assert_eq!(result.instances, vec![InstancePlan::Forget { app_id: app_id() }]);
+            assert_eq!(result.volumes, vec![detach()]);
+        }
+
+        #[test]
+        fn one_whose_app_the_document_still_names_is_left_alone_whatever_it_says_of_the_app() {
+            // An instance without a volume entry is that instance's own trouble; its volume and
+            // its slot are not taken away under it, asleep or stopped.
+            for wanted in [DesiredInstanceState::OnRequest, DesiredInstanceState::Stopped] {
+                let result = plan(
+                    desired_state(|state| {
+                        state.instances = vec![desired_instance(|instance| instance.desired_state = wanted)]
+                    }),
+                    observed_state(|state| {
+                        state.volumes = vec![observed_volume(|_| {})];
+                        state.instances = vec![observed_instance(|instance| instance.running = false)];
+                    }),
+                );
+                assert_eq!(result.volumes, vec![], "{wanted:?}");
+            }
+        }
+
+        #[test]
+        fn one_this_host_does_not_hold_a_device_for_has_nothing_to_take_down() {
+            let result = plan(
+                desired_state(|_| {}),
+                observed_state(|state| {
+                    state.volumes = vec![observed_volume(|volume| volume.attached = false)]
+                }),
             );
             assert_eq!(result.volumes, vec![]);
         }
@@ -858,7 +998,11 @@ mod tests {
                 desired_state(|state| state.volumes = vec![absent()]),
                 observed_state(|state| state.volumes = vec![observed_volume(|_| {})]),
             );
-            assert!(matches!(result.volumes[0], VolumePlan::Teardown { .. }));
+            assert_eq!(
+                result.volumes,
+                vec![VolumePlan::Teardown { desired: absent() }],
+                "absent deletes; only a vanished entry merely detaches"
+            );
         }
 
         #[test]
