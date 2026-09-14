@@ -90,6 +90,7 @@
       "enum": [
         "pending",
         "ready",
+        "deleted",
         "failed"
       ]
     },
