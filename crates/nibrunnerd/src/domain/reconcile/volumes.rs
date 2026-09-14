@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use protocol::{AppId, HostDesiredState, ReportedVolume, StateMessage, VolumeId, VolumeState};
+use futures::StreamExt;
+use protocol::{AppId, DesiredVolume, HostDesiredState, ReportedVolume, StateMessage, VolumeId, VolumeState};
 
 use crate::domain::metrics::passes::Trigger;
 use crate::domain::metrics::resources::Operation;
@@ -8,6 +9,13 @@ use crate::domain::reconcile::plan::{ObservedState, ObservedVolume, ReconcilePla
 use crate::domain::report::InstanceRecord;
 use crate::host::Host;
 use crate::state::merge_volume_reports;
+
+// How many volumes a pass provisions at once. Bringing a device back is `nbd-client` run,
+// refused, the device taken down and the client run again: a second or so of waiting on the
+// kernel and on the server per device, none of it shared between devices, and a ZeroFS restart
+// leaves every device on the host needing it. One at a time had a full host back in a minute;
+// eight have it back in seconds without sixty clients at the one socket the moment it opens.
+pub const PROVISION_CONCURRENCY: usize = 8;
 
 pub fn volume_owners(
     desired: &HostDesiredState,
@@ -108,7 +116,7 @@ pub async fn apply_volumes(
     host.state.forget_deleted_volumes(&still_named).await;
 
     // What was observed goes on record before anything is done about it. Re-attaching a device
-    // is seconds, and a host of many guests re-attaches them one after another, so a report that
+    // is seconds, and a host of many guests re-attaches them a few at a time, so a report that
     // waited for the last of them would say every device was well for the whole of the outage.
     let existing: Vec<ReportedVolume> = observed
         .volumes
@@ -122,70 +130,36 @@ pub async fn apply_volumes(
         })
         .await;
 
-    for action in &plan.volumes {
-        match action {
+    let provisions: Vec<_> = plan
+        .volumes
+        .iter()
+        .filter_map(|action| match action {
             // Provisioning a bare volume fetches its seed again before it can fail again, so one
             // whose seed was refused is tried again when the document moves or the daemon comes
             // back, not by every tick against a document that still names the wrong thing. A
             // volume whose device is gone is still re-attached on a tick: that costs nothing and
             // is what brings a guest back after a ZeroFS restart.
             VolumePlan::Provision { desired }
-                if trigger == Trigger::Tick && is_bare(observed, &desired.volume_id) => {}
-            VolumePlan::Provision { desired } => {
-                let provisioning = std::time::Instant::now();
-                let provisioned = host.volumes.provision(desired).await;
-                host.metrics.resources.done(
-                    Operation::VolumeProvision,
-                    provisioned.is_ok(),
-                    provisioning.elapsed(),
-                );
-                let report = match provisioned {
-                    Ok(attached) => ReportedVolume {
-                        volume_id: attached.volume_id,
-                        app_id: desired.app_id.clone(),
-                        state: VolumeState::Ready,
-                        size_bytes: attached.size_bytes,
-                        storage_prefix: Some(attached.storage_prefix),
-                        device_path: Some(attached.device_path),
-                        usage: None,
-                        message: None,
-                    },
-                    Err(error) => {
-                        let refusal = StateMessage::new(error.message());
-                        // A volume that cannot be provisioned is tried again every pass, and the
-                        // same refusal every pass is one line in the log rather than one per pass.
-                        if last_refusals.get(&desired.volume_id) != Some(&refusal) {
-                            tracing::error!(volume_id = %desired.volume_id, error = %error.message(), "volume provisioning failed");
-                        }
-                        ReportedVolume {
-                            volume_id: desired.volume_id.clone(),
-                            app_id: desired.app_id.clone(),
-                            state: VolumeState::Failed,
-                            size_bytes: desired.size_bytes,
-                            storage_prefix: None,
-                            device_path: None,
-                            usage: None,
-                            message: Some(refusal),
-                        }
-                    }
-                };
-                host.state
-                    .modify(|snapshot| {
-                        snapshot.volume_reports =
-                            merge_volume_reports(std::mem::take(&mut snapshot.volume_reports), vec![report]);
-                    })
-                    .await;
+                if trigger == Trigger::Tick && is_bare(observed, &desired.volume_id) =>
+            {
+                None
             }
+            VolumePlan::Provision { desired } => Some(provision_volume(host, desired, &last_refusals)),
             VolumePlan::Blocked { desired, blocked_by } => {
                 tracing::warn!(
                     volume_id = %desired.volume_id,
                     blocked_by = ?blocked_by.iter().map(ToString::to_string).collect::<Vec<_>>(),
                     "volume removal deferred: still held"
                 );
+                None
             }
-            _ => {}
-        }
-    }
+            _ => None,
+        })
+        .collect();
+    futures::stream::iter(provisions)
+        .buffer_unordered(PROVISION_CONCURRENCY)
+        .collect::<()>()
+        .await;
 }
 
 /// The tap goes with the slot rather than with the microVM, because a stopped app keeps both and
@@ -203,6 +177,56 @@ async fn give_back_slot(host: &Host, app_id: &AppId) {
             tracing::warn!(%tap_name, error = %error.message(), "a tap outlived the app it was made for");
         }
     }
+}
+
+async fn provision_volume(
+    host: &Host,
+    desired: &DesiredVolume,
+    last_refusals: &BTreeMap<VolumeId, StateMessage>,
+) {
+    let provisioning = std::time::Instant::now();
+    let provisioned = host.volumes.provision(desired).await;
+    host.metrics.resources.done(
+        Operation::VolumeProvision,
+        provisioned.is_ok(),
+        provisioning.elapsed(),
+    );
+    let report = match provisioned {
+        Ok(attached) => ReportedVolume {
+            volume_id: attached.volume_id,
+            app_id: desired.app_id.clone(),
+            state: VolumeState::Ready,
+            size_bytes: attached.size_bytes,
+            storage_prefix: Some(attached.storage_prefix),
+            device_path: Some(attached.device_path),
+            usage: None,
+            message: None,
+        },
+        Err(error) => {
+            let refusal = StateMessage::new(error.message());
+            // A volume that cannot be provisioned is tried again every pass, and the same
+            // refusal every pass is one line in the log rather than one per pass.
+            if last_refusals.get(&desired.volume_id) != Some(&refusal) {
+                tracing::error!(volume_id = %desired.volume_id, error = %error.message(), "volume provisioning failed");
+            }
+            ReportedVolume {
+                volume_id: desired.volume_id.clone(),
+                app_id: desired.app_id.clone(),
+                state: VolumeState::Failed,
+                size_bytes: desired.size_bytes,
+                storage_prefix: None,
+                device_path: None,
+                usage: None,
+                message: Some(refusal),
+            }
+        }
+    };
+    host.state
+        .modify(|snapshot| {
+            snapshot.volume_reports =
+                merge_volume_reports(std::mem::take(&mut snapshot.volume_reports), vec![report]);
+        })
+        .await;
 }
 
 pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
@@ -285,10 +309,14 @@ mod tests {
     use protocol::DesiredPresence;
 
     async fn host_over(volumes: MockVolumeBackend) -> TestHost {
+        host_sharing(std::sync::Arc::new(volumes)).await
+    }
+
+    async fn host_sharing(volumes: std::sync::Arc<dyn crate::adapters::volumes::VolumeBackend>) -> TestHost {
         let mut host = test_host().await;
         std::sync::Arc::get_mut(&mut host.host)
             .expect("nothing else holds this host yet")
-            .volumes = std::sync::Arc::new(volumes);
+            .volumes = volumes;
         host
     }
 
@@ -820,6 +848,178 @@ mod tests {
             .unwrap()
             .as_str()
             .contains("is not answering"));
+    }
+
+    fn nth(n: usize) -> DesiredVolume {
+        desired_volume(|volume| {
+            volume.volume_id = VolumeId::parse(format!("vol-{n}")).unwrap();
+            volume.app_id = AppId::parse(format!("app-{n}")).unwrap();
+        })
+    }
+
+    fn attached(desired: &DesiredVolume) -> crate::adapters::volumes::AttachedVolume {
+        crate::adapters::volumes::AttachedVolume {
+            volume_id: desired.volume_id.clone(),
+            device_path: format!("/dev/nbd-{}", desired.app_id),
+            size_bytes: desired.size_bytes,
+            storage_prefix: protocol::ObjectKey::parse(HOST_STORAGE_PREFIX).unwrap(),
+        }
+    }
+
+    /// A tick over this many volumes whose devices are all gone at once, as a ZeroFS restart
+    /// leaves them, on the given host.
+    fn a_tick_over(host: &TestHost, count: usize) -> tokio::task::JoinHandle<()> {
+        let host = host.arc().clone();
+        tokio::spawn(async move {
+            let plan = ReconcilePlan {
+                volumes: (1..=count)
+                    .map(|n| VolumePlan::Provision { desired: nth(n) })
+                    .collect(),
+                ..Default::default()
+            };
+            let yanked = observed_state(|state| {
+                state.volumes = (1..=count)
+                    .map(|n| {
+                        observed_volume(|volume| {
+                            volume.volume_id = nth(n).volume_id;
+                            volume.app_id = nth(n).app_id;
+                            volume.attached = false;
+                            volume.formatted = false;
+                        })
+                    })
+                    .collect()
+            });
+            let desired = desired_state(|state| state.volumes = (1..=count).map(nth).collect());
+            apply_volumes(&host, &plan, &yanked, &desired, Trigger::Tick).await;
+        })
+    }
+
+    async fn ready(host: &TestHost) -> usize {
+        host.state
+            .snapshot()
+            .await
+            .volume_reports
+            .iter()
+            .filter(|report| report.state == VolumeState::Ready)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_yanked_volumes_is_re_attached_eight_at_a_time_and_every_one_ends_ready() {
+        let count = PROVISION_CONCURRENCY * 2;
+        let mut volumes = MockVolumeBackend::new();
+        volumes
+            .expect_provision()
+            .times(count)
+            .returning(|desired| Ok(attached(desired)));
+        let (held, gate) = mocks::volumes_holding_provisions(volumes);
+        let host = host_sharing(held).await;
+        let pass = a_tick_over(&host, count);
+
+        gate.held_up(PROVISION_CONCURRENCY).await;
+        // Nothing has been let through, so anything more at the gate now is a ninth beside eight.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(gate.in_flight(), PROVISION_CONCURRENCY);
+        let meanwhile = host.state.snapshot().await.volume_reports;
+        assert_eq!(meanwhile.len(), count);
+        assert!(
+            meanwhile.iter().all(|report| report.state == VolumeState::Failed
+                && report
+                    .message
+                    .as_ref()
+                    .is_some_and(|message| message.as_str().contains("is not answering"))),
+            "every device reads failed from the moment the pass saw it: {meanwhile:?}"
+        );
+
+        gate.let_through(PROVISION_CONCURRENCY);
+        let landed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while ready(&host).await != PROVISION_CONCURRENCY {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        assert!(
+            landed.is_ok(),
+            "the first eight went on record as they landed rather than with the last"
+        );
+
+        gate.let_through(count - PROVISION_CONCURRENCY);
+        pass.await.unwrap();
+
+        assert_eq!(gate.most_in_flight(), PROVISION_CONCURRENCY);
+        let reports = host.state.snapshot().await.volume_reports;
+        assert_eq!(reports.len(), count);
+        for n in 1..=count {
+            let volume = nth(n);
+            let report = reports
+                .iter()
+                .find(|report| report.volume_id == volume.volume_id)
+                .unwrap();
+            assert_eq!(report.state, VolumeState::Ready, "{}", volume.volume_id);
+            assert_eq!(report.app_id, volume.app_id);
+            assert_eq!(report.device_path, Some(attached(&volume).device_path));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_volume_that_refuses_its_re_attach_holds_up_none_of_the_others() {
+        let count = PROVISION_CONCURRENCY + 1;
+        let refused = nth(1).volume_id;
+        let mut volumes = MockVolumeBackend::new();
+        volumes.expect_provision().times(count).returning({
+            let refused = refused.clone();
+            move |desired| {
+                if desired.volume_id == refused {
+                    Err(VolumeError::Unusable(format!(
+                        "nbd-client /dev/nbd-{} exited 1",
+                        desired.app_id
+                    )))
+                } else {
+                    Ok(attached(desired))
+                }
+            }
+        });
+        let (held, gate) = mocks::volumes_holding_provisions(volumes);
+        let host = host_sharing(held).await;
+        let pass = a_tick_over(&host, count);
+
+        gate.held_up(PROVISION_CONCURRENCY).await;
+        gate.let_through(count);
+        pass.await.unwrap();
+
+        let reports = host.state.snapshot().await.volume_reports;
+        assert_eq!(reports.len(), count);
+        for report in &reports {
+            if report.volume_id == refused {
+                assert_eq!(report.state, VolumeState::Failed);
+                assert_eq!(
+                    report.message.as_ref().unwrap().as_str(),
+                    "the volume could not be made ready: nbd-client /dev/nbd-app-1 exited 1"
+                );
+            } else {
+                assert_eq!(report.state, VolumeState::Ready, "{}", report.volume_id);
+                assert_eq!(report.message, None);
+            }
+        }
+        let page = crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        );
+        assert!(
+            page.contains(&format!(
+                "nibrunner_storage_operation_seconds_count{{operation=\"volume_provision\",outcome=\"ok\"}} {}\n",
+                count - 1
+            )),
+            "{page}"
+        );
+        assert!(
+            page.contains(
+                "nibrunner_storage_operation_seconds_count{operation=\"volume_provision\",outcome=\"failed\"} 1\n"
+            ),
+            "{page}"
+        );
     }
 
     #[tokio::test]
