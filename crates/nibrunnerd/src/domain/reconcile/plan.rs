@@ -13,6 +13,11 @@ pub struct ObservedInstance {
     pub present: bool,
     pub running: bool,
     pub exited: bool,
+    /// Whether the record is down from a start this host refused before spending an attempt on
+    /// it: its volume could not be made ready, or its document asked for what this host cannot
+    /// give. Nothing has been served under it, so it is not one asleep, nor one that spent its
+    /// budget: it is started the pass the refusal lifts, on request or not.
+    pub refused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +195,8 @@ fn plan_instance(
         }
         // An idle on-request app has no live guest to recover: its device reading as gone is only
         // the outage, and it is left asleep to be woken (and re-attached) when it is next asked for.
+        // One refused before it was ever brought up is not asleep: a request would only find it
+        // failed, so it is started the way an app this host has never served is.
         return if current.running {
             if volume_lost {
                 recover()
@@ -197,6 +204,10 @@ fn plan_instance(
                 InstancePlan::None {
                     app_id: wanted.app_id.clone(),
                 }
+            }
+        } else if current.refused {
+            InstancePlan::Start {
+                desired: wanted.clone(),
             }
         } else {
             InstancePlan::Sleep {
@@ -626,6 +637,28 @@ mod tests {
             assert_eq!(
                 result.instances,
                 vec![InstancePlan::Sleep {
+                    desired: on_request()
+                }]
+            );
+        }
+
+        #[test]
+        fn one_refused_before_it_was_ever_brought_up_is_started_rather_than_left_for_a_request() {
+            // What a refused seed leaves once the volume is put right: a failed record with no
+            // attempt spent, and nothing running under it. A request would only find it failed.
+            let result = plan(
+                desired_state(|state| state.instances = vec![on_request()]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.running = false;
+                        instance.exited = false;
+                        instance.refused = true;
+                    })]
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Start {
                     desired: on_request()
                 }]
             );
