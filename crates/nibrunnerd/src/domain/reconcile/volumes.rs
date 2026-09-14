@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use protocol::{AppId, HostDesiredState, ReportedVolume, StateMessage, VolumeId, VolumeState};
 
+use crate::domain::metrics::passes::Trigger;
 use crate::domain::metrics::resources::Operation;
 use crate::domain::reconcile::plan::{ObservedState, ObservedVolume, ReconcilePlan, VolumePlan};
 use crate::domain::report::InstanceRecord;
@@ -33,6 +34,7 @@ pub async fn observe_volumes(host: &Host, owners: &BTreeMap<VolumeId, AppId>) ->
                 volume_id: backing.volume_id,
                 app_id,
                 attached: backing.attached,
+                formatted: backing.formatted,
                 size_bytes: backing.size_bytes,
                 storage_prefix: backing.storage_prefix,
                 device_path: backing.device_path,
@@ -41,21 +43,43 @@ pub async fn observe_volumes(host: &Host, owners: &BTreeMap<VolumeId, AppId>) ->
         .collect()
 }
 
-pub fn to_reported_volume(observed: &ObservedVolume) -> ReportedVolume {
+/// A volume as the control plane hears of it. `last_refusal` is what the last pass said when it
+/// could not provision this volume: an attached device with no filesystem is still failed, and
+/// the reason stays on the report rather than going blank between one attempt and the next.
+pub fn to_reported_volume(observed: &ObservedVolume, last_refusal: Option<&StateMessage>) -> ReportedVolume {
+    let (state, message) = match (observed.attached, observed.formatted) {
+        (true, true) => (VolumeState::Ready, None),
+        (true, false) => (VolumeState::Failed, last_refusal.cloned()),
+        (false, _) => (VolumeState::Detached, None),
+    };
     ReportedVolume {
         volume_id: observed.volume_id.clone(),
         app_id: observed.app_id.clone(),
-        state: if observed.attached {
-            VolumeState::Ready
-        } else {
-            VolumeState::Detached
-        },
+        state,
         size_bytes: observed.size_bytes,
         storage_prefix: Some(observed.storage_prefix.clone()),
         device_path: observed.device_path.clone(),
         usage: None,
-        message: None,
+        message,
     }
+}
+
+/// What the last pass left on record against each volume it could not provision.
+fn last_refusals(reports: &[ReportedVolume]) -> BTreeMap<VolumeId, StateMessage> {
+    reports
+        .iter()
+        .filter(|report| report.state == VolumeState::Failed)
+        .filter_map(|report| Some((report.volume_id.clone(), report.message.clone()?)))
+        .collect()
+}
+
+/// Whether the host already holds this volume's device, answering reads, with no filesystem on
+/// it: what a refused seed leaves.
+fn is_bare(observed: &ObservedState, volume_id: &VolumeId) -> bool {
+    observed
+        .volumes
+        .iter()
+        .any(|volume| &volume.volume_id == volume_id && volume.attached && !volume.formatted)
 }
 
 pub async fn apply_volumes(
@@ -63,10 +87,19 @@ pub async fn apply_volumes(
     plan: &ReconcilePlan,
     observed: &ObservedState,
     desired: &HostDesiredState,
+    trigger: Trigger,
 ) {
+    let last_refusals = last_refusals(&host.state.snapshot().await.volume_reports);
     let mut updates = Vec::new();
     for action in &plan.volumes {
         match action {
+            // Provisioning a bare volume fetches its seed again before it can fail again, so one
+            // whose seed was refused is tried again when the document moves or the daemon comes
+            // back, not by every tick against a document that still names the wrong thing. A
+            // volume whose device is gone is still re-attached on a tick: that costs nothing and
+            // is what brings a guest back after a ZeroFS restart.
+            VolumePlan::Provision { desired }
+                if trigger == Trigger::Tick && is_bare(observed, &desired.volume_id) => {}
             VolumePlan::Provision { desired } => {
                 let provisioning = std::time::Instant::now();
                 let provisioned = host.volumes.provision(desired).await;
@@ -87,7 +120,12 @@ pub async fn apply_volumes(
                         message: None,
                     },
                     Err(error) => {
-                        tracing::error!(volume_id = %desired.volume_id, error = %error.message(), "volume provisioning failed");
+                        let refusal = StateMessage::new(error.message());
+                        // A volume that cannot be provisioned is tried again every pass, and the
+                        // same refusal every pass is one line in the log rather than one per pass.
+                        if last_refusals.get(&desired.volume_id) != Some(&refusal) {
+                            tracing::error!(volume_id = %desired.volume_id, error = %error.message(), "volume provisioning failed");
+                        }
                         ReportedVolume {
                             volume_id: desired.volume_id.clone(),
                             app_id: desired.app_id.clone(),
@@ -96,7 +134,7 @@ pub async fn apply_volumes(
                             storage_prefix: None,
                             device_path: None,
                             usage: None,
-                            message: Some(StateMessage::new(error.message())),
+                            message: Some(refusal),
                         }
                     }
                 };
@@ -120,7 +158,11 @@ pub async fn apply_volumes(
         .collect();
     host.state.forget_deleted_volumes(&still_named).await;
 
-    let existing: Vec<ReportedVolume> = observed.volumes.iter().map(to_reported_volume).collect();
+    let existing: Vec<ReportedVolume> = observed
+        .volumes
+        .iter()
+        .map(|volume| to_reported_volume(volume, last_refusals.get(&volume.volume_id)))
+        .collect();
     let snapshot = host.state.snapshot().await;
     let mut all_updates: Vec<ReportedVolume> = snapshot.deleted_volumes.values().cloned().collect();
     all_updates.extend(updates);
@@ -187,6 +229,7 @@ pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
 mod tests {
     use super::*;
     use crate::adapters::volumes::{MockVolumeBackend, VolumeError};
+    use crate::domain::reconcile::plan::plan_reconcile;
     use crate::test_support::*;
     use protocol::DesiredPresence;
 
@@ -225,7 +268,8 @@ mod tests {
         let owners = BTreeMap::from([(volume_id(), app_id())]);
         let observed = observe_volumes(&host, &owners).await;
         assert_eq!(observed.len(), 1);
-        assert_eq!(to_reported_volume(&observed[0]).state, VolumeState::Ready);
+        assert!(observed[0].formatted);
+        assert_eq!(to_reported_volume(&observed[0], None).state, VolumeState::Ready);
     }
 
     #[tokio::test]
@@ -284,7 +328,14 @@ mod tests {
             }],
             ..Default::default()
         };
-        apply_volumes(&host, &plan, &ObservedState::default(), &desired_state(|_| {})).await;
+        apply_volumes(
+            &host,
+            &plan,
+            &ObservedState::default(),
+            &desired_state(|_| {}),
+            Trigger::Change,
+        )
+        .await;
         let reports = host.state.snapshot().await.volume_reports;
         assert_eq!(reports[0].state, VolumeState::Failed);
         assert!(reports[0]
@@ -309,12 +360,119 @@ mod tests {
 
     #[test]
     fn a_volume_this_host_is_not_serving_is_reported_detached_rather_than_ready() {
-        let report = to_reported_volume(&observed_volume(|volume| volume.attached = false));
+        let report = to_reported_volume(&observed_volume(|volume| volume.attached = false), None);
         assert_eq!(report.state, VolumeState::Detached);
         assert_eq!(report.device_path.as_deref(), Some("/dev/nbd0"));
         assert_eq!(
             report.storage_prefix.map(|prefix| prefix.as_str().to_string()),
             Some(HOST_STORAGE_PREFIX.to_string())
+        );
+    }
+
+    #[test]
+    fn an_attached_volume_with_no_filesystem_is_reported_failed_with_the_reason_it_last_was() {
+        let refusal = StateMessage::new("the initial contents could not be laid out: wrong digest");
+        let bare = observed_volume(|volume| volume.formatted = false);
+
+        let report = to_reported_volume(&bare, Some(&refusal));
+        assert_eq!(report.state, VolumeState::Failed);
+        assert_eq!(report.message.as_ref(), Some(&refusal));
+        assert_eq!(report.device_path.as_deref(), Some("/dev/nbd0"));
+
+        let unexplained = to_reported_volume(&bare, None);
+        assert_eq!(unexplained.state, VolumeState::Failed);
+        assert_eq!(unexplained.message, None);
+
+        let ready = to_reported_volume(&observed_volume(|_| {}), Some(&refusal));
+        assert_eq!(ready.state, VolumeState::Ready);
+        assert_eq!(
+            ready.message, None,
+            "a volume that is ready has nothing to explain"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_stays_on_the_report_of_a_volume_a_pass_left_bare() {
+        let host = test_host().await;
+        let refusal = reported_volume(|report| {
+            report.state = VolumeState::Failed;
+            report.message = Some(StateMessage::new("the initial contents could not be laid out"));
+        });
+        host.state
+            .modify(|snapshot| snapshot.volume_reports = vec![refusal.clone()])
+            .await;
+        let observed =
+            observed_state(|state| state.volumes = vec![observed_volume(|volume| volume.formatted = false)]);
+
+        apply_volumes(
+            &host,
+            &ReconcilePlan::default(),
+            &observed,
+            &desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
+            Trigger::Change,
+        )
+        .await;
+
+        let reports = host.state.snapshot().await.volume_reports;
+        assert_eq!(reports[0].state, VolumeState::Failed);
+        assert_eq!(reports[0].message, refusal.message);
+    }
+
+    #[tokio::test]
+    async fn a_seed_that_is_refused_is_tried_again_every_pass_and_stays_failed_until_it_takes() {
+        let host = test_host().await;
+        // The store holds the app's layer; the document names a digest of something else.
+        let wrong = desired_volume(|volume| {
+            volume.initial_contents = Some(initial_contents(b"not what the store holds", "/app/data"))
+        });
+        let desired = desired_state(|state| state.volumes = vec![wrong.clone()]);
+        let plan = ReconcilePlan {
+            volumes: vec![VolumePlan::Provision {
+                desired: wrong.clone(),
+            }],
+            ..Default::default()
+        };
+        let owners = volume_owners(&desired, &BTreeMap::new());
+
+        apply_volumes(&host, &plan, &ObservedState::default(), &desired, Trigger::Change).await;
+        let first = host.state.snapshot().await.volume_reports;
+        assert_eq!(first[0].state, VolumeState::Failed);
+        let reason = first[0].message.clone().expect("the refusal");
+        assert!(reason.as_str().contains("hashes to"), "{}", reason.as_str());
+
+        // The file is there and sized, so the next pass finds the volume attached and bare.
+        let observed = observe_volumes(&host, &owners).await;
+        assert_eq!(observed.len(), 1);
+        assert!(observed[0].attached);
+        assert!(!observed[0].formatted);
+        let again = plan_reconcile(
+            &desired,
+            &observed_state(|state| state.volumes = observed.clone()),
+        );
+        assert_eq!(again.volumes, plan.volumes, "the next pass provisions it again");
+
+        apply_volumes(
+            &host,
+            &again,
+            &observed_state(|state| state.volumes = observed),
+            &desired,
+            Trigger::Change,
+        )
+        .await;
+        let second = host.state.snapshot().await.volume_reports;
+        assert_eq!(second[0].state, VolumeState::Failed);
+        assert_eq!(second[0].message, Some(reason), "the reason is kept, not blanked");
+        let page = crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        );
+        assert!(
+            page.contains(
+                "nibrunner_storage_operation_seconds_count{operation=\"volume_provision\",outcome=\"failed\"} 2\n"
+            ),
+            "{page}"
         );
     }
 
@@ -333,6 +491,7 @@ mod tests {
             &plan,
             &ObservedState::default(),
             &desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
+            Trigger::Change,
         )
         .await;
 
@@ -371,6 +530,7 @@ mod tests {
             &plan,
             &observed,
             &desired_state(|state| state.volumes = vec![absent()]),
+            Trigger::Change,
         )
         .await;
 
@@ -389,6 +549,7 @@ mod tests {
             &ReconcilePlan::default(),
             &ObservedState::default(),
             &desired_state(|_| {}),
+            Trigger::Change,
         )
         .await;
 
@@ -407,12 +568,122 @@ mod tests {
             &ReconcilePlan::default(),
             &ObservedState::default(),
             &desired_state(|state| state.volumes = vec![absent()]),
+            Trigger::Change,
         )
         .await;
 
         let snapshot = host.state.snapshot().await;
         assert!(snapshot.deleted_volumes.contains_key(&volume_id()));
         assert_eq!(snapshot.volume_reports[0].state, VolumeState::Deleted);
+    }
+
+    fn provisioning() -> ReconcilePlan {
+        ReconcilePlan {
+            volumes: vec![VolumePlan::Provision {
+                desired: desired_volume(|_| {}),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tick_leaves_a_bare_volume_alone_rather_than_fetching_its_seed_again() {
+        let mut volumes = MockVolumeBackend::new();
+        volumes.expect_provision().never();
+        let host = host_over(volumes).await;
+        let refusal = StateMessage::new("the initial contents could not be laid out");
+        host.state
+            .modify(|snapshot| {
+                snapshot.volume_reports = vec![reported_volume(|report| {
+                    report.state = VolumeState::Failed;
+                    report.message = Some(refusal.clone());
+                })]
+            })
+            .await;
+        let bare =
+            observed_state(|state| state.volumes = vec![observed_volume(|volume| volume.formatted = false)]);
+
+        apply_volumes(
+            &host,
+            &provisioning(),
+            &bare,
+            &desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
+            Trigger::Tick,
+        )
+        .await;
+
+        let reports = host.state.snapshot().await.volume_reports;
+        assert_eq!(reports[0].state, VolumeState::Failed);
+        assert_eq!(
+            reports[0].message.as_ref(),
+            Some(&refusal),
+            "the volume is still failed for the reason it was, and the app stays down for it"
+        );
+    }
+
+    #[tokio::test]
+    async fn but_a_tick_still_re_attaches_a_volume_whose_device_is_gone() {
+        let mut volumes = MockVolumeBackend::new();
+        volumes.expect_provision().times(1).returning(|desired| {
+            Ok(crate::adapters::volumes::AttachedVolume {
+                volume_id: desired.volume_id.clone(),
+                device_path: "/dev/nbd0".to_string(),
+                size_bytes: desired.size_bytes,
+                storage_prefix: protocol::ObjectKey::parse(HOST_STORAGE_PREFIX).unwrap(),
+            })
+        });
+        let host = host_over(volumes).await;
+        let yanked = observed_state(|state| {
+            state.volumes = vec![observed_volume(|volume| {
+                volume.attached = false;
+                volume.formatted = false;
+            })]
+        });
+
+        apply_volumes(
+            &host,
+            &provisioning(),
+            &yanked,
+            &desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
+            Trigger::Tick,
+        )
+        .await;
+
+        assert_eq!(
+            host.state.snapshot().await.volume_reports[0].state,
+            VolumeState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn and_a_change_provisions_a_bare_volume_again_since_the_document_may_have_put_it_right() {
+        let mut volumes = MockVolumeBackend::new();
+        volumes.expect_provision().times(1).returning(|_| {
+            Err(VolumeError::ContentsUnusable(
+                "still the wrong digest".to_string(),
+            ))
+        });
+        let host = host_over(volumes).await;
+        let bare =
+            observed_state(|state| state.volumes = vec![observed_volume(|volume| volume.formatted = false)]);
+
+        apply_volumes(
+            &host,
+            &provisioning(),
+            &bare,
+            &desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
+            Trigger::Change,
+        )
+        .await;
+
+        let reports = host.state.snapshot().await.volume_reports;
+        assert_eq!(reports[0].state, VolumeState::Failed);
+        assert!(reports[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("still the wrong digest"));
     }
 
     #[tokio::test]
@@ -463,6 +734,7 @@ mod tests {
                 volume_id: protocol::VolumeId::parse("vol-9").unwrap(),
                 size_bytes: VOLUME_SIZE_BYTES,
                 attached: true,
+                formatted: true,
                 device_path: None,
                 storage_prefix: protocol::ObjectKey::parse(HOST_STORAGE_PREFIX).unwrap(),
             }]
