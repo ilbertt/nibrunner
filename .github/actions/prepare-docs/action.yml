@@ -4,8 +4,6 @@ description: Prepare the environment, and the docs site's dependencies on top of
 runs:
   using: composite
   steps:
-    # The cargo cache for the clippy half of `just lint`; `just fmt --check` fills none of it,
-    # so the other job restores and saves next to nothing.
     - uses: ./.github/actions/prepare
       with:
         cache: enabled
