@@ -546,8 +546,9 @@ pub enum HealthCheck {
         #[serde(flatten)]
         probe: Probe,
     },
-    /// The microVM is up. Nothing inside it is probed: a guest this host did not build answers
-    /// no port it was not told about.
+    /// The microVM is up and `httpPort` has accepted a connection once: the tenant is listening.
+    /// That is all it is asked, and only until it answers — a guest this host did not build
+    /// answers no path it was not told about — so its liveness after that is the microVM being up.
     BootCompleted,
 }
 
@@ -564,11 +565,12 @@ pub struct Probe {
 }
 
 /// A microVM is up or it is not, and one reading either way says which. What `boot-completed`
-/// runs the same state machine on as a probed port.
+/// runs the same state machine on as a probed port: the grace is how long its tenant has to start
+/// listening, and the timeout is on the one connect that finds it so.
 const OF_THE_MICROVM: Probe = Probe {
     interval_ms: 5_000,
-    timeout_ms: 0,
-    grace_period_ms: 0,
+    timeout_ms: 2_000,
+    grace_period_ms: 30_000,
     healthy_threshold: 1,
     unhealthy_threshold: 1,
 };

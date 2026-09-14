@@ -75,6 +75,13 @@ pub fn next_probe_delay_ms(tracker: &HealthTracker, grace: &GraceInputs<'_>) -> 
     }
 }
 
+/// Whether the next probe asks the guest's port. A check of a port always does; `boot-completed`
+/// does until the port has answered once — the tenant is listening — and never after, the port
+/// being its start gate and not its health.
+pub fn asks_the_port(tracker: &HealthTracker, health_check: &HealthCheck) -> bool {
+    health_check.probes_a_port() || !tracker.ever_healthy
+}
+
 pub fn describe_instance_failure(
     unit: &VmStatus,
     tracker: &HealthTracker,
@@ -520,6 +527,69 @@ mod tests {
                 ..Default::default()
             }),
             InstanceState::Running
+        );
+    }
+
+    #[test]
+    fn a_boot_completed_guest_is_running_once_its_port_has_answered_and_not_before() {
+        let booted = || Evaluate {
+            health_check: HealthCheck::BootCompleted,
+            ..Default::default()
+        };
+        let grace_ms = HealthCheck::BootCompleted.probe().grace_period_ms as i64;
+        let within_grace = STARTED_AT_MS + grace_ms - 1;
+        let past_grace = STARTED_AT_MS + grace_ms + 1;
+
+        assert!(asks_the_port(&initial_tracker(), &HealthCheck::BootCompleted));
+        assert_eq!(
+            evaluate(Evaluate {
+                now_ms: within_grace,
+                ..booted()
+            }),
+            InstanceState::Starting,
+            "the microVM is up, but nothing has answered on the port yet"
+        );
+        assert_eq!(
+            evaluate(Evaluate {
+                tracker: failing(3),
+                now_ms: within_grace,
+                ..booted()
+            }),
+            InstanceState::Starting,
+            "a refused connect within the grace is the tenant still binding its port"
+        );
+        assert_eq!(
+            delay(&failing(3), within_grace, &HealthCheck::BootCompleted),
+            STARTUP_PROBE_INTERVAL_MS,
+            "and it is asked again on the settling cadence"
+        );
+
+        let listening = probe(&initial_tracker(), true, 1);
+        assert_eq!(
+            evaluate(Evaluate {
+                tracker: listening.clone(),
+                now_ms: STARTED_AT_MS + 1,
+                ..booted()
+            }),
+            InstanceState::Running
+        );
+        assert!(
+            !asks_the_port(&listening, &HealthCheck::BootCompleted),
+            "the port is asked once, and never again"
+        );
+        assert!(
+            asks_the_port(&listening, &TCP_HEALTH_CHECK),
+            "a check of a port goes on asking it"
+        );
+
+        assert_eq!(
+            evaluate(Evaluate {
+                tracker: failing(1),
+                now_ms: past_grace,
+                ..booted()
+            }),
+            InstanceState::Failed,
+            "a port that never opened is a guest that never answered"
         );
     }
 
