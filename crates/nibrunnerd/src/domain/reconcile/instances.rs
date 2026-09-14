@@ -5,7 +5,7 @@ use protocol::{
     AppId, DesiredInstance, DesiredInstanceState, InstanceState, StateMessage, VolumeId, VolumeState,
 };
 
-use crate::adapters::vm::{VmStatus, UNKNOWN_VM};
+use crate::adapters::vm::{VmExit, VmStatus, UNKNOWN_VM};
 use crate::clock::{now_ms, now_timestamp};
 use crate::domain::activation::SleepReason;
 use crate::domain::backoff::{is_ready_to_retry, next_attempt_window, BackoffPolicy, NO_START_ATTEMPTS};
@@ -62,6 +62,7 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
             .collect(),
         health_check: desired.config.health_check.clone(),
         resources: desired.config.resources,
+        restart_policy: desired.config.restart_policy.clone(),
         desired_running: true,
         on_request: desired.desired_state == DesiredInstanceState::OnRequest,
     }
@@ -150,6 +151,12 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
     host.state.mark_snapshotting(app_id, false).await;
 }
 
+// An attempt is a boot, whether the last one failed on the way up or came up and exited later,
+// and the window is the policy's: a backoff between attempts, a budget of them, and a reset after
+// `resetAfterMs`. A guest that exited keeps its window unless it stayed up for that long, in
+// which case the status loop gave the window back when it saw the exit, and the boot after it is
+// a first boot again.
+//
 // A start is refused for two very different reasons, and an instance waiting out its backoff read
 // exactly like one that is never starting again: failed, with the message from the last time it
 // worked. Only one of them is something an operator can do anything about.
@@ -613,14 +620,29 @@ async fn settle(
         _ => {}
     }
     let message = verdict(host, state, &status, &health, &record).await;
+    let exited = state == InstanceState::Failed && !status.active;
+    // A guest that stayed up for the policy's resetAfterMs has earned its app a fresh window: the
+    // boot after it owes no backoff and has the whole budget. One that exited sooner keeps its
+    // window, and the boot after it is the next attempt in it.
+    let stayed_up = exited
+        && record
+            .started_at
+            .as_ref()
+            .is_some_and(|at| now_ms - at.epoch_ms() >= record.restart_policy.reset_after_ms as i64);
     host.state
         .update_record(&record.app_id, |latest| {
             latest.health = health;
             latest.state = state;
-            if let Some(code) = status.exit_code {
-                if !status.active {
-                    latest.last_exit_code = Some(code);
-                }
+            if let Some(exit) = status.exit.filter(|_| !status.active) {
+                // A microVM killed under a signal has no exit code, and the code of an earlier
+                // exit is not this one's.
+                latest.last_exit_code = match exit {
+                    VmExit::Code(code) => Some(code),
+                    VmExit::Signal(_) => None,
+                };
+            }
+            if stayed_up {
+                latest.start_attempts = NO_START_ATTEMPTS;
             }
             latest.message = message;
         })
@@ -1316,7 +1338,7 @@ mod tests {
             active: false,
             failed: false,
             started_this_boot: true,
-            exit_code: Some(137),
+            exit: Some(VmExit::Code(137)),
         });
         host.state
             .put_record(instance_record(|record| record.started_at = Some(observed_at())))
@@ -1342,6 +1364,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_microvm_killed_from_outside_says_which_signal_and_leaves_no_code_behind() {
+        let host = test_host().await;
+        host.vms.set_status(VmStatus {
+            loaded: true,
+            active: false,
+            failed: true,
+            started_this_boot: true,
+            exit: Some(VmExit::Signal(libc::SIGKILL)),
+        });
+        host.state
+            .put_record(instance_record(|record| {
+                record.started_at = Some(observed_at());
+                // The code of an earlier exit, which is not this one's.
+                record.last_exit_code = Some(137);
+            }))
+            .await;
+
+        refresh_states(host.arc()).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.last_exit_code, None);
+        assert_eq!(
+            record.message.unwrap().as_str(),
+            "the microVM was killed by signal 9 (SIGKILL)"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_guest_that_stayed_up_for_reset_after_ms_gives_its_attempts_back_when_it_exits() {
+        let reset_after_ms = protocol::DEFAULT_RESTART_POLICY.reset_after_ms as i64;
+        let exited_after = |uptime_ms: i64| async move {
+            let host = test_host().await;
+            host.vms.set_status(VmStatus {
+                loaded: true,
+                active: false,
+                failed: false,
+                started_this_boot: true,
+                exit: Some(VmExit::Code(1)),
+            });
+            host.state
+                .put_record(instance_record(|record| {
+                    record.started_at = Some(protocol::Timestamp::from_epoch_ms(now_ms() - uptime_ms));
+                    record.start_attempts = spent_window();
+                }))
+                .await;
+            refresh_states(host.arc()).await;
+            host.state.record(&app_id()).await.unwrap()
+        };
+
+        let short_lived = exited_after(reset_after_ms - 1_000).await;
+        assert_eq!(short_lived.state, InstanceState::Failed);
+        assert_eq!(short_lived.start_attempts.attempts, spent_window().attempts);
+
+        let long_lived = exited_after(reset_after_ms).await;
+        assert_eq!(long_lived.state, InstanceState::Failed);
+        assert_eq!(long_lived.start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[tokio::test]
     async fn a_probe_is_counted_on_the_app_with_what_it_found() {
         let host = test_host().await;
         host.vms.set_status(VmStatus {
@@ -1349,7 +1431,7 @@ mod tests {
             active: true,
             failed: false,
             started_this_boot: true,
-            exit_code: None,
+            exit: None,
         });
         host.state
             .put_record(instance_record(|record| {
@@ -1375,7 +1457,7 @@ mod tests {
             active: true,
             failed: false,
             started_this_boot: true,
-            exit_code: None,
+            exit: None,
         }
     }
 

@@ -321,6 +321,7 @@ pub fn record_fields() -> RecordFields {
         layer_digests: vec![Sha256Digest::parse(ARTIFACT_DIGEST).unwrap()],
         health_check: TCP_HEALTH_CHECK,
         resources: DEFAULT_INSTANCE_RESOURCES,
+        restart_policy: DEFAULT_RESTART_POLICY,
         desired_running: true,
         on_request: false,
     }

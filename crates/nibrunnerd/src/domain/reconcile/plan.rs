@@ -214,9 +214,7 @@ fn plan_instance(
             desired: wanted.clone(),
         };
     }
-    // A running guest and one that has already exited under the outage both need the same fresh
-    // boot; only a guest that neither ran nor exited (a cold record) is a plain start.
-    if current.running || current.exited {
+    if current.running {
         return if volume_lost {
             recover()
         } else {
@@ -224,6 +222,13 @@ fn plan_instance(
                 app_id: wanted.app_id.clone(),
             }
         };
+    }
+    // A guest that exited on its own is booted again — the start applies the app's restart
+    // policy, so a crash loop is bounded — unless its disk was pulled out from under it, when the
+    // boot has to be the clean teardown and re-attach a recovery does first. A cold record is a
+    // plain start either way.
+    if current.exited && volume_lost {
+        return recover();
     }
     InstancePlan::Start {
         desired: wanted.clone(),
@@ -500,7 +505,9 @@ mod tests {
         }
 
         #[test]
-        fn a_vm_that_exited_on_its_own_is_not_booted_again() {
+        fn a_vm_that_exited_on_its_own_is_booted_again() {
+            // The start it is handed applies the app's restart policy, so this is what keeps a
+            // running app up, not what loops a crashing one.
             let result = plan(
                 desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
                 observed_state(|state| {
@@ -510,7 +517,12 @@ mod tests {
                     })]
                 }),
             );
-            assert_eq!(result.instances, vec![InstancePlan::None { app_id: app_id() }]);
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Start {
+                    desired: desired_instance(|_| {})
+                }]
+            );
         }
 
         #[test]
@@ -589,6 +601,25 @@ mod tests {
                     state.instances = vec![observed_instance(|instance| {
                         instance.running = false;
                         instance.exited = false;
+                    })]
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Sleep {
+                    desired: on_request()
+                }]
+            );
+        }
+
+        #[test]
+        fn one_whose_guest_exited_is_left_for_the_next_request_rather_than_booted_again() {
+            let result = plan(
+                desired_state(|state| state.instances = vec![on_request()]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.running = false;
+                        instance.exited = true;
                     })]
                 }),
             );
@@ -689,9 +720,10 @@ mod tests {
         }
 
         #[test]
-        fn a_guest_that_already_exited_under_the_outage_is_booted_again_not_left_down() {
-            // Without a lost volume this exited guest would be left alone; the yanked disk is what
-            // turns "it stopped on its own, leave it" into "its backing died, bring it back".
+        fn a_guest_that_already_exited_under_the_outage_is_recovered_rather_than_merely_started() {
+            // An exited guest is booted again anyway; the yanked disk is what makes that boot a
+            // recovery — the clean teardown and re-attach — rather than a plain start onto a dead
+            // device.
             let exited = observed_state(|state| {
                 state.instances = vec![observed_instance(|instance| {
                     instance.running = false;
