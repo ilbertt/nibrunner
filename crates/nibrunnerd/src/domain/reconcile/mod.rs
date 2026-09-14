@@ -477,6 +477,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn and_its_volume_is_let_go_of_with_the_slot_once_the_guest_is_down_but_its_data_kept() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let host = test_host().await;
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
+        host.vms.set_status(running_vm());
+
+        reconcile(host.arc(), &desired_state(|_| {}), Trigger::Change).await;
+        assert!(
+            host.slot_of(&app_id()).await.is_some(),
+            "the guest is still up on it"
+        );
+
+        host.vms.set_status(stopped_vm());
+        reconcile(host.arc(), &desired_state(|_| {}), Trigger::Change).await;
+        assert!(host.slot_of(&app_id()).await.is_none());
+        assert_eq!(host.vms.removed_taps(), vec!["nbr0".to_string()]);
+        assert!(host.repositories.slots.all().await.unwrap().is_empty());
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.volume_reports[0].state, protocol::VolumeState::Detached);
+        assert!(snapshot.deleted_volumes.is_empty());
+        assert_eq!(
+            host.volumes.observe(&Default::default()).await.len(),
+            1,
+            "a vanished entry is a detach, never a delete"
+        );
+
+        reconcile(host.arc(), &desired_state(|_| {}), Trigger::Tick).await;
+        assert!(host.state.snapshot().await.volume_reports.is_empty());
+    }
+
+    #[tokio::test]
     async fn an_instance_whose_volume_is_not_here_does_not_boot() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;

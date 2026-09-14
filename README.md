@@ -184,12 +184,12 @@ three kinds:
 | --- | --- |
 | `{ "kind": "http", "path": "/healthz", ...timing }` | `path`, requested on `httpPort`, answers 2xx. |
 | `{ "kind": "tcp", ...timing }` | A connection to `httpPort` is accepted. Only that — for a port that does not speak HTTP. |
-| `{ "kind": "boot-completed" }` | The microVM is up. Nothing inside it is probed: a guest this host did not build answers no port it was not told about. |
+| `{ "kind": "boot-completed" }` | The microVM is up and `httpPort` has accepted a connection once. Nothing more is asked of it: a guest this host did not build answers no path it was not told about, so its liveness after that is the microVM being up. |
 
 `...timing` is `intervalMs`, `timeoutMs`, `gracePeriodMs`, `healthyThreshold` and
-`unhealthyThreshold`, as in the document above; `boot-completed` carries none, having nothing to
-time. The same check is what a wake waits for before a caller is handed on, and what liveness is
-read from after that.
+`unhealthyThreshold`, as in the document above; `boot-completed` carries none, its tenant having
+30 s to start listening and nothing to time after. The same check is what a wake waits for before
+a caller is handed on, and what liveness is read from after that.
 
 Why `tcp` is not the default: a TCP connect is answered by the guest kernel's accept queue whether
 or not the process behind it will ever read the request, so a program that has stopped answering
