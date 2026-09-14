@@ -37,6 +37,9 @@ pub struct Host {
     pub commands: Arc<dyn CommandRunner>,
     pub firewall: Arc<HostFirewall>,
     pub router: Arc<Router>,
+    /// What `[proxy.http.tls]` names, read on the way up: a certificate file that is short or
+    /// wrong refuses the start, rather than every handshake after it.
+    pub tls: Option<tokio_rustls::TlsAcceptor>,
     pub metrics: Arc<HostMetrics>,
     pub activator: Arc<AppActivator>,
     /// Absent on a host whose configuration names no `[proxy.tcp]`, which is a host that offers

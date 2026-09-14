@@ -158,6 +158,14 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
     );
+    let tls = config
+        .proxy
+        .http
+        .as_ref()
+        .and_then(|http| http.tls.as_ref())
+        .map(|tls| router::tls_acceptor(&tls.certificate, &tls.key, tls.client_ca.as_deref()))
+        .transpose()
+        .map_err(|error| StartupError::Config(error.to_string()))?;
     let checkpoint_servers = config.volumes.zerofs().map(|settings| CheckpointServers {
         ready_timeout: crate::domain::exports::reader::DEFAULT_READY_TIMEOUT,
         binary: settings.binary.clone(),
@@ -183,6 +191,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         payloads,
         firewall: Arc::new(HostFirewall::new(commands)),
         router: Router::new(metrics.clone()),
+        tls,
         metrics,
         activator,
         stream_activator,
@@ -235,22 +244,17 @@ pub fn serve_proxy(host: &Arc<Host>) {
         return;
     };
     let router = host.router.clone();
+    let acceptor = host.tls.clone();
     let address = SocketAddr::new(http.listen_address, http.port);
     tokio::spawn(async move {
         // One listener, and what it is depends on whether this host was given the material to
         // encrypt with. Nothing here redirects, so a second plain port beside a TLS one would
         // serve every app both ways at once with nothing moving a visitor off the first.
-        let served = match &http.tls {
+        let served = match acceptor {
             None => router::serve_http(router, address).await,
-            Some(tls) => {
-                router::serve_https(
-                    router,
-                    address,
-                    &tls.certificate,
-                    &tls.key,
-                    tls.client_ca.as_deref(),
-                )
-                .await
+            Some(acceptor) => {
+                let trust_pool = http.tls.as_ref().and_then(|tls| tls.client_ca.as_deref());
+                router::serve_https(router, address, acceptor, trust_pool).await
             }
         };
         if let Err(error) = served {

@@ -469,6 +469,7 @@ async fn test_host_over(
         commands: commands.clone(),
         firewall: Arc::new(HostFirewall::new(commands.clone())),
         router: Router::new(metrics.clone()),
+        tls: None,
         activator: AppActivator::new(state.clone(), Arc::new(NeverWoken), metrics.clone()),
         stream_activator: Some(crate::adapters::proxy::StreamActivator::new(
             state.clone(),

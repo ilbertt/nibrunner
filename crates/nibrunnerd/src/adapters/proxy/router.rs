@@ -19,6 +19,7 @@ use crate::domain::metrics::{HostMetrics, Outcome};
 use tokio::sync::RwLock;
 
 use crate::adapters::proxy::forward::{forward, hostname_of, note_the_hop, say, ProxyBody, Unreachable};
+use crate::adapters::proxy::pem;
 use crate::domain::metrics::proxy::Handshake;
 use crate::domain::report::routes::RouteTarget;
 
@@ -225,11 +226,9 @@ pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Re
 pub async fn serve_https(
     router: Arc<Router>,
     address: SocketAddr,
-    certificate: &Path,
-    key: &Path,
+    acceptor: tokio_rustls::TlsAcceptor,
     client_ca: Option<&Path>,
 ) -> std::io::Result<()> {
-    let acceptor = tls_acceptor(certificate, key, client_ca)?;
     let listener = TcpListener::bind(address).await?;
     match client_ca {
         Some(pool) => tracing::info!(
@@ -281,17 +280,27 @@ pub async fn serve_https(
     }
 }
 
-// A trust pool that admits nobody is refused here rather than at the handshake it would refuse:
-// the file is named to require a client certificate, and an empty one requires an impossible one.
+fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+}
+
+// A trust pool that admits fewer than its file holds is refused here rather than at the handshakes
+// it would refuse: the file is named to say who may call, and one that is short, empty or not
+// X.509 says something else.
 fn client_verifier(client_ca: &Path) -> std::io::Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
-    let anchors: Vec<_> =
-        rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(client_ca)?))
-            .collect::<Result<_, _>>()?;
+    let anchors = pem::read_certificates(client_ca)?;
     let mut roots = rustls::RootCertStore::empty();
-    roots.add_parsable_certificates(anchors);
+    let (_, unparsable) = roots.add_parsable_certificates(anchors);
+    if unparsable > 0 {
+        return Err(invalid(format!(
+            "{} holds {unparsable} certificate(s) that could not be parsed as X.509",
+            client_ca.display()
+        )));
+    }
+    tracing::info!(certificates = roots.len(), pool = %client_ca.display(), "client CA pool loaded");
     rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        .map_err(invalid)
 }
 
 pub fn tls_acceptor(
@@ -299,16 +308,14 @@ pub fn tls_acceptor(
     key: &Path,
     client_ca: Option<&Path>,
 ) -> std::io::Result<tokio_rustls::TlsAcceptor> {
-    let certificates: Vec<_> =
-        rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(certificate)?))
-            .collect::<Result<_, _>>()?;
+    let certificates = pem::read_certificates(certificate)?;
+    tracing::info!(
+        certificates = certificates.len(),
+        chain = %certificate.display(),
+        "origin certificate chain loaded"
+    );
     let private_key = rustls_pemfile::private_key(&mut std::io::BufReader::new(std::fs::File::open(key)?))?
-        .ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "the key file holds no private key",
-        )
-    })?;
+        .ok_or_else(|| invalid("the key file holds no private key"))?;
     let builder = rustls::ServerConfig::builder();
     let builder = match client_ca {
         Some(client_ca) => builder.with_client_cert_verifier(client_verifier(client_ca)?),
@@ -316,7 +323,7 @@ pub fn tls_acceptor(
     };
     let mut config = builder
         .with_single_cert(certificates, private_key)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        .map_err(invalid)?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
@@ -524,7 +531,7 @@ mod tests {
         std::fs::write(&empty, b"").unwrap();
         let error = refusal(&empty, &empty);
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("no private key"), "{error}");
+        assert!(error.to_string().contains("holds no certificate"), "{error}");
     }
 
     async fn routed_to_one_app(server_name: Option<&'static str>) -> u16 {
@@ -672,6 +679,28 @@ mod tests {
         assert_eq!(
             table.port_for(app_hostname().hostname.as_str()),
             Some(theirs.host_port)
+        );
+    }
+
+    // Reading the file whole says how many certificates it holds; the trust store then keeps the
+    // ones it can parse and drops the rest without a word, and that would be the same short pool.
+    #[test]
+    fn a_pool_the_trust_store_would_quietly_thin_is_refused_with_the_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = directory.path().join("origin-pull-ca.pem");
+        std::fs::write(
+            &pool,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        let said = client_verifier(&pool).unwrap_err().to_string();
+        assert_eq!(
+            said,
+            format!(
+                "{} holds 2 certificate(s) that could not be parsed as X.509",
+                pool.display()
+            )
         );
     }
 }
