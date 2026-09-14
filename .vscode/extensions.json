@@ -1,0 +1,8 @@
+{
+  "recommendations": [
+    "biomejs.biome",
+    "oven.bun-vscode",
+    "typescriptteam.native-preview",
+    "rust-lang.rust-analyzer"
+  ]
+}

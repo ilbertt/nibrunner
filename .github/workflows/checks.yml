@@ -18,7 +18,7 @@ jobs:
           cache: disabled
           prepare_for_build: disabled
 
-      - name: Check Rust Codestyle
+      - name: Check Codestyle
         run: just fmt --check
 
   lint:

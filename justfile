@@ -63,12 +63,26 @@ test:
 integration *args:
     NIBRUNNER_INTEGRATION=1 cargo test --workspace --test integration {{args}} -- --test-threads 1 --nocapture
 
-# `just fmt --check` refuses instead of rewriting.
+# Rust and the docs site both; `just fmt --check` refuses instead of rewriting. Biome runs from the
+# package.json scripts, which name their config: docs/biome.json is `root: false` so that an editor
+# opened on the repo applies it, and a Biome started inside docs/ then has to be told where it is.
 fmt *args:
     cargo fmt --all {{args}}
+    cd docs && bun run {{ if args =~ "--check" { "check:format" } else { "fix:format" } }}
 
 lint:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cd docs && bun run check:types
+    cd docs && bun run check:lint
+
+# The docs site under docs/ is a Fumadocs app on Bun, which mise.toml pins; `bun install` in there first.
+docs-dev:
+    cd docs && bun run dev
+
+# One Linux x86_64 binary with the site inside, docs/dist/app: what nibrun runs. `bun run build:local`
+# in docs/ is the same for this machine.
+docs-build:
+    cd docs && bun run build
 
 # The JSON Schemas in crates/protocol/schema, written afresh from the protocol crate's types.
 schema:
