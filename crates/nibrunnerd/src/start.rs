@@ -7,7 +7,7 @@
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::HostConfig;
 use crate::install::render::{DAEMON_UNIT, MOUNT_UNIT, ZEROFS_UNIT};
@@ -43,6 +43,26 @@ impl Outcome {
 
 pub struct Report {
     pub units: Vec<(&'static str, Outcome)>,
+    /// `host.env` was edited after ZeroFS last started, and ZeroFS was left running.
+    pub kept_credentials: Option<KeptCredentials>,
+}
+
+/// ZeroFS expands the object-store key and the encryption password out of its environment once,
+/// on the way up, and a start that leaves it running — every start that changed nothing it reads —
+/// leaves it with the ones it started with. Not a reason to restart it from here: that drops
+/// every NBD device under every guest, and only the operator knows when no guest needs its disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptCredentials {
+    pub environment_file: PathBuf,
+}
+
+impl KeptCredentials {
+    pub fn said(&self) -> String {
+        format!(
+            "{} changed after {ZEROFS_UNIT} last started, and ZeroFS reads it only on the way up: it keeps the credentials it started with until `systemctl restart nibrunner-zerofs` is run. Run that at a moment no guest needs its disk, because the restart drops every device under every guest.",
+            self.environment_file.display()
+        )
+    }
 }
 
 impl Report {
@@ -88,7 +108,58 @@ pub fn run(config: &HostConfig, environment_file: &Path, laid: &Laid) -> Result<
             *outcome = Outcome::Failed;
         }
     }
-    Ok(Report { units })
+    let kept_credentials = zerofs_kept_its_credentials(&units, || {
+        let edited = std::fs::metadata(environment_file).ok()?.modified().ok()?;
+        Some((edited, active_since(ZEROFS_UNIT)?))
+    })
+    .then(|| KeptCredentials {
+        environment_file: environment_file.to_path_buf(),
+    });
+    Ok(Report {
+        units,
+        kept_credentials,
+    })
+}
+
+/// Whether ZeroFS was left running on an environment file edited after it came up. Only a unit
+/// left as it was can be: one this run started or restarted read the file on its way up. The
+/// clocks are asked for only then, so a host without ZeroFS never asks systemd about it.
+fn zerofs_kept_its_credentials(
+    units: &[(&'static str, Outcome)],
+    clocks: impl FnOnce() -> Option<(SystemTime, SystemTime)>,
+) -> bool {
+    let left_running = units
+        .iter()
+        .any(|(unit, outcome)| *unit == ZEROFS_UNIT && *outcome == Outcome::Running);
+    if !left_running {
+        return false;
+    }
+    clocks().is_some_and(|(edited, active_since)| edited > active_since)
+}
+
+/// When the unit last became active, on the wall clock. systemd keeps it on the monotonic clock,
+/// and a file's mtime is on the other one, so the two are brought together through now on both.
+fn active_since(unit: &str) -> Option<SystemTime> {
+    let output = Command::new("systemctl")
+        .args(["show", "-p", "ActiveEnterTimestampMonotonic", "--value", unit])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let since_boot = monotonic_since_boot(&String::from_utf8_lossy(&output.stdout))?;
+    let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).ok()?;
+    let now_since_boot = Duration::new(now.tv_sec().try_into().ok()?, now.tv_nsec().try_into().ok()?);
+    wall_clock_of(since_boot, now_since_boot, SystemTime::now())
+}
+
+/// systemd prints microseconds since boot, and `0` for a unit that has never been active.
+fn monotonic_since_boot(shown: &str) -> Option<Duration> {
+    let microseconds: u64 = shown.trim().parse().ok()?;
+    (microseconds > 0).then(|| Duration::from_micros(microseconds))
+}
+
+fn wall_clock_of(since_boot: Duration, now_since_boot: Duration, now: SystemTime) -> Option<SystemTime> {
+    now.checked_sub(now_since_boot.checked_sub(since_boot)?)
 }
 
 /// Which units this host has, in the order they come up, and whether each is restarted or merely
@@ -307,6 +378,7 @@ mod tests {
                 (MOUNT_UNIT, Outcome::Failed),
                 (DAEMON_UNIT, Outcome::Started),
             ],
+            kept_credentials: None,
         };
         assert!(!report.all_up());
         assert_eq!(
@@ -314,9 +386,99 @@ mod tests {
             "journalctl -u nibrunner-zerofs.service -u nibrunner-zerofs-mount.service -u nibrunnerd.service -n 60 --no-pager"
         );
         assert!(Report {
-            units: vec![(DAEMON_UNIT, Outcome::Running)]
+            units: vec![(DAEMON_UNIT, Outcome::Running)],
+            kept_credentials: None,
         }
         .all_up());
+    }
+
+    fn zerofs_left(outcome: Outcome) -> Vec<(&'static str, Outcome)> {
+        vec![
+            (ZEROFS_UNIT, outcome),
+            (MOUNT_UNIT, Outcome::Running),
+            (DAEMON_UNIT, Outcome::Restarted),
+        ]
+    }
+
+    // A rotated key or a corrected password in host.env reaches the daemon, which is always
+    // restarted, and never a ZeroFS left running — and restarting ZeroFS from here would drop
+    // every device under every guest. So it is said, once, on the start that left it running.
+    #[test]
+    fn zerofs_left_running_on_an_environment_file_edited_since_it_came_up_is_said() {
+        let came_up = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let edited_after = came_up + Duration::from_secs(60);
+        let edited_before = came_up - Duration::from_secs(60);
+
+        assert!(zerofs_kept_its_credentials(
+            &zerofs_left(Outcome::Running),
+            || Some((edited_after, came_up))
+        ));
+        assert!(!zerofs_kept_its_credentials(
+            &zerofs_left(Outcome::Running),
+            || Some((edited_before, came_up))
+        ));
+        assert!(
+            !zerofs_kept_its_credentials(&zerofs_left(Outcome::Running), || Some((came_up, came_up))),
+            "written in the same instant it came up is what it read"
+        );
+    }
+
+    #[test]
+    fn a_zerofs_this_run_brought_up_read_the_environment_file_as_it_is() {
+        let came_up = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let edited_after = came_up + Duration::from_secs(60);
+        for outcome in [Outcome::Started, Outcome::Restarted, Outcome::Failed] {
+            assert!(
+                !zerofs_kept_its_credentials(&zerofs_left(outcome), || Some((edited_after, came_up))),
+                "{}",
+                outcome.said()
+            );
+        }
+        assert!(!zerofs_kept_its_credentials(
+            &[(DAEMON_UNIT, Outcome::Restarted)],
+            || panic!("a host without ZeroFS has nothing to ask systemd about")
+        ));
+        assert!(
+            !zerofs_kept_its_credentials(&zerofs_left(Outcome::Running), || None),
+            "a clock that cannot be read is no claim either way"
+        );
+    }
+
+    #[test]
+    fn what_systemd_shows_of_the_monotonic_clock_is_brought_onto_the_wall_clock() {
+        assert_eq!(
+            monotonic_since_boot("1500000\n"),
+            Some(Duration::from_micros(1_500_000))
+        );
+        assert_eq!(monotonic_since_boot("0\n"), None, "never active");
+        assert_eq!(monotonic_since_boot(""), None);
+        assert_eq!(monotonic_since_boot("Failed to get properties"), None);
+
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        assert_eq!(
+            wall_clock_of(Duration::from_secs(100), Duration::from_secs(400), now),
+            Some(now - Duration::from_secs(300))
+        );
+        assert_eq!(
+            wall_clock_of(Duration::from_secs(500), Duration::from_secs(400), now),
+            None,
+            "active since after now is a clock that cannot be trusted"
+        );
+    }
+
+    #[test]
+    fn what_is_said_names_the_file_the_command_and_when_to_run_it() {
+        let said = KeptCredentials {
+            environment_file: PathBuf::from("/etc/nibrunner/host.env"),
+        }
+        .said();
+        assert!(
+            said.starts_with("/etc/nibrunner/host.env changed after nibrunner-zerofs.service last started"),
+            "{said}"
+        );
+        assert!(said.contains("keeps the credentials it started with"), "{said}");
+        assert!(said.contains("`systemctl restart nibrunner-zerofs`"), "{said}");
+        assert!(said.contains("no guest needs its disk"), "{said}");
     }
 
     #[test]

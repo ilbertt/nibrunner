@@ -8,8 +8,8 @@ use crate::clock::{now_ms, now_timestamp};
 use crate::domain::activation::SleepReason;
 use crate::domain::backoff::{is_ready_to_retry, next_attempt_window, BackoffPolicy, NO_START_ATTEMPTS};
 use crate::domain::health::{
-    apply_probe, describe_instance_failure, evaluate_instance_state, initial_tracker, next_probe_delay_ms,
-    LifecycleInputs,
+    apply_probe, describe_instance_failure, describe_unhealthy_instance, evaluate_instance_state,
+    initial_tracker, next_probe_delay_ms, HealthTracker, LifecycleInputs,
 };
 use crate::domain::metrics::converge;
 use crate::domain::metrics::health::Failure;
@@ -418,15 +418,21 @@ pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<W
     }
 }
 
+/// The sentence an unhealthy instance carries, and nothing for any other state.
+fn unwell(state: InstanceState, health: &HealthTracker, record: &InstanceRecord) -> Option<StateMessage> {
+    (state == InstanceState::Unhealthy)
+        .then(|| StateMessage::new(describe_unhealthy_instance(health, &record.health_check)))
+}
+
 async fn verdict(
     host: &Host,
     state: InstanceState,
     status: &VmStatus,
-    health: &crate::domain::health::HealthTracker,
+    health: &HealthTracker,
     record: &InstanceRecord,
 ) -> Option<StateMessage> {
     if state != InstanceState::Failed {
-        return None;
+        return unwell(state, health, record);
     }
     let guest_verdict = if status.active || record.started_at.is_none() {
         None
@@ -478,7 +484,7 @@ async fn settle(
 ) {
     let health = if status.active && due {
         let probed = std::time::Instant::now();
-        let healthy = if record.health_check.probes_a_port() {
+        let outcome = if record.health_check.probes_a_port() {
             crate::domain::health::probe::probe_instance(
                 &record.guest_ipv4,
                 record.http_port,
@@ -488,11 +494,11 @@ async fn settle(
         } else {
             // A guest this host did not build answers no port it was never told about, so that
             // its microVM is still up is the whole of what this host can observe about it.
-            true
+            Ok(())
         };
         host.metrics
             .health
-            .probed(&record.app_id, healthy, probed.elapsed());
+            .probed(&record.app_id, outcome.is_ok(), probed.elapsed());
         let delay = next_probe_delay_ms(&record.health, &record.grace_inputs(now_ms));
         host.state
             .modify(|snapshot| {
@@ -503,7 +509,7 @@ async fn settle(
             .await;
         apply_probe(
             &record.health,
-            healthy,
+            outcome,
             &now_timestamp(),
             record.health_check.probe().healthy_threshold,
         )
@@ -525,8 +531,17 @@ async fn settle(
     });
 
     if state == record.state {
+        // An instance that stays unhealthy keeps its sentence current — the count grows and how
+        // the probes fail can change — but only a probe changes it, and the status loop passes
+        // every second.
+        let said = unwell(state, &health, &record);
         host.state
-            .update_record(&record.app_id, |latest| latest.health = health)
+            .update_record(&record.app_id, |latest| {
+                latest.health = health;
+                if said.is_some() && latest.message != said {
+                    latest.message = said;
+                }
+            })
             .await;
         return;
     }
@@ -1217,6 +1232,89 @@ mod tests {
         );
         let health = host.metrics.health.of(&app_id());
         assert_eq!((health.probes_healthy, health.probes_unhealthy), (1, 0));
+    }
+
+    fn up() -> VmStatus {
+        VmStatus {
+            loaded: true,
+            active: true,
+            failed: false,
+            started_this_boot: true,
+            exit_code: None,
+        }
+    }
+
+    /// A record of an app that was well, checked on the loopback so a test can be the tenant.
+    fn well_until_now(http_port: protocol::HttpPort) -> InstanceRecord {
+        instance_record(|record| {
+            record.state = InstanceState::Running;
+            record.health.ever_healthy = true;
+            record.guest_ipv4 = crate::domain::health::probe::loopback();
+            record.http_port = http_port;
+            record.started_at = Some(protocol::Timestamp::from_epoch_ms(
+                now_ms() - 2 * TCP_HEALTH_CHECK.probe().grace_period_ms as i64,
+            ));
+        })
+    }
+
+    async fn probed(host: &TestHost) -> InstanceRecord {
+        host.state.probe_at_once(&app_id()).await;
+        refresh_states(host.arc()).await;
+        host.state.record(&app_id()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_app_that_stopped_answering_says_why_until_it_answers_again() {
+        let host = test_host().await;
+        host.vms.set_status(up());
+        let nobody_listening = protocol::HttpPort::new(1).unwrap();
+        host.state.put_record(well_until_now(nobody_listening)).await;
+        let threshold = TCP_HEALTH_CHECK.probe().unhealthy_threshold;
+
+        for _ in 1..threshold {
+            let record = probed(&host).await;
+            assert_eq!(record.state, InstanceState::Running);
+            assert_eq!(record.message, None, "not unhealthy yet, so nothing to explain");
+        }
+        let record = probed(&host).await;
+        assert_eq!(record.state, InstanceState::Unhealthy);
+        let said = record.message.expect("an unhealthy instance says why");
+        assert_eq!(
+            said.as_str(),
+            format!("{threshold} tcp probes failed in a row; the last tcp connect refused")
+        );
+        assert_eq!(host.metrics.health.of(&app_id()).went_unhealthy, 1);
+
+        // The status loop passes every second, and a probe is due every five: a pass without one
+        // has nothing new to say.
+        refresh_states(host.arc()).await;
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Unhealthy);
+        assert_eq!(record.message, Some(said));
+
+        let record = probed(&host).await;
+        assert_eq!(
+            record.message.unwrap().as_str(),
+            format!(
+                "{} tcp probes failed in a row; the last tcp connect refused",
+                threshold + 1
+            ),
+            "another failed probe is counted into the sentence"
+        );
+        assert_eq!(host.metrics.health.of(&app_id()).went_unhealthy, 1);
+
+        // The tenant is back: the port accepts again.
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let answering = protocol::HttpPort::new(listener.local_addr().unwrap().port()).unwrap();
+        host.state
+            .update_record(&app_id(), |record| record.http_port = answering)
+            .await;
+        let record = probed(&host).await;
+        assert_eq!(record.state, InstanceState::Running);
+        assert_eq!(record.message, None, "well again, so nothing left to explain");
+        assert_eq!(record.health.last_failure, None);
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 #![allow(unsafe_code)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
 
 #[cfg_attr(
     not(target_os = "linux"),

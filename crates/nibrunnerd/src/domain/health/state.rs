@@ -2,6 +2,7 @@ use protocol::{HealthCheck, HttpPort, InstanceState, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::vm::VmStatus;
+use crate::domain::health::probe::ProbeFailure;
 
 pub const STARTUP_PROBE_INTERVAL_MS: u64 = 250;
 
@@ -13,6 +14,9 @@ pub struct HealthTracker {
     pub ever_healthy: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_healthy_at: Option<Timestamp>,
+    /// How the latest of the failures in a row went; nothing once a probe finds the tenant well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<ProbeFailure>,
 }
 
 pub fn initial_tracker() -> HealthTracker {
@@ -21,14 +25,15 @@ pub fn initial_tracker() -> HealthTracker {
 
 pub fn apply_probe(
     tracker: &HealthTracker,
-    healthy: bool,
+    outcome: Result<(), ProbeFailure>,
     at: &Timestamp,
     healthy_threshold: u32,
 ) -> HealthTracker {
-    if !healthy {
+    if let Err(failure) = outcome {
         return HealthTracker {
             consecutive_successes: 0,
             consecutive_failures: tracker.consecutive_failures + 1,
+            last_failure: Some(failure),
             ..tracker.clone()
         };
     }
@@ -38,6 +43,7 @@ pub fn apply_probe(
         consecutive_failures: 0,
         ever_healthy: tracker.ever_healthy || consecutive_successes >= healthy_threshold,
         last_healthy_at: Some(at.clone()),
+        last_failure: None,
     }
 }
 
@@ -89,6 +95,23 @@ pub fn describe_instance_failure(
         "nothing answered on port {http_port} inside the guest: {} health probes failed after the {}ms grace period",
         tracker.consecutive_failures, health_check.probe().grace_period_ms
     )
+}
+
+/// Why an instance that was well reads as unhealthy: which check, how many probes in a row it
+/// failed, and how the last of them did — a wrong path, a pinned event loop and a stalled disk
+/// otherwise all look the same.
+pub fn describe_unhealthy_instance(tracker: &HealthTracker, health_check: &HealthCheck) -> String {
+    let failed = tracker.consecutive_failures;
+    let probes = if failed == 1 { "probe" } else { "probes" };
+    let of = match health_check {
+        HealthCheck::Http { path, .. } => format!(" of {path}"),
+        HealthCheck::Tcp { .. } | HealthCheck::BootCompleted => String::new(),
+    };
+    let sentence = format!("{failed} {} {probes}{of} failed in a row", health_check.kind());
+    match &tracker.last_failure {
+        Some(failure) => format!("{sentence}; the last {}", failure.describe()),
+        None => sentence,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,7 +247,12 @@ mod tests {
     }
 
     fn probe(tracker: &HealthTracker, healthy: bool, healthy_threshold: u32) -> HealthTracker {
-        apply_probe(tracker, healthy, &observed_at(), healthy_threshold)
+        let outcome = if healthy {
+            Ok(())
+        } else {
+            Err(ProbeFailure::Refused)
+        };
+        apply_probe(tracker, outcome, &observed_at(), healthy_threshold)
     }
 
     fn failing(count: u32) -> HealthTracker {
@@ -336,6 +364,77 @@ mod tests {
         assert_eq!(then_failed.consecutive_successes, 0);
         assert_eq!(then_failed.consecutive_failures, 1);
         assert!(then_failed.ever_healthy);
+    }
+
+    #[test]
+    fn probe_accounting_keeps_how_the_last_probe_failed_until_one_succeeds() {
+        assert_eq!(initial_tracker().last_failure, None);
+        let refused = probe(&initial_tracker(), false, 1);
+        assert_eq!(refused.last_failure, Some(ProbeFailure::Refused));
+        let then_timed_out = apply_probe(
+            &refused,
+            Err(ProbeFailure::TimedOut { after_ms: 2_000 }),
+            &observed_at(),
+            1,
+        );
+        assert_eq!(
+            then_timed_out.last_failure,
+            Some(ProbeFailure::TimedOut { after_ms: 2_000 }),
+            "the latest failure is the one kept"
+        );
+        assert_eq!(then_timed_out.consecutive_failures, 2);
+        let well = probe(&then_timed_out, true, 1);
+        assert_eq!(well.last_failure, None);
+        assert_eq!(well.last_healthy_at, Some(observed_at()));
+    }
+
+    #[test]
+    fn a_tracker_written_before_it_kept_the_last_failure_still_reads() {
+        let written = serde_json::json!({
+            "consecutiveSuccesses": 0,
+            "consecutiveFailures": 3,
+            "everHealthy": true,
+        });
+        let tracker: HealthTracker = serde_json::from_value(written).unwrap();
+        assert_eq!(tracker.consecutive_failures, 3);
+        assert_eq!(tracker.last_failure, None);
+        assert_eq!(
+            describe_unhealthy_instance(&tracker, &TCP_HEALTH_CHECK),
+            "3 tcp probes failed in a row"
+        );
+    }
+
+    #[test]
+    fn an_instance_that_stopped_answering_says_which_check_how_often_and_how() {
+        let http = |path: &str| HealthCheck::Http {
+            path: path.to_string(),
+            probe: TCP_HEALTH_CHECK.probe().clone(),
+        };
+        let after = |failures: u32, failure: ProbeFailure| HealthTracker {
+            consecutive_failures: failures,
+            ever_healthy: true,
+            last_failure: Some(failure),
+            ..initial_tracker()
+        };
+        assert_eq!(
+            describe_unhealthy_instance(&after(3, ProbeFailure::Answered { status: 404 }), &http("/nope")),
+            "3 http probes of /nope failed in a row; the last answered 404 Not Found"
+        );
+        assert_eq!(
+            describe_unhealthy_instance(&after(3, ProbeFailure::Refused), &TCP_HEALTH_CHECK),
+            "3 tcp probes failed in a row; the last tcp connect refused"
+        );
+        assert_eq!(
+            describe_unhealthy_instance(
+                &after(7, ProbeFailure::TimedOut { after_ms: 2_000 }),
+                &http("/health")
+            ),
+            "7 http probes of /health failed in a row; the last timed out after 2000 ms"
+        );
+        assert_eq!(
+            describe_unhealthy_instance(&after(1, ProbeFailure::Refused), &TCP_HEALTH_CHECK),
+            "1 tcp probe failed in a row; the last tcp connect refused"
+        );
     }
 
     #[test]
