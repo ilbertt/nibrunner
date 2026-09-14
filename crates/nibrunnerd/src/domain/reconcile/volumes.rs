@@ -45,12 +45,21 @@ pub async fn observe_volumes(host: &Host, owners: &BTreeMap<VolumeId, AppId>) ->
 
 /// A volume as the control plane hears of it. `last_refusal` is what the last pass said when it
 /// could not provision this volume: an attached device with no filesystem is still failed, and
-/// the reason stays on the report rather than going blank between one attempt and the next.
+/// the reason stays on the report rather than going blank between one attempt and the next. A
+/// device this host holds for the volume that no longer answers (what a ZeroFS restart leaves
+/// under every guest) is failed too, and says so, until the pass has re-attached it; only a
+/// volume this host holds no device for is detached.
 pub fn to_reported_volume(observed: &ObservedVolume, last_refusal: Option<&StateMessage>) -> ReportedVolume {
-    let (state, message) = match (observed.attached, observed.formatted) {
-        (true, true) => (VolumeState::Ready, None),
-        (true, false) => (VolumeState::Failed, last_refusal.cloned()),
-        (false, _) => (VolumeState::Detached, None),
+    let (state, message) = match (observed.attached, observed.formatted, &observed.device_path) {
+        (true, true, _) => (VolumeState::Ready, None),
+        (true, false, _) => (VolumeState::Failed, last_refusal.cloned()),
+        (false, _, Some(device_path)) => (
+            VolumeState::Failed,
+            Some(StateMessage::new(format!(
+                "{device_path} is not answering and is being re-attached"
+            ))),
+        ),
+        (false, _, None) => (VolumeState::Detached, None),
     };
     ReportedVolume {
         volume_id: observed.volume_id.clone(),
@@ -90,7 +99,29 @@ pub async fn apply_volumes(
     trigger: Trigger,
 ) {
     let last_refusals = last_refusals(&host.state.snapshot().await.volume_reports);
-    let mut updates = Vec::new();
+
+    let still_named: BTreeSet<VolumeId> = desired
+        .volumes
+        .iter()
+        .map(|volume| volume.volume_id.clone())
+        .collect();
+    host.state.forget_deleted_volumes(&still_named).await;
+
+    // What was observed goes on record before anything is done about it. Re-attaching a device
+    // is seconds, and a host of many guests re-attaches them one after another, so a report that
+    // waited for the last of them would say every device was well for the whole of the outage.
+    let existing: Vec<ReportedVolume> = observed
+        .volumes
+        .iter()
+        .map(|volume| to_reported_volume(volume, last_refusals.get(&volume.volume_id)))
+        .collect();
+    host.state
+        .modify(|snapshot| {
+            let deleted = snapshot.deleted_volumes.values().cloned().collect();
+            snapshot.volume_reports = merge_volume_reports(existing, deleted);
+        })
+        .await;
+
     for action in &plan.volumes {
         match action {
             // Provisioning a bare volume fetches its seed again before it can fail again, so one
@@ -138,7 +169,12 @@ pub async fn apply_volumes(
                         }
                     }
                 };
-                updates.push(report);
+                host.state
+                    .modify(|snapshot| {
+                        snapshot.volume_reports =
+                            merge_volume_reports(std::mem::take(&mut snapshot.volume_reports), vec![report]);
+                    })
+                    .await;
             }
             VolumePlan::Blocked { desired, blocked_by } => {
                 tracing::warn!(
@@ -150,26 +186,6 @@ pub async fn apply_volumes(
             _ => {}
         }
     }
-
-    let still_named: BTreeSet<VolumeId> = desired
-        .volumes
-        .iter()
-        .map(|volume| volume.volume_id.clone())
-        .collect();
-    host.state.forget_deleted_volumes(&still_named).await;
-
-    let existing: Vec<ReportedVolume> = observed
-        .volumes
-        .iter()
-        .map(|volume| to_reported_volume(volume, last_refusals.get(&volume.volume_id)))
-        .collect();
-    let snapshot = host.state.snapshot().await;
-    let mut all_updates: Vec<ReportedVolume> = snapshot.deleted_volumes.values().cloned().collect();
-    all_updates.extend(updates);
-    let merged = merge_volume_reports(existing, all_updates);
-    host.state
-        .modify(|snapshot| snapshot.volume_reports = merged)
-        .await;
 }
 
 /// The tap goes with the slot rather than with the microVM, because a stopped app keeps both and
@@ -394,13 +410,43 @@ mod tests {
     }
 
     #[test]
-    fn a_volume_this_host_is_not_serving_is_reported_detached_rather_than_ready() {
-        let report = to_reported_volume(&observed_volume(|volume| volume.attached = false), None);
+    fn a_volume_this_host_holds_no_device_for_is_reported_detached_rather_than_ready() {
+        let report = to_reported_volume(
+            &observed_volume(|volume| {
+                volume.attached = false;
+                volume.device_path = None;
+            }),
+            None,
+        );
         assert_eq!(report.state, VolumeState::Detached);
-        assert_eq!(report.device_path.as_deref(), Some("/dev/nbd0"));
+        assert_eq!(report.message, None);
+        assert_eq!(report.device_path, None);
         assert_eq!(
             report.storage_prefix.map(|prefix| prefix.as_str().to_string()),
             Some(HOST_STORAGE_PREFIX.to_string())
+        );
+    }
+
+    #[test]
+    fn a_device_this_host_holds_that_does_not_answer_is_reported_failed_and_says_it_is_being_re_attached() {
+        let dead = observed_volume(|volume| {
+            volume.attached = false;
+            volume.formatted = false;
+        });
+
+        let report = to_reported_volume(&dead, None);
+        assert_eq!(report.state, VolumeState::Failed);
+        assert_eq!(
+            report.message.as_ref().map(StateMessage::as_str),
+            Some("/dev/nbd0 is not answering and is being re-attached")
+        );
+        assert_eq!(report.device_path.as_deref(), Some("/dev/nbd0"));
+
+        let refused_before = StateMessage::new("the initial contents could not be laid out");
+        assert_eq!(
+            to_reported_volume(&dead, Some(&refused_before)).message,
+            report.message,
+            "what the last pass could not do is not what is wrong with the device now"
         );
     }
 
@@ -621,6 +667,15 @@ mod tests {
         }
     }
 
+    fn dead_device() -> ObservedState {
+        observed_state(|state| {
+            state.volumes = vec![observed_volume(|volume| {
+                volume.attached = false;
+                volume.formatted = false;
+            })]
+        })
+    }
+
     #[tokio::test]
     async fn a_tick_leaves_a_bare_volume_alone_rather_than_fetching_its_seed_again() {
         let mut volumes = MockVolumeBackend::new();
@@ -668,17 +723,11 @@ mod tests {
             })
         });
         let host = host_over(volumes).await;
-        let yanked = observed_state(|state| {
-            state.volumes = vec![observed_volume(|volume| {
-                volume.attached = false;
-                volume.formatted = false;
-            })]
-        });
 
         apply_volumes(
             &host,
             &provisioning(),
-            &yanked,
+            &dead_device(),
             &desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
             Trigger::Tick,
         )
@@ -688,6 +737,89 @@ mod tests {
             host.state.snapshot().await.volume_reports[0].state,
             VolumeState::Ready
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_device_that_stopped_answering_is_reported_failed_while_it_is_re_attached_and_ready_once_it_is()
+    {
+        let mut host = test_host().await;
+        let state = host.state.clone();
+        let while_re_attaching = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let noted = while_re_attaching.clone();
+        let mut volumes = MockVolumeBackend::new();
+        volumes.expect_provision().times(1).returning(move |desired| {
+            let snapshot =
+                tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(state.snapshot()));
+            *noted.lock().unwrap() = snapshot.volume_reports.into_iter().next();
+            Ok(crate::adapters::volumes::AttachedVolume {
+                volume_id: desired.volume_id.clone(),
+                device_path: "/dev/nbd0".to_string(),
+                size_bytes: desired.size_bytes,
+                storage_prefix: protocol::ObjectKey::parse(HOST_STORAGE_PREFIX).unwrap(),
+            })
+        });
+        std::sync::Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .volumes = std::sync::Arc::new(volumes);
+
+        apply_volumes(
+            &host,
+            &provisioning(),
+            &dead_device(),
+            &desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
+            Trigger::Tick,
+        )
+        .await;
+
+        let seen = while_re_attaching
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the record while the device was re-attached");
+        assert_eq!(seen.state, VolumeState::Failed);
+        assert_eq!(
+            seen.message.as_ref().map(StateMessage::as_str),
+            Some("/dev/nbd0 is not answering and is being re-attached")
+        );
+        let mut report = crate::domain::metrics::tests::report();
+        report.volumes = vec![seen];
+        let page =
+            crate::domain::metrics::tests::page(&report, &host.metrics, &host.state.snapshot().await, 0);
+        assert!(
+            page.contains("nibrunner_volume_state{volume=\"vol-1\",app=\"app-1\",state=\"failed\"} 1\n"),
+            "{page}"
+        );
+
+        let after = host.state.snapshot().await.volume_reports;
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].state, VolumeState::Ready);
+        assert_eq!(
+            after[0].message, None,
+            "a device that answers again has nothing to explain"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_that_stopped_answering_under_a_volume_nothing_re_attaches_this_pass_still_says_so() {
+        let host = test_host().await;
+
+        apply_volumes(
+            &host,
+            &ReconcilePlan::default(),
+            &dead_device(),
+            &desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
+            Trigger::Tick,
+        )
+        .await;
+
+        let reports = host.state.snapshot().await.volume_reports;
+        assert_eq!(reports[0].state, VolumeState::Failed);
+        assert!(reports[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("is not answering"));
     }
 
     #[tokio::test]
