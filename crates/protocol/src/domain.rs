@@ -851,6 +851,42 @@ impl TenantLogStream {
     }
 }
 
+/// How a tenant process ended: the code it exited with, or the signal that killed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum TenantExit {
+    Code(i32),
+    Signal(i32),
+}
+
+impl TenantExit {
+    /// The one number a shell reports for either: the code, or 128 plus the signal.
+    pub fn status(self) -> i32 {
+        match self {
+            TenantExit::Code(code) => code,
+            TenantExit::Signal(signal) => 128 + signal,
+        }
+    }
+}
+
+/// One restart of the tenant by the supervisor inside its guest, as the guest reported it. The
+/// host never sees the process, so this is the whole of what it knows about why the tenant went
+/// down and came back: which of the budget this restart was, how the tenant ended, the sentence
+/// the guest printed for it, and how long it waited before starting the tenant again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TenantRestart {
+    /// 1 for the first restart since the tenant last stayed up long enough to earn its budget
+    /// back, up to `budget`.
+    pub attempt: u32,
+    pub budget: u32,
+    pub exit: TenantExit,
+    pub reason: StateMessage,
+    pub backoff_ms: u64,
+}
+
 pub const LOG_SOURCES: [&str; 5] = ["tenant", "agent", "firecracker", "zerofs", "caddy"];
 
 pub const LOG_STREAM_FIELDS: [&str; 3] = ["hostId", "SOURCE", "appId"];

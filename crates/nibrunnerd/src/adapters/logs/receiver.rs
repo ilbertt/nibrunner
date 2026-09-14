@@ -175,6 +175,12 @@ async fn pump(
                     lines.close(|stream, text| events.push(stamp.line(stream, text)));
                     events.push(stamp.event(TenantLogBody::Gap { dropped_bytes }));
                 }
+                GuestLogFrame::Restart(restart) => {
+                    // The tenant that was writing the line is gone: what follows is the next
+                    // one's, and the restart sits between them.
+                    lines.close(|stream, text| events.push(stamp.line(stream, text)));
+                    events.push(stamp.event(TenantLogBody::Restart(restart)));
+                }
                 GuestLogFrame::Data { stream, bytes } => {
                     lines.extend(stream, &bytes, |stream, text| {
                         events.push(stamp.line(stream, text))
@@ -342,8 +348,10 @@ pub fn tenant_log_socket_path(working_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::test_support::mocks;
-    use crate::test_support::{app_id, deployment_id};
-    use guest_contract::logs::{encode_frame, ENCODE_KIND_GAP, ENCODE_KIND_STDERR, ENCODE_KIND_STDOUT};
+    use crate::test_support::{app_id, deployment_id, tenant_restart};
+    use guest_contract::logs::{
+        encode_frame, encode_restart, ENCODE_KIND_GAP, ENCODE_KIND_STDERR, ENCODE_KIND_STDOUT,
+    };
     use tokio::io::AsyncWriteExt;
 
     async fn until(condition: impl Fn() -> bool) {
@@ -390,6 +398,56 @@ mod tests {
         assert_eq!(events[1].body, TenantLogBody::Gap { dropped_bytes: 4096 });
         assert_eq!(events[0].source_id, events[1].source_id);
         assert_eq!((events[0].sequence, events[1].sequence), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn a_restart_closes_the_line_the_tenant_was_writing_and_takes_its_place_after_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = tenant_log_socket_path(directory.path());
+        let (sink, spy) = mocks::log_sink();
+        let receiver = TenantLogReceiver::new();
+        receiver
+            .attach(app_id(), deployment_id(), socket_path.clone(), sink.clone())
+            .await
+            .unwrap();
+
+        let mut guest = UnixStream::connect(&socket_path).await.unwrap();
+        guest
+            .write_all(&encode_frame(ENCODE_KIND_STDERR, b"out of memory\nallocating 4"))
+            .await
+            .unwrap();
+        guest
+            .write_all(&encode_restart(&tenant_restart(|_| {})))
+            .await
+            .unwrap();
+        guest
+            .write_all(&encode_frame(ENCODE_KIND_STDOUT, b"listening\n"))
+            .await
+            .unwrap();
+        guest.flush().await.unwrap();
+
+        until(|| spy.events().len() == 4).await;
+        let bodies: Vec<TenantLogBody> = spy.events().into_iter().map(|event| event.body).collect();
+        assert_eq!(
+            bodies,
+            vec![
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stderr,
+                    text: "out of memory".into()
+                },
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stderr,
+                    text: "allocating 4".into()
+                },
+                TenantLogBody::Restart(tenant_restart(|_| {})),
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stdout,
+                    text: "listening".into()
+                },
+            ]
+        );
+        let sequences: Vec<u64> = spy.events().iter().map(|event| event.sequence).collect();
+        assert_eq!(sequences, vec![0, 1, 2, 3]);
     }
 
     #[tokio::test]

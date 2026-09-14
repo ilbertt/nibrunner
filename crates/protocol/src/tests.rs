@@ -180,6 +180,7 @@ fn a_report_omits_what_it_does_not_know() {
         guest_ipv4: None,
         layer_digests: Vec::new(),
         restart_count: 0,
+        last_restart: None,
         started_at: None,
         last_healthy_at: None,
         converged_at: None,
@@ -193,6 +194,7 @@ fn a_report_omits_what_it_does_not_know() {
     assert!(written.get("startedAt").is_none());
     assert!(written.get("convergedAt").is_none());
     assert!(written.get("message").is_none());
+    assert!(written.get("lastRestart").is_none());
     assert_eq!(written["hostPort"], 21000);
     // An app that has used nothing has used nothing, which is a figure and not an absence.
     assert_eq!(written["meters"]["runningMs"], 0);
@@ -209,6 +211,43 @@ fn a_report_written_before_anything_was_metered_still_reads_back() {
     });
     let read: ReportedInstance = serde_json::from_value(older).unwrap();
     assert_eq!(read.meters, UsageMeters::default());
+    assert_eq!(read.last_restart, None);
+}
+
+#[test]
+fn a_tenant_restart_is_written_flat_with_how_the_tenant_ended_named_by_kind() {
+    let restart = ReportedRestart {
+        at: Timestamp::parse("2026-09-14T10:00:00.000Z").unwrap(),
+        restart: TenantRestart {
+            attempt: 2,
+            budget: 5,
+            exit: TenantExit::Signal(9),
+            reason: StateMessage::new("the tenant exited (137); restart 2 of 5 in 1000ms"),
+            backoff_ms: 1000,
+        },
+    };
+    let written = serde_json::to_value(&restart).unwrap();
+    assert_eq!(
+        written,
+        serde_json::json!({
+            "at": "2026-09-14T10:00:00.000Z",
+            "attempt": 2,
+            "budget": 5,
+            "exit": { "signal": 9 },
+            "reason": "the tenant exited (137); restart 2 of 5 in 1000ms",
+            "backoffMs": 1000
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ReportedRestart>(written).unwrap(),
+        restart
+    );
+    assert_eq!(
+        serde_json::to_value(TenantExit::Code(1)).unwrap(),
+        serde_json::json!({ "code": 1 })
+    );
+    assert_eq!(TenantExit::Code(1).status(), 1);
+    assert_eq!(TenantExit::Signal(9).status(), 137);
 }
 
 #[test]
@@ -537,6 +576,18 @@ mod schema {
                     Sha256Digest::parse("a".repeat(64)).unwrap(),
                 ],
                 restart_count: 1,
+                last_restart: Some(ReportedRestart {
+                    at: now.clone(),
+                    restart: TenantRestart {
+                        attempt: 1,
+                        budget: 5,
+                        exit: TenantExit::Signal(9),
+                        reason: StateMessage::new(
+                            "the tenant exited (137): the kernel killed it for running out of memory at its ceiling of 198 MiB; restart 1 of 5 in 500ms",
+                        ),
+                        backoff_ms: 500,
+                    },
+                }),
                 started_at: Some(now.clone()),
                 last_healthy_at: Some(now.clone()),
                 converged_at: Some(now.clone()),
@@ -823,6 +874,12 @@ mod schema {
                 "/instances/0/restartCount",
                 serde_json::json!(-1),
             ),
+            with(
+                reported_json(),
+                "/instances/0/lastRestart/exit",
+                serde_json::json!({ "status": 137 }),
+            ),
+            without(reported_json(), "/instances/0/lastRestart/reason"),
             with(
                 reported_json(),
                 "/instances/0/meters/cpuMs",

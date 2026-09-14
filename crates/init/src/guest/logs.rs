@@ -2,8 +2,9 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
+use guest_contract::logs::{encode_frame, encode_gap, encode_restart, kind_of, FRAME_HEADER_BYTES};
 use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
-use protocol::TenantLogStream;
+use protocol::{TenantLogStream, TenantRestart};
 
 const CID_HOST: u32 = 2;
 
@@ -33,7 +34,16 @@ impl Forwarder {
     }
 
     pub(crate) fn write(&mut self, stream: TenantLogStream, bytes: &[u8]) {
-        let frame = guest_contract::logs::encode_frame(guest_contract::logs::kind_of(stream), bytes);
+        self.send(encode_frame(kind_of(stream), bytes));
+    }
+
+    /// Sent the way the tenant's output is, resend and all: a restart the host was not there to
+    /// hear of is so many bytes in the next gap, and one fewer on its count.
+    pub(crate) fn restarted(&mut self, restart: &TenantRestart) {
+        self.send(encode_restart(restart));
+    }
+
+    fn send(&mut self, frame: Vec<u8>) {
         let delivered = if self.connection.is_some() {
             // A connection that fails is as likely one a snapshot captured, or one a host daemon
             // since restarted was holding, as a host gone away: the write is the first news of
@@ -43,7 +53,7 @@ impl Forwarder {
             Instant::now() >= self.retry_after && self.redial() && self.deliver(&frame)
         };
         if !delivered {
-            self.dropped_bytes += bytes.len() as u64;
+            self.dropped_bytes += (frame.len() - FRAME_HEADER_BYTES) as u64;
         }
     }
 
@@ -68,7 +78,7 @@ impl Forwarder {
             return false;
         }
         if self.dropped_bytes > 0 {
-            if !self.deliver(&guest_contract::logs::encode_gap(self.dropped_bytes)) {
+            if !self.deliver(&encode_gap(self.dropped_bytes)) {
                 return false;
             }
             self.dropped_bytes = 0;
@@ -102,6 +112,7 @@ mod tests {
     use std::rc::Rc;
 
     use guest_contract::logs::{decode_frames, GuestLogFrame};
+    use protocol::{StateMessage, TenantExit};
 
     use super::*;
 
@@ -190,6 +201,56 @@ mod tests {
         assert_eq!(arrived(&mut second), vec![stdout("after\n")]);
         assert_eq!(host.dials.get(), 2);
         assert_eq!(forwarder.dropped_bytes, 0);
+    }
+
+    fn restart() -> TenantRestart {
+        TenantRestart {
+            attempt: 1,
+            budget: 5,
+            exit: TenantExit::Signal(9),
+            reason: StateMessage::new("the tenant exited (137); restart 1 of 5 in 500ms"),
+            backoff_ms: 500,
+        }
+    }
+
+    #[test]
+    fn a_restart_takes_its_place_after_the_output_and_is_resent_like_it_on_a_fresh_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.sock");
+        let host = Host::listening_at(&path);
+        let mut forwarder = host.forwarder(&path);
+
+        forwarder.write(TenantLogStream::Stderr, b"out of memory\n");
+        forwarder.restarted(&restart());
+        let mut first = host.accept();
+        assert_eq!(
+            arrived(&mut first),
+            vec![
+                GuestLogFrame::Data {
+                    stream: TenantLogStream::Stderr,
+                    bytes: b"out of memory\n".to_vec(),
+                },
+                GuestLogFrame::Restart(restart()),
+            ]
+        );
+
+        gone(first);
+        forwarder.restarted(&restart());
+        let mut second = host.accept();
+        assert_eq!(arrived(&mut second), vec![GuestLogFrame::Restart(restart())]);
+        assert_eq!(forwarder.dropped_bytes, 0);
+    }
+
+    #[test]
+    fn a_restart_nobody_heard_is_so_many_bytes_of_the_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.sock");
+        let mut forwarder = Forwarder::dialing(Box::new(move || {
+            UnixStream::connect(&path).ok().map(OwnedFd::from)
+        }));
+        forwarder.restarted(&restart());
+        let payload_bytes = encode_restart(&restart()).len() - FRAME_HEADER_BYTES;
+        assert_eq!(forwarder.dropped_bytes, payload_bytes as u64);
     }
 
     #[test]
