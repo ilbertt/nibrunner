@@ -223,6 +223,7 @@ mod tests {
     #[tokio::test]
     async fn an_app_is_woken_by_putting_back_the_microvm_it_had() {
         let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.vms.set_status(stopped_vm());
         host.state
             .put_record(instance_record(|record| {
@@ -265,6 +266,7 @@ mod tests {
     #[tokio::test]
     async fn a_restore_is_not_a_restart_so_it_costs_the_app_nothing() {
         let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.vms.set_status(stopped_vm());
         host.state
             .put_record(instance_record(|record| {

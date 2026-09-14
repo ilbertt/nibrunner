@@ -66,6 +66,7 @@ testing = ["dep:mockall", "dep:tempfile"]
 [dev-dependencies]
 tempfile.workspace = true
 mockall.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 nft-render.workspace = true
 nibrunnerd = { path = ".", features = ["testing"] }
 

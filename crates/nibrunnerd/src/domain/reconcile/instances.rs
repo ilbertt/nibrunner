@@ -18,7 +18,7 @@ use crate::domain::metrics::sleep_wake::SleepOutcome;
 use crate::domain::reconcile::plan::{InstancePlan, ReconcilePlan};
 use crate::domain::report::instance_record::{InstanceRecord, RecordFields};
 use crate::host::Host;
-use crate::ports::{BootRequest, SuspendRequest, VmError, WakeOutcome};
+use crate::ports::{BootRequest, SuspendRequest, VmError, WakeFailure, WakeOutcome, WakeRefusal};
 
 /// The host ports a slot hands this app's extra ports, in the order the document named them.
 ///
@@ -361,14 +361,40 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     }
 }
 
-pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<WakeOutcome, String> {
+pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<WakeOutcome, WakeRefusal> {
+    let would_not_start = |reason: String| WakeRefusal::Failed {
+        kind: WakeFailure::WouldNotStart,
+        reason,
+    };
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
-        return Err("this host has no slot left".to_string());
+        return Err(would_not_start("this host has no slot left".to_string()));
     };
 
     let status = host.vms.statuses(std::slice::from_ref(&desired.app_id)).await;
     if status.get(&desired.app_id).copied().unwrap_or(UNKNOWN_VM).active {
         return Ok(WakeOutcome::AlreadyRunning);
+    }
+
+    // The snapshot carries the guest's page cache, so a guest restored onto a device that no
+    // longer answers serves reads from memory and only finds out when it writes. The device is
+    // made to answer first — re-attached if it does not — or the wake is refused.
+    let attaching = std::time::Instant::now();
+    let attached = host.volumes.attach(&desired.volume_id, &desired.app_id).await;
+    host.metrics
+        .resources
+        .done(Operation::VolumeAttach, attached.is_ok(), attaching.elapsed());
+    if let Err(error) = attached {
+        let reason = error.message();
+        host.state
+            .update_record(&desired.app_id, |record| {
+                record.message = Some(StateMessage::new(reason.clone()));
+            })
+            .await;
+        tracing::error!(app_id = %desired.app_id, reason, "wake refused: the volume is not usable");
+        return Err(WakeRefusal::Failed {
+            kind: WakeFailure::VolumeUnusable,
+            reason,
+        });
     }
 
     host.state.mark_active(&desired.app_id, now_ms()).await;
@@ -404,7 +430,7 @@ pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<W
                     record.message = Some(StateMessage::new(reason.clone()));
                 })
                 .await;
-            Err(reason)
+            Err(would_not_start(reason))
         }
     }
 }
@@ -980,6 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn a_wake_that_failed_for_its_own_reason_says_so_rather_than_booting_the_app_cold() {
         let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.vms
             .refuse_wake(VmError::Host("the snapshot file is unreadable".to_string()));
         host.state
@@ -991,7 +1018,11 @@ mod tests {
 
         let refusal = resume_instance(&host, &on_request()).await.unwrap_err();
 
-        assert!(refusal.contains("the snapshot file is unreadable"));
+        let WakeRefusal::Failed { kind, reason } = refusal else {
+            panic!("a wake that failed is not a host short of memory: {refusal:?}");
+        };
+        assert_eq!(kind, WakeFailure::WouldNotStart);
+        assert!(reason.contains("the snapshot file is unreadable"), "{reason}");
         assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Wake]);
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Idle);

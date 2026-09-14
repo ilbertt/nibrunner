@@ -100,12 +100,7 @@ impl AppWaker {
             return Err(refusal);
         }
 
-        let outcome = crate::domain::reconcile::instances::resume_instance(&self.host, &wanted)
-            .await
-            .map_err(|reason| WakeRefusal::Failed {
-                kind: WakeFailure::WouldNotStart,
-                reason,
-            })?;
+        let outcome = crate::domain::reconcile::instances::resume_instance(&self.host, &wanted).await?;
 
         let Some(record) = self.host.state.record(app_id).await else {
             return Err(WakeRefusal::Failed {
@@ -586,6 +581,151 @@ mod tests {
             .await
             .expect("a microVM that started is the whole of what it promised");
         assert!(host.vms.calls().contains(&crate::ports::VmCall::Wake));
+    }
+
+    /// A host whose volumes are ZeroFS exports on NBD devices: the kernel's view of the devices
+    /// lives under `sysfs`, and `commands` answers for nbd-client. The volume is there and its
+    /// app is asleep, waiting to be asked for.
+    async fn host_on_nbd(
+        commands: Arc<crate::ports::MockCommandRunner>,
+        sysfs: &std::path::Path,
+    ) -> (TestHost, tempfile::TempDir) {
+        use crate::adapters::volumes::nbd::NbdDevices;
+        use crate::adapters::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
+
+        let root = tempfile::tempdir().unwrap();
+        let filesystem = ZerofsFilesystem {
+            storage_prefix: protocol::ObjectKey::parse("volumes").unwrap(),
+            mount_path: root.path().join("mnt"),
+            nbd_socket_path: "/run/zerofs/nbd.sock".into(),
+            checkpoint_runtime_dir: "/run/zerofs-checkpoint".into(),
+            binary: "/opt/nibrun/bin/zerofs/zerofs".into(),
+            config_file: root.path().join("zerofs.toml"),
+        };
+        std::fs::create_dir_all(filesystem.nbd_directory()).unwrap();
+        std::fs::write(filesystem.device_file_for(&volume_id()), vec![0u8; 4096]).unwrap();
+
+        let mut host = test_host().await;
+        let staging = crate::adapters::volumes::initial_contents::tests::staging(
+            &root.path().join("staging"),
+            crate::adapters::volumes::initial_contents::tests::archive(),
+        );
+        let volumes = ZerofsVolumes::new(filesystem, host.allocator.clone(), commands.clone(), staging)
+            .with_devices(NbdDevices::with_sysfs(sysfs.to_path_buf(), commands));
+        Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .volumes = Arc::new(volumes);
+
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Idle;
+                record.health_check = protocol::HealthCheck::BootCompleted;
+            }))
+            .await;
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
+        (host, root)
+    }
+
+    /// The kernel holds the device but nothing answers on it: what a ZeroFS restart leaves.
+    fn dead_device(sysfs: &std::path::Path) -> std::path::PathBuf {
+        let directory = sysfs.join("nbd0");
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("pid");
+        std::fs::write(&pid_file, "4123\n").unwrap();
+        pid_file
+    }
+
+    fn detaches(request: &crate::ports::CommandRequest) -> bool {
+        request.command.get(1).is_some_and(|word| word == "-d")
+    }
+
+    #[tokio::test]
+    async fn a_wake_onto_a_device_that_does_not_answer_re_attaches_it_before_the_restore() {
+        let _woken = WOKEN_LOG.lock();
+        let sysfs = tempfile::tempdir().unwrap();
+        let pid_file = dead_device(sysfs.path());
+        let (commands, log) = mocks::commands_answering(move |request| {
+            if detaches(request) {
+                std::fs::remove_file(&pid_file).unwrap();
+            }
+            Ok(crate::ports::CommandResult::succeeded())
+        });
+        let (host, _root) = host_on_nbd(commands, sysfs.path()).await;
+
+        AppWaker::new(host.arc().clone())
+            .wake(&app_id())
+            .await
+            .expect("the device was re-attached and the app restored onto it");
+
+        let asked = log.commands();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert_eq!(
+            asked[0],
+            vec!["nbd-client".to_string(), "-d".into(), "/dev/nbd0".into()]
+        );
+        assert_eq!(asked[1][3..6], ["/dev/nbd0", "-N", "vol-1"]);
+        assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Wake]);
+    }
+
+    #[tokio::test]
+    async fn a_wake_whose_re_attach_fails_is_refused_rather_than_restored_onto_a_dead_disk() {
+        let sysfs = tempfile::tempdir().unwrap();
+        let pid_file = dead_device(sysfs.path());
+        let (commands, _) = mocks::commands_answering(move |request| {
+            if detaches(request) {
+                std::fs::remove_file(&pid_file).unwrap();
+                return Ok(crate::ports::CommandResult::succeeded());
+            }
+            Ok(crate::ports::CommandResult {
+                code: 1,
+                stdout: String::new(),
+                stderr: "Error: Failed to setup device, check dmesg\nExiting.\n".into(),
+            })
+        });
+        let (host, _root) = host_on_nbd(commands, sysfs.path()).await;
+
+        // The pause between the two attach attempts is on the clock rather than waited out.
+        tokio::time::pause();
+        let refusal = AppWaker::new(host.arc().clone())
+            .wake(&app_id())
+            .await
+            .unwrap_err();
+
+        let WakeRefusal::Failed { kind, reason } = refusal else {
+            panic!("refused for a reason of its own, not for want of memory: {refusal:?}");
+        };
+        assert_eq!(kind, WakeFailure::VolumeUnusable);
+        assert!(reason.contains("Failed to setup device, check dmesg"), "{reason}");
+        assert!(
+            host.vms.calls().is_empty(),
+            "nothing was restored onto the dead disk: {:?}",
+            host.vms.calls()
+        );
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Idle, "the app is still asleep");
+        assert!(
+            record
+                .message
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .contains("Failed to setup device"),
+            "the tenant is told why: {:?}",
+            record.message
+        );
+        assert!(
+            page(&host)
+                .await
+                .contains("nibrunner_wake_refusals_total{reason=\"volume_unusable\"} 1\n"),
+            "the refusal is counted under its reason"
+        );
     }
 
     #[tokio::test]
