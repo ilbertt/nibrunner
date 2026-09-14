@@ -1,7 +1,9 @@
 use protocol::{
-    CheckpointState, DesiredCheckpoint, HostDesiredState, ReportedCheckpoint, StateMessage, Timestamp,
+    CheckpointState, DesiredCheckpoint, DesiredPresence, HostDesiredState, ReportedCheckpoint, StateMessage,
+    Timestamp,
 };
 
+use crate::adapters::volumes::VolumeError;
 use crate::domain::metrics::resources::Operation;
 use crate::domain::reconcile::plan::{CheckpointPlan, ObservedCheckpoint, ReconcilePlan};
 use crate::host::Host;
@@ -25,16 +27,23 @@ pub async fn apply_checkpoints(host: &Host, plan: &ReconcilePlan) {
     for action in &plan.checkpoints {
         match action {
             CheckpointPlan::Create { desired } => reports.push(cut(host, desired).await),
-            CheckpointPlan::Delete { desired } => release(host, desired).await,
+            CheckpointPlan::Delete { desired } => reports.push(release(host, desired).await),
             CheckpointPlan::None { checkpoint_id } => {
                 if let Some(wanted) = plan_subject(host, checkpoint_id).await {
-                    // When it was cut is known only to the daemon that cut it, and that daemon
-                    // keeps saying so rather than forgetting on the next pass.
-                    let ready_at = held
-                        .iter()
-                        .find(|report| &report.checkpoint_id == checkpoint_id)
-                        .and_then(|report| report.ready_at.clone());
-                    reports.push(ready(&wanted, ready_at));
+                    reports.push(match wanted.desired_state {
+                        DesiredPresence::Present => {
+                            // When it was cut is known only to the daemon that cut it, and that
+                            // daemon keeps saying so rather than forgetting on the next pass.
+                            let ready_at = held
+                                .iter()
+                                .find(|report| &report.checkpoint_id == checkpoint_id)
+                                .and_then(|report| report.ready_at.clone());
+                            ready(&wanted, ready_at)
+                        }
+                        // Not held, and the document is still saying it should not be: the
+                        // release is done, whether this pass or one long before it.
+                        DesiredPresence::Absent => deleted(&wanted),
+                    });
                 }
             }
         }
@@ -59,29 +68,26 @@ async fn cut(host: &Host, desired: &DesiredCheckpoint) -> ReportedCheckpoint {
             );
             ready(desired, Some(Timestamp::now()))
         }
-        Err(error) => ReportedCheckpoint {
-            checkpoint_id: desired.checkpoint_id.clone(),
-            volume_id: desired.volume_id.clone(),
-            state: CheckpointState::Failed,
-            reference: None,
-            ready_at: None,
-            message: Some(StateMessage::new(error.message())),
-        },
+        Err(error) => failed(desired, &error),
     }
 }
 
-async fn release(host: &Host, desired: &DesiredCheckpoint) {
+async fn release(host: &Host, desired: &DesiredCheckpoint) -> ReportedCheckpoint {
     let releasing = std::time::Instant::now();
     let released = host.volumes.delete_checkpoint(&desired.checkpoint_id).await;
     host.metrics
         .resources
         .done(Operation::CheckpointDelete, released.is_ok(), releasing.elapsed());
-    if let Err(error) = released {
-        tracing::error!(
-            checkpoint_id = %desired.checkpoint_id,
-            error = %error.message(),
-            "checkpoint not deleted; storage reclamation stays paused"
-        );
+    match released {
+        Ok(()) => deleted(desired),
+        Err(error) => {
+            tracing::error!(
+                checkpoint_id = %desired.checkpoint_id,
+                error = %error.message(),
+                "checkpoint not deleted; storage reclamation stays paused"
+            );
+            failed(desired, &error)
+        }
     }
 }
 
@@ -93,6 +99,28 @@ fn ready(desired: &DesiredCheckpoint, ready_at: Option<Timestamp>) -> ReportedCh
         reference: Some(StateMessage::new(desired.checkpoint_id.to_string())),
         ready_at,
         message: None,
+    }
+}
+
+fn deleted(desired: &DesiredCheckpoint) -> ReportedCheckpoint {
+    ReportedCheckpoint {
+        checkpoint_id: desired.checkpoint_id.clone(),
+        volume_id: desired.volume_id.clone(),
+        state: CheckpointState::Deleted,
+        reference: None,
+        ready_at: None,
+        message: None,
+    }
+}
+
+fn failed(desired: &DesiredCheckpoint, error: &VolumeError) -> ReportedCheckpoint {
+    ReportedCheckpoint {
+        checkpoint_id: desired.checkpoint_id.clone(),
+        volume_id: desired.volume_id.clone(),
+        state: CheckpointState::Failed,
+        reference: None,
+        ready_at: None,
+        message: Some(StateMessage::new(error.message())),
     }
 }
 
@@ -234,7 +262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_the_document_no_longer_wants_is_released_and_stops_being_reported() {
+    async fn one_the_document_no_longer_wants_is_released_and_reported_deleted() {
         let mut volumes = holding(vec![checkpoint_id()]);
         volumes
             .expect_delete_checkpoint()
@@ -247,11 +275,46 @@ mod tests {
 
         apply_checkpoints(host.arc(), &plan).await;
 
-        assert!(host.state.snapshot().await.checkpoint_reports.is_empty());
+        let reports = host.state.snapshot().await.checkpoint_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, CheckpointState::Deleted);
+        assert_eq!(reports[0].volume_id, volume_id());
+        assert_eq!(reports[0].reference, None);
+        assert_eq!(reports[0].ready_at, None);
     }
 
     #[tokio::test]
-    async fn a_release_the_backend_refused_leaves_the_pass_running_rather_than_raising() {
+    async fn one_released_stays_deleted_on_the_passes_the_document_still_names_it() {
+        let held = std::sync::Arc::new(std::sync::Mutex::new(vec![checkpoint_id()]));
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        let observed = held.clone();
+        volumes
+            .expect_observe_checkpoints()
+            .returning(move || observed.lock().unwrap().clone());
+        let released = held.clone();
+        volumes
+            .expect_delete_checkpoint()
+            .times(1)
+            .returning(move |gone| {
+                released.lock().unwrap().retain(|kept| kept != gone);
+                Ok(())
+            });
+        volumes.expect_create_checkpoint().never();
+        let host = host_over(volumes).await;
+        let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Absent)]);
+        apply_checkpoints(host.arc(), &planned(host.arc(), &desired).await).await;
+        assert!(held.lock().unwrap().is_empty());
+
+        apply_checkpoints(host.arc(), &planned(host.arc(), &desired).await).await;
+
+        let reports = host.state.snapshot().await.checkpoint_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, CheckpointState::Deleted);
+        assert_eq!(reports[0].reference, None);
+    }
+
+    #[tokio::test]
+    async fn a_release_the_backend_refused_leaves_the_pass_running_and_is_reported_failed() {
         let mut volumes = holding(vec![checkpoint_id()]);
         volumes.expect_delete_checkpoint().returning(|_| {
             Err(crate::adapters::volumes::VolumeError::NoCheckpoints {
@@ -264,7 +327,15 @@ mod tests {
 
         apply_checkpoints(host.arc(), &plan).await;
 
-        assert!(host.state.snapshot().await.checkpoint_reports.is_empty());
+        let reports = host.state.snapshot().await.checkpoint_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, CheckpointState::Failed);
+        assert!(reports[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("cannot be checkpointed"));
     }
 
     #[tokio::test]

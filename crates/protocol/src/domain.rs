@@ -682,6 +682,7 @@ pub enum VolumeState {
 pub enum CheckpointState {
     Pending,
     Ready,
+    Deleted,
     Failed,
 }
 
