@@ -12,30 +12,7 @@ export default defineConfig({
   plugins: [
     fumadocsMdx(),
     tailwindcss(),
-    tanstackStart({
-      spa: {
-        enabled: true,
-        prerender: {
-          enabled: true,
-          crawlLinks: true,
-        },
-      },
-
-      pages: [
-        {
-          path: '/docs',
-        },
-        {
-          path: '/api/search',
-        },
-        {
-          path: 'llms-full.txt',
-        },
-        {
-          path: 'llms.txt',
-        },
-      ],
-    }),
+    tanstackStart(),
     react(),
     nitro({ preset: 'bun', serveStatic: 'inline' }),
   ],
