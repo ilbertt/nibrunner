@@ -92,6 +92,12 @@ pub enum InstancePlan {
     Sleep {
         desired: DesiredInstance,
     },
+    /// A stopped record on a slot of its own for an app the document wants down that this host
+    /// has never held, with nothing booted under it: what a stop leaves behind, so that its
+    /// hostnames say it is stopped rather than that it is not here.
+    Hold {
+        desired: DesiredInstance,
+    },
     Stop {
         app_id: AppId,
         reason: InstanceStopReason,
@@ -177,7 +183,12 @@ fn plan_instance(
         desired: wanted.clone(),
     };
     if wanted.desired_state == DesiredInstanceState::Stopped {
-        return if current.is_some_and(|instance| instance.running) {
+        let Some(current) = current.filter(|instance| instance.present) else {
+            return InstancePlan::Hold {
+                desired: wanted.clone(),
+            };
+        };
+        return if current.running {
             InstancePlan::Stop {
                 app_id: wanted.app_id.clone(),
                 reason: InstanceStopReason::DesiredStopped,
@@ -611,9 +622,27 @@ mod tests {
             );
             let already = plan(
                 desired_state(|state| state.instances = vec![stopped()]),
-                ObservedState::default(),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.running = false;
+                        instance.exited = true;
+                    })]
+                }),
             );
             assert_eq!(already.instances, vec![InstancePlan::None { app_id: app_id() }]);
+        }
+
+        #[test]
+        fn a_stopped_app_this_host_has_never_held_is_held_rather_than_left_off_the_report() {
+            // What was measured: an app added to the document already stopped was never written
+            // down, so its hostnames answered that it was not here rather than that it was down.
+            let stopped =
+                || desired_instance(|instance| instance.desired_state = DesiredInstanceState::Stopped);
+            let result = plan(
+                desired_state(|state| state.instances = vec![stopped()]),
+                ObservedState::default(),
+            );
+            assert_eq!(result.instances, vec![InstancePlan::Hold { desired: stopped() }]);
         }
     }
 

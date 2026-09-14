@@ -63,7 +63,7 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
         health_check: desired.config.health_check.clone(),
         resources: desired.config.resources,
         restart_policy: desired.config.restart_policy.clone(),
-        desired_running: true,
+        desired_running: desired.desired_state != DesiredInstanceState::Stopped,
         on_request: desired.desired_state == DesiredInstanceState::OnRequest,
     }
 }
@@ -250,6 +250,24 @@ pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
             tracing::info!(app_id = %desired.app_id, host_port = %slot.host_port, "app is waiting to be asked for");
         }
     }
+}
+
+/// A stop leaves a record behind, and it is the record that keeps the app's hostnames answering
+/// that it is stopped rather than that it is not here; an app that arrives already stopped is
+/// owed the same one.
+pub async fn hold_instance(host: &Host, desired: &DesiredInstance) {
+    let Ok(slot) = host.slot_for(&desired.app_id).await else {
+        tracing::error!(app_id = %desired.app_id, "this host has no slot left to answer for the app");
+        return;
+    };
+    host.state
+        .put_record(InstanceRecord::new(
+            record_fields(desired, &slot),
+            InstanceState::Stopped,
+            initial_tracker(),
+        ))
+        .await;
+    tracing::info!(app_id = %desired.app_id, host_port = %slot.host_port, "app is held stopped");
 }
 
 pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
@@ -996,6 +1014,31 @@ mod tests {
         assert_eq!(record.deployment_id.as_str(), "dep-2");
         assert_eq!(record.restart_count, 3);
         assert!(record.on_request);
+    }
+
+    #[tokio::test]
+    async fn an_app_that_arrives_already_stopped_is_left_a_record_that_answers_for_it() {
+        let host = test_host().await;
+        let stopped = desired_instance(|instance| {
+            instance.desired_state = DesiredInstanceState::Stopped;
+            instance.hostnames = vec![app_hostname()];
+        });
+
+        hold_instance(&host, &stopped).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Stopped);
+        assert!(!record.desired_running);
+        assert!(!record.on_request);
+        assert_eq!(record.started_at, None);
+        assert_eq!(record.hostnames, vec![app_hostname()]);
+        let slot = host.slot_of(&app_id()).await.expect("the slot it answers on");
+        assert_eq!(record.host_port, slot.host_port);
+        assert!(host.vms.calls().is_empty());
+        let routes = crate::domain::report::routes::renderable_routes(&host.state.records().await);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].hostnames, vec![app_hostname()]);
+        assert_eq!(routes[0].host_port, slot.host_port);
     }
 
     #[tokio::test]
