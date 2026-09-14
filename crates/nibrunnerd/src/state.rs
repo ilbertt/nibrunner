@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use nft_render::AppTraffic;
 use protocol::{AppId, ComputeUsage, FilesystemUsage, ReportedVolume, StateMessage, UsageMeters, VolumeId};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Notify, OwnedMutexGuard, RwLock};
 
 use crate::domain::metrics::converge::Deploy;
 use crate::domain::report::InstanceRecord;
@@ -40,10 +40,13 @@ pub struct HostSnapshot {
 
 pub type SharedState = Arc<HostState>;
 
+type Transitions = BTreeMap<AppId, Arc<tokio::sync::Mutex<()>>>;
+
 pub struct HostState {
     snapshot: RwLock<HostSnapshot>,
     refresh: Notify,
     report: Notify,
+    transitions: Mutex<Transitions>,
 }
 
 impl HostState {
@@ -52,7 +55,26 @@ impl HostState {
             snapshot: RwLock::new(HostSnapshot::default()),
             refresh: Notify::new(),
             report: Notify::new(),
+            transitions: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// The lock a sleep or a wake of this app holds for as long as it is moving the microVM.
+    /// One transition of an app at a time, so that neither finds the other half way through a
+    /// snapshot; and each app's own, so that the sleeps a pass runs side by side wait on nothing
+    /// but the disk.
+    pub async fn transition(&self, app_id: &AppId) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut transitions = self
+                .transitions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // A guard and a waiter each hold a reference, so an app's lock is kept only while
+            // something is at it, and the map does not grow by one for every app ever moved.
+            transitions.retain(|_, lock| Arc::strong_count(lock) > 1);
+            transitions.entry(app_id.clone()).or_default().clone()
+        };
+        lock.lock_owned().await
     }
 
     pub async fn snapshot(&self) -> HostSnapshot {
@@ -200,6 +222,40 @@ mod tests {
             .update_record(&app_id(), |record| record.state = InstanceState::Running)
             .await;
         assert!(state.record(&app_id()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn one_transition_of_an_app_at_a_time_and_any_app_beside_any_other() {
+        let state = HostState::shared();
+        let (this, other) = (app_id(), AppId::parse("app-2").unwrap());
+        let held = state.transition(&this).await;
+
+        let beside = tokio::time::timeout(std::time::Duration::from_secs(1), state.transition(&other)).await;
+        assert!(beside.is_ok(), "another app's transition waited on this one's");
+
+        let mut same = std::pin::pin!(state.transition(&this));
+        let waited = tokio::time::timeout(std::time::Duration::from_millis(20), &mut same).await;
+        assert!(
+            waited.is_err(),
+            "a second transition of the same app began before the first was done"
+        );
+
+        drop(held);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), same)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_app_nothing_is_moving_any_more_keeps_no_lock_behind() {
+        let state = HostState::shared();
+        drop(state.transition(&app_id()).await);
+        drop(state.transition(&AppId::parse("app-2").unwrap()).await);
+        let kept = state.transitions.lock().unwrap().len();
+        assert_eq!(
+            kept, 1,
+            "only the app whose lock was taken last is still on the map"
+        );
     }
 
     #[tokio::test]
