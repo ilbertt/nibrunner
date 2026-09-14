@@ -84,11 +84,11 @@ pub fn describe_instance_failure(
 ) -> String {
     if !unit.active {
         if let Some(verdict) = guest_verdict {
-            return verdict.to_string();
+            return format!("the microVM stopped: {verdict}");
         }
-        return match unit.exit_code {
-            None => "the microVM stopped without being asked to".to_string(),
-            Some(code) => format!("the microVM stopped without being asked to, exit code {code}"),
+        return match unit.exit {
+            None => "the microVM exited".to_string(),
+            Some(exit) => format!("the microVM {}", exit.describe()),
         };
     }
     format!(
@@ -189,7 +189,7 @@ pub fn evaluate_instance_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::vm::UNKNOWN_VM;
+    use crate::adapters::vm::{VmExit, UNKNOWN_VM};
     use crate::test_support::TCP_HEALTH_CHECK;
     use protocol::{Probe, DEFAULT_HTTP_PORT};
 
@@ -218,7 +218,7 @@ mod tests {
             active: true,
             failed: false,
             started_this_boot: true,
-            exit_code: None,
+            exit: None,
         }
     }
 
@@ -228,7 +228,7 @@ mod tests {
             active: false,
             failed: false,
             started_this_boot: true,
-            exit_code: Some(0),
+            exit: Some(VmExit::Code(0)),
         }
     }
 
@@ -238,7 +238,7 @@ mod tests {
             active: false,
             failed: true,
             started_this_boot: true,
-            exit_code: Some(1),
+            exit: Some(VmExit::Code(1)),
         }
     }
 
@@ -732,26 +732,46 @@ mod tests {
         };
         assert_eq!(
             failure(&exited(), &initial_tracker(), None),
-            "the microVM stopped without being asked to, exit code 0"
+            "the microVM exited with exit code 0"
         );
         assert_eq!(
             failure(
                 &VmStatus {
-                    exit_code: None,
+                    exit: None,
                     ..crashed()
                 },
                 &initial_tracker(),
                 None
             ),
-            "the microVM stopped without being asked to"
+            "the microVM exited"
         );
+        assert_eq!(
+            failure(
+                &VmStatus {
+                    exit: Some(VmExit::Signal(9)),
+                    ..crashed()
+                },
+                &initial_tracker(),
+                None
+            ),
+            "the microVM was killed by signal 9 (SIGKILL)"
+        );
+        // A guest that said why it went down is quoted, whatever its VMM's exit code says.
         assert_eq!(
             failure(
                 &exited(),
                 &initial_tracker(),
                 Some("the tenant used its 5 restarts without staying up; shutting the guest down")
             ),
-            "the tenant used its 5 restarts without staying up; shutting the guest down"
+            "the microVM stopped: the tenant used its 5 restarts without staying up; shutting the guest down"
+        );
+        assert_eq!(
+            failure(
+                &crashed(),
+                &initial_tracker(),
+                Some("Kernel panic - not syncing: Attempted to kill init!")
+            ),
+            "the microVM stopped: Kernel panic - not syncing: Attempted to kill init!"
         );
         let unreachable = HealthTracker {
             consecutive_failures: TCP_HEALTH_CHECK.probe().unhealthy_threshold,

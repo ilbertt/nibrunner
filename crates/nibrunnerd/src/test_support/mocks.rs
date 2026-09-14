@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use protocol::{AppId, ObjectKey};
@@ -9,7 +10,7 @@ use crate::adapters::vm::VmStatus;
 use crate::domain::exports::store::{ExportStoreError, MockExportStore};
 use crate::ports::{
     ArtifactError, CommandError, CommandRequest, CommandResult, MockArtifactStore, MockCommandRunner,
-    MockLogSink, MockVmm, TenantLogEvent, VmCall, VmError,
+    MockLogSink, MockVmm, TenantLogEvent, VmCall, VmError, Vmm,
 };
 
 fn shared<T>(value: T) -> Arc<Mutex<T>> {
@@ -48,6 +49,32 @@ impl CommandLog {
 
 pub fn commands_succeeding() -> (Arc<MockCommandRunner>, CommandLog) {
     commands_answering(|_| Ok(CommandResult::succeeded()))
+}
+
+/// Succeeds at everything, and leaves behind the one thing the real `mke2fs` does that anything
+/// here reads back: an ext superblock on the device it was pointed at.
+pub fn commands_formatting() -> (Arc<MockCommandRunner>, CommandLog) {
+    commands_answering(|request| {
+        if request.executable() == "mke2fs" {
+            lay_superblock(request.command.last().expect("a device to format"));
+        }
+        Ok(CommandResult::succeeded())
+    })
+}
+
+/// The ext magic where a superblock keeps it, which is all "formatted" is read from.
+pub fn lay_superblock(device_path: &str) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut device = std::fs::OpenOptions::new()
+        .write(true)
+        .open(device_path)
+        .expect("the device to format");
+    device
+        .seek(SeekFrom::Start(crate::adapters::volumes::SUPERBLOCK_MAGIC_OFFSET))
+        .expect("the superblock's offset");
+    device
+        .write_all(&0xef53u16.to_le_bytes())
+        .expect("the magic to be written");
 }
 
 pub fn commands_answering(
@@ -186,10 +213,132 @@ pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
     (Arc::new(vms), spy)
 }
 
+/// The spy's VMM with every sleep held at a gate until the test lets it through, so that how
+/// many the host runs side by side is something a test can see, and a wake that lands
+/// mid-snapshot something it can stage.
+pub struct HeldSleeps {
+    vms: Arc<MockVmm>,
+    gate: tokio::sync::Semaphore,
+    in_flight: AtomicUsize,
+    most_in_flight: AtomicUsize,
+    wakes_mid_sleep: AtomicUsize,
+}
+
+impl HeldSleeps {
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
+    pub fn most_in_flight(&self) -> usize {
+        self.most_in_flight.load(Ordering::SeqCst)
+    }
+
+    /// Wakes that were asked for while a snapshot was still being written.
+    pub fn wakes_mid_sleep(&self) -> usize {
+        self.wakes_mid_sleep.load(Ordering::SeqCst)
+    }
+
+    pub fn let_through(&self, sleeps: usize) {
+        self.gate.add_permits(sleeps);
+    }
+
+    /// Waits until this many sleeps are at the gate, or panics after long enough.
+    pub async fn held_up(&self, sleeps: usize) {
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while self.in_flight() < sleeps {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "{sleeps} sleeps never reached the gate at once");
+    }
+}
+
+pub fn vmm_holding_sleeps() -> (Arc<HeldSleeps>, VmmSpy) {
+    let (vms, spy) = vmm();
+    let held = HeldSleeps {
+        vms,
+        gate: tokio::sync::Semaphore::new(0),
+        in_flight: AtomicUsize::new(0),
+        most_in_flight: AtomicUsize::new(0),
+        wakes_mid_sleep: AtomicUsize::new(0),
+    };
+    (Arc::new(held), spy)
+}
+
+#[async_trait::async_trait]
+impl Vmm for HeldSleeps {
+    async fn boot(&self, request: crate::ports::BootRequest) -> Result<(), VmError> {
+        self.vms.boot(request).await
+    }
+
+    async fn sleep(&self, request: crate::ports::SuspendRequest) -> Result<(), VmError> {
+        let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+        self.gate
+            .acquire()
+            .await
+            .expect("the gate is never closed")
+            .forget();
+        let outcome = self.vms.sleep(request).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        outcome
+    }
+
+    async fn wake(&self, request: crate::ports::SuspendRequest) -> Result<(), VmError> {
+        if self.in_flight() > 0 {
+            self.wakes_mid_sleep.fetch_add(1, Ordering::SeqCst);
+        }
+        self.vms.wake(request).await
+    }
+
+    async fn stop(&self, app_id: &AppId) -> Result<(), VmError> {
+        self.vms.stop(app_id).await
+    }
+
+    async fn discard(&self, app_id: &AppId) -> Result<(), VmError> {
+        self.vms.discard(app_id).await
+    }
+
+    async fn delete_tap(&self, tap_name: &str) -> Result<(), VmError> {
+        self.vms.delete_tap(tap_name).await
+    }
+
+    async fn tap_names(&self) -> Vec<String> {
+        self.vms.tap_names().await
+    }
+
+    async fn statuses(&self, app_ids: &[AppId]) -> BTreeMap<AppId, VmStatus> {
+        self.vms.statuses(app_ids).await
+    }
+
+    async fn adopted_app_ids(&self) -> Vec<AppId> {
+        self.vms.adopted_app_ids().await
+    }
+
+    async fn readopt(&self, app_id: &AppId) -> Result<(), VmError> {
+        self.vms.readopt(app_id).await
+    }
+
+    async fn guest_verdict(&self, app_id: &AppId) -> Option<String> {
+        self.vms.guest_verdict(app_id).await
+    }
+
+    fn working_dir(&self, app_id: &AppId) -> PathBuf {
+        self.vms.working_dir(app_id)
+    }
+}
+
 pub fn artifacts_holding(bytes: impl Into<Vec<u8>>) -> Arc<MockArtifactStore> {
     let bytes = bytes.into();
+    artifacts_answering(move |_| Ok(bytes.clone()))
+}
+
+pub fn artifacts_answering(
+    answer: impl Fn(&ObjectKey) -> Result<Vec<u8>, ArtifactError> + Send + Sync + 'static,
+) -> Arc<MockArtifactStore> {
     let mut artifacts = MockArtifactStore::new();
-    artifacts.expect_read().returning(move |_| Ok(bytes.clone()));
+    artifacts.expect_read().returning(move |key| answer(key));
     Arc::new(artifacts)
 }
 

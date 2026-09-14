@@ -107,6 +107,57 @@ pub fn refusal_for_disk(disk: &SnapshotDisk, wanted_bytes: u64) -> Option<String
     None
 }
 
+/// What the snapshots in flight are going to put on the disk. A sleep is admitted against the
+/// disk as measured less what is already spoken for, and holds its own share until its snapshot
+/// is on the disk or has failed, so that four admitted together are each measured against the
+/// room the others will have taken rather than all four against the room they all saw.
+#[derive(Debug, Default)]
+pub struct SnapshotsInFlight {
+    bytes: std::sync::Mutex<u64>,
+}
+
+impl SnapshotsInFlight {
+    fn held(&self) -> std::sync::MutexGuard<'_, u64> {
+        self.bytes.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn bytes(&self) -> u64 {
+        *self.held()
+    }
+
+    pub fn admit(&self, disk: &SnapshotDisk, wanted_bytes: u64) -> Result<Reserved<'_>, String> {
+        let mut held = self.held();
+        let spoken_for = SnapshotDisk {
+            available_bytes: disk.available_bytes.saturating_sub(*held),
+            snapshot_bytes: disk.snapshot_bytes.saturating_add(*held),
+            ..*disk
+        };
+        if let Some(refusal) = refusal_for_disk(&spoken_for, wanted_bytes) {
+            return Err(refusal);
+        }
+        *held += wanted_bytes;
+        Ok(Reserved {
+            of: self,
+            bytes: wanted_bytes,
+        })
+    }
+}
+
+/// One admitted snapshot's share of the disk, given back when this is dropped.
+#[derive(Debug)]
+#[must_use = "the share is given back the moment this is dropped"]
+pub struct Reserved<'a> {
+    of: &'a SnapshotsInFlight,
+    bytes: u64,
+}
+
+impl Drop for Reserved<'_> {
+    fn drop(&mut self) {
+        let mut held = self.of.held();
+        *held = held.saturating_sub(self.bytes);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotPaths {
     pub directory: PathBuf,
@@ -564,6 +615,50 @@ mod tests {
             reap_stale_snapshots(&directory.path().join("nowhere"), "boot-1"),
             Reaped::default()
         );
+    }
+
+    /// Room for one snapshot of the default guest memory and half of another, both in the
+    /// budget and over the reserve the filesystem keeps.
+    fn room_for_one() -> SnapshotDisk {
+        let one = snapshot_bytes_for(256);
+        SnapshotDisk {
+            total_bytes: 8 * GIB + one + one / 2,
+            available_bytes: 8 * GIB + one + one / 2,
+            cache_bytes: 0,
+            snapshot_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_disk_with_room_for_one_snapshot_admits_the_first_and_refuses_the_second_while_it_is_in_flight() {
+        let in_flight = SnapshotsInFlight::default();
+        let disk = room_for_one();
+        let one = snapshot_bytes_for(256);
+
+        let first = in_flight.admit(&disk, one).expect("the first fits");
+        assert_eq!(in_flight.bytes(), one);
+        let refused = in_flight.admit(&disk, one).unwrap_err();
+        assert!(refused.contains("already hold"), "{refused}");
+        assert_eq!(in_flight.bytes(), one, "a refused sleep reserves nothing");
+
+        drop(first);
+        assert_eq!(in_flight.bytes(), 0);
+        let _second = in_flight
+            .admit(&disk, one)
+            .expect("the room is there once the first has landed");
+    }
+
+    #[test]
+    fn what_is_in_flight_is_taken_off_the_room_the_filesystem_has_left_as_well() {
+        let in_flight = SnapshotsInFlight::default();
+        let one = snapshot_bytes_for(256);
+        let budget_but_not_room = SnapshotDisk {
+            total_bytes: 100 * GIB,
+            ..room_for_one()
+        };
+        let _first = in_flight.admit(&budget_but_not_room, one).unwrap();
+        let refused = in_flight.admit(&budget_but_not_room, one).unwrap_err();
+        assert!(refused.contains("every app"), "{refused}");
     }
 
     #[test]

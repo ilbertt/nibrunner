@@ -1,6 +1,7 @@
 use protocol::{
     AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort, InstanceResources,
-    InstanceState, Ipv4Address, PortName, Sha256Digest, StateMessage, Timestamp, VolumeId,
+    InstanceState, Ipv4Address, PortName, ReportedRestart, RestartPolicy, Sha256Digest, StateMessage,
+    Timestamp, VolumeId, DEFAULT_RESTART_POLICY,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,11 +36,20 @@ pub struct InstanceRecord {
     pub health: HealthTracker,
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
+    /// The policy the status loop judges an exit by. Absent is a record written before the status
+    /// loop needed it; it reads as the default until the first pass copies the document's.
+    #[serde(default = "default_restart_policy")]
+    pub restart_policy: RestartPolicy,
     pub desired_running: bool,
     pub on_request: bool,
     #[serde(default)]
     pub start_attempts: AttemptWindow,
+    /// Restarts of the tenant by the supervisor inside its guest, since the host last booted the
+    /// app afresh: a cold boot starts the count over, a restore keeps it. The host's own boots
+    /// are `start_attempts`.
     pub restart_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_restart: Option<ReportedRestart>,
     #[serde(default)]
     pub stop_requested: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +60,10 @@ pub struct InstanceRecord {
     pub last_exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<StateMessage>,
+}
+
+fn default_restart_policy() -> RestartPolicy {
+    DEFAULT_RESTART_POLICY
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +79,7 @@ pub struct RecordFields {
     pub layer_digests: Vec<Sha256Digest>,
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
+    pub restart_policy: RestartPolicy,
     pub desired_running: bool,
     pub on_request: bool,
 }
@@ -85,10 +100,12 @@ impl InstanceRecord {
             health,
             health_check: fields.health_check,
             resources: fields.resources,
+            restart_policy: fields.restart_policy,
             desired_running: fields.desired_running,
             on_request: fields.on_request,
             start_attempts: NO_START_ATTEMPTS,
             restart_count: 0,
+            last_restart: None,
             stop_requested: false,
             started_at: None,
             converged_at: None,
@@ -108,6 +125,7 @@ impl InstanceRecord {
         self.layer_digests = fields.layer_digests;
         self.health_check = fields.health_check;
         self.resources = fields.resources;
+        self.restart_policy = fields.restart_policy;
         self.desired_running = fields.desired_running;
         self.on_request = fields.on_request;
     }
@@ -155,6 +173,11 @@ mod tests {
             vcpu_count: 4,
             memory_mib: 4_096,
         };
+        fields.restart_policy = RestartPolicy {
+            max_restarts: 9,
+            reset_after_ms: 5_000,
+            ..DEFAULT_RESTART_POLICY
+        };
         fields.desired_running = false;
         fields.on_request = true;
         fields
@@ -184,9 +207,11 @@ mod tests {
         let mut written = serde_json::to_value(instance_record(|_| {})).unwrap();
         let object = written.as_object_mut().unwrap();
         object.remove("startAttempts");
+        object.remove("restartPolicy");
         let records = read_instance_records(Some(serde_json::Value::Array(vec![written])));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].start_attempts, NO_START_ATTEMPTS);
+        assert_eq!(records[0].restart_policy, DEFAULT_RESTART_POLICY);
     }
 
     #[test]
@@ -199,6 +224,7 @@ mod tests {
         assert_eq!(record.state, InstanceState::Pending);
         assert_eq!(record.start_attempts, NO_START_ATTEMPTS);
         assert_eq!(record.restart_count, 0);
+        assert_eq!(record.last_restart, None);
         assert!(!record.stop_requested);
         assert_eq!(record.started_at, None);
         assert_eq!(record.last_exit_code, None);
@@ -219,6 +245,7 @@ mod tests {
         assert_eq!(record.guest_ipv4, wanted.guest_ipv4);
         assert_eq!(record.layer_digests, wanted.layer_digests);
         assert_eq!(record.resources, wanted.resources);
+        assert_eq!(record.restart_policy, wanted.restart_policy);
         assert!(!record.desired_running);
         assert!(record.on_request);
     }
@@ -228,6 +255,7 @@ mod tests {
         let mut record = instance_record(|record| {
             record.state = InstanceState::Unhealthy;
             record.restart_count = 4;
+            record.last_restart = Some(crate::test_support::reported_restart(|_| {}));
             record.stop_requested = true;
             record.started_at = Some(Timestamp::from_epoch_ms(REDEPLOYED_AT_MS));
             record.last_exit_code = Some(137);
@@ -245,6 +273,7 @@ mod tests {
         assert_eq!(record.health, before.health);
         assert_eq!(record.start_attempts, before.start_attempts);
         assert_eq!(record.restart_count, before.restart_count);
+        assert_eq!(record.last_restart, before.last_restart);
         assert_eq!(record.stop_requested, before.stop_requested);
         assert_eq!(record.started_at, before.started_at);
         assert_eq!(record.last_exit_code, before.last_exit_code);

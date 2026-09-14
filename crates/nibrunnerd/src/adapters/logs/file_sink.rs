@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use guest_contract::control::GUEST_LOG_PREFIX;
 use protocol::AppId;
 
 use crate::json_store::make_directory;
@@ -52,6 +53,13 @@ impl FileLogSink {
                 out,
                 "{} stderr {}/{} {GAP_MESSAGE}: {dropped_bytes} bytes",
                 event.observed_at, event.source_id, event.sequence
+            ),
+            // The line the guest printed on its console, where the tenant's own stderr would have
+            // put it had the tenant been alive to write one.
+            TenantLogBody::Restart(restart) => writeln!(
+                out,
+                "{} stderr {}/{} {GUEST_LOG_PREFIX}{}",
+                event.observed_at, event.source_id, event.sequence, restart.reason
             ),
         }
     }
@@ -121,7 +129,7 @@ impl Drop for FileLogSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{app_id, deployment_id, observed_at};
+    use crate::test_support::{app_id, deployment_id, observed_at, tenant_restart};
     use protocol::TenantLogStream;
 
     fn event(body: TenantLogBody, sequence: u64) -> TenantLogEvent {
@@ -233,6 +241,20 @@ mod tests {
         assert!(rendered.starts_with(observed_at().as_str()), "{rendered}");
         assert!(rendered.contains("stderr source-1/9"), "{rendered}");
         assert!(rendered.ends_with('\n'), "{rendered}");
+    }
+
+    #[test]
+    fn a_restart_is_written_as_the_line_the_guest_printed_for_it() {
+        let restart = tenant_restart(|_| {});
+        let rendered = rendered(&event(TenantLogBody::Restart(restart.clone()), 3));
+        assert_eq!(
+            rendered,
+            format!(
+                "{} stderr source-1/3 [nibrun] {}\n",
+                observed_at(),
+                restart.reason
+            )
+        );
     }
 
     #[test]

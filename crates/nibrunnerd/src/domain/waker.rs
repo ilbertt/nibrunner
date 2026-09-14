@@ -100,7 +100,14 @@ impl AppWaker {
             return Err(refusal);
         }
 
-        let outcome = crate::domain::reconcile::instances::resume_instance(&self.host, &wanted).await?;
+        // The lock a sleep of this app holds while it is writing the guest out. A request that
+        // lands mid-snapshot waits here for the snapshot to finish and restores from it, rather
+        // than finding a paused guest or bringing up a second beside a half-written one. The
+        // restore is the whole of resume_instance, the volume attach that opens it included.
+        let outcome = {
+            let _transition = self.host.state.transition(app_id).await;
+            crate::domain::reconcile::instances::resume_instance(&self.host, &wanted).await?
+        };
 
         let Some(record) = self.host.state.record(app_id).await else {
             return Err(WakeRefusal::Failed {
@@ -295,6 +302,63 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_finds_its_app_mid_snapshot_waits_for_the_snapshot_and_restores_from_it() {
+        use crate::ports::VmCall;
+
+        let mut host = test_host().await;
+        let (held, spy) = mocks::vmm_holding_sleeps();
+        Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .vms = held.clone();
+        host.vms = spy;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.health_check = protocol::HealthCheck::BootCompleted;
+            }))
+            .await;
+        let on_request =
+            desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
+        host.cache
+            .lock()
+            .await
+            .accept(desired_state(|state| state.instances = vec![on_request]));
+        let quiet_since = crate::clock::now_ms() - protocol::DEFAULT_IDLE_TIMEOUT_MS as i64 - 1;
+        host.state.mark_active(&app_id(), quiet_since).await;
+
+        let sleeping = tokio::spawn({
+            let host = host.arc().clone();
+            async move { crate::domain::reconcile::idle::apply_sleep(&host).await }
+        });
+        held.held_up(1).await;
+
+        let waker = AppWaker::new(host.arc().clone());
+        let asked_for = app_id();
+        let mut woken = std::pin::pin!(waker.wake(&asked_for));
+        let went_ahead = tokio::time::timeout(Duration::from_millis(50), &mut woken).await;
+        assert!(
+            went_ahead.is_err(),
+            "the wake went ahead while the snapshot was still being written: {went_ahead:?}"
+        );
+        assert!(!host.vms.calls().contains(&VmCall::Wake));
+
+        held.let_through(1);
+        sleeping.await.unwrap();
+        woken
+            .await
+            .expect("restored from the snapshot once it was on the disk");
+
+        assert_eq!(held.wakes_mid_sleep(), 0);
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep, VmCall::Wake]);
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Starting);
+        assert!(!record.stop_requested);
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use std::process::Stdio;
 use protocol::AppId;
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::vm::status::VmStatus;
+use crate::adapters::vm::status::{VmExit, VmStatus};
 use crate::json_store::{make_directory, read_json, write_json};
 
 const FIRECRACKER: &[u8] = include_bytes!(env!("NIBRUNNER_FIRECRACKER_PATH"));
@@ -50,8 +50,39 @@ pub struct VmRecord {
     pub started_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// The signal the process died under, when it did not exit with a code of its own. Beside
+    /// `exit_code` rather than folded into it so a record an earlier daemon wrote still reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
     #[serde(default)]
     pub stop_requested: bool,
+}
+
+impl VmRecord {
+    pub fn exit(&self) -> Option<VmExit> {
+        self.signal
+            .map(VmExit::Signal)
+            .or(self.exit_code.map(VmExit::Code))
+    }
+
+    fn ended(&mut self, exit: VmExit) {
+        match exit {
+            VmExit::Code(code) => self.exit_code = Some(code),
+            VmExit::Signal(signal) => self.signal = Some(signal),
+        }
+    }
+}
+
+fn exit_of(waited: std::io::Result<std::process::ExitStatus>) -> VmExit {
+    use std::os::unix::process::ExitStatusExt;
+    let Ok(status) = waited else {
+        return VmExit::Code(-1);
+    };
+    status
+        .code()
+        .map(VmExit::Code)
+        .or_else(|| status.signal().map(VmExit::Signal))
+        .unwrap_or(VmExit::Code(-1))
 }
 
 const HOST_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
@@ -128,13 +159,14 @@ impl VmProcesses {
             return VmStatus::default();
         };
         let started_this_boot = record.host_boot_id == self.boot_id;
-        let active = started_this_boot && record.exit_code.is_none() && is_alive(record.pid);
+        let exit = record.exit();
+        let active = started_this_boot && exit.is_none() && is_alive(record.pid);
         VmStatus {
             loaded: true,
             active,
-            failed: !active && !record.stop_requested && record.exit_code.is_some_and(|code| code != 0),
+            failed: !active && !record.stop_requested && exit.is_some_and(|exit| exit != VmExit::Code(0)),
             started_this_boot,
-            exit_code: record.exit_code,
+            exit,
         }
     }
 
@@ -186,6 +218,7 @@ impl VmProcesses {
             host_boot_id: self.boot_id.clone(),
             started_at_ms: crate::clock::now_ms(),
             exit_code: None,
+            signal: None,
             stop_requested: false,
         };
         self.write_record(&record)?;
@@ -196,15 +229,10 @@ impl VmProcesses {
         };
         let app_id = app_id.clone();
         tokio::spawn(async move {
-            let code = child
-                .wait()
-                .await
-                .ok()
-                .and_then(|status| status.code())
-                .unwrap_or(-1);
+            let exit = exit_of(child.wait().await);
             if let Some(mut record) = processes.read_record(&app_id) {
                 if record.pid == pid {
-                    record.exit_code = Some(code);
+                    record.ended(exit);
                     let _ = processes.write_record(&record);
                 }
             }
@@ -288,6 +316,7 @@ mod tests {
                 host_boot_id: "an-earlier-boot".into(),
                 started_at_ms: 0,
                 exit_code: None,
+                signal: None,
                 stop_requested: false,
             })
             .unwrap();
@@ -309,6 +338,7 @@ mod tests {
                 host_boot_id: "boot-1".into(),
                 started_at_ms: 0,
                 exit_code: None,
+                signal: None,
                 stop_requested: false,
             })
             .unwrap();
@@ -328,12 +358,13 @@ mod tests {
             host_boot_id: "boot-1".into(),
             started_at_ms: 0,
             exit_code: Some(1),
+            signal: None,
             stop_requested: false,
         };
         processes.write_record(&record).unwrap();
         let crashed = processes.status(&app_id());
         assert!(crashed.failed);
-        assert_eq!(crashed.exit_code, Some(1));
+        assert_eq!(crashed.exit, Some(VmExit::Code(1)));
 
         processes
             .write_record(&VmRecord {
@@ -345,10 +376,59 @@ mod tests {
         processes
             .write_record(&VmRecord {
                 exit_code: Some(0),
-                ..record
+                ..record.clone()
             })
             .unwrap();
         assert!(!processes.status(&app_id()).failed);
+
+        // A process that died under a signal has no code of its own, and that is a failure too.
+        processes
+            .write_record(&VmRecord {
+                exit_code: None,
+                signal: Some(9),
+                ..record
+            })
+            .unwrap();
+        let killed = processes.status(&app_id());
+        assert!(killed.failed);
+        assert!(!killed.active);
+        assert_eq!(killed.exit, Some(VmExit::Signal(9)));
+    }
+
+    #[test]
+    fn a_record_an_earlier_daemon_wrote_still_reads_with_the_code_it_carried() {
+        let written = serde_json::json!({
+            "appId": "app-1",
+            "pid": 1,
+            "hostBootId": "boot-1",
+            "startedAtMs": 0,
+            "exitCode": 137
+        });
+        let record: VmRecord = serde_json::from_value(written).unwrap();
+        assert_eq!(record.exit(), Some(VmExit::Code(137)));
+        assert_eq!(record.signal, None);
+    }
+
+    #[test]
+    fn how_a_process_ended_is_read_off_what_wait_said() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            exit_of(Ok(std::process::ExitStatus::from_raw(0))),
+            VmExit::Code(0)
+        );
+        // A status word of 9 is death by SIGKILL; 137 << 8 is an exit with code 137.
+        assert_eq!(
+            exit_of(Ok(std::process::ExitStatus::from_raw(9))),
+            VmExit::Signal(9)
+        );
+        assert_eq!(
+            exit_of(Ok(std::process::ExitStatus::from_raw(137 << 8))),
+            VmExit::Code(137)
+        );
+        assert_eq!(
+            exit_of(Err(std::io::Error::other("the child was never waited for"))),
+            VmExit::Code(-1)
+        );
     }
 
     #[test]
@@ -362,6 +442,7 @@ mod tests {
                 host_boot_id: "boot-1".into(),
                 started_at_ms: 0,
                 exit_code: Some(0),
+                signal: None,
                 stop_requested: true,
             })
             .unwrap();
@@ -458,13 +539,49 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let settled = processes.status(&app_id());
-        assert_eq!(settled.exit_code, Some(0));
+        assert_eq!(settled.exit, Some(VmExit::Code(0)));
         assert!(settled.loaded);
         assert!(!settled.active);
         assert!(!settled.failed, "an exit of 0 is not a failure");
         assert!(std::fs::read_to_string(processes.console_path(&app_id()))
             .unwrap()
             .contains("--api-sock"));
+    }
+
+    #[tokio::test]
+    async fn a_hypervisor_killed_from_outside_has_the_signal_written_back_rather_than_a_made_up_code() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        let working_dir = directory.path().join("vm");
+        make_directory(&working_dir, 0o700).unwrap();
+        // Something that stays up whatever it is handed on its command line.
+        let lingering = directory.path().join("linger.sh");
+        std::fs::write(&lingering, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(
+            &lingering,
+            std::os::unix::fs::PermissionsExt::from_mode(EXECUTABLE_MODE),
+        )
+        .unwrap();
+
+        let record = processes
+            .spawn(&app_id(), &lingering, &working_dir, None)
+            .await
+            .unwrap();
+        signal(record.pid, libc::SIGKILL);
+
+        for _ in 0..200 {
+            if processes
+                .read_record(&app_id())
+                .is_some_and(|held| held.exit().is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let killed = processes.status(&app_id());
+        assert_eq!(killed.exit, Some(VmExit::Signal(libc::SIGKILL)));
+        assert!(killed.failed);
+        assert!(!killed.active);
     }
 
     #[tokio::test]
@@ -504,6 +621,7 @@ mod tests {
                 host_boot_id: "boot-1".into(),
                 started_at_ms: 0,
                 exit_code: None,
+                signal: None,
                 stop_requested: false,
             })
             .unwrap();

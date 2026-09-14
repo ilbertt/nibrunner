@@ -386,14 +386,17 @@ impl VolumeBackend for ZerofsVolumes {
                 Some(app_id) => self.device_for(app_id).await,
                 None => None,
             };
-            let attached = match &device_path {
-                Some(path) => self.devices.is_usable(path).await,
-                None => false,
+            let (attached, formatted) = match &device_path {
+                Some(path) if self.devices.is_usable(path).await => {
+                    (true, self.is_formatted(path).await.unwrap_or(false))
+                }
+                _ => (false, false),
             };
             observed.push(ObservedBacking {
                 volume_id,
                 size_bytes,
                 attached,
+                formatted,
                 device_path,
                 storage_prefix: self.filesystem.storage_prefix.clone(),
             });
@@ -749,6 +752,10 @@ mod tests {
         assert_eq!(observed[0].size_bytes, 4096);
         assert_eq!(observed[0].device_path, None);
         assert!(!observed[0].attached, "a volume no app holds is not attached");
+        assert!(
+            !observed[0].formatted,
+            "a device nothing holds is not read for a filesystem either"
+        );
         assert_eq!(observed[0].storage_prefix, ObjectKey::parse("volumes").unwrap());
     }
 
@@ -777,6 +784,7 @@ mod tests {
             Some(slot.nbd_device_path.as_str())
         );
         assert!(!observed[0].attached, "nothing in sysfs holds the device");
+        assert!(!observed[0].formatted);
     }
 
     fn sysfs_attribute(sysfs: &Path, device: &str, attribute: &str, value: &str) {

@@ -9,8 +9,8 @@ use crate::adapters::net::tap::{HostNetwork, Neighbour, TapInterface};
 use crate::adapters::vm::firecracker_api::FirecrackerApi;
 use crate::adapters::vm::process::{VmProcesses, FIRECRACKER_VERSION};
 use crate::adapters::vm::snapshot::{
-    ensure_loadable, measure_snapshot_disk, refusal_for_disk, refusal_to_sleep, snapshot_bytes_for,
-    snapshot_paths, SleepSubject, SnapshotStamp,
+    ensure_loadable, measure_snapshot_disk, refusal_to_sleep, snapshot_bytes_for, snapshot_paths, Reserved,
+    SleepSubject, SnapshotStamp, SnapshotsInFlight,
 };
 use crate::adapters::vm::status::VmStatus;
 use crate::adapters::volumes::VolumeBackend;
@@ -41,6 +41,7 @@ pub struct VmManager {
     pub sink: Arc<dyn LogSink>,
     pub state: SharedState,
     pub metrics: Arc<crate::domain::metrics::HostMetrics>,
+    pub in_flight: SnapshotsInFlight,
 }
 
 impl VmManager {
@@ -153,33 +154,32 @@ impl VmManager {
         Ok(config_file)
     }
 
-    async fn refusal_to_snapshot(&self, app_id: &AppId) -> Option<String> {
-        let Some(record) = self.state.record(app_id).await else {
-            return refusal_to_sleep(None).map(str::to_string);
-        };
-        if let Some(refusal) = refusal_to_sleep(Some(SleepSubject {
+    /// Whether this microVM may be snapshotted now, and its share of the disk while it is.
+    async fn admit_snapshot(&self, app_id: &AppId) -> Result<Reserved<'_>, String> {
+        let record = self.state.record(app_id).await;
+        let subject = record.as_ref().map(|record| SleepSubject {
             stop_requested: record.stop_requested,
             desired_running: record.desired_running,
             ever_healthy: record.health.ever_healthy,
-        })) {
-            return Some(refusal.to_string());
+        });
+        if let Some(refusal) = refusal_to_sleep(subject) {
+            return Err(refusal.to_string());
         }
-        match measure_snapshot_disk(&self.snapshot_dir, self.volumes.reserved_cache().disk_bytes) {
-            Err(error) => {
+        let wanted_bytes = record.map_or(0, |record| snapshot_bytes_for(record.resources.memory_mib));
+        let disk = measure_snapshot_disk(&self.snapshot_dir, self.volumes.reserved_cache().disk_bytes)
+            .map_err(|error| {
                 tracing::warn!(%app_id, %error, "snapshot disk could not be measured");
-                Some("the disk it would be written to cannot be measured".into())
-            }
-            Ok(disk) => {
-                tracing::info!(
-                    %app_id,
-                    total_bytes = disk.total_bytes,
-                    available_bytes = disk.available_bytes,
-                    snapshot_bytes = disk.snapshot_bytes,
-                    "snapshot disk measured"
-                );
-                refusal_for_disk(&disk, snapshot_bytes_for(record.resources.memory_mib))
-            }
-        }
+                "the disk it would be written to cannot be measured".to_string()
+            })?;
+        tracing::info!(
+            %app_id,
+            total_bytes = disk.total_bytes,
+            available_bytes = disk.available_bytes,
+            snapshot_bytes = disk.snapshot_bytes,
+            in_flight_bytes = self.in_flight.bytes(),
+            "snapshot disk measured"
+        );
+        self.in_flight.admit(&disk, wanted_bytes)
     }
 }
 
@@ -213,9 +213,12 @@ impl Vmm for VmManager {
     }
 
     async fn sleep(&self, request: SuspendRequest) -> Result<(), VmError> {
-        if let Some(reason) = self.refusal_to_snapshot(&request.app_id).await {
-            return Err(VmError::SleepRefused { reason });
-        }
+        // Held to the end, whichever way the snapshot goes: only once it is on the disk does
+        // the next measurement count it, and only once it has failed is the room free again.
+        let _share_of_the_disk = self
+            .admit_snapshot(&request.app_id)
+            .await
+            .map_err(|reason| VmError::SleepRefused { reason })?;
         let paths = snapshot_paths(&self.snapshot_dir, &request.app_id);
         let stamp = self.current_stamp(&request);
         let api = self.api(&request.app_id);
@@ -359,7 +362,7 @@ impl Vmm for VmManager {
 
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String> {
         let console = std::fs::read_to_string(self.processes.console_path(app_id)).ok()?;
-        guest_contract::control::last_guest_line(&console)
+        guest_contract::control::exit_reason(&console)
     }
 
     fn working_dir(&self, app_id: &AppId) -> PathBuf {
@@ -480,6 +483,7 @@ mod tests {
             logs: TenantLogReceiver::new(),
             sink: Arc::new(FileLogSink::new(root.join("logs"))),
             state: state.clone(),
+            in_flight: SnapshotsInFlight::default(),
         };
         Fixture {
             _directory: directory,
@@ -647,28 +651,33 @@ mod tests {
         );
     }
 
+    fn write_console(fixture: &Fixture, console: &str) {
+        let path = fixture.manager.processes.console_path(&app_id());
+        make_directory(path.parent().unwrap(), 0o700).unwrap();
+        std::fs::write(path, console).unwrap();
+    }
+
     #[tokio::test]
-    async fn the_guest_verdict_is_the_last_thing_its_init_said() {
+    async fn the_guest_verdict_is_what_its_init_said_before_it_shut_the_guest_down() {
         let fixture = fixture();
-        make_directory(
-            fixture
-                .manager
-                .processes
-                .console_path(&app_id())
-                .parent()
-                .unwrap(),
-            0o700,
-        )
-        .unwrap();
-        std::fs::write(
-            fixture.manager.processes.console_path(&app_id()),
+        write_console(
+            &fixture,
             "[nibrun] starting the tenant\n[nibrun] the tenant has stopped; shutting the guest down\n[   15.7] reboot: Restarting system\n",
-        )
-        .unwrap();
+        );
         assert_eq!(
             fixture.manager.guest_verdict(&app_id()).await.as_deref(),
             Some("the tenant has stopped; shutting the guest down")
         );
+    }
+
+    #[tokio::test]
+    async fn a_microvm_killed_from_outside_has_no_verdict_whatever_its_init_was_saying() {
+        let fixture = fixture();
+        write_console(
+            &fixture,
+            "[nibrun] guest runtime starting\n[nibrun] starting /app/probe as uid 65534 in /app, with 198 MiB to spend\n",
+        );
+        assert_eq!(fixture.manager.guest_verdict(&app_id()).await, None);
     }
 
     #[tokio::test]
@@ -765,21 +774,10 @@ mod tests {
     #[tokio::test]
     async fn a_console_that_holds_nothing_the_guest_said_gives_no_verdict() {
         let fixture = fixture();
-        make_directory(
-            fixture
-                .manager
-                .processes
-                .console_path(&app_id())
-                .parent()
-                .unwrap(),
-            0o700,
-        )
-        .unwrap();
-        std::fs::write(
-            fixture.manager.processes.console_path(&app_id()),
+        write_console(
+            &fixture,
             "[    0.0] Linux version 6.1.180\n[   15.7] reboot: Restarting system\n",
-        )
-        .unwrap();
+        );
         assert_eq!(fixture.manager.guest_verdict(&app_id()).await, None);
     }
 
@@ -839,6 +837,41 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, VmError::SleepRefused { .. }), "{error}");
         assert!(error.message().contains("cannot be measured"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_sleep_is_measured_against_the_snapshots_in_flight_as_well_as_those_on_the_disk() {
+        let fixture = fixture();
+        fixture
+            .state
+            .put_record(instance_record(|record| record.health.ever_healthy = true))
+            .await;
+        let request = SuspendRequest {
+            app_id: app_id(),
+            deployment_id: deployment_id(),
+            slot: nft_render::describe_slot(0, app_id()),
+        };
+        // Admitted against a disk of its own so that its share, and not the test machine's disk,
+        // is what leaves no room for the next.
+        let bottomless = crate::adapters::vm::snapshot::SnapshotDisk {
+            total_bytes: u64::MAX,
+            available_bytes: u64::MAX,
+            cache_bytes: 0,
+            snapshot_bytes: 0,
+        };
+        let the_rest_of_the_disk = fixture.manager.in_flight.admit(&bottomless, 1 << 60).unwrap();
+
+        let error = fixture.manager.sleep(request).await.unwrap_err();
+        assert!(matches!(error, VmError::SleepRefused { .. }), "{error}");
+        assert!(error.message().contains("already hold"), "{error}");
+        assert_eq!(
+            fixture.manager.in_flight.bytes(),
+            1 << 60,
+            "a refused sleep takes no share of the disk"
+        );
+
+        drop(the_rest_of_the_disk);
+        assert_eq!(fixture.manager.in_flight.bytes(), 0);
     }
 
     #[tokio::test]

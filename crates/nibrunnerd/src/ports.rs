@@ -186,6 +186,8 @@ pub trait Vmm: Send + Sync {
     /// guest keeps its end of the socket across a daemon restart, but a fresh receiver never
     /// bound the host end, so without this its output would go nowhere for the rest of its life.
     async fn readopt(&self, app_id: &AppId) -> Result<(), VmError>;
+    /// Why a microVM that exited went down, when its guest said: init's reason for shutting it
+    /// down, or the kernel's panic. A guest killed from outside said nothing.
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String>;
     fn working_dir(&self, app_id: &AppId) -> PathBuf;
 }
@@ -284,6 +286,9 @@ pub enum TenantLogBody {
     Gap {
         dropped_bytes: u64,
     },
+    /// The guest's supervisor restarted the tenant, in its place in the stream: after the
+    /// tenant's last words, before its first ones back.
+    Restart(protocol::TenantRestart),
 }
 
 /// Why a wake was refused, apart from want of memory: the word a counter uses, beside the

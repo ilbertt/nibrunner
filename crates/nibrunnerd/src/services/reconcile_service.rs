@@ -38,7 +38,7 @@ impl ReconcileService for HostReconciler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::vm::VmStatus;
+    use crate::adapters::vm::{VmExit, VmStatus};
     use crate::ports::VmCall;
     use crate::test_support::*;
     use protocol::InstanceState;
@@ -56,7 +56,7 @@ mod tests {
             active: false,
             failed: false,
             started_this_boot: true,
-            exit_code: Some(0),
+            exit: Some(VmExit::Code(0)),
         }
     }
     #[tokio::test]

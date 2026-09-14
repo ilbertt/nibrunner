@@ -20,6 +20,9 @@ pub struct ObservedVolume {
     pub volume_id: VolumeId,
     pub app_id: AppId,
     pub attached: bool,
+    /// Whether the device carries a filesystem. A refused seed leaves a volume attached and bare,
+    /// and only a volume that is both is one an app can be booted onto.
+    pub formatted: bool,
     pub size_bytes: u64,
     pub storage_prefix: ObjectKey,
     pub device_path: Option<String>,
@@ -211,9 +214,7 @@ fn plan_instance(
             desired: wanted.clone(),
         };
     }
-    // A running guest and one that has already exited under the outage both need the same fresh
-    // boot; only a guest that neither ran nor exited (a cold record) is a plain start.
-    if current.running || current.exited {
+    if current.running {
         return if volume_lost {
             recover()
         } else {
@@ -221,6 +222,13 @@ fn plan_instance(
                 app_id: wanted.app_id.clone(),
             }
         };
+    }
+    // A guest that exited on its own is booted again — the start applies the app's restart
+    // policy, so a crash loop is bounded — unless its disk was pulled out from under it, when the
+    // boot has to be the clean teardown and re-attach a recovery does first. A cold record is a
+    // plain start either way.
+    if current.exited && volume_lost {
+        return recover();
     }
     InstancePlan::Start {
         desired: wanted.clone(),
@@ -323,8 +331,14 @@ fn plan_volumes(desired: &HostDesiredState, observed: &ObservedState) -> Vec<Vol
                     },
                 };
             }
+            // An attached device with no filesystem on it is provisioned again rather than left
+            // alone: a seed that was refused is retried, and a document that has since put the
+            // seed right takes effect, where taking "attached" for "ready" booted apps onto a
+            // volume nothing could mount.
             match current {
-                Some(volume) if volume.attached && volume.size_bytes >= wanted.size_bytes => {
+                Some(volume)
+                    if volume.attached && volume.formatted && volume.size_bytes >= wanted.size_bytes =>
+                {
                     VolumePlan::None {
                         volume_id: wanted.volume_id.clone(),
                     }
@@ -491,7 +505,9 @@ mod tests {
         }
 
         #[test]
-        fn a_vm_that_exited_on_its_own_is_not_booted_again() {
+        fn a_vm_that_exited_on_its_own_is_booted_again() {
+            // The start it is handed applies the app's restart policy, so this is what keeps a
+            // running app up, not what loops a crashing one.
             let result = plan(
                 desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
                 observed_state(|state| {
@@ -501,7 +517,12 @@ mod tests {
                     })]
                 }),
             );
-            assert_eq!(result.instances, vec![InstancePlan::None { app_id: app_id() }]);
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Start {
+                    desired: desired_instance(|_| {})
+                }]
+            );
         }
 
         #[test]
@@ -580,6 +601,25 @@ mod tests {
                     state.instances = vec![observed_instance(|instance| {
                         instance.running = false;
                         instance.exited = false;
+                    })]
+                }),
+            );
+            assert_eq!(
+                result.instances,
+                vec![InstancePlan::Sleep {
+                    desired: on_request()
+                }]
+            );
+        }
+
+        #[test]
+        fn one_whose_guest_exited_is_left_for_the_next_request_rather_than_booted_again() {
+            let result = plan(
+                desired_state(|state| state.instances = vec![on_request()]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.running = false;
+                        instance.exited = true;
                     })]
                 }),
             );
@@ -680,9 +720,10 @@ mod tests {
         }
 
         #[test]
-        fn a_guest_that_already_exited_under_the_outage_is_booted_again_not_left_down() {
-            // Without a lost volume this exited guest would be left alone; the yanked disk is what
-            // turns "it stopped on its own, leave it" into "its backing died, bring it back".
+        fn a_guest_that_already_exited_under_the_outage_is_recovered_rather_than_merely_started() {
+            // An exited guest is booted again anyway; the yanked disk is what makes that boot a
+            // recovery — the clean teardown and re-attach — rather than a plain start onto a dead
+            // device.
             let exited = observed_state(|state| {
                 state.instances = vec![observed_instance(|instance| {
                     instance.running = false;
@@ -915,6 +956,24 @@ mod tests {
                 }),
             );
             assert!(matches!(detached.volumes[0], VolumePlan::Provision { .. }));
+        }
+
+        #[test]
+        fn an_attached_volume_with_no_filesystem_on_it_is_provisioned_again_every_pass() {
+            // What a refused seed leaves: the device answers reads, so it is attached, but the
+            // format never happened. Left alone it would be reported ready and booted onto.
+            let bare = plan(
+                desired_state(|state| state.volumes = vec![desired_volume(|_| {})]),
+                observed_state(|state| {
+                    state.volumes = vec![observed_volume(|volume| volume.formatted = false)]
+                }),
+            );
+            assert_eq!(
+                bare.volumes,
+                vec![VolumePlan::Provision {
+                    desired: desired_volume(|_| {})
+                }]
+            );
         }
     }
 
