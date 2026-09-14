@@ -24,6 +24,7 @@ use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
 use crate::domain::exports::reader::CheckpointServers;
 use crate::domain::report::capacity::{guest_memory_mib, read_host_memory_mib};
+use crate::domain::restarts::RestartRecorder;
 use crate::domain::waker::AppWaker;
 use crate::host::Host;
 use crate::state::HostState;
@@ -91,7 +92,10 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let network = open_network()?;
     let logs = TenantLogReceiver::new();
-    let sink = Arc::new(FileLogSink::new(config.logs_dir()));
+    let sink = Arc::new(RestartRecorder::new(
+        state.clone(),
+        Arc::new(FileLogSink::new(config.logs_dir())),
+    ));
 
     let processes = VmProcesses::new(config.runtime_dir.clone());
     let reaped = reap_stale_snapshots(&config.snapshot_dir, processes.boot_id());

@@ -284,6 +284,9 @@ pub enum TenantLogBody {
     Gap {
         dropped_bytes: u64,
     },
+    /// The guest's supervisor restarted the tenant, in its place in the stream: after the
+    /// tenant's last words, before its first ones back.
+    Restart(protocol::TenantRestart),
 }
 
 /// Why a wake was refused, apart from want of memory: the word a counter uses, beside the

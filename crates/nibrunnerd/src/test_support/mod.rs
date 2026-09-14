@@ -210,6 +210,7 @@ pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedIn
         guest_ipv4: None,
         layer_digests: Vec::new(),
         restart_count: 0,
+        last_restart: None,
         started_at: None,
         last_healthy_at: None,
         converged_at: None,
@@ -217,6 +218,30 @@ pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedIn
         compute: None,
         meters: Default::default(),
         message: None,
+    };
+    edit(&mut value);
+    value
+}
+
+/// A tenant the kernel killed at its memory ceiling, started again by its guest.
+pub fn tenant_restart(edit: impl FnOnce(&mut TenantRestart)) -> TenantRestart {
+    let mut value = TenantRestart {
+        attempt: 1,
+        budget: 5,
+        exit: TenantExit::Signal(9),
+        reason: StateMessage::new(
+            "the tenant exited (137): the kernel killed it for running out of memory at its ceiling of 198 MiB; restart 1 of 5 in 500ms",
+        ),
+        backoff_ms: 500,
+    };
+    edit(&mut value);
+    value
+}
+
+pub fn reported_restart(edit: impl FnOnce(&mut ReportedRestart)) -> ReportedRestart {
+    let mut value = ReportedRestart {
+        at: observed_at(),
+        restart: tenant_restart(|_| {}),
     };
     edit(&mut value);
     value

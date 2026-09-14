@@ -148,10 +148,6 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
     host.state.mark_snapshotting(app_id, false).await;
 }
 
-fn restarted(existing: Option<&InstanceRecord>) -> bool {
-    existing.is_some_and(|record| !record.stop_requested)
-}
-
 // A start is refused for two very different reasons, and an instance waiting out its backoff read
 // exactly like one that is never starting again: failed, with the message from the last time it
 // worked. Only one of them is something an operator can do anything about.
@@ -178,8 +174,8 @@ fn start_refused(
 }
 
 // The attempts are what the decision is made on, and restartCount is not that number — it counts
-// the starts that worked. So the sentence carries both, because an instance out of restarts is
-// otherwise indistinguishable from one that has never been restarted at all.
+// the tenant's restarts inside the guest. So the sentence carries both, because an instance out
+// of restarts is otherwise indistinguishable from one that has never been restarted at all.
 async fn say_it_is_out_of_restarts(host: &Host, app_id: &AppId, attempted: u32, allowed: u32) {
     let said = StateMessage::new(format!(
         "out of restarts: {attempted} starts attempted against a budget of {allowed},          and this instance will not be started again until it is deployed afresh"
@@ -346,7 +342,10 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                     record.started_at = Some(started_at);
                     record.state = InstanceState::Starting;
                     record.health = initial_tracker();
-                    record.restart_count += u32::from(restarted(existing.as_ref()));
+                    // A fresh guest starts its tenant for the first time: what the last one
+                    // counted was that guest's, and the host's own boots are the attempts.
+                    record.restart_count = 0;
+                    record.last_restart = None;
                     record.message = None;
                 })
                 .await;
@@ -883,15 +882,6 @@ mod tests {
         failures
     }
 
-    #[test]
-    fn only_a_boot_nobody_asked_for_counts_as_a_restart() {
-        assert!(!restarted(None));
-        assert!(restarted(Some(&instance_record(|_| {}))));
-        assert!(!restarted(Some(&instance_record(|record| record
-            .stop_requested =
-            true))));
-    }
-
     fn spent_window() -> crate::domain::backoff::AttemptWindow {
         crate::domain::backoff::AttemptWindow {
             attempts: 3,
@@ -1061,12 +1051,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_boot_over_a_microvm_nobody_asked_to_stop_counts_as_a_restart() {
+    async fn a_cold_boot_starts_the_count_of_the_guests_restarts_over() {
         let host = test_host().await;
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.state
             .put_record(instance_record(|record| {
-                record.restart_count = 1;
+                record.restart_count = 5;
+                record.last_restart = Some(reported_restart(|_| {}));
                 record.stop_requested = false;
             }))
             .await;
@@ -1075,26 +1066,34 @@ mod tests {
 
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Starting);
-        assert_eq!(record.restart_count, 2);
+        assert_eq!(record.restart_count, 0);
+        assert_eq!(record.last_restart, None);
         assert!(record.started_at.is_some());
         assert!(!record.stop_requested);
-        assert_eq!(record.start_attempts.attempts, 1);
+        assert_eq!(
+            record.start_attempts.attempts, 1,
+            "the host's own boots are counted apart"
+        );
     }
 
     #[tokio::test]
-    async fn a_boot_after_a_stop_that_was_asked_for_does_not() {
-        let host = test_host().await;
+    async fn a_boot_that_failed_keeps_what_the_last_guest_counted() {
+        let mut host = test_host().await;
+        refuse_artifacts(&mut host, "the object store is down");
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.state
             .put_record(instance_record(|record| {
-                record.restart_count = 1;
-                record.stop_requested = true;
+                record.restart_count = 5;
+                record.last_restart = Some(reported_restart(|_| {}));
             }))
             .await;
 
         start_instance(&host, &desired_instance(|_| {})).await;
 
-        assert_eq!(host.state.record(&app_id()).await.unwrap().restart_count, 1);
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.restart_count, 5);
+        assert_eq!(record.last_restart, Some(reported_restart(|_| {})));
     }
 
     #[tokio::test]

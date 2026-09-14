@@ -1,6 +1,6 @@
 use protocol::{
     AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort, InstanceResources,
-    InstanceState, Ipv4Address, PortName, Sha256Digest, StateMessage, Timestamp, VolumeId,
+    InstanceState, Ipv4Address, PortName, ReportedRestart, Sha256Digest, StateMessage, Timestamp, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,12 @@ pub struct InstanceRecord {
     pub on_request: bool,
     #[serde(default)]
     pub start_attempts: AttemptWindow,
+    /// Restarts of the tenant by the supervisor inside its guest, since the host last booted the
+    /// app afresh: a cold boot starts the count over, a restore keeps it. The host's own boots
+    /// are `start_attempts`.
     pub restart_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_restart: Option<ReportedRestart>,
     #[serde(default)]
     pub stop_requested: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +94,7 @@ impl InstanceRecord {
             on_request: fields.on_request,
             start_attempts: NO_START_ATTEMPTS,
             restart_count: 0,
+            last_restart: None,
             stop_requested: false,
             started_at: None,
             converged_at: None,
@@ -199,6 +205,7 @@ mod tests {
         assert_eq!(record.state, InstanceState::Pending);
         assert_eq!(record.start_attempts, NO_START_ATTEMPTS);
         assert_eq!(record.restart_count, 0);
+        assert_eq!(record.last_restart, None);
         assert!(!record.stop_requested);
         assert_eq!(record.started_at, None);
         assert_eq!(record.last_exit_code, None);
@@ -228,6 +235,7 @@ mod tests {
         let mut record = instance_record(|record| {
             record.state = InstanceState::Unhealthy;
             record.restart_count = 4;
+            record.last_restart = Some(crate::test_support::reported_restart(|_| {}));
             record.stop_requested = true;
             record.started_at = Some(Timestamp::from_epoch_ms(REDEPLOYED_AT_MS));
             record.last_exit_code = Some(137);
@@ -245,6 +253,7 @@ mod tests {
         assert_eq!(record.health, before.health);
         assert_eq!(record.start_attempts, before.start_attempts);
         assert_eq!(record.restart_count, before.restart_count);
+        assert_eq!(record.last_restart, before.last_restart);
         assert_eq!(record.stop_requested, before.stop_requested);
         assert_eq!(record.started_at, before.started_at);
         assert_eq!(record.last_exit_code, before.last_exit_code);

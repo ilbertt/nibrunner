@@ -1,4 +1,4 @@
-use protocol::TenantLogStream;
+use protocol::{StateMessage, TenantExit, TenantLogStream, TenantRestart};
 
 pub const FRAME_MAGIC: &[u8; 4] = b"NBL1";
 pub const FRAME_HEADER_BYTES: usize = 9;
@@ -10,11 +10,20 @@ const GAP_PAYLOAD_BYTES: usize = 8;
 pub const KIND_STDOUT: u8 = 1;
 pub const KIND_STDERR: u8 = 2;
 pub const KIND_GAP: u8 = 3;
+/// The guest's supervisor restarted the tenant. The payload is the restart's figures, big-endian,
+/// with the sentence the guest printed for it after them: attempt `u32`, budget `u32`, how the
+/// tenant ended as one byte of kind and an `i32`, the backoff in ms as a `u64`, then the reason.
+pub const KIND_RESTART: u8 = 4;
+
+const RESTART_HEADER_BYTES: usize = 21;
+const EXIT_CODE: u8 = 0;
+const EXIT_SIGNAL: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestLogFrame {
     Data { stream: TenantLogStream, bytes: Vec<u8> },
     Gap { dropped_bytes: u64 },
+    Restart(TenantRestart),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -80,10 +89,49 @@ fn frame_from(kind: u8, payload: &[u8]) -> Result<GuestLogFrame, InvalidGuestLog
                 dropped_bytes: u64::from_be_bytes(encoded),
             })
         }
+        KIND_RESTART => decode_restart(payload).map(GuestLogFrame::Restart),
         _ => Err(InvalidGuestLogFrame {
             reason: "unknown frame kind",
         }),
     }
+}
+
+fn decode_restart(payload: &[u8]) -> Result<TenantRestart, InvalidGuestLogFrame> {
+    if payload.len() < RESTART_HEADER_BYTES {
+        return Err(InvalidGuestLogFrame {
+            reason: "invalid restart payload length",
+        });
+    }
+    let u32_at = |offset: usize| {
+        u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ])
+    };
+    let ended_with = u32_at(9) as i32;
+    let exit = match payload[8] {
+        EXIT_CODE => TenantExit::Code(ended_with),
+        EXIT_SIGNAL => TenantExit::Signal(ended_with),
+        _ => {
+            return Err(InvalidGuestLogFrame {
+                reason: "unknown tenant exit kind",
+            })
+        }
+    };
+    let mut backoff = [0u8; 8];
+    backoff.copy_from_slice(&payload[13..RESTART_HEADER_BYTES]);
+    let reason = std::str::from_utf8(&payload[RESTART_HEADER_BYTES..]).map_err(|_| InvalidGuestLogFrame {
+        reason: "the restart reason is not text",
+    })?;
+    Ok(TenantRestart {
+        attempt: u32_at(0),
+        budget: u32_at(4),
+        exit,
+        reason: StateMessage::new(reason),
+        backoff_ms: u64::from_be_bytes(backoff),
+    })
 }
 
 pub fn kind_of(stream: TenantLogStream) -> u8 {
@@ -95,6 +143,22 @@ pub fn kind_of(stream: TenantLogStream) -> u8 {
 
 pub fn encode_gap(dropped_bytes: u64) -> Vec<u8> {
     encode_frame(KIND_GAP, &dropped_bytes.to_be_bytes())
+}
+
+pub fn encode_restart(restart: &TenantRestart) -> Vec<u8> {
+    let (kind, ended_with) = match restart.exit {
+        TenantExit::Code(code) => (EXIT_CODE, code),
+        TenantExit::Signal(signal) => (EXIT_SIGNAL, signal),
+    };
+    let reason = restart.reason.as_str().as_bytes();
+    let mut payload = Vec::with_capacity(RESTART_HEADER_BYTES + reason.len());
+    payload.extend_from_slice(&restart.attempt.to_be_bytes());
+    payload.extend_from_slice(&restart.budget.to_be_bytes());
+    payload.push(kind);
+    payload.extend_from_slice(&ended_with.to_be_bytes());
+    payload.extend_from_slice(&restart.backoff_ms.to_be_bytes());
+    payload.extend_from_slice(reason);
+    encode_frame(KIND_RESTART, &payload)
 }
 
 pub fn encode_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
@@ -109,6 +173,7 @@ pub fn encode_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
 pub const ENCODE_KIND_STDOUT: u8 = KIND_STDOUT;
 pub const ENCODE_KIND_STDERR: u8 = KIND_STDERR;
 pub const ENCODE_KIND_GAP: u8 = KIND_GAP;
+pub const ENCODE_KIND_RESTART: u8 = KIND_RESTART;
 
 #[cfg(test)]
 mod tests {
@@ -158,6 +223,74 @@ mod tests {
         let gap = encode_frame(ENCODE_KIND_GAP, &42u64.to_be_bytes());
         let (frames, _) = decode_frames(&[], &gap).unwrap();
         assert_eq!(frames, vec![GuestLogFrame::Gap { dropped_bytes: 42 }]);
+    }
+
+    fn oom_restart() -> TenantRestart {
+        TenantRestart {
+            attempt: 1,
+            budget: 5,
+            exit: TenantExit::Signal(9),
+            reason: StateMessage::new(
+                "the tenant exited (137): the kernel killed it for running out of memory at its ceiling of 198 MiB; restart 1 of 5 in 500ms",
+            ),
+            backoff_ms: 500,
+        }
+    }
+
+    #[test]
+    fn a_restart_round_trips_with_everything_the_guest_said_about_it() {
+        let frame = encode_restart(&oom_restart());
+        assert_eq!(&frame[..4], FRAME_MAGIC);
+        assert_eq!(frame[KIND_OFFSET], ENCODE_KIND_RESTART);
+        let (frames, rest) = decode_frames(&[], &frame).unwrap();
+        assert_eq!(frames, vec![GuestLogFrame::Restart(oom_restart())]);
+        assert!(rest.is_empty());
+
+        let exited = TenantRestart {
+            exit: TenantExit::Code(1),
+            reason: StateMessage::new("the tenant exited (1); restart 2 of 5 in 1000ms"),
+            ..oom_restart()
+        };
+        let (frames, _) = decode_frames(&[], &encode_restart(&exited)).unwrap();
+        assert_eq!(frames, vec![GuestLogFrame::Restart(exited)]);
+    }
+
+    #[test]
+    fn a_restart_payload_is_laid_out_the_way_the_header_says() {
+        let frame = encode_restart(&oom_restart());
+        let payload = &frame[FRAME_HEADER_BYTES..];
+        assert_eq!(&payload[..4], &1u32.to_be_bytes(), "attempt");
+        assert_eq!(&payload[4..8], &5u32.to_be_bytes(), "budget");
+        assert_eq!(payload[8], EXIT_SIGNAL);
+        assert_eq!(&payload[9..13], &9i32.to_be_bytes(), "signal");
+        assert_eq!(&payload[13..21], &500u64.to_be_bytes(), "backoff");
+        assert_eq!(
+            std::str::from_utf8(&payload[21..]).unwrap(),
+            oom_restart().reason.as_str()
+        );
+    }
+
+    #[test]
+    fn a_restart_this_host_cannot_read_is_refused_rather_than_guessed_at() {
+        let short = encode_frame(ENCODE_KIND_RESTART, &[0u8; RESTART_HEADER_BYTES - 1]);
+        assert_eq!(
+            decode_frames(&[], &short).unwrap_err().reason,
+            "invalid restart payload length"
+        );
+        let mut unknown_exit = encode_restart(&oom_restart());
+        unknown_exit[FRAME_HEADER_BYTES + 8] = 7;
+        assert_eq!(
+            decode_frames(&[], &unknown_exit).unwrap_err().reason,
+            "unknown tenant exit kind"
+        );
+        let mut not_text = [0u8; RESTART_HEADER_BYTES].to_vec();
+        not_text.extend_from_slice(&[0xff, 0xfe]);
+        assert_eq!(
+            decode_frames(&[], &encode_frame(ENCODE_KIND_RESTART, &not_text))
+                .unwrap_err()
+                .reason,
+            "the restart reason is not text"
+        );
     }
 
     #[test]

@@ -218,7 +218,7 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
 
     page.metric(
         "nibrunner_instance_restarts_total",
-        "Times an app's tenant has been restarted by its host.",
+        "Times an app's tenant has been restarted inside its guest since the host last booted the app afresh.",
         "counter",
     );
     for instance in &report.instances {

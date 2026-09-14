@@ -278,14 +278,17 @@ mod tests {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
                 record.restart_count = 4;
+                record.last_restart = Some(reported_restart(|_| {}));
             }))
             .await;
 
         let on_request =
             desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
-        instances::resume_instance(&host, &on_request).await.unwrap();
+        let outcome = instances::resume_instance(&host, &on_request).await.unwrap();
+        assert_eq!(outcome, crate::ports::WakeOutcome::Restored);
         let record = host.state.record(&app_id()).await.unwrap();
-        assert_eq!(record.restart_count, 4);
+        assert_eq!(record.restart_count, 4, "the guest that counted them is back");
+        assert_eq!(record.last_restart, Some(reported_restart(|_| {})));
         assert_eq!(record.start_attempts.attempts, 0);
     }
 

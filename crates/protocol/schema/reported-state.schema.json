@@ -426,6 +426,17 @@
             }
           ]
         },
+        "lastRestart": {
+          "description": "The last of those restarts. Absent until there has been one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportedRestart"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "layerDigests": {
           "description": "The layers the running microVM was booted from, bottom first. Empty until one has been.",
           "type": "array",
@@ -456,6 +467,7 @@
           }
         },
         "restartCount": {
+          "description": "Times the supervisor inside the guest has restarted the tenant since this host last booted\nthe app afresh. A restore from a snapshot keeps the count; a cold boot starts it over.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
@@ -479,6 +491,45 @@
         "deploymentId",
         "state",
         "restartCount"
+      ]
+    },
+    "ReportedRestart": {
+      "description": "A tenant restart as the host heard of it: what the guest said, and when it said it.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "attempt": {
+          "description": "1 for the first restart since the tenant last stayed up long enough to earn its budget\nback, up to `budget`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "backoffMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "budget": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "exit": {
+          "$ref": "#/$defs/TenantExit"
+        },
+        "reason": {
+          "$ref": "#/$defs/StateMessage"
+        }
+      },
+      "required": [
+        "at",
+        "attempt",
+        "budget",
+        "exit",
+        "reason",
+        "backoffMs"
       ]
     },
     "ReportedVolume": {
@@ -550,6 +601,37 @@
     "StateMessage": {
       "type": "string",
       "maxLength": 512
+    },
+    "TenantExit": {
+      "description": "How a tenant process ended: the code it exited with, or the signal that killed it.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "code"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "signal": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "signal"
+          ]
+        }
+      ]
     },
     "Timestamp": {
       "description": "an ISO 8601 instant with an offset",
