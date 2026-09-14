@@ -122,12 +122,13 @@ const WAKE_OUTCOMES: [WakeOutcome; 3] = [
     WakeOutcome::ColdBoot,
     WakeOutcome::AlreadyRunning,
 ];
-const REFUSALS: [&str; 8] = [
+const REFUSALS: [&str; 9] = [
     "no_room",
     "host_starting",
     "not_named",
     "not_on_request",
     "not_isolated",
+    "volume_unusable",
     "would_not_start",
     "never_answered",
     "abandoned",
@@ -510,6 +511,7 @@ mod tests {
             WakeFailure::NotNamed,
             WakeFailure::NotOnRequest,
             WakeFailure::NotIsolated,
+            WakeFailure::VolumeUnusable,
             WakeFailure::WouldNotStart,
             WakeFailure::NeverAnswered,
             WakeFailure::Abandoned,

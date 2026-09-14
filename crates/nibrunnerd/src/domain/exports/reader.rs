@@ -210,11 +210,11 @@ impl<'a> ReaderDevice<'a> {
         // thing being waited for. It refuses in milliseconds while it is still opening, so this
         // asks again rather than deciding on the first answer.
         let deadline = tokio::time::Instant::now() + ATTACH_TIMEOUT;
-        let mut refusal = devices.attach_checkpoint(&target).await;
+        let mut refusal = devices.attach(&target).await;
         while refusal.is_err() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(ATTACH_POLL).await;
             let _ = devices.detach(&device_path).await;
-            refusal = devices.attach_checkpoint(&target).await;
+            refusal = devices.attach(&target).await;
         }
         refusal?;
         Ok(ReaderDevice { devices, device_path })

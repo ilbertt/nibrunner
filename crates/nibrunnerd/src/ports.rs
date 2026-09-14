@@ -294,6 +294,9 @@ pub enum WakeFailure {
     NotNamed,
     NotOnRequest,
     NotIsolated,
+    /// Its volume's device does not answer and could not be re-attached, so there is nothing
+    /// sound to put the guest on.
+    VolumeUnusable,
     WouldNotStart,
     NeverAnswered,
     Abandoned,
@@ -306,6 +309,7 @@ impl WakeFailure {
             WakeFailure::NotNamed => "not_named",
             WakeFailure::NotOnRequest => "not_on_request",
             WakeFailure::NotIsolated => "not_isolated",
+            WakeFailure::VolumeUnusable => "volume_unusable",
             WakeFailure::WouldNotStart => "would_not_start",
             WakeFailure::NeverAnswered => "never_answered",
             WakeFailure::Abandoned => "abandoned",
