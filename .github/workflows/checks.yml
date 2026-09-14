@@ -14,9 +14,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/prepare-docs
-        with:
-          cache: disabled
-          prepare_for_build: disabled
 
       - name: Check Codestyle
         run: just fmt --check
@@ -28,9 +25,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/prepare-docs
-        with:
-          cache: enabled
-          prepare_for_build: disabled
 
       - name: Lint
         run: just lint

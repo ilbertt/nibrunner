@@ -1,21 +1,15 @@
 name: Prepare docs
 description: Prepare the environment, and the docs site's dependencies on top of it — for the jobs whose `just` recipe checks Rust and the docs site both.
 
-inputs:
-  cache:
-    description: Handed to prepare. `enabled` or `disabled`.
-    required: true
-  prepare_for_build:
-    description: Handed to prepare. `enabled` or `disabled`.
-    required: true
-
 runs:
   using: composite
   steps:
+    # The cargo cache for the clippy half of `just lint`; `just fmt --check` fills none of it,
+    # so the other job restores and saves next to nothing.
     - uses: ./.github/actions/prepare
       with:
-        cache: ${{ inputs.cache }}
-        prepare_for_build: ${{ inputs.prepare_for_build }}
+        cache: enabled
+        prepare_for_build: disabled
 
     - name: Install the docs site's dependencies
       shell: bash
