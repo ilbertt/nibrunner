@@ -223,14 +223,6 @@ impl VolumeBackend for ZerofsVolumes {
             .await
             .allocate(&desired.app_id)
             .map_err(|error| VolumeError::Unusable(error.message()))?;
-        if slot.slot >= nft_render::NBD_SLOT_LIMIT {
-            return Err(VolumeError::Unusable(format!(
-                "slot {} is past the {} volumes the zerofs backend addresses on one host: \
-                 keep this host under that many apps, or keep its volumes with the local-file backend",
-                slot.slot,
-                nft_render::NBD_SLOT_LIMIT
-            )));
-        }
         let socket_path = self.filesystem.nbd_socket_path.display().to_string();
         let target = NbdTarget {
             socket_path: &socket_path,
@@ -411,6 +403,8 @@ mod tests {
     use crate::test_support::mocks;
     use crate::test_support::{app_id, desired_volume};
 
+    const MAX_APPS: u32 = 63;
+
     fn staging(root: &Path) -> ContentsStaging {
         seed::staging(&root.join("staging"), seed::archive())
     }
@@ -498,7 +492,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             mocks::commands_succeeding().0,
             staging(root.path()),
         );
@@ -520,7 +514,7 @@ mod tests {
         let (commands, log) = mocks::commands_succeeding();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             commands.clone(),
             staging(root.path()),
         );
@@ -545,7 +539,7 @@ mod tests {
     async fn nothing_here_ever_runs_zerofs_as_a_second_writer() {
         let root = tempfile::tempdir().unwrap();
         let (commands, log) = mocks::commands_succeeding();
-        let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
+        let allocator = Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS)));
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
             allocator,
@@ -580,7 +574,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             mocks::commands_succeeding().0,
             staging(root.path()),
         );
@@ -598,7 +592,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             mocks::commands_succeeding().0,
             staging(root.path()),
         );
@@ -615,7 +609,7 @@ mod tests {
         .unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             mocks::commands_succeeding().0,
             staging(root.path()),
         );
@@ -629,7 +623,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             mocks::commands_succeeding().0,
             staging(root.path()),
         );
@@ -644,7 +638,7 @@ mod tests {
         let sysfs = tempfile::tempdir().unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             commands.clone(),
             staging(root.path()),
         )
@@ -675,28 +669,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_slot_past_the_devices_this_backend_addresses_is_refused_naming_that_limit() {
-        // The limit is this daemon's own, not the module's: a host measured with nbds_max at 1024
-        // was still refused here, and told to raise a setting that had nothing to do with it.
+    async fn a_host_holding_a_slot_for_every_app_it_is_laid_out_for_refuses_the_next_volume_naming_the_key() {
+        // The limit is the configuration's, not the module's: a host measured with nbds_max at
+        // 1024 was once refused here and told to raise a setting that had nothing to do with it.
         let root = tempfile::tempdir().unwrap();
         let (commands, log) = mocks::commands_succeeding();
-        let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
+        let allocator = Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS)));
         allocator.lock().await.restore(
-            std::collections::BTreeMap::from([(app_id(), nft_render::NBD_SLOT_LIMIT)]),
-            i64::from(nft_render::NBD_SLOT_LIMIT) + 1,
+            (0..MAX_APPS)
+                .map(|slot| {
+                    (
+                        protocol::AppId::parse(format!("app-holding-{slot}")).unwrap(),
+                        slot,
+                    )
+                })
+                .collect(),
+            i64::from(MAX_APPS),
         );
-        let volumes = ZerofsVolumes::new(filesystem(root.path()), allocator, commands, staging(root.path()));
+        let volumes = ZerofsVolumes::new(
+            filesystem(root.path()),
+            allocator.clone(),
+            commands,
+            staging(root.path()),
+        );
 
         let error = volumes.provision(&desired_volume(|_| {})).await.unwrap_err();
 
         let said = error.message();
-        assert!(
-            said.contains(&format!("{} volumes", nft_render::NBD_SLOT_LIMIT)),
-            "{said}"
-        );
-        assert!(said.contains("local-file"), "{said}");
+        assert!(said.contains(&format!("all {MAX_APPS} apps")), "{said}");
+        assert!(said.contains("max_apps"), "{said}");
         assert!(!said.contains("nbds_max"), "{said}");
         assert!(log.calls().is_empty(), "nothing was attached past the limit");
+        assert!(
+            allocator.lock().await.lookup(&app_id()).is_none(),
+            "a refused volume holds no slot"
+        );
     }
 
     fn volumes_with_sysfs(
@@ -706,7 +713,7 @@ mod tests {
     ) -> ZerofsVolumes {
         ZerofsVolumes::new(
             filesystem(root),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             commands.clone(),
             staging(root),
         )
@@ -729,7 +736,7 @@ mod tests {
         let (commands, log) = mocks::commands_succeeding();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             commands,
             staging(root.path()),
         );
@@ -745,7 +752,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             mocks::commands_succeeding().0,
             staging(root.path()),
         );
@@ -787,7 +794,7 @@ mod tests {
     async fn a_volume_an_app_holds_is_observed_on_the_device_that_app_was_given() {
         let root = tempfile::tempdir().unwrap();
         let (commands, _) = mocks::commands_succeeding();
-        let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
+        let allocator = Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS)));
         let slot = allocator.lock().await.allocate(&app_id()).unwrap();
         let sysfs = tempfile::tempdir().unwrap();
         let volumes = ZerofsVolumes::new(
@@ -824,7 +831,7 @@ mod tests {
         sysfs: &Path,
         commands: Arc<crate::ports::MockCommandRunner>,
     ) -> (ZerofsVolumes, VolumeId) {
-        let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
+        let allocator = Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS)));
         allocator.lock().await.allocate(&app_id()).unwrap();
         let volumes = ZerofsVolumes::new(filesystem(root), allocator, commands.clone(), staging(root))
             .with_devices(NbdDevices::with_sysfs(sysfs.to_path_buf(), commands));
@@ -926,7 +933,7 @@ mod tests {
         });
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             commands,
             staging(root.path()),
         );
@@ -958,7 +965,7 @@ mod tests {
         });
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             commands,
             staging(root.path()),
         );
@@ -995,7 +1002,7 @@ mod tests {
         std::fs::write(filesystem.nbd_directory(), b"a file, not a directory").unwrap();
         let volumes = ZerofsVolumes::new(
             filesystem,
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             mocks::commands_succeeding().0,
             staging(root.path()),
         );
@@ -1059,7 +1066,7 @@ mod tests {
         let (commands, log) = mocks::commands_succeeding();
         let volumes = ZerofsVolumes::new(
             filesystem(root.path()),
-            Arc::new(Mutex::new(SlotAllocator::empty())),
+            Arc::new(Mutex::new(SlotAllocator::addressing(MAX_APPS))),
             commands,
             staging(root.path()),
         );

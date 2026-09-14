@@ -38,6 +38,7 @@ pub struct Scrape<'a> {
     pub snapshot: &'a HostSnapshot,
     pub now_ms: i64,
     pub slots_used: usize,
+    pub slots_total: u32,
     pub memory_available_bytes: Option<u64>,
 }
 
@@ -389,6 +390,7 @@ pub(crate) mod tests {
                 snapshot,
                 now_ms,
                 slots_used: 0,
+                slots_total: 1000,
                 memory_available_bytes: None,
             },
         )

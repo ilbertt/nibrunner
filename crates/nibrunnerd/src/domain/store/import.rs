@@ -19,6 +19,7 @@ pub async fn import_documents(
             .ok()
             .flatten()
             .unwrap_or_default(),
+        config.max_apps,
     );
     let cursor = crate::adapters::net::allocator::read_slot_cursor(
         crate::json_store::read_json(&config.slot_cursor_file())

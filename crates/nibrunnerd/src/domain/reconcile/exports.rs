@@ -169,7 +169,14 @@ async fn read_into_staging(
         .start(checkpoint_id)
         .await
         .map_err(|error| error.message())?;
-    let reader = match ReaderDevice::attach(&host.nbd, server.socket_path(), &desired.volume_id).await {
+    let reader = match ReaderDevice::attach(
+        &host.nbd,
+        server.socket_path(),
+        &desired.volume_id,
+        host.config.max_apps,
+    )
+    .await
+    {
         Ok(reader) => reader,
         Err(error) => {
             // A server that died after it began listening leaves a socket that refuses, so the
@@ -210,7 +217,10 @@ async fn reap(host: &Host, plan: &ReconcilePlan) {
         return;
     }
     let _ = std::fs::remove_dir_all(&host.config.export_staging_dir);
-    let _ = host.nbd.detach(&nft_render::export_reader_device_path()).await;
+    let _ = host
+        .nbd
+        .detach(&nft_render::export_reader_device_path(host.config.max_apps))
+        .await;
     for checkpoint_id in &orphans {
         if let Err(error) = host.volumes.delete_checkpoint(checkpoint_id).await {
             tracing::error!(

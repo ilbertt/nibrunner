@@ -1,21 +1,20 @@
 use protocol::{AppId, HostPort, Ipv4Address};
 
+/// Where the layout starts. How far it goes is the configuration's to say — `max_apps` in
+/// config.toml — and nothing here holds a copy of that number.
 pub const FIRST_SLOT: u32 = 0;
-
-const NBD_DEVICE_COUNT: u32 = 64;
 
 fn nbd_device_path(minor: u32) -> String {
     format!("/dev/nbd{minor}")
 }
 
-pub fn export_reader_device_path() -> String {
-    nbd_device_path(NBD_DEVICE_COUNT - 1)
+/// Slot N takes /dev/nbdN, so the export reader holds the minor past the last slot a host laid
+/// out for `max_apps` could hand out.
+pub fn export_reader_device_path(max_apps: u32) -> String {
+    nbd_device_path(max_apps)
 }
 
-/// The zerofs backend addresses one nbd minor per slot and the export reader holds the last
-/// of them, so a host on that backend cannot reach the slots the port layout otherwise allows.
-pub const NBD_SLOT_LIMIT: u32 = NBD_DEVICE_COUNT - 1;
-
+/// The first loopback port a slot reserves: where the ports are, not how many a host takes.
 pub const HOST_PORT_BASE: u16 = 21_000;
 
 /// How many host ports a slot reserves, whether or not an app asks for them.
@@ -33,23 +32,32 @@ const _: () = assert!(
     "a slot with no room beside the HTTP port could offer no way in"
 );
 
-/// Only the zerofs backend addresses an nbd minor, so a local-file host is not bounded by how
-/// many of those exist. What bounds every host is the range of loopback ports reserved from
-/// `HOST_PORT_BASE`, which is this many slots' worth and no more.
-pub const SLOT_COUNT: u32 = 1_000;
+/// The most apps any host can be laid out for: the last port of the last slot has to be a port.
+/// The guest network fits more, so this is the bound `max_apps` is held to.
+pub const fn most_apps_the_ports_fit() -> u32 {
+    (u16::MAX as u32 - HOST_PORT_BASE as u32 + 1) / PORTS_PER_SLOT
+}
 
-/// The host ports no listener of an operator's may take, first and last inclusive.
-pub fn reserved_port_range() -> (u16, u16) {
-    let last = u32::from(HOST_PORT_BASE) + SLOT_COUNT * PORTS_PER_SLOT - 1;
+/// The host ports no listener of an operator's may take, first and last inclusive, on a host
+/// laid out for `max_apps`.
+pub fn reserved_port_range(max_apps: u32) -> (u16, u16) {
+    let last = u32::from(HOST_PORT_BASE) + max_apps * PORTS_PER_SLOT - 1;
     (
         HOST_PORT_BASE,
-        u16::try_from(last).expect("the slot range is laid out to fit a port"),
+        u16::try_from(last).expect("max_apps is held to what the ports fit"),
     )
 }
 
+/// Where the guests are: a /30 per slot, so the /16 has room for more slots than the ports do.
 pub const GUEST_NETWORK_CIDR: &str = "10.201.0.0/16";
 const GUEST_SUBNET_PREFIX_LENGTH: u8 = 30;
 const ADDRESSES_PER_SLOT: u32 = 4;
+const GUEST_NETWORK_ADDRESSES: u32 = 1 << 16;
+
+const _: () = assert!(
+    most_apps_the_ports_fit() <= GUEST_NETWORK_ADDRESSES / ADDRESSES_PER_SLOT,
+    "max_apps is held to what the ports fit, so the guest network has to fit at least as many"
+);
 const GUEST_NETWORK_FIRST_OCTET: u32 = 10;
 const GUEST_NETWORK_SECOND_OCTET: u32 = 201;
 const OCTET_SIZE: u32 = 256;
@@ -160,8 +168,13 @@ mod tests {
             "a slot's ports are its own, so the next slot starts past the whole stride"
         );
         assert_eq!(describe_slot(64, app("64")).guest_ipv4.as_str(), "10.201.1.2");
-        assert_eq!(export_reader_device_path(), "/dev/nbd63");
-        assert_eq!(SLOT_COUNT, 1_000);
+    }
+
+    #[test]
+    fn the_export_reader_holds_the_minor_past_the_last_slot() {
+        assert_eq!(export_reader_device_path(63), "/dev/nbd63");
+        assert_eq!(describe_slot(62, app("last")).nbd_device_path, "/dev/nbd62");
+        assert_eq!(export_reader_device_path(1000), "/dev/nbd1000");
     }
 
     #[test]
@@ -182,10 +195,22 @@ mod tests {
 
     #[test]
     fn the_reserved_range_covers_every_port_every_slot_could_hand_out() {
-        let (base, end) = reserved_port_range();
-        assert_eq!(base, HOST_PORT_BASE);
-        let last = describe_slot(SLOT_COUNT - 1, app("last"));
-        assert_eq!(last.host_port_at(PORTS_PER_SLOT - 1).unwrap().get(), end);
+        for max_apps in [1, 63, 1000, most_apps_the_ports_fit()] {
+            let (base, end) = reserved_port_range(max_apps);
+            assert_eq!(base, HOST_PORT_BASE);
+            let last = describe_slot(max_apps - 1, app("last"));
+            assert_eq!(last.host_port_at(PORTS_PER_SLOT - 1).unwrap().get(), end);
+        }
+        assert_eq!(reserved_port_range(1000), (21_000, 28_999));
+    }
+
+    #[test]
+    fn the_most_apps_the_ports_fit_ends_on_the_last_port_there_is() {
+        assert_eq!(most_apps_the_ports_fit(), 5_567);
+        assert_eq!(reserved_port_range(most_apps_the_ports_fit()).1, u16::MAX);
+        let last = describe_slot(most_apps_the_ports_fit() - 1, app("last"));
+        assert_eq!(last.host_port_at(PORTS_PER_SLOT - 1).unwrap().get(), u16::MAX);
+        assert_eq!(last.guest_ipv4.as_str(), "10.201.86.250");
     }
 
     #[test]

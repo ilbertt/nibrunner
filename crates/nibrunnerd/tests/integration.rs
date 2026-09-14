@@ -218,7 +218,7 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
 
     let network = KernelNetwork::open().expect("a netlink socket");
     let slot = nft_render::describe_slot(
-        nft_render::SLOT_COUNT - 1,
+        nft_render::most_apps_the_ports_fit() - 1,
         protocol::AppId::parse("integration").unwrap(),
     );
     let tap = TapInterface {

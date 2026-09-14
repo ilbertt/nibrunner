@@ -291,11 +291,11 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
 
     page.metric(
         "nibrunner_slots",
-        "Slots on this host: each holds an app's ports, tap and guest address, and an app with none is refused.",
+        "Slots on this host: each holds an app's ports, tap and guest address, and an app with none is refused. The total is max_apps in config.toml.",
         "gauge",
     );
     page.value("nibrunner_slots", &[("of", "used")], scrape.slots_used);
-    page.value("nibrunner_slots", &[("of", "total")], nft_render::SLOT_COUNT);
+    page.value("nibrunner_slots", &[("of", "total")], scrape.slots_total);
 
     page.metric(
         "nibrunner_host_memory_available_bytes",
@@ -392,6 +392,7 @@ mod tests {
                 snapshot: &snapshot,
                 now_ms: 0,
                 slots_used: 7,
+                slots_total: 63,
                 memory_available_bytes: Some(1_000_000),
             },
         );
@@ -421,10 +422,10 @@ mod tests {
             "not written, no size"
         );
         assert!(page.contains("nibrunner_slots{of=\"used\"} 7\n"));
-        assert!(page.contains(&format!(
-            "nibrunner_slots{{of=\"total\"}} {}\n",
-            nft_render::SLOT_COUNT
-        )));
+        assert!(
+            page.contains("nibrunner_slots{of=\"total\"} 63\n"),
+            "the total is what the host is laid out for"
+        );
         assert!(page.contains("nibrunner_host_memory_available_bytes 1000000\n"));
         assert!(
             page.contains("nibrunner_instance_measured_timestamp_seconds{app=\"app-1\"} 1700000000.000\n")
@@ -445,6 +446,7 @@ mod tests {
                 snapshot: &snapshot,
                 now_ms: 0,
                 slots_used: 0,
+                slots_total: 1000,
                 memory_available_bytes: None,
             },
         );
