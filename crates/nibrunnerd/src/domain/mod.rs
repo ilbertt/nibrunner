@@ -7,6 +7,7 @@ pub mod meters;
 pub mod metrics;
 pub mod reconcile;
 pub mod report;
+pub mod restarts;
 pub mod store;
 pub mod usage;
 pub mod waker;

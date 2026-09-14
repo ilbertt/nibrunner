@@ -9,12 +9,13 @@ use nix::sys::signal::{SigSet, Signal};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{ForkResult, Gid, Pid, Uid};
+use protocol::{TenantExit, TenantRestart};
 
 use crate::ceiling::{self, Verdict, Watch};
 use crate::guest::log;
 use crate::guest::logs::Forwarder;
 use crate::guest::memory::{self, Ceiling};
-use crate::supervise::{backoff_ms, budget_resets, Outcome, SHUTDOWN_GRACE_MS};
+use crate::supervise::{Budget, Outcome, SHUTDOWN_GRACE_MS};
 
 pub(crate) use crate::supervise::Outcome as Ended;
 
@@ -51,7 +52,7 @@ fn signals_as_fd() -> Option<SignalFd> {
 }
 
 pub(crate) fn supervise(config: &InstanceConfig, ceiling: &Ceiling) -> Ended {
-    let mut restarts = 0u32;
+    let mut budget = Budget::default();
     let mut forwarder = Forwarder::new();
     let signals = signals_as_fd();
     loop {
@@ -71,26 +72,25 @@ pub(crate) fn supervise(config: &InstanceConfig, ceiling: &Ceiling) -> Ended {
                 stop(tenant);
                 return Outcome::ShutdownRequested;
             }
-            Watched::Exited { status, because } => {
+            Watched::Exited { exit, because } => {
                 let uptime_ms = started.elapsed().as_millis() as u64;
-                if budget_resets(config, uptime_ms) {
-                    restarts = 0;
-                }
-                if restarts >= config.max_restarts {
+                let Some(restart) = budget.exited(config, uptime_ms, exit, &because) else {
                     return Outcome::RestartBudgetExhausted;
-                }
-                let delay = backoff_ms(config, restarts);
-                restarts += 1;
-                log(&format!(
-                    "the tenant exited ({status}){because}; restart {restarts} of {} in {delay}ms",
-                    config.max_restarts
-                ));
-                if wait_for_signal(Duration::from_millis(u64::from(delay))) == Arrived::Shutdown {
+                };
+                announce(&restart, &mut forwarder);
+                if wait_for_signal(Duration::from_millis(restart.backoff_ms)) == Arrived::Shutdown {
                     return Outcome::ShutdownRequested;
                 }
             }
         }
     }
+}
+
+/// The restart, on the console and to the host. After the tenant's last output, which `watch`
+/// drained before handing back the exit, so the host reads it where it happened in the stream.
+fn announce(restart: &TenantRestart, forwarder: &mut Forwarder) {
+    log(restart.reason.as_str());
+    forwarder.restarted(restart);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +99,7 @@ enum Watched {
     /// `because` is what this runtime knows about the exit that the status does not say: empty,
     /// or a clause naming the memory ceiling.
     Exited {
-        status: i32,
+        exit: TenantExit,
         because: String,
     },
 }
@@ -123,7 +123,7 @@ fn watch(
         match wait_for_signal(Duration::ZERO) {
             Arrived::Shutdown => return Watched::ShutdownRequested,
             Arrived::ChildDied | Arrived::Nothing => {
-                if let Some(status) = reap_until(tenant) {
+                if let Some(exit) = reap_until(tenant) {
                     output.forward(forwarder);
                     let because = killed_for.take().unwrap_or_else(|| {
                         match (at_start, memory::read()) {
@@ -136,7 +136,7 @@ fn watch(
                             _ => String::new(),
                         }
                     });
-                    return Watched::Exited { status, because };
+                    return Watched::Exited { exit, because };
                 }
             }
         }
@@ -259,19 +259,19 @@ pub(crate) struct Tenant {
     output: TenantOutput,
 }
 
-fn reap_until(tenant: Pid) -> Option<i32> {
-    let mut tenant_status = None;
+fn reap_until(tenant: Pid) -> Option<TenantExit> {
+    let mut tenant_exit = None;
     loop {
         match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) | Err(_) => return tenant_status,
+            Ok(WaitStatus::StillAlive) | Err(_) => return tenant_exit,
             Ok(status) => {
-                let (pid, code) = match status {
-                    WaitStatus::Exited(pid, code) => (pid, code),
-                    WaitStatus::Signaled(pid, signal, _) => (pid, 128 + signal as i32),
+                let (pid, exit) = match status {
+                    WaitStatus::Exited(pid, code) => (pid, TenantExit::Code(code)),
+                    WaitStatus::Signaled(pid, signal, _) => (pid, TenantExit::Signal(signal as i32)),
                     _ => continue,
                 };
                 if pid == tenant {
-                    tenant_status = Some(code);
+                    tenant_exit = Some(exit);
                 }
             }
         }
@@ -488,7 +488,7 @@ mod tests {
         assert_eq!(
             ended,
             Watched::Exited {
-                status: 0,
+                exit: TenantExit::Code(0),
                 because: String::new()
             }
         );
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(
             ended,
             Watched::Exited {
-                status: 3,
+                exit: TenantExit::Code(3),
                 because: String::new()
             }
         );
@@ -520,6 +520,64 @@ mod tests {
         let frames = frames_in(&sink);
         assert_eq!(payload_of(&frames, TenantLogStream::Stdout), b"going\n");
         assert_eq!(payload_of(&frames, TenantLogStream::Stderr), b"gone\n");
+    }
+
+    #[test]
+    fn a_tenant_the_kernel_killed_is_reaped_with_the_signal_rather_than_a_code() {
+        let _one = one_tenant_at_a_time();
+        let (_dir, sink) = sink();
+        let tenant = tenant_that(|_, _| loop {
+            unsafe { libc::pause() };
+        });
+        let _ = nix::sys::signal::kill(tenant.pid, Signal::SIGKILL);
+        let (ended, _) = watched(tenant, &sink);
+        assert_eq!(
+            ended,
+            Watched::Exited {
+                exit: TenantExit::Signal(9),
+                because: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn a_restart_is_sent_to_the_host_after_the_last_of_what_the_tenant_said() {
+        let _one = one_tenant_at_a_time();
+        let (_dir, sink) = sink();
+        let tenant = tenant_that(|stdout, stderr| {
+            say(stdout, b"going\n");
+            say(stderr, b"out of memory\n");
+            exit(3)
+        });
+        block_signals();
+        let mut forwarder = forwarder_into(&sink);
+        let signals = signals_as_fd();
+        let Watched::Exited { exit, because } = watch(
+            tenant.pid,
+            tenant.output,
+            &mut forwarder,
+            signals.as_ref(),
+            1 << 30,
+        ) else {
+            panic!("the tenant exited");
+        };
+        let restart = Budget::default()
+            .exited(&crate::supervise::config(|_| {}), 0, exit, &because)
+            .unwrap();
+
+        announce(&restart, &mut forwarder);
+
+        let frames = frames_in(&sink);
+        assert_eq!(frames.last(), Some(&GuestLogFrame::Restart(restart.clone())));
+        assert_eq!(
+            payload_of(&frames[..frames.len() - 1], TenantLogStream::Stderr),
+            b"out of memory\n"
+        );
+        assert_eq!(restart.exit, TenantExit::Code(3));
+        assert_eq!(
+            restart.reason.as_str(),
+            "the tenant exited (3); restart 1 of 5 in 500ms"
+        );
     }
 
     #[test]

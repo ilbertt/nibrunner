@@ -305,6 +305,16 @@ pub struct HostDesiredState {
 
 pub const MAX_DEVICE_PATH_LENGTH: usize = 256;
 
+/// A tenant restart as the host heard of it: what the guest said, and when it said it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ReportedRestart {
+    pub at: Timestamp,
+    #[serde(flatten)]
+    pub restart: TenantRestart,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -319,7 +329,12 @@ pub struct ReportedInstance {
     /// The layers the running microVM was booted from, bottom first. Empty until one has been.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layer_digests: Vec<Sha256Digest>,
+    /// Times the supervisor inside the guest has restarted the tenant since this host last booted
+    /// the app afresh. A restore from a snapshot keeps the count; a cold boot starts it over.
     pub restart_count: u32,
+    /// The last of those restarts. Absent until there has been one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_restart: Option<ReportedRestart>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

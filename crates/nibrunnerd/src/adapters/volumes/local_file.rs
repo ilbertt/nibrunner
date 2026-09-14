@@ -201,9 +201,11 @@ impl VolumeBackend for LocalFileVolumes {
             .filter_map(|entry| {
                 let volume_id = VolumeId::parse(entry.file_name().to_string_lossy().as_ref()).ok()?;
                 let size_bytes = Self::size_of(&entry.path())?;
+                let formatted = self.is_formatted(&volume_id).unwrap_or(false);
                 Some(ObservedBacking {
                     device_path: Some(entry.path().display().to_string()),
                     attached: true,
+                    formatted,
                     size_bytes,
                     storage_prefix: self.storage_prefix.clone(),
                     volume_id,
@@ -235,12 +237,7 @@ mod tests {
 
     /// What the real tool leaves: a superblock, which is what "formatted" is read from.
     fn formatted(request: &CommandRequest) -> Result<CommandResult, crate::ports::CommandError> {
-        let path = request.command.last().expect("a path to format");
-        let mut image = std::fs::read(path).unwrap_or_default();
-        image.resize(4096, 0);
-        image[SUPERBLOCK_MAGIC_OFFSET as usize..SUPERBLOCK_MAGIC_OFFSET as usize + 2]
-            .copy_from_slice(&0xef53u16.to_le_bytes());
-        std::fs::write(path, image).unwrap();
+        mocks::lay_superblock(request.command.last().expect("a path to format"));
         Ok(CommandResult::succeeded())
     }
 
@@ -390,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn what_the_host_holds_is_observed_from_the_disk_rather_than_remembered() {
         let directory = tempfile::tempdir().unwrap();
-        let volumes = backend(directory.path(), mocks::commands_succeeding().0);
+        let volumes = backend(directory.path(), mocks::commands_answering(formatted).0);
         assert!(volumes.observe(&Default::default()).await.is_empty());
         volumes.provision(&desired_volume(|_| {})).await.unwrap();
         std::fs::write(directory.path().join("not a volume"), b"").unwrap();
@@ -398,6 +395,7 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].volume_id, volume_id());
         assert!(observed[0].attached);
+        assert!(observed[0].formatted);
         assert_eq!(observed[0].size_bytes, VOLUME_SIZE_BYTES);
 
         volumes.teardown(&volume_id(), &app_id()).await.unwrap();
@@ -407,6 +405,28 @@ mod tests {
             volumes.attach(&volume_id(), &app_id()).await,
             Err(VolumeError::NotHere { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn a_file_with_no_filesystem_on_it_is_observed_attached_but_not_formatted() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_answering(formatted);
+        let volumes = backend(directory.path(), commands);
+        // The store holds the archive; the document names a digest of something else, so the
+        // file is sized but never formatted.
+        let contents = initial_contents(&seed::gzipped(&seed::archive()), "/app/data");
+        let seeded = desired_volume(|volume| volume.initial_contents = Some(contents));
+        volumes.provision(&seeded).await.unwrap_err();
+        assert!(log.calls().is_empty());
+
+        let observed = volumes.observe(&Default::default()).await;
+        assert_eq!(observed.len(), 1);
+        assert!(observed[0].attached, "the file is there to be read");
+        assert!(!observed[0].formatted, "and carries no filesystem");
+        assert_eq!(observed[0].size_bytes, VOLUME_SIZE_BYTES);
+
+        volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        assert!(volumes.observe(&Default::default()).await[0].formatted);
     }
 
     #[tokio::test]

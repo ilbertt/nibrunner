@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use protocol::{AppId, DesiredInstance, DesiredInstanceState, InstanceState, StateMessage};
+use protocol::{
+    AppId, DesiredInstance, DesiredInstanceState, InstanceState, StateMessage, VolumeId, VolumeState,
+};
 
-use crate::adapters::vm::{VmStatus, UNKNOWN_VM};
+use crate::adapters::vm::{VmExit, VmStatus, UNKNOWN_VM};
 use crate::clock::{now_ms, now_timestamp};
 use crate::domain::activation::SleepReason;
 use crate::domain::backoff::{is_ready_to_retry, next_attempt_window, BackoffPolicy, NO_START_ATTEMPTS};
@@ -60,6 +62,7 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
             .collect(),
         health_check: desired.config.health_check.clone(),
         resources: desired.config.resources,
+        restart_policy: desired.config.restart_policy.clone(),
         desired_running: true,
         on_request: desired.desired_state == DesiredInstanceState::OnRequest,
     }
@@ -148,10 +151,12 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
     host.state.mark_snapshotting(app_id, false).await;
 }
 
-fn restarted(existing: Option<&InstanceRecord>) -> bool {
-    existing.is_some_and(|record| !record.stop_requested)
-}
-
+// An attempt is a boot, whether the last one failed on the way up or came up and exited later,
+// and the window is the policy's: a backoff between attempts, a budget of them, and a reset after
+// `resetAfterMs`. A guest that exited keeps its window unless it stayed up for that long, in
+// which case the status loop gave the window back when it saw the exit, and the boot after it is
+// a first boot again.
+//
 // A start is refused for two very different reasons, and an instance waiting out its backoff read
 // exactly like one that is never starting again: failed, with the message from the last time it
 // worked. Only one of them is something an operator can do anything about.
@@ -178,8 +183,8 @@ fn start_refused(
 }
 
 // The attempts are what the decision is made on, and restartCount is not that number — it counts
-// the starts that worked. So the sentence carries both, because an instance out of restarts is
-// otherwise indistinguishable from one that has never been restarted at all.
+// the tenant's restarts inside the guest. So the sentence carries both, because an instance out
+// of restarts is otherwise indistinguishable from one that has never been restarted at all.
 async fn say_it_is_out_of_restarts(host: &Host, app_id: &AppId, attempted: u32, allowed: u32) {
     let said = StateMessage::new(format!(
         "out of restarts: {attempted} starts attempted against a budget of {allowed},          and this instance will not be started again until it is deployed afresh"
@@ -203,6 +208,23 @@ async fn say(host: &Host, app_id: &AppId, said: StateMessage) -> bool {
         })
         .await;
     news
+}
+
+/// Why the volume this instance would boot onto cannot be booted onto, as the pass over the
+/// volumes just reported it; nothing for a volume that is ready, or that this host has no report
+/// of yet, which the attach below answers for itself.
+async fn volume_refusal(host: &Host, volume_id: &VolumeId) -> Option<StateMessage> {
+    host.state
+        .snapshot()
+        .await
+        .volume_reports
+        .into_iter()
+        .find(|report| &report.volume_id == volume_id && report.state == VolumeState::Failed)
+        .map(|report| {
+            report
+                .message
+                .unwrap_or_else(|| StateMessage::new(format!("{volume_id} could not be made ready")))
+        })
 }
 
 pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
@@ -284,6 +306,22 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         ),
     };
     attempted.adopt(record_fields(desired, &slot));
+    attempted.stop_requested = false;
+
+    // A volume the pass over the volumes could not make ready (a seed the document names wrongly
+    // leaves it attached but bare) is nothing to boot onto: the guest would only die failing to
+    // mount it. The fault is the volume's, so no start attempt is spent on it, and the app is
+    // started the pass the volume is put right.
+    if let Some(refusal) = volume_refusal(host, &desired.volume_id).await {
+        attempted.state = InstanceState::Failed;
+        host.state.put_record(attempted).await;
+        if say(host, &desired.app_id, refusal.clone()).await {
+            host.metrics.health.failed(&desired.app_id, Failure::Volume);
+            tracing::error!(app_id = %desired.app_id, reason = refusal.as_str(), "instance start failed");
+        }
+        return;
+    }
+
     attempted.start_attempts = next_attempt_window(
         &existing
             .as_ref()
@@ -292,7 +330,6 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         now,
         desired.config.restart_policy.reset_after_ms,
     );
-    attempted.stop_requested = false;
     host.state.put_record(attempted.clone()).await;
     host.state.mark_active(&desired.app_id, now).await;
 
@@ -346,7 +383,10 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                     record.started_at = Some(started_at);
                     record.state = InstanceState::Starting;
                     record.health = initial_tracker();
-                    record.restart_count += u32::from(restarted(existing.as_ref()));
+                    // A fresh guest starts its tenant for the first time: what the last one
+                    // counted was that guest's, and the host's own boots are the attempts.
+                    record.restart_count = 0;
+                    record.last_restart = None;
                     record.message = None;
                 })
                 .await;
@@ -580,14 +620,29 @@ async fn settle(
         _ => {}
     }
     let message = verdict(host, state, &status, &health, &record).await;
+    let exited = state == InstanceState::Failed && !status.active;
+    // A guest that stayed up for the policy's resetAfterMs has earned its app a fresh window: the
+    // boot after it owes no backoff and has the whole budget. One that exited sooner keeps its
+    // window, and the boot after it is the next attempt in it.
+    let stayed_up = exited
+        && record
+            .started_at
+            .as_ref()
+            .is_some_and(|at| now_ms - at.epoch_ms() >= record.restart_policy.reset_after_ms as i64);
     host.state
         .update_record(&record.app_id, |latest| {
             latest.health = health;
             latest.state = state;
-            if let Some(code) = status.exit_code {
-                if !status.active {
-                    latest.last_exit_code = Some(code);
-                }
+            if let Some(exit) = status.exit.filter(|_| !status.active) {
+                // A microVM killed under a signal has no exit code, and the code of an earlier
+                // exit is not this one's.
+                latest.last_exit_code = match exit {
+                    VmExit::Code(code) => Some(code),
+                    VmExit::Signal(_) => None,
+                };
+            }
+            if stayed_up {
+                latest.start_attempts = NO_START_ATTEMPTS;
             }
             latest.message = message;
         })
@@ -883,15 +938,6 @@ mod tests {
         failures
     }
 
-    #[test]
-    fn only_a_boot_nobody_asked_for_counts_as_a_restart() {
-        assert!(!restarted(None));
-        assert!(restarted(Some(&instance_record(|_| {}))));
-        assert!(!restarted(Some(&instance_record(|record| record
-            .stop_requested =
-            true))));
-    }
-
     fn spent_window() -> crate::domain::backoff::AttemptWindow {
         crate::domain::backoff::AttemptWindow {
             attempts: 3,
@@ -1031,6 +1077,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_app_whose_volume_has_no_filesystem_is_not_booted_and_says_why_the_volume_has_none() {
+        let host = test_host().await;
+        // What the pass over the volumes leaves when a seed is refused: a report that says failed,
+        // with the reason.
+        let refusal = StateMessage::new("the initial contents could not be laid out: wrong digest");
+        host.state
+            .modify(|snapshot| {
+                snapshot.volume_reports = vec![reported_volume(|report| {
+                    report.state = protocol::VolumeState::Failed;
+                    report.message = Some(refusal.clone());
+                })]
+            })
+            .await;
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        assert!(
+            host.vms.calls().is_empty(),
+            "nothing was booted onto a bare volume"
+        );
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.message.as_ref(), Some(&refusal));
+        assert_eq!(record.deployment_id, deployment_id());
+        assert!(record.started_at.is_none());
+        assert_eq!(
+            record.start_attempts, NO_START_ATTEMPTS,
+            "a volume that is not ready is not the app's failure to pay for"
+        );
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("volume", 1)])
+        );
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("volume", 1)]),
+            "said once, counted once, however many passes say it again"
+        );
+
+        // The status loop reads the record as it is left, not as an app asleep and well.
+        refresh_states(host.arc()).await;
+        let settled = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(settled.state, InstanceState::Failed);
+        assert_eq!(settled.message.as_ref(), Some(&refusal));
+    }
+
+    #[tokio::test]
+    async fn a_volume_reported_ready_again_lets_the_app_that_was_refused_for_it_start() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Failed;
+                record.message = Some(StateMessage::new("the initial contents could not be laid out"));
+            }))
+            .await;
+        host.state
+            .modify(|snapshot| snapshot.volume_reports = vec![reported_volume(|_| {})])
+            .await;
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Boot]);
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Starting);
+        assert_eq!(record.message, None);
+    }
+
+    #[tokio::test]
     async fn an_on_request_first_start_that_failed_stays_failed_through_the_status_loop() {
         let mut host = test_host().await;
         refuse_artifacts(&mut host, "the object store 403'd the executable layer");
@@ -1061,12 +1178,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_boot_over_a_microvm_nobody_asked_to_stop_counts_as_a_restart() {
+    async fn a_cold_boot_starts_the_count_of_the_guests_restarts_over() {
         let host = test_host().await;
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.state
             .put_record(instance_record(|record| {
-                record.restart_count = 1;
+                record.restart_count = 5;
+                record.last_restart = Some(reported_restart(|_| {}));
                 record.stop_requested = false;
             }))
             .await;
@@ -1075,26 +1193,34 @@ mod tests {
 
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Starting);
-        assert_eq!(record.restart_count, 2);
+        assert_eq!(record.restart_count, 0);
+        assert_eq!(record.last_restart, None);
         assert!(record.started_at.is_some());
         assert!(!record.stop_requested);
-        assert_eq!(record.start_attempts.attempts, 1);
+        assert_eq!(
+            record.start_attempts.attempts, 1,
+            "the host's own boots are counted apart"
+        );
     }
 
     #[tokio::test]
-    async fn a_boot_after_a_stop_that_was_asked_for_does_not() {
-        let host = test_host().await;
+    async fn a_boot_that_failed_keeps_what_the_last_guest_counted() {
+        let mut host = test_host().await;
+        refuse_artifacts(&mut host, "the object store is down");
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.state
             .put_record(instance_record(|record| {
-                record.restart_count = 1;
-                record.stop_requested = true;
+                record.restart_count = 5;
+                record.last_restart = Some(reported_restart(|_| {}));
             }))
             .await;
 
         start_instance(&host, &desired_instance(|_| {})).await;
 
-        assert_eq!(host.state.record(&app_id()).await.unwrap().restart_count, 1);
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.restart_count, 5);
+        assert_eq!(record.last_restart, Some(reported_restart(|_| {})));
     }
 
     #[tokio::test]
@@ -1212,7 +1338,7 @@ mod tests {
             active: false,
             failed: false,
             started_this_boot: true,
-            exit_code: Some(137),
+            exit: Some(VmExit::Code(137)),
         });
         host.state
             .put_record(instance_record(|record| record.started_at = Some(observed_at())))
@@ -1238,6 +1364,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_microvm_killed_from_outside_says_which_signal_and_leaves_no_code_behind() {
+        let host = test_host().await;
+        host.vms.set_status(VmStatus {
+            loaded: true,
+            active: false,
+            failed: true,
+            started_this_boot: true,
+            exit: Some(VmExit::Signal(libc::SIGKILL)),
+        });
+        host.state
+            .put_record(instance_record(|record| {
+                record.started_at = Some(observed_at());
+                // The code of an earlier exit, which is not this one's.
+                record.last_exit_code = Some(137);
+            }))
+            .await;
+
+        refresh_states(host.arc()).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.last_exit_code, None);
+        assert_eq!(
+            record.message.unwrap().as_str(),
+            "the microVM was killed by signal 9 (SIGKILL)"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_guest_that_stayed_up_for_reset_after_ms_gives_its_attempts_back_when_it_exits() {
+        let reset_after_ms = protocol::DEFAULT_RESTART_POLICY.reset_after_ms as i64;
+        let exited_after = |uptime_ms: i64| async move {
+            let host = test_host().await;
+            host.vms.set_status(VmStatus {
+                loaded: true,
+                active: false,
+                failed: false,
+                started_this_boot: true,
+                exit: Some(VmExit::Code(1)),
+            });
+            host.state
+                .put_record(instance_record(|record| {
+                    record.started_at = Some(protocol::Timestamp::from_epoch_ms(now_ms() - uptime_ms));
+                    record.start_attempts = spent_window();
+                }))
+                .await;
+            refresh_states(host.arc()).await;
+            host.state.record(&app_id()).await.unwrap()
+        };
+
+        let short_lived = exited_after(reset_after_ms - 1_000).await;
+        assert_eq!(short_lived.state, InstanceState::Failed);
+        assert_eq!(short_lived.start_attempts.attempts, spent_window().attempts);
+
+        let long_lived = exited_after(reset_after_ms).await;
+        assert_eq!(long_lived.state, InstanceState::Failed);
+        assert_eq!(long_lived.start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[tokio::test]
     async fn a_probe_is_counted_on_the_app_with_what_it_found() {
         let host = test_host().await;
         host.vms.set_status(VmStatus {
@@ -1245,7 +1431,7 @@ mod tests {
             active: true,
             failed: false,
             started_this_boot: true,
-            exit_code: None,
+            exit: None,
         });
         host.state
             .put_record(instance_record(|record| {
@@ -1271,7 +1457,7 @@ mod tests {
             active: true,
             failed: false,
             started_this_boot: true,
-            exit_code: None,
+            exit: None,
         }
     }
 

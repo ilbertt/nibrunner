@@ -362,7 +362,7 @@ impl Vmm for VmManager {
 
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String> {
         let console = std::fs::read_to_string(self.processes.console_path(app_id)).ok()?;
-        guest_contract::control::last_guest_line(&console)
+        guest_contract::control::exit_reason(&console)
     }
 
     fn working_dir(&self, app_id: &AppId) -> PathBuf {
@@ -651,28 +651,33 @@ mod tests {
         );
     }
 
+    fn write_console(fixture: &Fixture, console: &str) {
+        let path = fixture.manager.processes.console_path(&app_id());
+        make_directory(path.parent().unwrap(), 0o700).unwrap();
+        std::fs::write(path, console).unwrap();
+    }
+
     #[tokio::test]
-    async fn the_guest_verdict_is_the_last_thing_its_init_said() {
+    async fn the_guest_verdict_is_what_its_init_said_before_it_shut_the_guest_down() {
         let fixture = fixture();
-        make_directory(
-            fixture
-                .manager
-                .processes
-                .console_path(&app_id())
-                .parent()
-                .unwrap(),
-            0o700,
-        )
-        .unwrap();
-        std::fs::write(
-            fixture.manager.processes.console_path(&app_id()),
+        write_console(
+            &fixture,
             "[nibrun] starting the tenant\n[nibrun] the tenant has stopped; shutting the guest down\n[   15.7] reboot: Restarting system\n",
-        )
-        .unwrap();
+        );
         assert_eq!(
             fixture.manager.guest_verdict(&app_id()).await.as_deref(),
             Some("the tenant has stopped; shutting the guest down")
         );
+    }
+
+    #[tokio::test]
+    async fn a_microvm_killed_from_outside_has_no_verdict_whatever_its_init_was_saying() {
+        let fixture = fixture();
+        write_console(
+            &fixture,
+            "[nibrun] guest runtime starting\n[nibrun] starting /app/probe as uid 65534 in /app, with 198 MiB to spend\n",
+        );
+        assert_eq!(fixture.manager.guest_verdict(&app_id()).await, None);
     }
 
     #[tokio::test]
@@ -769,21 +774,10 @@ mod tests {
     #[tokio::test]
     async fn a_console_that_holds_nothing_the_guest_said_gives_no_verdict() {
         let fixture = fixture();
-        make_directory(
-            fixture
-                .manager
-                .processes
-                .console_path(&app_id())
-                .parent()
-                .unwrap(),
-            0o700,
-        )
-        .unwrap();
-        std::fs::write(
-            fixture.manager.processes.console_path(&app_id()),
+        write_console(
+            &fixture,
             "[    0.0] Linux version 6.1.180\n[   15.7] reboot: Restarting system\n",
-        )
-        .unwrap();
+        );
         assert_eq!(fixture.manager.guest_verdict(&app_id()).await, None);
     }
 

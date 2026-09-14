@@ -51,6 +51,32 @@ pub fn commands_succeeding() -> (Arc<MockCommandRunner>, CommandLog) {
     commands_answering(|_| Ok(CommandResult::succeeded()))
 }
 
+/// Succeeds at everything, and leaves behind the one thing the real `mke2fs` does that anything
+/// here reads back: an ext superblock on the device it was pointed at.
+pub fn commands_formatting() -> (Arc<MockCommandRunner>, CommandLog) {
+    commands_answering(|request| {
+        if request.executable() == "mke2fs" {
+            lay_superblock(request.command.last().expect("a device to format"));
+        }
+        Ok(CommandResult::succeeded())
+    })
+}
+
+/// The ext magic where a superblock keeps it, which is all "formatted" is read from.
+pub fn lay_superblock(device_path: &str) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut device = std::fs::OpenOptions::new()
+        .write(true)
+        .open(device_path)
+        .expect("the device to format");
+    device
+        .seek(SeekFrom::Start(crate::adapters::volumes::SUPERBLOCK_MAGIC_OFFSET))
+        .expect("the superblock's offset");
+    device
+        .write_all(&0xef53u16.to_le_bytes())
+        .expect("the magic to be written");
+}
+
 pub fn commands_answering(
     answer: impl Fn(&CommandRequest) -> Result<CommandResult, CommandError> + Send + Sync + 'static,
 ) -> (Arc<MockCommandRunner>, CommandLog) {
@@ -305,8 +331,14 @@ impl Vmm for HeldSleeps {
 
 pub fn artifacts_holding(bytes: impl Into<Vec<u8>>) -> Arc<MockArtifactStore> {
     let bytes = bytes.into();
+    artifacts_answering(move |_| Ok(bytes.clone()))
+}
+
+pub fn artifacts_answering(
+    answer: impl Fn(&ObjectKey) -> Result<Vec<u8>, ArtifactError> + Send + Sync + 'static,
+) -> Arc<MockArtifactStore> {
     let mut artifacts = MockArtifactStore::new();
-    artifacts.expect_read().returning(move |_| Ok(bytes.clone()));
+    artifacts.expect_read().returning(move |key| answer(key));
     Arc::new(artifacts)
 }
 

@@ -57,6 +57,7 @@ async fn sync_desired(host: &Host, desired: &HostDesiredState) {
                 record.hostnames = wanted.hostnames.clone();
                 record.health_check = wanted.config.health_check.clone();
                 record.resources = wanted.config.resources;
+                record.restart_policy = wanted.config.restart_policy.clone();
                 record.desired_running = wanted.desired_state != DesiredInstanceState::Stopped;
                 record.on_request = wanted.desired_state == DesiredInstanceState::OnRequest;
                 record.http_port = wanted.config.http_port;
@@ -145,7 +146,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
     let stops = apply_stops(host, &plan);
     tokio::join!(prefetch, stops);
 
-    volumes::apply_volumes(host, &plan, &observed, desired).await;
+    volumes::apply_volumes(host, &plan, &observed, desired, trigger).await;
     apply_sleeps(host, &plan).await;
     network::apply_activators(host).await;
     network::apply_network(host).await;
@@ -174,7 +175,7 @@ pub async fn refresh(host: &Arc<Host>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::vm::VmStatus;
+    use crate::adapters::vm::{VmExit, VmStatus};
     use crate::ports::{VmCall, VmError};
     use crate::test_support::*;
     use protocol::InstanceState;
@@ -185,7 +186,7 @@ mod tests {
             active: true,
             failed: false,
             started_this_boot: true,
-            exit_code: None,
+            exit: None,
         }
     }
 
@@ -195,7 +196,7 @@ mod tests {
             active: false,
             failed: false,
             started_this_boot: true,
-            exit_code: Some(0),
+            exit: Some(VmExit::Code(0)),
         }
     }
 
@@ -205,7 +206,7 @@ mod tests {
             active: false,
             failed: true,
             started_this_boot: false,
-            exit_code: None,
+            exit: None,
         }
     }
 
@@ -278,14 +279,17 @@ mod tests {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
                 record.restart_count = 4;
+                record.last_restart = Some(reported_restart(|_| {}));
             }))
             .await;
 
         let on_request =
             desired_instance(|instance| instance.desired_state = DesiredInstanceState::OnRequest);
-        instances::resume_instance(&host, &on_request).await.unwrap();
+        let outcome = instances::resume_instance(&host, &on_request).await.unwrap();
+        assert_eq!(outcome, crate::ports::WakeOutcome::Restored);
         let record = host.state.record(&app_id()).await.unwrap();
-        assert_eq!(record.restart_count, 4);
+        assert_eq!(record.restart_count, 4, "the guest that counted them is back");
+        assert_eq!(record.last_restart, Some(reported_restart(|_| {})));
         assert_eq!(record.start_attempts.attempts, 0);
     }
 
@@ -479,6 +483,100 @@ mod tests {
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Failed);
         assert!(record.message.unwrap().as_str().contains("does not serve"));
+    }
+
+    #[tokio::test]
+    async fn a_seed_the_document_names_wrongly_keeps_the_app_down_until_the_document_is_put_right() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let archive = crate::adapters::volumes::initial_contents::tests::archive();
+        let host = test_host_seeding(archive.clone()).await;
+        let seeded_with = |contents: protocol::InitialContents| {
+            desired_state(|state| {
+                state.volumes = vec![desired_volume(|volume| volume.initial_contents = Some(contents))];
+                state.instances = vec![desired_instance(|instance| {
+                    instance.hostnames = vec![app_hostname()]
+                })];
+            })
+        };
+        // The store holds the archive; the document names a digest of something else.
+        let wrong = seeded_with(initial_contents(b"not what the store holds", "/app/data"));
+
+        reconcile(host.arc(), &wrong, Trigger::Change).await;
+        reconcile(host.arc(), &wrong, Trigger::Change).await;
+
+        assert!(
+            host.vms.calls().is_empty(),
+            "nothing was booted onto a bare volume"
+        );
+        let snapshot = host.state.snapshot().await;
+        let volume = &snapshot.volume_reports[0];
+        assert_eq!(volume.state, protocol::VolumeState::Failed);
+        let reason = volume.message.clone().expect("the refusal");
+        assert!(reason.as_str().contains("hashes to"), "{}", reason.as_str());
+        let record = &snapshot.records[&app_id()];
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(
+            record.message.as_ref(),
+            Some(&reason),
+            "the app carries the volume's reason"
+        );
+        assert_eq!(record.start_attempts, crate::domain::backoff::NO_START_ATTEMPTS);
+        assert!(
+            !host.commands.executables().contains(&"mke2fs".to_string()),
+            "a seed that was refused formats nothing"
+        );
+        let provisions_failed = |page: &str| {
+            page.lines()
+                .find(|line| {
+                    line.starts_with(
+                        "nibrunner_storage_operation_seconds_count{operation=\"volume_provision\",outcome=\"failed\"}",
+                    )
+                })
+                .map(str::to_string)
+        };
+        let after_two_changes = provisions_failed(&metrics_page(&host).await);
+        assert!(
+            after_two_changes.as_deref().unwrap_or("").ends_with(" 2"),
+            "{after_two_changes:?}"
+        );
+
+        // The timer does not fetch the seed again against a document that still names the wrong
+        // thing; the volume and the app stay failed for the reason they were.
+        reconcile(host.arc(), &wrong, Trigger::Tick).await;
+
+        assert_eq!(provisions_failed(&metrics_page(&host).await), after_two_changes);
+        assert!(host.vms.calls().is_empty());
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.volume_reports[0].state, protocol::VolumeState::Failed);
+        assert_eq!(snapshot.volume_reports[0].message, Some(reason.clone()));
+        assert_eq!(snapshot.records[&app_id()].state, InstanceState::Failed);
+        assert_eq!(snapshot.records[&app_id()].message, Some(reason));
+
+        reconcile(
+            host.arc(),
+            &seeded_with(initial_contents(&archive, "/app/data")),
+            Trigger::Change,
+        )
+        .await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.volume_reports[0].state, protocol::VolumeState::Ready);
+        assert_eq!(snapshot.volume_reports[0].message, None);
+        let record = &snapshot.records[&app_id()];
+        assert_eq!(record.state, InstanceState::Starting);
+        assert_eq!(record.message, None);
+        let formats: Vec<_> = host
+            .commands
+            .commands()
+            .into_iter()
+            .filter(|command| command[0] == "mke2fs")
+            .collect();
+        assert_eq!(formats.len(), 1);
+        assert!(
+            formats[0].contains(&"-d".to_string()),
+            "the volume was formatted holding the seed: {formats:?}"
+        );
     }
 
     #[tokio::test]
@@ -821,9 +919,178 @@ mod tests {
 
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Failed);
-        assert_eq!(
-            record.message.unwrap().as_str(),
-            "the microVM stopped without being asked to"
-        );
+        assert_eq!(record.message.unwrap().as_str(), "the microVM exited");
+    }
+
+    mod a_running_app_whose_guest_exited {
+        use super::*;
+        use crate::domain::backoff::AttemptWindow;
+
+        const A_MINUTE_AGO_MS: i64 = 60_000;
+
+        fn spent() -> AttemptWindow {
+            AttemptWindow {
+                attempts: protocol::DEFAULT_RESTART_POLICY.max_restarts + 1,
+                last_attempt_at_ms: Some(crate::clock::now_ms()),
+            }
+        }
+
+        async fn exited_after(host: &TestHost, uptime_ms: i64, window: AttemptWindow) {
+            host.vms.set_status(stopped_vm());
+            host.state
+                .put_record(instance_record(|record| {
+                    record.started_at = Some(protocol::Timestamp::from_epoch_ms(
+                        crate::clock::now_ms() - uptime_ms,
+                    ));
+                    record.start_attempts = window;
+                }))
+                .await;
+            refresh(host.arc()).await;
+            assert_eq!(
+                host.state.record(&app_id()).await.unwrap().state,
+                InstanceState::Failed
+            );
+        }
+
+        #[tokio::test]
+        async fn is_booted_again_once_its_backoff_is_done_and_the_boot_counts_as_an_attempt() {
+            let _serial = ONE_HOST_AT_A_TIME.lock().await;
+            let host = test_host().await;
+            reconcile(host.arc(), &running_app(), Trigger::Change).await;
+            assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
+            // Ten seconds of running, in which the guest restarted its tenant twice, then the
+            // guest went away: past the first backoff, short of the reset.
+            let booted_at = crate::clock::now_ms() - 10_000;
+            host.state
+                .update_record(&app_id(), |record| {
+                    record.started_at = Some(protocol::Timestamp::from_epoch_ms(booted_at));
+                    record.start_attempts.last_attempt_at_ms = Some(booted_at);
+                    record.restart_count = 2;
+                    record.last_restart = Some(reported_restart(|_| {}));
+                })
+                .await;
+            host.vms.set_status(stopped_vm());
+            refresh(host.arc()).await;
+            assert_eq!(
+                host.state.record(&app_id()).await.unwrap().state,
+                InstanceState::Failed
+            );
+
+            reconcile(host.arc(), &running_app(), Trigger::Tick).await;
+
+            assert_eq!(host.vms.calls(), vec![VmCall::Boot, VmCall::Boot]);
+            let record = host.state.record(&app_id()).await.unwrap();
+            assert_eq!(record.state, InstanceState::Starting);
+            assert_eq!(
+                record.start_attempts.attempts, 2,
+                "the host's own boots are the attempts"
+            );
+            // A cold boot is a fresh guest, and what the last one counted was that guest's.
+            assert_eq!(record.restart_count, 0);
+            assert_eq!(record.last_restart, None);
+            assert_eq!(record.message, None);
+        }
+
+        #[tokio::test]
+        async fn is_left_down_while_its_backoff_still_has_time_to_run() {
+            let _serial = ONE_HOST_AT_A_TIME.lock().await;
+            let host = test_host().await;
+            host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+            exited_after(
+                &host,
+                100,
+                AttemptWindow {
+                    attempts: 3,
+                    last_attempt_at_ms: Some(crate::clock::now_ms() - 100),
+                },
+            )
+            .await;
+
+            reconcile(host.arc(), &running_app(), Trigger::Tick).await;
+
+            assert!(host.vms.calls().is_empty(), "{:?}", host.vms.calls());
+            let record = host.state.record(&app_id()).await.unwrap();
+            assert_eq!(record.state, InstanceState::Failed);
+            assert_eq!(record.start_attempts.attempts, 3);
+            assert!(
+                record.message.unwrap().as_str().contains("the microVM exited"),
+                "what happened to it is kept while it waits"
+            );
+        }
+
+        #[tokio::test]
+        async fn that_spent_its_budget_without_staying_up_is_out_of_restarts() {
+            let _serial = ONE_HOST_AT_A_TIME.lock().await;
+            let host = test_host().await;
+            host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+            exited_after(&host, 10_000, spent()).await;
+
+            reconcile(host.arc(), &running_app(), Trigger::Tick).await;
+            reconcile(host.arc(), &running_app(), Trigger::Tick).await;
+
+            assert!(host.vms.calls().is_empty(), "{:?}", host.vms.calls());
+            let record = host.state.record(&app_id()).await.unwrap();
+            assert_eq!(record.state, InstanceState::Failed);
+            let said = record.message.unwrap();
+            assert!(said.as_str().contains("out of restarts"), "{}", said.as_str());
+            assert!(
+                said.as_str().contains("until it is deployed afresh"),
+                "{}",
+                said.as_str()
+            );
+            // One exit, and one running out of restarts: said once, counted once, however many
+            // passes say it again.
+            let [_, _, _, _, _, exited, _, out_of_restarts] = host.metrics.health.of(&app_id()).failures;
+            assert_eq!((exited, out_of_restarts), (1, 1));
+        }
+
+        #[tokio::test]
+        async fn that_stayed_up_past_reset_after_ms_starts_a_fresh_window_however_spent_the_old_one() {
+            let _serial = ONE_HOST_AT_A_TIME.lock().await;
+            let host = test_host().await;
+            host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+            let reset_after_ms = protocol::DEFAULT_RESTART_POLICY.reset_after_ms as i64;
+            exited_after(&host, reset_after_ms + A_MINUTE_AGO_MS, spent()).await;
+            assert_eq!(
+                host.state.record(&app_id()).await.unwrap().start_attempts,
+                crate::domain::backoff::NO_START_ATTEMPTS,
+                "the window was given back the moment the exit was seen"
+            );
+
+            reconcile(host.arc(), &running_app(), Trigger::Tick).await;
+
+            assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
+            let record = host.state.record(&app_id()).await.unwrap();
+            assert_eq!(record.state, InstanceState::Starting);
+            assert_eq!(record.start_attempts.attempts, 1);
+        }
+
+        #[tokio::test]
+        async fn that_was_on_request_is_left_for_the_next_request() {
+            let _serial = ONE_HOST_AT_A_TIME.lock().await;
+            let host = test_host().await;
+            host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+            host.vms.set_status(stopped_vm());
+            host.state
+                .put_record(instance_record(|record| {
+                    record.on_request = true;
+                    record.started_at = Some(observed_at());
+                }))
+                .await;
+            refresh(host.arc()).await;
+            let on_request = desired_state(|state| {
+                state.volumes = vec![desired_volume(|_| {})];
+                state.instances = vec![desired_instance(|instance| {
+                    instance.desired_state = DesiredInstanceState::OnRequest
+                })];
+            });
+
+            reconcile(host.arc(), &on_request, Trigger::Tick).await;
+
+            assert!(host.vms.calls().is_empty(), "{:?}", host.vms.calls());
+            let record = host.state.record(&app_id()).await.unwrap();
+            assert_eq!(record.state, InstanceState::Failed);
+            assert!(record.message.unwrap().as_str().contains("the microVM exited"));
+        }
     }
 }
