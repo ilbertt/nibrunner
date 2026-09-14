@@ -168,6 +168,9 @@ async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
     for (unit, outcome) in &report.units {
         println!("  {unit:<32} {}", outcome.said());
     }
+    if let Some(kept) = &report.kept_credentials {
+        println!("\n{}", kept.said());
+    }
     if report.all_up() {
         println!(
             "\nUp. It serves what {} says; `journalctl -u nibrunnerd -f` follows it.",

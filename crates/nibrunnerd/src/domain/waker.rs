@@ -126,7 +126,10 @@ impl AppWaker {
             let deadline =
                 Instant::now() + Duration::from_millis(record.health_check.probe().grace_period_ms);
             loop {
-                if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check).await {
+                if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check)
+                    .await
+                    .is_ok()
+                {
                     break;
                 }
                 if Instant::now() >= deadline {

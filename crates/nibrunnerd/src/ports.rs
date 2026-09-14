@@ -275,6 +275,8 @@ pub struct TenantLogEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TenantLogBody {
+    /// One line the tenant wrote, without the newline that ended it. A line the tenant left
+    /// open long enough, or was still writing when its stream closed, arrives as it stands.
     Data {
         stream: protocol::TenantLogStream,
         text: String,
