@@ -225,9 +225,8 @@ impl VolumeBackend for ZerofsVolumes {
             .map_err(|error| VolumeError::Unusable(error.message()))?;
         if slot.slot >= nft_render::NBD_SLOT_LIMIT {
             return Err(VolumeError::Unusable(format!(
-                "slot {} needs /dev/nbd{}, and this backend addresses one minor per slot: \
-                 load the nbd module with nbds_max above {}, or keep this host under that many apps",
-                slot.slot,
+                "slot {} is past the {} volumes the zerofs backend addresses on one host: \
+                 keep this host under that many apps, or keep its volumes with the local-file backend",
                 slot.slot,
                 nft_render::NBD_SLOT_LIMIT
             )));
@@ -673,6 +672,31 @@ mod tests {
             device_file_size(&filesystem(root.path()).device_file_for(&desired.volume_id)),
             Some(268_435_456)
         );
+    }
+
+    #[tokio::test]
+    async fn a_slot_past_the_devices_this_backend_addresses_is_refused_naming_that_limit() {
+        // The limit is this daemon's own, not the module's: a host measured with nbds_max at 1024
+        // was still refused here, and told to raise a setting that had nothing to do with it.
+        let root = tempfile::tempdir().unwrap();
+        let (commands, log) = mocks::commands_succeeding();
+        let allocator = Arc::new(Mutex::new(SlotAllocator::empty()));
+        allocator.lock().await.restore(
+            std::collections::BTreeMap::from([(app_id(), nft_render::NBD_SLOT_LIMIT)]),
+            i64::from(nft_render::NBD_SLOT_LIMIT) + 1,
+        );
+        let volumes = ZerofsVolumes::new(filesystem(root.path()), allocator, commands, staging(root.path()));
+
+        let error = volumes.provision(&desired_volume(|_| {})).await.unwrap_err();
+
+        let said = error.message();
+        assert!(
+            said.contains(&format!("{} volumes", nft_render::NBD_SLOT_LIMIT)),
+            "{said}"
+        );
+        assert!(said.contains("local-file"), "{said}");
+        assert!(!said.contains("nbds_max"), "{said}");
+        assert!(log.calls().is_empty(), "nothing was attached past the limit");
     }
 
     fn volumes_with_sysfs(

@@ -544,7 +544,7 @@
           ]
         },
         {
-          "description": "The microVM is up. Nothing inside it is probed: a guest this host did not build answers\nno port it was not told about.",
+          "description": "The microVM is up and `httpPort` has accepted a connection once: the tenant is listening.\nThat is all it is asked, and only until it answers — a guest this host did not build\nanswers no path it was not told about — so its liveness after that is the microVM being up.",
           "type": "object",
           "properties": {
             "kind": {

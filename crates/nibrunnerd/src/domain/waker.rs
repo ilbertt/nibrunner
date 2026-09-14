@@ -128,25 +128,23 @@ impl AppWaker {
         let restored = started.elapsed();
 
         // A caller is handed on once the guest is ready for it, and what ready means is the
-        // instance's to say: a port that answers, or a microVM that started at all.
-        if record.health_check.probes_a_port() {
-            let deadline =
-                Instant::now() + Duration::from_millis(record.health_check.probe().grace_period_ms);
-            loop {
-                if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check)
-                    .await
-                    .is_ok()
-                {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return Err(WakeRefusal::Failed {
-                        kind: WakeFailure::NeverAnswered,
-                        reason: format!("nothing answered on port {} inside the guest", record.http_port),
-                    });
-                }
-                tokio::time::sleep(PROBE_INTERVAL).await;
+        // instance's to say: a port that answers its check, or one that accepts a connection at
+        // all — either way, a port a request can be forwarded to.
+        let deadline = Instant::now() + Duration::from_millis(record.health_check.probe().grace_period_ms);
+        loop {
+            if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check)
+                .await
+                .is_ok()
+            {
+                break;
             }
+            if Instant::now() >= deadline {
+                return Err(WakeRefusal::Failed {
+                    kind: WakeFailure::NeverAnswered,
+                    reason: format!("nothing answered on port {} inside the guest", record.http_port),
+                });
+            }
+            tokio::time::sleep(PROBE_INTERVAL).await;
         }
         let ready = started.elapsed() - restored;
 
@@ -317,10 +315,13 @@ mod tests {
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.state.modify(|snapshot| snapshot.isolated = true).await;
         host.slot_for(&app_id()).await.unwrap();
+        let listening = listening().await;
         host.state
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.health_check = protocol::HealthCheck::BootCompleted;
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.http_port = listening;
             }))
             .await;
         let on_request =
@@ -412,7 +413,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_requests_that_waited_on_a_wake_are_counted_on_it() {
-        use std::net::SocketAddr;
         use tracing_subscriber::layer::SubscriberExt;
 
         let _woken = WOKEN_LOG.lock();
@@ -424,12 +424,7 @@ mod tests {
         // lock above keeps the other test that reaches the same callsite from answering it first.
         tracing::callsite::rebuild_interest_cache();
 
-        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
-
+        let listening = listening().await;
         let host = test_host().await;
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
         host.state.modify(|snapshot| snapshot.isolated = true).await;
@@ -438,7 +433,7 @@ mod tests {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
                 record.guest_ipv4 = crate::domain::health::probe::loopback();
-                record.http_port = protocol::HttpPort::try_from(u32::from(port)).unwrap();
+                record.http_port = listening;
             }))
             .await;
         let on_request =
@@ -621,8 +616,20 @@ mod tests {
         )
     }
 
+    /// A port on the loopback that accepts, for as long as the test runs.
+    async fn listening() -> protocol::HttpPort {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = protocol::HttpPort::new(listener.local_addr().unwrap().port()).unwrap();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+        port
+    }
+
+    // A request handed on between the boot completing and the tenant binding its port is refused
+    // by the guest; it is held until the port accepts once instead.
     #[tokio::test]
-    async fn a_guest_that_answers_no_port_is_woken_when_starting_is_all_it_promised() {
+    async fn a_boot_completed_guest_is_woken_once_its_port_accepts_and_held_until_then() {
         let _woken = WOKEN_LOG.lock();
         let host = test_host().await;
         host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
@@ -642,12 +649,23 @@ mod tests {
             .lock()
             .await
             .accept(desired_state(|state| state.instances = vec![on_request]));
+        let waker = AppWaker::new(host.arc().clone());
 
-        AppWaker::new(host.arc().clone())
+        let held = tokio::time::timeout(Duration::from_millis(50), waker.wake(&app_id())).await;
+        assert!(
+            held.is_err(),
+            "the caller was handed on while nothing listened: {held:?}"
+        );
+        assert!(host.vms.calls().contains(&crate::ports::VmCall::Wake));
+
+        let listening = listening().await;
+        host.state
+            .update_record(&app_id(), |record| record.http_port = listening)
+            .await;
+        waker
             .wake(&app_id())
             .await
-            .expect("a microVM that started is the whole of what it promised");
-        assert!(host.vms.calls().contains(&crate::ports::VmCall::Wake));
+            .expect("the tenant is listening, which is all it promised");
     }
 
     /// A host whose volumes are ZeroFS exports on NBD devices: the kernel's view of the devices
@@ -684,11 +702,14 @@ mod tests {
             .volumes = Arc::new(volumes);
 
         host.state.modify(|snapshot| snapshot.isolated = true).await;
+        let listening = listening().await;
         host.state
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
                 record.health_check = protocol::HealthCheck::BootCompleted;
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.http_port = listening;
             }))
             .await;
         let on_request =

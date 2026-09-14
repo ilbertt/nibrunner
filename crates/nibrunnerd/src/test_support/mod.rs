@@ -282,6 +282,7 @@ pub fn observed_instance(edit: impl FnOnce(&mut ObservedInstance)) -> ObservedIn
         present: true,
         running: true,
         exited: false,
+        refused: false,
     };
     edit(&mut value);
     value
