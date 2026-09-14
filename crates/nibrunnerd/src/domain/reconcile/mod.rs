@@ -112,6 +112,14 @@ async fn apply_sleeps(host: &Host, plan: &ReconcilePlan) {
     }
 }
 
+async fn apply_holds(host: &Host, plan: &ReconcilePlan) {
+    for action in &plan.instances {
+        if let InstancePlan::Hold { desired } = action {
+            instances::hold_instance(host, desired).await;
+        }
+    }
+}
+
 async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
     let starts: Vec<_> = plan
         .instances
@@ -156,6 +164,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
 
     volumes::apply_volumes(host, &plan, &observed, desired, trigger).await;
     apply_sleeps(host, &plan).await;
+    apply_holds(host, &plan).await;
     network::apply_activators(host).await;
     network::apply_network(host).await;
     apply_starts(host, &plan).await;
@@ -222,6 +231,16 @@ mod tests {
             state.volumes = vec![desired_volume(|_| {})];
             state.instances = vec![desired_instance(|instance| {
                 instance.hostnames = vec![app_hostname()]
+            })];
+        })
+    }
+
+    fn stopped_app() -> protocol::HostDesiredState {
+        desired_state(|state| {
+            state.volumes = vec![desired_volume(|_| {})];
+            state.instances = vec![desired_instance(|instance| {
+                instance.desired_state = DesiredInstanceState::Stopped;
+                instance.hostnames = vec![app_hostname()];
             })];
         })
     }
@@ -505,6 +524,75 @@ mod tests {
 
         reconcile(host.arc(), &desired_state(|_| {}), Trigger::Tick).await;
         assert!(host.state.snapshot().await.volume_reports.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_app_added_to_the_document_already_stopped_is_answered_for_without_being_booted() {
+        // What was measured: the volume was provisioned and reported ready, the instance was never
+        // reported at all, and its hostname answered that it was not here rather than that it was
+        // down. Not a running app that was told to stop: one that arrived stopped.
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let host = test_host().await;
+
+        reconcile(host.arc(), &stopped_app(), Trigger::Change).await;
+
+        assert!(host.vms.calls().is_empty(), "{:?}", host.vms.calls());
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Stopped);
+        assert!(!record.desired_running);
+        assert_eq!(record.hostnames, vec![app_hostname()]);
+        let slot = host.slot_of(&app_id()).await.expect("held on a slot of its own");
+        assert_eq!(record.host_port, slot.host_port);
+        assert_eq!(
+            host.router
+                .routes()
+                .await
+                .port_for(app_hostname().hostname.as_str()),
+            Some(slot.host_port)
+        );
+        assert_eq!(host.activator.listening_for().await, vec![app_id()]);
+        assert_eq!(
+            host.state.snapshot().await.volume_reports[0].state,
+            protocol::VolumeState::Ready
+        );
+        assert_eq!(host.repositories.instances.all().await.unwrap().len(), 1);
+
+        // The timer and the status loop find it as it was left.
+        reconcile(host.arc(), &stopped_app(), Trigger::Tick).await;
+        refresh(host.arc()).await;
+        assert!(host.vms.calls().is_empty(), "{:?}", host.vms.calls());
+        let held = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(held.state, InstanceState::Stopped);
+        assert_eq!(held.host_port, slot.host_port);
+        assert!(host.state.snapshot().await.converged);
+
+        // And when the document wants it up, it comes up on the port it was answering on.
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
+        assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
+        let started = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(started.state, InstanceState::Starting);
+        assert!(started.desired_running);
+        assert_eq!(started.host_port, slot.host_port);
+    }
+
+    #[tokio::test]
+    async fn an_app_stopped_after_running_keeps_the_record_its_stop_left() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let host = test_host().await;
+        reconcile(host.arc(), &running_app(), Trigger::Change).await;
+        host.vms.set_status(running_vm());
+
+        reconcile(host.arc(), &stopped_app(), Trigger::Change).await;
+        assert_eq!(host.vms.calls(), vec![VmCall::Boot, VmCall::Stop]);
+        let stopped = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(stopped.state, InstanceState::Stopped);
+        assert!(stopped.started_at.is_some(), "it ran");
+
+        host.vms.set_status(stopped_vm());
+        reconcile(host.arc(), &stopped_app(), Trigger::Tick).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Boot, VmCall::Stop]);
+        assert_eq!(host.state.record(&app_id()).await.unwrap(), stopped);
     }
 
     #[tokio::test]
@@ -1011,6 +1099,9 @@ mod tests {
                 InstancePlan::Start {
                     desired: desired_instance(|_| {}),
                 },
+                InstancePlan::Hold {
+                    desired: desired_instance(|_| {}),
+                },
             ],
             ..Default::default()
         };
@@ -1019,6 +1110,25 @@ mod tests {
 
         assert!(host.vms.calls().is_empty());
         assert!(host.state.record(&app_id()).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_holds_an_app_leaves_a_stopped_record_and_boots_nothing() {
+        let host = test_host().await;
+        let plan = ReconcilePlan {
+            instances: vec![InstancePlan::Hold {
+                desired: desired_instance(|instance| instance.desired_state = DesiredInstanceState::Stopped),
+            }],
+            ..Default::default()
+        };
+
+        apply_holds(&host, &plan).await;
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Stopped);
+        assert!(!record.desired_running);
+        assert!(host.slot_of(&app_id()).await.is_some());
+        assert!(host.vms.calls().is_empty());
     }
 
     #[tokio::test]
