@@ -731,7 +731,12 @@ mod tests {
         )
         .await;
 
-        crate::domain::reconcile::reconcile(host.arc(), &desired).await;
+        crate::domain::reconcile::reconcile(
+            host.arc(),
+            &desired,
+            crate::domain::metrics::passes::Trigger::Change,
+        )
+        .await;
         let after_pass = host.state.snapshot().await.deploys[&app_id()].clone();
         assert!(after_pass.is_open(), "starting is not there yet");
         assert!(after_pass.layers_ready_at_ms.is_some_and(|at| at >= noticed));

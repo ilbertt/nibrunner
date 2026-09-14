@@ -252,6 +252,29 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         return;
     };
 
+    // Before anything is fetched or attached, and before it counts as an attempt: a microVM this
+    // host could not have put within reach is a cost paid for an app nobody could have reached,
+    // and the document that asked for it is wrong in a way no retry mends. So the window is left
+    // alone, the reason stays on the record for every pass that finds it, and it is said once.
+    if let Some(refusal) = crate::domain::reconcile::ingress::ingress_refusal(desired, &host.config) {
+        let mut refused = existing.unwrap_or_else(|| {
+            InstanceRecord::new(
+                record_fields(desired, &slot),
+                InstanceState::Failed,
+                initial_tracker(),
+            )
+        });
+        refused.adopt(record_fields(desired, &slot));
+        refused.state = InstanceState::Failed;
+        refused.stop_requested = false;
+        host.state.put_record(refused).await;
+        if say(host, &desired.app_id, StateMessage::new(refusal.clone())).await {
+            host.metrics.health.failed(&desired.app_id, Failure::Refused);
+            tracing::error!(app_id = %desired.app_id, refusal, "instance refused before it was started");
+        }
+        return;
+    }
+
     let mut attempted = match existing.clone() {
         Some(record) => record,
         None => InstanceRecord::new(
@@ -272,20 +295,6 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     attempted.stop_requested = false;
     host.state.put_record(attempted.clone()).await;
     host.state.mark_active(&desired.app_id, now).await;
-
-    // Before anything is fetched or attached: a microVM this host could not have put within
-    // reach is a cost paid for an app nobody could have reached.
-    if let Some(refusal) = crate::domain::reconcile::ingress::ingress_refusal(desired, &host.config) {
-        host.state
-            .update_record(&desired.app_id, |record| {
-                record.state = InstanceState::Failed;
-                record.message = Some(StateMessage::new(refusal.clone()));
-            })
-            .await;
-        host.metrics.health.failed(&desired.app_id, Failure::Refused);
-        tracing::error!(app_id = %desired.app_id, refusal, "instance refused before it was started");
-        return;
-    }
 
     let booted = match host.payloads.prepare(&desired.layers).await {
         Err(error) => Err((Failure::Layers, error.message())),
@@ -565,8 +574,12 @@ fn starting(plan: &ReconcilePlan) -> impl Iterator<Item = &DesiredInstance> {
 }
 
 pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
+    layers_of(starting(plan))
+}
+
+fn layers_of<'a>(instances: impl Iterator<Item = &'a DesiredInstance>) -> Vec<protocol::DesiredLayer> {
     let mut seen = BTreeSet::new();
-    starting(plan)
+    instances
         .flat_map(|desired| &desired.layers)
         .filter(|layer| seen.insert((*layer).clone()))
         .cloned()
@@ -574,9 +587,13 @@ pub fn layers_to_start(plan: &ReconcilePlan) -> Vec<protocol::DesiredLayer> {
 }
 
 pub async fn prefetch_layers(host: &Host, plan: &ReconcilePlan) {
-    let mut waiting: Vec<&DesiredInstance> = starting(plan).collect();
+    // An app the start below will refuse is not fetched for either: nothing it needs is worth
+    // having, and a pass that finds the same refusal standing would otherwise look it up again.
+    let mut waiting: Vec<&DesiredInstance> = starting(plan)
+        .filter(|desired| crate::domain::reconcile::ingress::ingress_refusal(desired, &host.config).is_none())
+        .collect();
     let mut prepared = BTreeSet::new();
-    for layer in layers_to_start(plan) {
+    for layer in layers_of(waiting.iter().copied()) {
         let fetching = std::time::Instant::now();
         match host.payloads.prepare(std::slice::from_ref(&layer)).await {
             Ok(payload) if payload.fetched_bytes > 0 => {
@@ -738,6 +755,68 @@ mod tests {
             failures(&[("out_of_restarts", 1)]),
             "said once, counted once, however many passes say it again"
         );
+    }
+
+    #[tokio::test]
+    async fn a_start_the_document_made_impossible_is_refused_once_and_takes_nothing_from_the_budget() {
+        let (said, _listening) = Said::listening();
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let port = |name: &str, number: u16| protocol::InstancePort {
+            name: protocol::PortName::parse(name).unwrap(),
+            guest_port: protocol::GuestPort::new(number).unwrap(),
+        };
+        // Two ports beside the HTTP one, on a host whose [proxy.raw] allows each guest one.
+        let asking_too_much =
+            desired_instance(|instance| instance.config.ports = vec![port("ssh", 22), port("git", 9418)]);
+        let budget = asking_too_much.config.restart_policy.max_restarts;
+
+        // Pass after pass over a document that stands still, past what the budget would allow,
+        // each fetching ahead of its starts the way a pass does.
+        for _ in 0..budget + 3 {
+            let plan = ReconcilePlan {
+                instances: vec![InstancePlan::Start {
+                    desired: asking_too_much.clone(),
+                }],
+                ..Default::default()
+            };
+            prefetch_layers(&host, &plan).await;
+            start_instance(&host, &asking_too_much).await;
+        }
+
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(
+            record.start_attempts, NO_START_ATTEMPTS,
+            "a refusal is the document's fault, not a start that failed"
+        );
+        let reason = record.message.unwrap();
+        assert!(
+            reason.as_str().contains("allows 1"),
+            "the refusal, not a budget, is what the record says: {}",
+            reason.as_str()
+        );
+        assert!(host.vms.calls().is_empty());
+        assert!(
+            !cached_image(&host).exists(),
+            "nothing is fetched for an app nobody could have reached"
+        );
+        let page = metrics_page(&host).await;
+        assert!(page.contains("nibrunner_layers_cached_total 0\n"), "{page}");
+        assert!(page.contains(
+            "nibrunner_storage_operation_seconds_count{operation=\"layer_fetch\",outcome=\"ok\"} 0\n"
+        ));
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("refused", 1)]),
+            "counted once, however many passes find it"
+        );
+        let refusals = said
+            .lines()
+            .into_iter()
+            .filter(|line| line.contains("refused before it was started"))
+            .count();
+        assert_eq!(refusals, 1, "said once: {:?}", said.lines());
     }
 
     fn failures(counted: &[(&str, u64)]) -> [u64; 8] {

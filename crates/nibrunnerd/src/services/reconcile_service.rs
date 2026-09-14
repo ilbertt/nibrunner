@@ -3,13 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use protocol::HostDesiredState;
 
+use crate::domain::metrics::passes::Trigger;
 use crate::domain::reconcile::{reconcile, refresh};
 use crate::host::Host;
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait ReconcileService: Send + Sync {
-    async fn reconcile(&self, desired: &HostDesiredState);
+    async fn reconcile(&self, desired: &HostDesiredState, trigger: Trigger);
     async fn refresh(&self);
 }
 
@@ -25,8 +26,8 @@ impl HostReconciler {
 
 #[async_trait]
 impl ReconcileService for HostReconciler {
-    async fn reconcile(&self, desired: &HostDesiredState) {
-        reconcile(&self.host, desired).await;
+    async fn reconcile(&self, desired: &HostDesiredState, trigger: Trigger) {
+        reconcile(&self.host, desired, trigger).await;
     }
 
     async fn refresh(&self) {
@@ -64,7 +65,7 @@ mod tests {
         let host = test_host().await;
         let reconciler = HostReconciler::new(host.arc().clone());
 
-        reconciler.reconcile(&running_app()).await;
+        reconciler.reconcile(&running_app(), Trigger::Change).await;
 
         assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
         assert_eq!(
