@@ -188,55 +188,90 @@ pub async fn apply_volumes(
     }
 }
 
+/// The tap goes with the slot rather than with the microVM, because a stopped app keeps both and
+/// only an app that is leaving gives them up. Taking it here is also what stops the slot the
+/// cursor hands out next from inheriting a live device.
+async fn give_back_slot(host: &Host, app_id: &AppId) {
+    let tap_name = {
+        let mut allocator = host.allocator.lock().await;
+        let held = allocator.lookup(app_id).map(|slot| slot.tap_name);
+        allocator.release(app_id);
+        held
+    };
+    if let Some(tap_name) = tap_name {
+        if let Err(error) = host.vms.delete_tap(&tap_name).await {
+            tracing::warn!(%tap_name, error = %error.message(), "a tap outlived the app it was made for");
+        }
+    }
+}
+
 pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
     for action in &plan.volumes {
-        let VolumePlan::Teardown { desired } = action else {
-            continue;
-        };
-        let tearing_down = std::time::Instant::now();
-        let torn_down = host.volumes.teardown(&desired.volume_id, &desired.app_id).await;
-        host.metrics.resources.done(
-            Operation::VolumeTeardown,
-            torn_down.is_ok(),
-            tearing_down.elapsed(),
-        );
-        match torn_down {
-            Ok(()) => {
-                // The tap goes with the slot rather than with the microVM, because a stopped app
-                // keeps both and only an app that is leaving gives them up. Taking it here is also
-                // what stops the slot the cursor hands out next from inheriting a live device.
-                let tap_name = {
-                    let mut allocator = host.allocator.lock().await;
-                    let held = allocator.lookup(&desired.app_id).map(|slot| slot.tap_name);
-                    allocator.release(&desired.app_id);
-                    held
-                };
-                if let Some(tap_name) = tap_name {
-                    if let Err(error) = host.vms.delete_tap(&tap_name).await {
-                        tracing::warn!(%tap_name, error = %error.message(), "a tap outlived the app it was made for");
+        match action {
+            VolumePlan::Teardown { desired } => tear_down_volume(host, desired).await,
+            VolumePlan::Detach { volume_id, app_id } => detach_volume(host, volume_id, app_id).await,
+            _ => {}
+        }
+    }
+}
+
+async fn tear_down_volume(host: &Host, desired: &protocol::DesiredVolume) {
+    let tearing_down = std::time::Instant::now();
+    let torn_down = host.volumes.teardown(&desired.volume_id, &desired.app_id).await;
+    host.metrics.resources.done(
+        Operation::VolumeTeardown,
+        torn_down.is_ok(),
+        tearing_down.elapsed(),
+    );
+    match torn_down {
+        Ok(()) => {
+            give_back_slot(host, &desired.app_id).await;
+            let report = ReportedVolume {
+                volume_id: desired.volume_id.clone(),
+                app_id: desired.app_id.clone(),
+                state: VolumeState::Deleted,
+                size_bytes: 0,
+                storage_prefix: None,
+                device_path: None,
+                usage: None,
+                message: None,
+            };
+            host.state.remember_deleted_volume(report.clone()).await;
+            host.state
+                .modify(|snapshot| {
+                    snapshot.volume_reports =
+                        merge_volume_reports(std::mem::take(&mut snapshot.volume_reports), vec![report]);
+                })
+                .await;
+        }
+        Err(error) => {
+            tracing::error!(volume_id = %desired.volume_id, error = %error.message(), "volume teardown failed");
+        }
+    }
+}
+
+async fn detach_volume(host: &Host, volume_id: &VolumeId, app_id: &AppId) {
+    match host.volumes.detach(volume_id, app_id).await {
+        Ok(()) => {
+            give_back_slot(host, app_id).await;
+            tracing::info!(%volume_id, %app_id, "volume detached: the document no longer names it");
+            // The pass reported it as observed, on a device this host no longer holds for it.
+            // Nothing owns it after this, so the next pass drops it.
+            host.state
+                .modify(|snapshot| {
+                    for report in snapshot
+                        .volume_reports
+                        .iter_mut()
+                        .filter(|report| &report.volume_id == volume_id)
+                    {
+                        report.state = VolumeState::Detached;
+                        report.device_path = None;
                     }
-                }
-                let report = ReportedVolume {
-                    volume_id: desired.volume_id.clone(),
-                    app_id: desired.app_id.clone(),
-                    state: VolumeState::Deleted,
-                    size_bytes: 0,
-                    storage_prefix: None,
-                    device_path: None,
-                    usage: None,
-                    message: None,
-                };
-                host.state.remember_deleted_volume(report.clone()).await;
-                host.state
-                    .modify(|snapshot| {
-                        snapshot.volume_reports =
-                            merge_volume_reports(std::mem::take(&mut snapshot.volume_reports), vec![report]);
-                    })
-                    .await;
-            }
-            Err(error) => {
-                tracing::error!(volume_id = %desired.volume_id, error = %error.message(), "volume teardown failed");
-            }
+                })
+                .await;
+        }
+        Err(error) => {
+            tracing::error!(%volume_id, error = %error.message(), "volume detach failed");
         }
     }
 }
@@ -840,10 +875,69 @@ mod tests {
         assert!(snapshot.volume_reports.is_empty());
     }
 
+    fn detaching() -> ReconcilePlan {
+        ReconcilePlan {
+            volumes: vec![VolumePlan::Detach {
+                volume_id: volume_id(),
+                app_id: app_id(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_detach_gives_the_slot_back_and_keeps_the_data() {
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state
+            .modify(|snapshot| {
+                snapshot.volume_reports = vec![reported_volume(|report| {
+                    report.device_path = Some("/dev/nbd0".to_string())
+                })]
+            })
+            .await;
+
+        apply_teardowns(&host, &detaching()).await;
+
+        assert!(host.slot_of(&app_id()).await.is_none());
+        assert_eq!(
+            host.vms.removed_taps(),
+            vec!["nbr0".to_string()],
+            "the slot went back with its tap"
+        );
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.volume_reports[0].state, VolumeState::Detached);
+        assert_eq!(snapshot.volume_reports[0].device_path, None);
+        assert!(
+            snapshot.deleted_volumes.is_empty(),
+            "nothing was deleted, so nothing says so"
+        );
+        let owners = BTreeMap::from([(volume_id(), app_id())]);
+        assert_eq!(host.volumes.observe(&owners).await.len(), 1, "the data is kept");
+    }
+
+    #[tokio::test]
+    async fn a_detach_that_failed_keeps_the_slot_so_its_device_is_not_handed_on() {
+        let mut volumes = MockVolumeBackend::new();
+        volumes
+            .expect_detach()
+            .times(1)
+            .returning(|_, _| Err(VolumeError::Unusable("the device would not let go".to_string())));
+        let host = host_over(volumes).await;
+        host.slot_for(&app_id()).await.unwrap();
+
+        apply_teardowns(&host, &detaching()).await;
+
+        assert!(host.slot_of(&app_id()).await.is_some());
+        assert!(host.vms.removed_taps().is_empty());
+    }
+
     #[tokio::test]
     async fn a_plan_with_nothing_to_tear_down_asks_the_backend_for_nothing() {
         let mut volumes = MockVolumeBackend::new();
         volumes.expect_teardown().never();
+        volumes.expect_detach().never();
         let host = host_over(volumes).await;
 
         apply_teardowns(
