@@ -6,6 +6,7 @@ use protocol::{
 use crate::domain::exports::bundle::{dump_volume, write_bundle};
 use crate::domain::exports::freeze::frozen;
 use crate::domain::exports::reader::ReaderDevice;
+use crate::domain::metrics::passes::Trigger;
 use crate::domain::metrics::resources::Operation;
 use crate::domain::reconcile::plan::{ExportPlan, ObservedExport, ReconcilePlan};
 use crate::host::Host;
@@ -37,12 +38,16 @@ pub async fn observe_exports(host: &Host, desired: &HostDesiredState) -> Vec<Obs
         .collect()
 }
 
-pub async fn apply_exports(host: &Host, plan: &ReconcilePlan) {
+pub async fn apply_exports(host: &Host, plan: &ReconcilePlan, trigger: Trigger) {
     reap(host, plan).await;
 
     let mut reports = host.state.snapshot().await.export_reports;
     for action in &plan.exports {
         match action {
+            // Writing a bundle freezes the tenant and dumps its volume, so one that failed is
+            // tried again when the document moves or the daemon comes back, not by every tick
+            // against a store that keeps refusing.
+            ExportPlan::Write { .. } if trigger == Trigger::Tick => {}
             ExportPlan::Write { desired } => {
                 let report = write(host, desired).await;
                 reports.retain(|held| held.export_id != report.export_id);
@@ -271,7 +276,7 @@ mod tests {
         let host = test_host().await;
         let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
 
-        apply_exports(host.arc(), &plan).await;
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
 
         let reports = host.state.snapshot().await.export_reports;
         assert_eq!(reports.len(), 1);
@@ -296,7 +301,7 @@ mod tests {
             .await;
         let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Absent)]).await;
 
-        apply_exports(host.arc(), &plan).await;
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
         assert!(host.state.snapshot().await.export_reports.is_empty());
     }
 
@@ -369,7 +374,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_exports(host.arc(), &plan).await;
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
 
         let reports = host.state.snapshot().await.export_reports;
         assert_eq!(reports.len(), 1);
@@ -390,11 +395,42 @@ mod tests {
         holding(host.arc(), vec![note(ExportState::Failed)]).await;
         let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
 
-        apply_exports(host.arc(), &plan).await;
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
 
         let reports = host.state.snapshot().await.export_reports;
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].state, ExportState::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_bundle_that_failed_is_left_for_the_document_to_ask_for_again_rather_than_tried_every_tick() {
+        let host = test_host().await;
+        let failed = ReportedExport {
+            message: Some(StateMessage::new("the store refused it")),
+            ..note(ExportState::Failed)
+        };
+        holding(host.arc(), vec![failed.clone()]).await;
+        let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
+        assert!(matches!(plan.exports[0], ExportPlan::Write { .. }));
+
+        apply_exports(host.arc(), &plan, Trigger::Tick).await;
+
+        assert_eq!(
+            host.state.snapshot().await.export_reports,
+            vec![failed],
+            "the note, and the reason on it, stand as they were"
+        );
+        assert!(host.exports_written().is_empty());
+        let page = crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &host.state.snapshot().await,
+            0,
+        );
+        assert!(
+            !page.contains("operation=\"export_write\",outcome=\"failed\"} 1\n"),
+            "nothing was tried, so nothing was counted: {page}"
+        );
     }
 
     #[tokio::test]
@@ -408,7 +444,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_exports(host.arc(), &plan).await;
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
 
         let reports = host.state.snapshot().await.export_reports;
         assert_eq!(reports.len(), 1);
@@ -441,7 +477,7 @@ mod tests {
             .returning(|_| Ok(()));
         let host = host_over(volumes).await;
 
-        apply_exports(host.arc(), &ReconcilePlan::default()).await;
+        apply_exports(host.arc(), &ReconcilePlan::default(), Trigger::Change).await;
     }
 
     #[tokio::test]
@@ -467,7 +503,7 @@ mod tests {
         let host = host_over(volumes).await;
         let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
 
-        apply_exports(host.arc(), &plan).await;
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
 
         assert_eq!(
             host.state.snapshot().await.export_reports[0].state,
@@ -489,7 +525,7 @@ mod tests {
         let host = host_over(volumes).await;
         let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
 
-        apply_exports(host.arc(), &plan).await;
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
 
         let reported = &host.state.snapshot().await.export_reports[0];
         assert_eq!(reported.state, ExportState::Failed);
@@ -521,7 +557,7 @@ mod tests {
         let host = host_over(volumes).await;
         let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
 
-        apply_exports(host.arc(), &plan).await;
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
 
         assert_eq!(
             host.state.snapshot().await.export_reports[0].state,

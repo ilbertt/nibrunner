@@ -20,6 +20,7 @@ pub async fn observe_checkpoints(host: &Host, desired: &HostDesiredState) -> Vec
 }
 
 pub async fn apply_checkpoints(host: &Host, plan: &ReconcilePlan) {
+    let held = host.state.snapshot().await.checkpoint_reports;
     let mut reports = Vec::new();
     for action in &plan.checkpoints {
         match action {
@@ -27,7 +28,13 @@ pub async fn apply_checkpoints(host: &Host, plan: &ReconcilePlan) {
             CheckpointPlan::Delete { desired } => release(host, desired).await,
             CheckpointPlan::None { checkpoint_id } => {
                 if let Some(wanted) = plan_subject(host, checkpoint_id).await {
-                    reports.push(ready(&wanted, None));
+                    // When it was cut is known only to the daemon that cut it, and that daemon
+                    // keeps saying so rather than forgetting on the next pass.
+                    let ready_at = held
+                        .iter()
+                        .find(|report| &report.checkpoint_id == checkpoint_id)
+                        .and_then(|report| report.ready_at.clone());
+                    reports.push(ready(&wanted, ready_at));
                 }
             }
         }
@@ -184,6 +191,30 @@ mod tests {
         assert_eq!(reports[0].volume_id, volume_id());
         assert!(reports[0].ready_at.is_some());
         assert_eq!(reports[0].reference.as_ref().unwrap().as_str(), "chk-1");
+    }
+
+    #[tokio::test]
+    async fn when_this_host_cut_a_checkpoint_is_still_said_on_the_passes_that_follow() {
+        let mut volumes = holding(vec![]);
+        volumes.expect_create_checkpoint().times(1).returning(|_| Ok(()));
+        let host = host_over(volumes).await;
+        let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Present)]);
+        apply_checkpoints(host.arc(), &planned(host.arc(), &desired).await).await;
+        let cut_at = host.state.snapshot().await.checkpoint_reports[0].ready_at.clone();
+        assert!(cut_at.is_some());
+
+        let held = ReconcilePlan {
+            checkpoints: vec![CheckpointPlan::None {
+                checkpoint_id: checkpoint_id(),
+            }],
+            ..Default::default()
+        };
+        apply_checkpoints(host.arc(), &held).await;
+
+        let reports = host.state.snapshot().await.checkpoint_reports;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, CheckpointState::Ready);
+        assert_eq!(reports[0].ready_at, cut_at);
     }
 
     #[tokio::test]

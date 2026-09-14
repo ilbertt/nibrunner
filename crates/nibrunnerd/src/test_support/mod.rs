@@ -435,3 +435,49 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
         exports: export_spy,
     }
 }
+
+/// Every line logged on the thread that made it, as its level and message, so a test can say a
+/// pass said nothing, or said a thing once.
+#[derive(Clone, Default)]
+pub struct Said(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Said {
+    /// Hears everything logged on this thread until the guard is dropped.
+    pub fn listening() -> (Self, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let said = Self::default();
+        let guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(said.clone()));
+        // Interest in a callsite is cached for the whole process by whichever thread reaches it
+        // first, and a thread with no subscriber of its own caches it as never. This subscriber
+        // is this thread's alone, so the cache is told to ask again.
+        tracing::callsite::rebuild_interest_cache();
+        (said, guard)
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    pub fn forget(&self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Said {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{} {}", event.metadata().level(), message.0));
+    }
+}
