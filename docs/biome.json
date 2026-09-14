@@ -12,6 +12,7 @@
       "**",
       "!**/node_modules",
       "!.output",
+      "!dist",
       "!.tanstack",
       "!.source",
       "!**/*.lock",

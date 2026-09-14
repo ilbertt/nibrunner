@@ -79,7 +79,8 @@ lint:
 docs-dev:
     cd docs && bun run dev
 
-# The static site, into docs/.output/public.
+# One Linux x86_64 binary with the site inside, docs/dist/app: what nibrun runs. `bun run build:local`
+# in docs/ is the same for this machine.
 docs-build:
     cd docs && bun run build
 

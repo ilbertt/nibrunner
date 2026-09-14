@@ -4,6 +4,7 @@ node_modules
 .cache
 .vercel
 .output
+/dist/
 .nitro
 /build/
 /api/
