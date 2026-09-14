@@ -1,6 +1,7 @@
 pub mod activator;
 pub mod datagram_activator;
 pub mod forward;
+pub mod pem;
 pub mod router;
 pub mod stream_activator;
 

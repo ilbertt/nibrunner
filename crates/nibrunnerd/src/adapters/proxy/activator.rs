@@ -116,7 +116,7 @@ impl AppActivator {
         let Some(record) = self.state.record(&app_id).await else {
             return (app_is_down(), Answer::Down);
         };
-        if !record.on_request || !record.desired_running {
+        if !record.desired_running {
             return (app_is_down(), Answer::Down);
         }
         self.state.mark_active(&app_id, crate::clock::now_ms()).await;
@@ -128,7 +128,8 @@ impl AppActivator {
         // brought this here. Health is report-only, so if such a guest already accepts a connection
         // the request is handed straight to it rather than waking it onto a health check it is
         // currently failing (which would wait out the whole grace period and then refuse). A guest
-        // that is genuinely down still takes the wake path.
+        // that is genuinely down still takes the wake path, which for an app the document wants
+        // running is a wait for the guest the pass is bringing up in its place.
         let guest = SocketAddr::from((record.guest_ipv4.addr(), record.http_port.get()));
         if record.is_idle() || !accepts_a_connection(guest).await {
             if let Err(refusal) = self.waker.wake(&app_id).await {
@@ -263,11 +264,7 @@ mod tests {
 
     async fn serving(activator: &Arc<AppActivator>, app_id: &AppId) -> HostPort {
         for _ in 0..50 {
-            let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .await
-                .unwrap();
-            let port = HostPort::new(probe.local_addr().unwrap().port()).unwrap();
-            drop(probe);
+            let port = HostPort::new(free_port().await).unwrap();
             activator.serve(&[(app_id.clone(), port)]).await;
             if activator.listening_for().await.contains(app_id) {
                 return port;
@@ -287,11 +284,8 @@ mod tests {
             .expect("the activator answers")
     }
 
-    async fn guest(state: &SharedState, in_state: InstanceState, body: &'static str) -> HostPort {
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let port = listener.local_addr().unwrap().port();
+    /// Answers every request on `listener` with `body`, as a tenant would.
+    fn serve(listener: TcpListener, body: &'static str) {
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -307,6 +301,22 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// A port nothing is listening on yet.
+    async fn free_port() -> u16 {
+        let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        probe.local_addr().unwrap().port()
+    }
+
+    async fn guest(state: &SharedState, in_state: InstanceState, body: &'static str) -> HostPort {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        serve(listener, body);
         state
             .put_record(instance_record(|record| {
                 record.on_request = true;
@@ -318,17 +328,74 @@ mod tests {
         HostPort::new(port).unwrap()
     }
 
+    /// Wakes by bringing the guest up on the port the record names, then reports the wake as
+    /// `outcome`.
+    struct WakingBringsUpAGuest {
+        port: HostPort,
+        body: &'static str,
+        outcome: Result<(), WakeRefusal>,
+    }
+
+    #[async_trait::async_trait]
+    impl Waker for WakingBringsUpAGuest {
+        async fn wake(&self, _app_id: &AppId) -> Result<(), WakeRefusal> {
+            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], self.port.get())))
+                .await
+                .unwrap();
+            serve(listener, self.body);
+            self.outcome.clone()
+        }
+    }
+
     #[tokio::test]
-    async fn a_request_the_microvm_is_not_there_to_take_is_answered_rather_than_refused() {
+    async fn a_request_to_a_running_app_between_guests_waits_for_the_next_one_and_is_served_by_it() {
+        // The pass stopped the old guest for its replacement and the record is Starting, but
+        // nothing answers on the port yet. The request is not turned away for the app not being
+        // on-request: it is handed to the waker, which holds it until the guest answers.
+        let state = HostState::shared();
+        let port = free_port().await;
+        state
+            .put_record(instance_record(|record| {
+                record.on_request = false;
+                record.state = InstanceState::Starting;
+                record.guest_ipv4 = Ipv4Address::parse("127.0.0.1").unwrap();
+                record.http_port = HttpPort::new(port).unwrap();
+            }))
+            .await;
+        let waker = WakingBringsUpAGuest {
+            port: HostPort::new(port).unwrap(),
+            body: "served by the replacement\n",
+            outcome: Ok(()),
+        };
+        let activator = AppActivator::new(state, Arc::new(waker), Arc::default());
+        let host_port = serving(&activator, &app_id()).await;
+
+        let response = get(host_port).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "served by the replacement\n");
+    }
+
+    #[tokio::test]
+    async fn a_running_app_that_is_out_of_restarts_is_said_to_have_not_started() {
         let state = HostState::shared();
         state
-            .put_record(instance_record(|record| record.on_request = false))
+            .put_record(instance_record(|record| {
+                record.on_request = false;
+                record.state = InstanceState::Failed;
+            }))
             .await;
-        let activator = AppActivator::new(state, CountingWaker::allowing(), Arc::default());
+        let activator = AppActivator::new(
+            state,
+            CountingWaker::refusing(WakeRefusal::Failed {
+                kind: WakeFailure::WouldNotStart,
+                reason: "out of restarts: 6 starts attempted against a budget of 5".into(),
+            }),
+            Arc::default(),
+        );
         let host_port = serving(&activator, &app_id()).await;
         let response = get(host_port).await;
         assert_eq!(response.status(), 503);
-        assert!(response.text().await.unwrap().contains("not running"));
+        assert!(response.text().await.unwrap().contains("could not be started"));
     }
 
     #[tokio::test]
@@ -419,53 +486,13 @@ mod tests {
         assert_eq!(waker.count(), 0, "an app already answering its port is not woken");
     }
 
-    /// Wakes by bringing the guest up on the port the record names, then reports the health check
-    /// as unmet — a cold guest that comes up serving but never goes green.
-    struct WakingBringsUpAnUnhealthyGuest {
-        port: HostPort,
-        body: &'static str,
-    }
-
-    #[async_trait::async_trait]
-    impl Waker for WakingBringsUpAnUnhealthyGuest {
-        async fn wake(&self, _app_id: &AppId) -> Result<(), WakeRefusal> {
-            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], self.port.get())))
-                .await
-                .unwrap();
-            let body = self.body;
-            tokio::spawn(async move {
-                loop {
-                    let Ok((stream, _)) = listener.accept().await else {
-                        return;
-                    };
-                    tokio::spawn(async move {
-                        let service = service_fn(move |_request: Request<Incoming>| async move {
-                            Ok::<_, std::convert::Infallible>(say(StatusCode::OK, body))
-                        });
-                        let _ = http1::Builder::new()
-                            .serve_connection(TokioIo::new(stream), service)
-                            .await;
-                    });
-                }
-            });
-            Err(WakeRefusal::Failed {
-                kind: WakeFailure::NeverAnswered,
-                reason: "the health check is unmet".into(),
-            })
-        }
-    }
-
     #[tokio::test]
     async fn a_woken_guest_that_comes_up_unhealthy_is_forwarded_to_rather_than_refused() {
         // Cold path: nothing is listening when the request arrives, so the guest is woken. It comes
         // up serving its port but never passes its health check (NeverAnswered). Health is
         // report-only, so the request is still forwarded to the port that is now up.
         let state = HostState::shared();
-        let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
+        let port = free_port().await;
         state
             .put_record(instance_record(|record| {
                 record.on_request = true;
@@ -474,9 +501,13 @@ mod tests {
                 record.http_port = HttpPort::new(port).unwrap();
             }))
             .await;
-        let waker = WakingBringsUpAnUnhealthyGuest {
+        let waker = WakingBringsUpAGuest {
             port: HostPort::new(port).unwrap(),
             body: "up but unhealthy\n",
+            outcome: Err(WakeRefusal::Failed {
+                kind: WakeFailure::NeverAnswered,
+                reason: "the health check is unmet".into(),
+            }),
         };
         let activator = AppActivator::new(state, Arc::new(waker), Arc::default());
         let host_port = serving(&activator, &app_id()).await;
@@ -506,7 +537,9 @@ mod tests {
     #[tokio::test]
     async fn a_slot_the_host_no_longer_holds_stops_being_answered_for() {
         let state = HostState::shared();
-        state.put_record(instance_record(|_| {})).await;
+        state
+            .put_record(instance_record(|record| record.desired_running = false))
+            .await;
         let activator = AppActivator::new(state, CountingWaker::allowing(), Arc::default());
         let host_port = serving(&activator, &app_id()).await;
         activator.serve(&[(app_id(), host_port)]).await;
@@ -573,14 +606,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_app_that_was_never_asked_for_on_request_is_not_marked_as_used_by_a_refusal() {
+    async fn an_app_the_document_has_stopped_is_not_marked_as_used_by_a_refusal() {
         let state = HostState::shared();
         state
-            .put_record(instance_record(|record| record.on_request = false))
+            .put_record(instance_record(|record| record.desired_running = false))
             .await;
         let activator = AppActivator::new(state.clone(), CountingWaker::allowing(), Arc::default());
         let host_port = serving(&activator, &app_id()).await;
-        assert_eq!(get(host_port).await.status(), 503);
+        let response = get(host_port).await;
+        assert_eq!(response.status(), 503);
+        assert!(response.text().await.unwrap().contains("not running"));
         assert!(state.snapshot().await.last_active_at_ms.is_empty());
     }
 
