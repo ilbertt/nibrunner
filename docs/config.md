@@ -103,6 +103,20 @@ kills tenants.
 **This backend caps a host at 63 apps.** Slot *N* takes `/dev/nbdN` and the export reader holds the
 last of them.
 
+**A guest's `fsync` is not a durability point on this backend.** `install` renders ZeroFS's
+configuration with `ignore_fsync = true` and `flush_interval_secs = 5`, and deliberately: honouring
+`fsync` over an object store costs about 244 ms a call, against about 1 ms with it ignored, and no
+database is usable at the first number. So an `fsync` inside the guest returns at once and reaches
+nothing — NBD `FLUSH` and `FUA` mean nothing to ZeroFS — and the flush interval is the entire
+durability guarantee: every 5 s ZeroFS seals what it holds and uploads it. What can be lost is what
+was written since the last seal that reached the store, which is the interval plus the seal and the
+upload — 5–15 s in practice. A guest that crashes loses none of it, because the host is still there
+to flush; a host that loses power, or is reset hard, loses all of it, acknowledged `fsync`s
+included. Measured on a host: `kill -9` of a guest 0.6 s into a write with an `fsync` every 100
+rows kept every acknowledged row; `echo b > /proc/sysrq-trigger` on the host 0.7 s into the same
+write kept none of them. Five is the minimum ZeroFS enforces and the file is `install`'s, so there
+is no key here to turn: this is the host's trade, made once for every app on it.
+
 ## What this host serves
 
 Every way in is a section under `[proxy]`, and each is absent or complete. Each binds an address

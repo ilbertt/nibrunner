@@ -102,6 +102,19 @@ The volume is not mounted anywhere in particular: it is the writable top of the 
 every write anywhere lands on it and persists, and nothing else does. An export is the volume's
 contents and the environment — never what a layer already holds.
 
+Persists, on a host whose volumes are in an object store, with one window that is worth knowing
+the size of. The volume reaches the store through ZeroFS, which the host runs with `fsync`
+ignored and a flush every 5 seconds — honouring `fsync` over an object store costs about 244 ms
+a call, and nothing that keeps a database is usable at that price. So an `fsync` inside the guest
+returns at once and reaches nothing, and the flush interval is the whole of the durability
+guarantee: what can be lost is what was written since the last flush that reached the store,
+which is the interval plus the seal and the upload, 5–15 s in practice. A guest that crashes
+loses none of it, because the host is still there to flush; a host that loses power, or is
+reset hard, loses all of it, acknowledged `fsync`s included. Measured: `kill -9` of a guest
+0.6 s into a write that fsynced every 100 rows kept every acknowledged row; a hard reset of the
+host 0.7 s into the same write kept none of them. This is the host's trade, made once for every
+app on it — [`docs/config.md`](docs/config.md) says where.
+
 `command` is what the guest's init runs in that root once it is stacked: `program` with `args`,
 in `workingDirectory`, with `environment`, as uid 65534. The working directory is made if no
 layer holds it, given to that uid, and is where the program's persistent state lives — it is the
