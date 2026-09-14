@@ -187,7 +187,7 @@ fn start_refused(
 // of restarts is otherwise indistinguishable from one that has never been restarted at all.
 async fn say_it_is_out_of_restarts(host: &Host, app_id: &AppId, attempted: u32, allowed: u32) {
     let said = StateMessage::new(format!(
-        "out of restarts: {attempted} starts attempted against a budget of {allowed},          and this instance will not be started again until it is deployed afresh"
+        "out of restarts: {attempted} starts attempted against a budget of {allowed}, and this instance will not be started again until it is deployed afresh"
     ));
     if say(host, app_id, said).await {
         host.metrics.health.failed(app_id, Failure::OutOfRestarts);

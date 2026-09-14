@@ -12,9 +12,10 @@ pub use plan::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use protocol::{DesiredInstanceState, HostDesiredState};
+use protocol::{DesiredInstanceState, HostDesiredState, InstanceState};
 
 use crate::adapters::vm::UNKNOWN_VM;
+use crate::domain::backoff::NO_START_ATTEMPTS;
 use crate::domain::metrics::converge;
 use crate::domain::metrics::passes::Trigger;
 use crate::host::Host;
@@ -41,6 +42,13 @@ pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
                     exited: !status.active
                         && status.started_this_boot
                         && record.is_some_and(|record| record.started_at.is_some() && !record.stop_requested),
+                    // A refusal leaves the record failed with nothing spent on it; a boot that
+                    // failed, or a guest that exited, cost an attempt or came up first.
+                    refused: record.is_some_and(|record| {
+                        record.state == InstanceState::Failed
+                            && record.started_at.is_none()
+                            && record.start_attempts == NO_START_ATTEMPTS
+                    }),
                 }
             })
             .collect(),
@@ -178,7 +186,6 @@ mod tests {
     use crate::adapters::vm::{VmExit, VmStatus};
     use crate::ports::{VmCall, VmError};
     use crate::test_support::*;
-    use protocol::InstanceState;
 
     fn running_vm() -> VmStatus {
         VmStatus {
@@ -611,6 +618,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_on_request_app_whose_seed_is_put_right_is_started_without_waiting_to_be_asked_for() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let archive = crate::adapters::volumes::initial_contents::tests::archive();
+        let host = test_host_seeding(archive.clone()).await;
+        let seeded_with = |contents: protocol::InitialContents| {
+            desired_state(|state| {
+                state.volumes = vec![desired_volume(|volume| volume.initial_contents = Some(contents))];
+                state.instances = vec![desired_instance(|instance| {
+                    instance.desired_state = DesiredInstanceState::OnRequest;
+                    instance.hostnames = vec![app_hostname()];
+                })];
+            })
+        };
+        let wrong = seeded_with(initial_contents(b"not what the store holds", "/app/data"));
+
+        reconcile(host.arc(), &wrong, Trigger::Change).await;
+        let refused = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(refused.state, InstanceState::Failed);
+        let reason = refused.message.clone().expect("the volume's reason");
+        assert!(reason.as_str().contains("hashes to"), "{}", reason.as_str());
+        let provisions_failed = |page: &str| {
+            page.lines()
+                .find(|line| {
+                    line.starts_with(
+                        "nibrunner_storage_operation_seconds_count{operation=\"volume_provision\",outcome=\"failed\"}",
+                    )
+                })
+                .map(str::to_string)
+        };
+        let once = provisions_failed(&metrics_page(&host).await);
+        assert!(once.as_deref().unwrap_or("").ends_with(" 1"), "{once:?}");
+
+        // The ticks neither fetch the seed again nor boot anything, and the app is not read as
+        // one asleep and well: it stays failed for the volume's reason.
+        reconcile(host.arc(), &wrong, Trigger::Tick).await;
+        refresh(host.arc()).await;
+        reconcile(host.arc(), &wrong, Trigger::Tick).await;
+
+        assert_eq!(provisions_failed(&metrics_page(&host).await), once);
+        assert!(host.vms.calls().is_empty(), "{:?}", host.vms.calls());
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.volume_reports[0].state, protocol::VolumeState::Failed);
+        let record = &snapshot.records[&app_id()];
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.message, Some(reason));
+        assert_eq!(record.start_attempts, crate::domain::backoff::NO_START_ATTEMPTS);
+        let [_, _, _, volume, _, _, _, _] = host.metrics.health.of(&app_id()).failures;
+        assert_eq!(volume, 1, "said once, counted once");
+
+        reconcile(
+            host.arc(),
+            &seeded_with(initial_contents(&archive, "/app/data")),
+            Trigger::Change,
+        )
+        .await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.volume_reports[0].state, protocol::VolumeState::Ready);
+        let record = &snapshot.records[&app_id()];
+        assert_eq!(record.state, InstanceState::Starting);
+        assert_eq!(record.message, None);
+        assert_eq!(
+            record.start_attempts.attempts, 1,
+            "the refusal cost nothing; this boot is the first attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_on_request_app_that_spent_its_budget_before_coming_up_is_not_started_by_a_pass() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let said = protocol::StateMessage::new("out of restarts: 6 starts attempted against a budget of 5");
+        host.state
+            .put_record(instance_record(|record| {
+                record.on_request = true;
+                record.state = InstanceState::Failed;
+                record.started_at = None;
+                record.start_attempts = crate::domain::backoff::AttemptWindow {
+                    attempts: protocol::DEFAULT_RESTART_POLICY.max_restarts + 1,
+                    last_attempt_at_ms: Some(crate::clock::now_ms()),
+                };
+                record.message = Some(said.clone());
+            }))
+            .await;
+        let on_request = desired_state(|state| {
+            state.volumes = vec![desired_volume(|_| {})];
+            state.instances = vec![desired_instance(|instance| {
+                instance.desired_state = DesiredInstanceState::OnRequest
+            })];
+        });
+
+        reconcile(host.arc(), &on_request, Trigger::Tick).await;
+
+        assert!(host.vms.calls().is_empty(), "{:?}", host.vms.calls());
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.message, Some(said));
+        assert_eq!(
+            record.start_attempts.attempts,
+            protocol::DEFAULT_RESTART_POLICY.max_restarts + 1
+        );
+    }
+
+    #[tokio::test]
     async fn a_deploy_replaces_the_release_rather_than_restarting_it() {
         let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
@@ -692,6 +805,52 @@ mod tests {
             .put_record(instance_record(|record| record.started_at = None))
             .await;
         assert!(!observe(&host, &desired_state(|_| {})).await.instances[0].exited);
+    }
+
+    #[tokio::test]
+    async fn a_record_failed_with_no_attempt_spent_on_it_reads_as_refused() {
+        let host = test_host().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Failed;
+                record.started_at = None;
+                record.message = Some(protocol::StateMessage::new(
+                    "the initial contents could not be laid out",
+                ));
+            }))
+            .await;
+        assert!(observe(&host, &desired_state(|_| {})).await.instances[0].refused);
+    }
+
+    #[tokio::test]
+    async fn one_that_spent_its_budget_or_came_up_once_does_not() {
+        let host = test_host().await;
+        let spent = crate::domain::backoff::AttemptWindow {
+            attempts: protocol::DEFAULT_RESTART_POLICY.max_restarts + 1,
+            last_attempt_at_ms: Some(crate::clock::now_ms()),
+        };
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Failed;
+                record.started_at = None;
+                record.start_attempts = spent;
+            }))
+            .await;
+        assert!(
+            !observe(&host, &desired_state(|_| {})).await.instances[0].refused,
+            "every boot failed on the way up, and each cost an attempt"
+        );
+
+        host.state
+            .update_record(&app_id(), |record| {
+                record.started_at = Some(observed_at());
+                record.start_attempts = crate::domain::backoff::NO_START_ATTEMPTS;
+            })
+            .await;
+        assert!(
+            !observe(&host, &desired_state(|_| {})).await.instances[0].refused,
+            "a guest that came up and earned its window back is one that exited, not one refused"
+        );
     }
 
     #[tokio::test]
