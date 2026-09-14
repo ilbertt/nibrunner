@@ -490,10 +490,12 @@ mod tests {
             let mut volumes = MockVolumeBackend::new();
             let observed = usable.clone();
             volumes.expect_observe().returning(move |_| {
+                let usable = observed.load(Ordering::SeqCst);
                 vec![ObservedBacking {
                     volume_id: volume_id(),
                     size_bytes: VOLUME_SIZE_BYTES,
-                    attached: observed.load(Ordering::SeqCst),
+                    attached: usable,
+                    formatted: usable,
                     device_path: Some("/dev/nbd0".to_string()),
                     storage_prefix: protocol::ObjectKey::parse(HOST_STORAGE_PREFIX).unwrap(),
                 }]

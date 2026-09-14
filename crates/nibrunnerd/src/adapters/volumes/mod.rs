@@ -48,11 +48,15 @@ pub struct AttachedVolume {
     pub storage_prefix: ObjectKey,
 }
 
+/// A volume as the host finds it. `attached` and `formatted` are two different facts: a device
+/// can answer reads and still carry no filesystem, which is what a seeded format that was refused
+/// leaves behind, and a guest booted onto that only dies failing to mount it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedBacking {
     pub volume_id: VolumeId,
     pub size_bytes: u64,
     pub attached: bool,
+    pub formatted: bool,
     pub device_path: Option<String>,
     pub storage_prefix: ObjectKey,
 }

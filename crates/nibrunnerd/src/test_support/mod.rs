@@ -292,6 +292,7 @@ pub fn observed_volume(edit: impl FnOnce(&mut ObservedVolume)) -> ObservedVolume
         volume_id: volume_id(),
         app_id: app_id(),
         attached: true,
+        formatted: true,
         size_bytes: VOLUME_SIZE_BYTES,
         storage_prefix: ObjectKey::parse(HOST_STORAGE_PREFIX).unwrap(),
         device_path: Some("/dev/nbd0".to_string()),
@@ -370,6 +371,30 @@ pub async fn test_host() -> TestHost {
 }
 
 pub async fn test_host_with(repositories: crate::repositories::Repositories) -> TestHost {
+    test_host_over(repositories, mocks::artifacts_holding(ARTIFACT_BYTES.to_vec())).await
+}
+
+/// A host whose store holds `seed` under the key the seeded volume fixture names, and the app's
+/// layer under every other.
+pub async fn test_host_seeding(seed: Vec<u8>) -> TestHost {
+    let store = mocks::artifacts_answering(move |key| {
+        Ok(if key.as_str().starts_with("seeds/") {
+            seed.clone()
+        } else {
+            ARTIFACT_BYTES.to_vec()
+        })
+    });
+    test_host_over(
+        crate::repositories::Repositories::sqlite(crate::domain::store::in_memory().await),
+        store,
+    )
+    .await
+}
+
+async fn test_host_over(
+    repositories: crate::repositories::Repositories,
+    artifacts: Arc<crate::ports::MockArtifactStore>,
+) -> TestHost {
     use crate::adapters::net::allocator::SlotAllocator;
     use crate::adapters::net::firewall::HostFirewall;
     use crate::adapters::proxy::activator::AppActivator;
@@ -391,6 +416,12 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
     }
 
     let directory = tempfile::tempdir().expect("a temporary directory");
+    // Whoever runs the tests is not root, and a seed can be given to nobody but themself.
+    let owner = {
+        use std::os::unix::fs::MetadataExt;
+        let me = std::fs::metadata(directory.path()).expect("the directory just made");
+        (me.uid(), me.gid())
+    };
     let mut config = HostConfig::under(directory.path());
     // A host that serves apps under hostnames runs a proxy and binds the ports beside it, and an
     // app is refused on a host that does neither.
@@ -407,10 +438,10 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
     };
     let state = HostState::shared();
     let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
-    let (commands, command_log) = mocks::commands_succeeding();
+    let (commands, command_log) = mocks::commands_formatting();
     let (vms, vm_spy) = mocks::vmm();
     let (exports, export_spy) = mocks::exports_accepting();
-    let artifacts: Arc<dyn crate::ports::ArtifactStore> = mocks::artifacts_holding(ARTIFACT_BYTES.to_vec());
+    let artifacts: Arc<dyn crate::ports::ArtifactStore> = artifacts;
     let host = Arc::new(Host {
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         guest_image_version: "6.1.180-test".to_string(),
@@ -425,7 +456,8 @@ pub async fn test_host_with(repositories: crate::repositories::Repositories) -> 
             crate::adapters::volumes::initial_contents::ContentsStaging::new(
                 artifacts.clone(),
                 config.initial_contents_dir(),
-            ),
+            )
+            .given_to(owner.0, owner.1),
         )),
         artifacts: artifacts.clone(),
         payloads: crate::adapters::vm::layers::LayerImages::new(artifacts, config.artifact_cache_dir()),

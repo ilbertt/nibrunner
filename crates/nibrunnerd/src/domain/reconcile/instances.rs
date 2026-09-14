@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use protocol::{AppId, DesiredInstance, DesiredInstanceState, InstanceState, StateMessage};
+use protocol::{
+    AppId, DesiredInstance, DesiredInstanceState, InstanceState, StateMessage, VolumeId, VolumeState,
+};
 
 use crate::adapters::vm::{VmStatus, UNKNOWN_VM};
 use crate::clock::{now_ms, now_timestamp};
@@ -201,6 +203,23 @@ async fn say(host: &Host, app_id: &AppId, said: StateMessage) -> bool {
     news
 }
 
+/// Why the volume this instance would boot onto cannot be booted onto, as the pass over the
+/// volumes just reported it; nothing for a volume that is ready, or that this host has no report
+/// of yet, which the attach below answers for itself.
+async fn volume_refusal(host: &Host, volume_id: &VolumeId) -> Option<StateMessage> {
+    host.state
+        .snapshot()
+        .await
+        .volume_reports
+        .into_iter()
+        .find(|report| &report.volume_id == volume_id && report.state == VolumeState::Failed)
+        .map(|report| {
+            report
+                .message
+                .unwrap_or_else(|| StateMessage::new(format!("{volume_id} could not be made ready")))
+        })
+}
+
 pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
         tracing::error!(app_id = %desired.app_id, "this host has no slot left to answer for the app");
@@ -280,6 +299,22 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         ),
     };
     attempted.adopt(record_fields(desired, &slot));
+    attempted.stop_requested = false;
+
+    // A volume the pass over the volumes could not make ready (a seed the document names wrongly
+    // leaves it attached but bare) is nothing to boot onto: the guest would only die failing to
+    // mount it. The fault is the volume's, so no start attempt is spent on it, and the app is
+    // started the pass the volume is put right.
+    if let Some(refusal) = volume_refusal(host, &desired.volume_id).await {
+        attempted.state = InstanceState::Failed;
+        host.state.put_record(attempted).await;
+        if say(host, &desired.app_id, refusal.clone()).await {
+            host.metrics.health.failed(&desired.app_id, Failure::Volume);
+            tracing::error!(app_id = %desired.app_id, reason = refusal.as_str(), "instance start failed");
+        }
+        return;
+    }
+
     attempted.start_attempts = next_attempt_window(
         &existing
             .as_ref()
@@ -288,7 +323,6 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         now,
         desired.config.restart_policy.reset_after_ms,
     );
-    attempted.stop_requested = false;
     host.state.put_record(attempted.clone()).await;
     host.state.mark_active(&desired.app_id, now).await;
 
@@ -1018,6 +1052,77 @@ mod tests {
             host.metrics.health.of(&app_id()).failures,
             failures(&[("layers", 1)])
         );
+    }
+
+    #[tokio::test]
+    async fn an_app_whose_volume_has_no_filesystem_is_not_booted_and_says_why_the_volume_has_none() {
+        let host = test_host().await;
+        // What the pass over the volumes leaves when a seed is refused: a report that says failed,
+        // with the reason.
+        let refusal = StateMessage::new("the initial contents could not be laid out: wrong digest");
+        host.state
+            .modify(|snapshot| {
+                snapshot.volume_reports = vec![reported_volume(|report| {
+                    report.state = protocol::VolumeState::Failed;
+                    report.message = Some(refusal.clone());
+                })]
+            })
+            .await;
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        assert!(
+            host.vms.calls().is_empty(),
+            "nothing was booted onto a bare volume"
+        );
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.message.as_ref(), Some(&refusal));
+        assert_eq!(record.deployment_id, deployment_id());
+        assert!(record.started_at.is_none());
+        assert_eq!(
+            record.start_attempts, NO_START_ATTEMPTS,
+            "a volume that is not ready is not the app's failure to pay for"
+        );
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("volume", 1)])
+        );
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("volume", 1)]),
+            "said once, counted once, however many passes say it again"
+        );
+
+        // The status loop reads the record as it is left, not as an app asleep and well.
+        refresh_states(host.arc()).await;
+        let settled = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(settled.state, InstanceState::Failed);
+        assert_eq!(settled.message.as_ref(), Some(&refusal));
+    }
+
+    #[tokio::test]
+    async fn a_volume_reported_ready_again_lets_the_app_that_was_refused_for_it_start() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Failed;
+                record.message = Some(StateMessage::new("the initial contents could not be laid out"));
+            }))
+            .await;
+        host.state
+            .modify(|snapshot| snapshot.volume_reports = vec![reported_volume(|_| {})])
+            .await;
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Boot]);
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Starting);
+        assert_eq!(record.message, None);
     }
 
     #[tokio::test]

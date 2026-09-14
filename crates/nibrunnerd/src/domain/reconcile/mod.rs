@@ -145,7 +145,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
     let stops = apply_stops(host, &plan);
     tokio::join!(prefetch, stops);
 
-    volumes::apply_volumes(host, &plan, &observed, desired).await;
+    volumes::apply_volumes(host, &plan, &observed, desired, trigger).await;
     apply_sleeps(host, &plan).await;
     network::apply_activators(host).await;
     network::apply_network(host).await;
@@ -482,6 +482,100 @@ mod tests {
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Failed);
         assert!(record.message.unwrap().as_str().contains("does not serve"));
+    }
+
+    #[tokio::test]
+    async fn a_seed_the_document_names_wrongly_keeps_the_app_down_until_the_document_is_put_right() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let archive = crate::adapters::volumes::initial_contents::tests::archive();
+        let host = test_host_seeding(archive.clone()).await;
+        let seeded_with = |contents: protocol::InitialContents| {
+            desired_state(|state| {
+                state.volumes = vec![desired_volume(|volume| volume.initial_contents = Some(contents))];
+                state.instances = vec![desired_instance(|instance| {
+                    instance.hostnames = vec![app_hostname()]
+                })];
+            })
+        };
+        // The store holds the archive; the document names a digest of something else.
+        let wrong = seeded_with(initial_contents(b"not what the store holds", "/app/data"));
+
+        reconcile(host.arc(), &wrong, Trigger::Change).await;
+        reconcile(host.arc(), &wrong, Trigger::Change).await;
+
+        assert!(
+            host.vms.calls().is_empty(),
+            "nothing was booted onto a bare volume"
+        );
+        let snapshot = host.state.snapshot().await;
+        let volume = &snapshot.volume_reports[0];
+        assert_eq!(volume.state, protocol::VolumeState::Failed);
+        let reason = volume.message.clone().expect("the refusal");
+        assert!(reason.as_str().contains("hashes to"), "{}", reason.as_str());
+        let record = &snapshot.records[&app_id()];
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(
+            record.message.as_ref(),
+            Some(&reason),
+            "the app carries the volume's reason"
+        );
+        assert_eq!(record.start_attempts, crate::domain::backoff::NO_START_ATTEMPTS);
+        assert!(
+            !host.commands.executables().contains(&"mke2fs".to_string()),
+            "a seed that was refused formats nothing"
+        );
+        let provisions_failed = |page: &str| {
+            page.lines()
+                .find(|line| {
+                    line.starts_with(
+                        "nibrunner_storage_operation_seconds_count{operation=\"volume_provision\",outcome=\"failed\"}",
+                    )
+                })
+                .map(str::to_string)
+        };
+        let after_two_changes = provisions_failed(&metrics_page(&host).await);
+        assert!(
+            after_two_changes.as_deref().unwrap_or("").ends_with(" 2"),
+            "{after_two_changes:?}"
+        );
+
+        // The timer does not fetch the seed again against a document that still names the wrong
+        // thing; the volume and the app stay failed for the reason they were.
+        reconcile(host.arc(), &wrong, Trigger::Tick).await;
+
+        assert_eq!(provisions_failed(&metrics_page(&host).await), after_two_changes);
+        assert!(host.vms.calls().is_empty());
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.volume_reports[0].state, protocol::VolumeState::Failed);
+        assert_eq!(snapshot.volume_reports[0].message, Some(reason.clone()));
+        assert_eq!(snapshot.records[&app_id()].state, InstanceState::Failed);
+        assert_eq!(snapshot.records[&app_id()].message, Some(reason));
+
+        reconcile(
+            host.arc(),
+            &seeded_with(initial_contents(&archive, "/app/data")),
+            Trigger::Change,
+        )
+        .await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Boot]);
+        let snapshot = host.state.snapshot().await;
+        assert_eq!(snapshot.volume_reports[0].state, protocol::VolumeState::Ready);
+        assert_eq!(snapshot.volume_reports[0].message, None);
+        let record = &snapshot.records[&app_id()];
+        assert_eq!(record.state, InstanceState::Starting);
+        assert_eq!(record.message, None);
+        let formats: Vec<_> = host
+            .commands
+            .commands()
+            .into_iter()
+            .filter(|command| command[0] == "mke2fs")
+            .collect();
+        assert_eq!(formats.len(), 1);
+        assert!(
+            formats[0].contains(&"-d".to_string()),
+            "the volume was formatted holding the seed: {formats:?}"
+        );
     }
 
     #[tokio::test]

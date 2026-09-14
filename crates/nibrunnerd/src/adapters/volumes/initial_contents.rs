@@ -42,7 +42,7 @@ impl ContentsStaging {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn given_to(mut self, uid: u32, gid: u32) -> Self {
         self.owner = (uid, gid);
         self
