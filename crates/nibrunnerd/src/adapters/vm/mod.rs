@@ -5,4 +5,4 @@ pub mod process;
 pub mod snapshot;
 pub mod status;
 
-pub use status::{VmStatus, UNKNOWN_VM};
+pub use status::{VmExit, VmStatus, UNKNOWN_VM};

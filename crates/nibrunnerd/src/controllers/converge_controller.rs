@@ -471,7 +471,7 @@ mod tests {
                 active: true,
                 failed: false,
                 started_this_boot: true,
-                exit_code: None,
+                exit: None,
             }
         }
 

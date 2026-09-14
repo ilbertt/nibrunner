@@ -186,6 +186,8 @@ pub trait Vmm: Send + Sync {
     /// guest keeps its end of the socket across a daemon restart, but a fresh receiver never
     /// bound the host end, so without this its output would go nowhere for the rest of its life.
     async fn readopt(&self, app_id: &AppId) -> Result<(), VmError>;
+    /// Why a microVM that exited went down, when its guest said: init's reason for shutting it
+    /// down, or the kernel's panic. A guest killed from outside said nothing.
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String>;
     fn working_dir(&self, app_id: &AppId) -> PathBuf;
 }

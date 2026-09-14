@@ -748,7 +748,7 @@ mod tests {
             active: true,
             failed: false,
             started_this_boot: true,
-            exit_code: None,
+            exit: None,
         });
         crate::domain::reconcile::refresh(host.arc()).await;
         let closed = host.state.snapshot().await.deploys[&app_id()].clone();

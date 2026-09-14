@@ -1,6 +1,7 @@
 use protocol::{
     AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort, InstanceResources,
-    InstanceState, Ipv4Address, PortName, ReportedRestart, Sha256Digest, StateMessage, Timestamp, VolumeId,
+    InstanceState, Ipv4Address, PortName, ReportedRestart, RestartPolicy, Sha256Digest, StateMessage,
+    Timestamp, VolumeId, DEFAULT_RESTART_POLICY,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,10 @@ pub struct InstanceRecord {
     pub health: HealthTracker,
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
+    /// The policy the status loop judges an exit by. Absent is a record written before the status
+    /// loop needed it; it reads as the default until the first pass copies the document's.
+    #[serde(default = "default_restart_policy")]
+    pub restart_policy: RestartPolicy,
     pub desired_running: bool,
     pub on_request: bool,
     #[serde(default)]
@@ -57,6 +62,10 @@ pub struct InstanceRecord {
     pub message: Option<StateMessage>,
 }
 
+fn default_restart_policy() -> RestartPolicy {
+    DEFAULT_RESTART_POLICY
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordFields {
     pub app_id: AppId,
@@ -70,6 +79,7 @@ pub struct RecordFields {
     pub layer_digests: Vec<Sha256Digest>,
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
+    pub restart_policy: RestartPolicy,
     pub desired_running: bool,
     pub on_request: bool,
 }
@@ -90,6 +100,7 @@ impl InstanceRecord {
             health,
             health_check: fields.health_check,
             resources: fields.resources,
+            restart_policy: fields.restart_policy,
             desired_running: fields.desired_running,
             on_request: fields.on_request,
             start_attempts: NO_START_ATTEMPTS,
@@ -114,6 +125,7 @@ impl InstanceRecord {
         self.layer_digests = fields.layer_digests;
         self.health_check = fields.health_check;
         self.resources = fields.resources;
+        self.restart_policy = fields.restart_policy;
         self.desired_running = fields.desired_running;
         self.on_request = fields.on_request;
     }
@@ -161,6 +173,11 @@ mod tests {
             vcpu_count: 4,
             memory_mib: 4_096,
         };
+        fields.restart_policy = RestartPolicy {
+            max_restarts: 9,
+            reset_after_ms: 5_000,
+            ..DEFAULT_RESTART_POLICY
+        };
         fields.desired_running = false;
         fields.on_request = true;
         fields
@@ -190,9 +207,11 @@ mod tests {
         let mut written = serde_json::to_value(instance_record(|_| {})).unwrap();
         let object = written.as_object_mut().unwrap();
         object.remove("startAttempts");
+        object.remove("restartPolicy");
         let records = read_instance_records(Some(serde_json::Value::Array(vec![written])));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].start_attempts, NO_START_ATTEMPTS);
+        assert_eq!(records[0].restart_policy, DEFAULT_RESTART_POLICY);
     }
 
     #[test]
@@ -226,6 +245,7 @@ mod tests {
         assert_eq!(record.guest_ipv4, wanted.guest_ipv4);
         assert_eq!(record.layer_digests, wanted.layer_digests);
         assert_eq!(record.resources, wanted.resources);
+        assert_eq!(record.restart_policy, wanted.restart_policy);
         assert!(!record.desired_running);
         assert!(record.on_request);
     }
