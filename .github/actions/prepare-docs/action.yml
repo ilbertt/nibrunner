@@ -1,0 +1,22 @@
+name: Prepare docs
+description: Prepare the environment, and the docs site's dependencies on top of it — for the jobs whose `just` recipe checks Rust and the docs site both.
+
+inputs:
+  cache:
+    description: Handed to prepare. `enabled` or `disabled`.
+    required: true
+  prepare_for_build:
+    description: Handed to prepare. `enabled` or `disabled`.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/prepare
+      with:
+        cache: ${{ inputs.cache }}
+        prepare_for_build: ${{ inputs.prepare_for_build }}
+
+    - name: Install the docs site's dependencies
+      shell: bash
+      run: cd docs && bun install --frozen-lockfile

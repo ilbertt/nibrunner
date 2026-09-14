@@ -52,10 +52,6 @@ runs:
         install: true
         cache: true
 
-    - name: Install the docs site's dependencies
-      shell: bash
-      run: cd docs && bun install --frozen-lockfile
-
     - name: Cargo Cache
       if: inputs.cache == 'enabled'
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
