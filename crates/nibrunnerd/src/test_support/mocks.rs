@@ -7,6 +7,9 @@ use protocol::{AppId, ObjectKey};
 
 use crate::adapters::net::tap::{MockHostNetwork, Neighbour, NetworkError, TapInterface};
 use crate::adapters::vm::VmStatus;
+use crate::adapters::volumes::{
+    AttachedVolume, CacheReservation, MockVolumeBackend, ObservedBacking, VolumeBackend, VolumeError,
+};
 use crate::domain::exports::store::{ExportStoreError, MockExportStore};
 use crate::ports::{
     ArtifactError, CommandError, CommandRequest, CommandResult, MockArtifactStore, MockCommandRunner,
@@ -213,18 +216,23 @@ pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
     (Arc::new(vms), spy)
 }
 
-/// The spy's VMM with every sleep held at a gate until the test lets it through, so that how
-/// many the host runs side by side is something a test can see, and a wake that lands
-/// mid-snapshot something it can stage.
-pub struct HeldSleeps {
-    vms: Arc<MockVmm>,
-    gate: tokio::sync::Semaphore,
+/// A gate every call of one kind waits at until the test lets it through, counting how many
+/// are waiting, so that how many the host runs side by side is something a test can see.
+pub struct Gate {
+    permits: tokio::sync::Semaphore,
     in_flight: AtomicUsize,
     most_in_flight: AtomicUsize,
-    wakes_mid_sleep: AtomicUsize,
 }
 
-impl HeldSleeps {
+impl Gate {
+    fn closed() -> Self {
+        Self {
+            permits: tokio::sync::Semaphore::new(0),
+            in_flight: AtomicUsize::new(0),
+            most_in_flight: AtomicUsize::new(0),
+        }
+    }
+
     pub fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::SeqCst)
     }
@@ -233,24 +241,65 @@ impl HeldSleeps {
         self.most_in_flight.load(Ordering::SeqCst)
     }
 
+    pub fn let_through(&self, calls: usize) {
+        self.permits.add_permits(calls);
+    }
+
+    /// Waits until this many calls are at the gate, or panics after long enough.
+    pub async fn held_up(&self, calls: usize) {
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while self.in_flight() < calls {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "{calls} calls never reached the gate at once");
+    }
+
+    /// Runs `call` once the test lets it through, counting it as in flight from now until then.
+    async fn through<T>(&self, call: impl std::future::Future<Output = T>) -> T {
+        let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+        self.permits
+            .acquire()
+            .await
+            .expect("the gate is never closed")
+            .forget();
+        let outcome = call.await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        outcome
+    }
+}
+
+/// The spy's VMM with every sleep held at a gate until the test lets it through, so that how
+/// many the host runs side by side is something a test can see, and a wake that lands
+/// mid-snapshot something it can stage.
+pub struct HeldSleeps {
+    vms: Arc<MockVmm>,
+    gate: Gate,
+    wakes_mid_sleep: AtomicUsize,
+}
+
+impl HeldSleeps {
+    pub fn in_flight(&self) -> usize {
+        self.gate.in_flight()
+    }
+
+    pub fn most_in_flight(&self) -> usize {
+        self.gate.most_in_flight()
+    }
+
     /// Wakes that were asked for while a snapshot was still being written.
     pub fn wakes_mid_sleep(&self) -> usize {
         self.wakes_mid_sleep.load(Ordering::SeqCst)
     }
 
     pub fn let_through(&self, sleeps: usize) {
-        self.gate.add_permits(sleeps);
+        self.gate.let_through(sleeps);
     }
 
-    /// Waits until this many sleeps are at the gate, or panics after long enough.
     pub async fn held_up(&self, sleeps: usize) {
-        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while self.in_flight() < sleeps {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-        })
-        .await;
-        assert!(waited.is_ok(), "{sleeps} sleeps never reached the gate at once");
+        self.gate.held_up(sleeps).await;
     }
 }
 
@@ -258,9 +307,7 @@ pub fn vmm_holding_sleeps() -> (Arc<HeldSleeps>, VmmSpy) {
     let (vms, spy) = vmm();
     let held = HeldSleeps {
         vms,
-        gate: tokio::sync::Semaphore::new(0),
-        in_flight: AtomicUsize::new(0),
-        most_in_flight: AtomicUsize::new(0),
+        gate: Gate::closed(),
         wakes_mid_sleep: AtomicUsize::new(0),
     };
     (Arc::new(held), spy)
@@ -273,16 +320,7 @@ impl Vmm for HeldSleeps {
     }
 
     async fn sleep(&self, request: crate::ports::SuspendRequest) -> Result<(), VmError> {
-        let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-        self.most_in_flight.fetch_max(in_flight, Ordering::SeqCst);
-        self.gate
-            .acquire()
-            .await
-            .expect("the gate is never closed")
-            .forget();
-        let outcome = self.vms.sleep(request).await;
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
-        outcome
+        self.gate.through(self.vms.sleep(request)).await
     }
 
     async fn wake(&self, request: crate::ports::SuspendRequest) -> Result<(), VmError> {
@@ -326,6 +364,68 @@ impl Vmm for HeldSleeps {
 
     fn working_dir(&self, app_id: &AppId) -> PathBuf {
         self.vms.working_dir(app_id)
+    }
+}
+
+/// The given backend with every provision held at the gate until the test lets it through.
+pub struct HeldProvisions {
+    volumes: MockVolumeBackend,
+    gate: Arc<Gate>,
+}
+
+pub fn volumes_holding_provisions(volumes: MockVolumeBackend) -> (Arc<HeldProvisions>, Arc<Gate>) {
+    let gate = Arc::new(Gate::closed());
+    let held = HeldProvisions {
+        volumes,
+        gate: gate.clone(),
+    };
+    (Arc::new(held), gate)
+}
+
+#[async_trait::async_trait]
+impl VolumeBackend for HeldProvisions {
+    async fn provision(&self, desired: &protocol::DesiredVolume) -> Result<AttachedVolume, VolumeError> {
+        self.gate.through(self.volumes.provision(desired)).await
+    }
+
+    async fn attach(
+        &self,
+        volume_id: &protocol::VolumeId,
+        app_id: &AppId,
+    ) -> Result<AttachedVolume, VolumeError> {
+        self.volumes.attach(volume_id, app_id).await
+    }
+
+    async fn detach(&self, volume_id: &protocol::VolumeId, app_id: &AppId) -> Result<(), VolumeError> {
+        self.volumes.detach(volume_id, app_id).await
+    }
+
+    async fn teardown(&self, volume_id: &protocol::VolumeId, app_id: &AppId) -> Result<(), VolumeError> {
+        self.volumes.teardown(volume_id, app_id).await
+    }
+
+    async fn flush(&self) -> Result<(), VolumeError> {
+        self.volumes.flush().await
+    }
+
+    async fn create_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+        self.volumes.create_checkpoint(checkpoint_id).await
+    }
+
+    async fn delete_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+        self.volumes.delete_checkpoint(checkpoint_id).await
+    }
+
+    async fn observe_checkpoints(&self) -> Vec<protocol::CheckpointId> {
+        self.volumes.observe_checkpoints().await
+    }
+
+    async fn observe(&self, owners: &BTreeMap<protocol::VolumeId, AppId>) -> Vec<ObservedBacking> {
+        self.volumes.observe(owners).await
+    }
+
+    fn reserved_cache(&self) -> CacheReservation {
+        self.volumes.reserved_cache()
     }
 }
 
