@@ -7,13 +7,22 @@ pub use protocol::DEFAULT_IDLE_TIMEOUT_MS;
 // much of a late pass is time this host actually watched.
 pub const ACTIVITY_INTERVAL_MS: u64 = 5_000;
 
+// How many apps a pass puts to sleep at once. A snapshot is disk-bound — pausing the guest is
+// instant, and the rest is writing its memory out to the one NVMe every app on the host runs
+// from — so four keep that disk busy without forty of them queueing on it, and the last app of a
+// batch that went quiet together is asleep a few snapshots after the first rather than forty.
+pub const SLEEP_CONCURRENCY: usize = 4;
+
 use std::collections::{BTreeMap, BTreeSet};
 
+use futures::StreamExt;
 use nft_render::AppTraffic;
-use protocol::{AppId, Timestamp};
+use protocol::{ActivationPolicy, AppId, Timestamp};
 
 use crate::domain::activation::{should_sleep, ActivitySignals, SleepReason};
+use crate::domain::report::InstanceRecord;
 use crate::host::Host;
+use crate::state::HostSnapshot;
 
 pub struct Activity {
     pub traffic: BTreeMap<AppId, AppTraffic>,
@@ -136,8 +145,60 @@ fn allowance_ms(policy: protocol::SleepPolicy) -> Option<u64> {
     }
 }
 
+/// Whether the policy lets this app go now, and what the pass has seen of it that says so.
+fn due(
+    policy: &ActivationPolicy,
+    record: &InstanceRecord,
+    snapshot: &HostSnapshot,
+    now: i64,
+) -> Option<(ActivitySignals, SleepReason)> {
+    let signals = ActivitySignals {
+        last_active_at_ms: snapshot.last_active_at_ms.get(&record.app_id).copied(),
+        started_at_ms: record.started_at.as_ref().map(Timestamp::epoch_ms),
+    };
+    let reason = should_sleep(policy, record, &signals, now)?;
+    Some((signals, reason))
+}
+
+async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) {
+    // Held across the flush and the snapshot, and taken by a wake for as long as it is bringing
+    // the guest back: a request that reaches an app mid-snapshot waits for the snapshot and then
+    // restores what it wrote, rather than finding a guest that is paused or half written out.
+    let _transition = host.state.transition(app_id).await;
+    // Decided again under the lock, and against the clock as it is now: an app picked for the
+    // batch may have been asked for while it waited its turn, and how late the policy is acted on
+    // is measured from when it is, not from when the batch was picked.
+    let now = crate::clock::now_ms();
+    let snapshot = host.state.snapshot().await;
+    let Some(record) = snapshot.records.get(app_id) else {
+        return;
+    };
+    let Some((signals, reason)) = due(policy, record, &snapshot, now) else {
+        return;
+    };
+    let since = match reason {
+        SleepReason::Quiet => signals.last_active_at_ms,
+        SleepReason::LivedLongEnough => signals.started_at_ms,
+    };
+    let for_ms = now - since.unwrap_or(now);
+    let late_ms = allowance_ms(policy.sleep_when)
+        .map_or(0, |allowed| for_ms - allowed as i64)
+        .max(0);
+    host.metrics
+        .sleep_wake
+        .sleep_due(reason, std::time::Duration::from_millis(late_ms as u64));
+    tracing::info!(
+        %app_id,
+        reason = reason.as_str(),
+        for_ms,
+        late_ms,
+        "letting an app sleep"
+    );
+    crate::domain::reconcile::instances::suspend_instance(host, app_id, reason).await;
+}
+
 pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
-    let policies: BTreeMap<AppId, protocol::ActivationPolicy> = {
+    let policies: BTreeMap<AppId, ActivationPolicy> = {
         let cache = host.cache.lock().await;
         cache
             .latest()
@@ -153,45 +214,22 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
     let snapshot = host.state.snapshot().await;
     let now = crate::clock::now_ms();
 
-    let letting_go: Vec<_> = snapshot
+    let letting_go: Vec<(AppId, &ActivationPolicy)> = snapshot
         .records
         .values()
         .filter_map(|record| {
             let policy = policies.get(&record.app_id)?;
-            let signals = ActivitySignals {
-                last_active_at_ms: snapshot.last_active_at_ms.get(&record.app_id).copied(),
-                started_at_ms: record.started_at.as_ref().map(Timestamp::epoch_ms),
-            };
-            let reason = should_sleep(policy, record, &signals, now)?;
-            Some((record.clone(), signals, reason))
+            due(policy, record, &snapshot, now).map(|_| (record.app_id.clone(), policy))
         })
         .collect();
     if letting_go.is_empty() {
         return;
     }
-    for (record, signals, reason) in letting_go {
-        let since = match reason {
-            SleepReason::Quiet => signals.last_active_at_ms,
-            SleepReason::LivedLongEnough => signals.started_at_ms,
-        };
-        let for_ms = now - since.unwrap_or(now);
-        let late_ms = policies
-            .get(&record.app_id)
-            .and_then(|policy| allowance_ms(policy.sleep_when))
-            .map_or(0, |allowed| for_ms - allowed as i64)
-            .max(0);
-        host.metrics
-            .sleep_wake
-            .sleep_due(reason, std::time::Duration::from_millis(late_ms as u64));
-        tracing::info!(
-            app_id = %record.app_id,
-            reason = reason.as_str(),
-            for_ms,
-            late_ms,
-            "letting an app sleep"
-        );
-        crate::domain::reconcile::instances::suspend_instance(host, &record.app_id, reason).await;
-    }
+    futures::stream::iter(letting_go)
+        .for_each_concurrent(SLEEP_CONCURRENCY, |(app_id, policy)| async move {
+            let_sleep(host, &app_id, policy).await;
+        })
+        .await;
     crate::domain::reconcile::network::apply_network(host).await;
 }
 
@@ -571,5 +609,86 @@ mod sleep_tests {
         apply_sleep(host.arc()).await;
 
         assert!(host.vms.calls().is_empty());
+    }
+
+    fn nth(n: usize) -> AppId {
+        AppId::parse(format!("app-{n}")).unwrap()
+    }
+
+    /// This many on-request apps, each in a slot and quiet for longer than its timeout, on a
+    /// host whose VMM holds every snapshot at a gate until the test lets it through.
+    async fn quiet_batch(count: usize) -> (TestHost, std::sync::Arc<mocks::HeldSleeps>) {
+        let mut host = test_host().await;
+        let (held, spy) = mocks::vmm_holding_sleeps();
+        std::sync::Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .vms = held.clone();
+        host.vms = spy;
+        host.cache.lock().await.accept(desired_state(|state| {
+            state.instances = (1..=count)
+                .map(|n| {
+                    desired_instance(|instance| {
+                        instance.app_id = nth(n);
+                        instance.desired_state = DesiredInstanceState::OnRequest;
+                    })
+                })
+                .collect()
+        }));
+        let quiet_since = crate::clock::now_ms() - DEFAULT_IDLE_TIMEOUT_MS as i64 - 1;
+        for n in 1..=count {
+            host.slot_for(&nth(n)).await.unwrap();
+            let mut record = quiet_record();
+            record.app_id = nth(n);
+            host.state.put_record(record).await;
+            host.state.mark_active(&nth(n), quiet_since).await;
+        }
+        (host, held)
+    }
+
+    fn a_pass_over(host: &TestHost) -> tokio::task::JoinHandle<()> {
+        let host = host.arc().clone();
+        tokio::spawn(async move { apply_sleep(&host).await })
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_quiet_apps_sleeps_four_at_a_time_and_every_one_of_them_ends_asleep() {
+        let count = SLEEP_CONCURRENCY * 2;
+        let (host, held) = quiet_batch(count).await;
+        let pass = a_pass_over(&host);
+
+        held.held_up(SLEEP_CONCURRENCY).await;
+        // Nothing has been let through, so anything more at the gate now is a fifth beside four.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(held.in_flight(), SLEEP_CONCURRENCY);
+
+        held.let_through(count);
+        pass.await.unwrap();
+
+        assert_eq!(held.most_in_flight(), SLEEP_CONCURRENCY);
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; count]);
+        for n in 1..=count {
+            let record = host.state.record(&nth(n)).await.unwrap();
+            assert_eq!(record.state, InstanceState::Idle, "{}", nth(n));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_app_asked_for_while_it_waited_its_turn_is_left_up() {
+        let count = SLEEP_CONCURRENCY + 1;
+        let (host, held) = quiet_batch(count).await;
+        let pass = a_pass_over(&host);
+
+        held.held_up(SLEEP_CONCURRENCY).await;
+        let waiting_its_turn = nth(count);
+        host.state
+            .mark_active(&waiting_its_turn, crate::clock::now_ms())
+            .await;
+
+        held.let_through(count);
+        pass.await.unwrap();
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; SLEEP_CONCURRENCY]);
+        let record = host.state.record(&waiting_its_turn).await.unwrap();
+        assert_eq!(record.state, InstanceState::Running);
     }
 }

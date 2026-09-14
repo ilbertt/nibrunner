@@ -120,6 +120,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         sink,
         state: state.clone(),
         metrics: metrics.clone(),
+        in_flight: crate::adapters::vm::snapshot::SnapshotsInFlight::default(),
     });
 
     let waker_slot: Arc<tokio::sync::OnceCell<Arc<AppWaker>>> = Arc::new(tokio::sync::OnceCell::new());
