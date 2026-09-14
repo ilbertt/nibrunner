@@ -58,10 +58,9 @@ pub async fn probe_instance(
     let address = SocketAddr::from((guest_ipv4.addr(), http_port.get()));
     let attempt = match health_check {
         HealthCheck::Http { path, .. } => probe_http(address, path, timeout).await,
-        HealthCheck::Tcp { .. } => probe_tcp(address, timeout).await,
-        // A guest this host did not build answers no port it was never told about; that its
-        // microVM is up is read elsewhere, and asked here is always well.
-        HealthCheck::BootCompleted => return Ok(()),
+        // Whether the tenant is listening is all a boot-completed check asks; that it is asked
+        // once, and never after the port has answered, is the caller's to keep.
+        HealthCheck::Tcp { .. } | HealthCheck::BootCompleted => probe_tcp(address, timeout).await,
     };
     attempt.unwrap_or(Err(ProbeFailure::TimedOut {
         after_ms: health_check.probe().timeout_ms,
@@ -164,14 +163,20 @@ mod tests {
         );
     }
 
-    // Nothing is asked of a guest this host did not build, and a port that does not exist is no
-    // verdict on it.
+    // Nothing is asked of a guest this host did not build about its health; whether its tenant
+    // has bound the port yet is not about its health.
     #[tokio::test]
-    async fn a_boot_completed_check_asks_nothing_and_is_always_well() {
+    async fn a_boot_completed_check_asks_whether_the_tenant_is_listening() {
         let closed = HttpPort::new(1).unwrap();
         assert_eq!(
             probe_instance(&loopback(), closed, &HealthCheck::BootCompleted).await,
-            Ok(())
+            Err(ProbeFailure::Refused)
+        );
+        let listening = listening(hyper::StatusCode::INTERNAL_SERVER_ERROR).await;
+        assert_eq!(
+            probe_instance(&loopback(), listening, &HealthCheck::BootCompleted).await,
+            Ok(()),
+            "what the tenant answers is not asked, only that it is there"
         );
     }
 

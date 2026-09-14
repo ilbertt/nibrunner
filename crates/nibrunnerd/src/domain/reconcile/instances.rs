@@ -10,8 +10,8 @@ use crate::clock::{now_ms, now_timestamp};
 use crate::domain::activation::SleepReason;
 use crate::domain::backoff::{is_ready_to_retry, next_attempt_window, BackoffPolicy, NO_START_ATTEMPTS};
 use crate::domain::health::{
-    apply_probe, describe_instance_failure, describe_unhealthy_instance, evaluate_instance_state,
-    initial_tracker, next_probe_delay_ms, HealthTracker, LifecycleInputs,
+    apply_probe, asks_the_port, describe_instance_failure, describe_unhealthy_instance,
+    evaluate_instance_state, initial_tracker, next_probe_delay_ms, HealthTracker, LifecycleInputs,
 };
 use crate::domain::metrics::converge;
 use crate::domain::metrics::health::Failure;
@@ -550,7 +550,7 @@ async fn settle(
 ) {
     let health = if status.active && due {
         let probed = std::time::Instant::now();
-        let outcome = if record.health_check.probes_a_port() {
+        let outcome = if asks_the_port(&record.health, &record.health_check) {
             crate::domain::health::probe::probe_instance(
                 &record.guest_ipv4,
                 record.http_port,
@@ -558,8 +558,8 @@ async fn settle(
             )
             .await
         } else {
-            // A guest this host did not build answers no port it was never told about, so that
-            // its microVM is still up is the whole of what this host can observe about it.
+            // A boot-completed tenant found listening is asked nothing more: that its microVM is
+            // still up is the whole of what this host reads about it after that.
             Ok(())
         };
         host.metrics
@@ -1426,18 +1426,15 @@ mod tests {
     #[tokio::test]
     async fn a_probe_is_counted_on_the_app_with_what_it_found() {
         let host = test_host().await;
-        host.vms.set_status(VmStatus {
-            loaded: true,
-            active: true,
-            failed: false,
-            started_this_boot: true,
-            exit: None,
-        });
+        host.vms.set_status(up());
+        let listening = listening().await;
         host.state
             .put_record(instance_record(|record| {
                 record.health_check = protocol::HealthCheck::BootCompleted;
                 record.state = InstanceState::Starting;
                 record.started_at = Some(now_timestamp());
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.http_port = listening;
             }))
             .await;
 
@@ -1451,6 +1448,57 @@ mod tests {
         assert_eq!((health.probes_healthy, health.probes_unhealthy), (1, 0));
     }
 
+    // The boot completes ~100 ms before the tenant binds its port; a record read as `running` in
+    // that window had the host port forwarded to a guest that refused the connection.
+    #[tokio::test]
+    async fn a_boot_completed_guest_is_starting_until_its_port_accepts_and_running_for_good_after() {
+        let host = test_host().await;
+        host.vms.set_status(up());
+        let nobody_listening = protocol::HttpPort::new(1).unwrap();
+        host.state
+            .put_record(instance_record(|record| {
+                record.health_check = protocol::HealthCheck::BootCompleted;
+                record.state = InstanceState::Starting;
+                record.started_at = Some(now_timestamp());
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.http_port = nobody_listening;
+            }))
+            .await;
+
+        let record = probed(&host).await;
+        assert_eq!(
+            record.state,
+            InstanceState::Starting,
+            "up, but nothing listening yet"
+        );
+        assert_eq!(record.health.consecutive_failures, 1);
+        let asked_again_at = host.state.snapshot().await.next_probe_at_ms[&app_id()];
+        assert!(
+            asked_again_at <= now_ms() + crate::domain::health::STARTUP_PROBE_INTERVAL_MS as i64,
+            "asked again on the settling cadence"
+        );
+
+        let listening = listening().await;
+        host.state
+            .update_record(&app_id(), |record| record.http_port = listening)
+            .await;
+        let record = probed(&host).await;
+        assert_eq!(record.state, InstanceState::Running);
+        assert!(record.health.ever_healthy);
+
+        host.state
+            .update_record(&app_id(), |record| record.http_port = nobody_listening)
+            .await;
+        let record = probed(&host).await;
+        assert_eq!(
+            record.state,
+            InstanceState::Running,
+            "the port was a start gate, not a health check"
+        );
+        assert_eq!(record.health.consecutive_failures, 0, "it is never asked again");
+        assert_eq!(record.message, None);
+    }
+
     fn up() -> VmStatus {
         VmStatus {
             loaded: true,
@@ -1459,6 +1507,16 @@ mod tests {
             started_this_boot: true,
             exit: None,
         }
+    }
+
+    /// A port on the loopback that accepts, for as long as the test runs.
+    async fn listening() -> protocol::HttpPort {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = protocol::HttpPort::new(listener.local_addr().unwrap().port()).unwrap();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+        port
     }
 
     /// A record of an app that was well, checked on the loopback so a test can be the tenant.
@@ -1521,10 +1579,7 @@ mod tests {
         assert_eq!(host.metrics.health.of(&app_id()).went_unhealthy, 1);
 
         // The tenant is back: the port accepts again.
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let answering = protocol::HttpPort::new(listener.local_addr().unwrap().port()).unwrap();
+        let answering = listening().await;
         host.state
             .update_record(&app_id(), |record| record.http_port = answering)
             .await;

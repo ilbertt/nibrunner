@@ -380,7 +380,10 @@ fn a_health_check_writes_back_as_it_was_read() {
 fn only_a_check_of_a_port_probes_one_and_a_microvm_is_judged_by_one_reading() {
     assert!(!HealthCheck::BootCompleted.probes_a_port());
     assert_eq!(HealthCheck::BootCompleted.probe().unhealthy_threshold, 1);
-    assert_eq!(HealthCheck::BootCompleted.probe().grace_period_ms, 0);
+    assert_eq!(HealthCheck::BootCompleted.probe().healthy_threshold, 1);
+    // The one reading is of the port, once: a tenant has this long to start listening.
+    assert_eq!(HealthCheck::BootCompleted.probe().grace_period_ms, 30_000);
+    assert!(HealthCheck::BootCompleted.probe().timeout_ms > 0);
     let tcp = HealthCheck::Tcp {
         probe: Probe {
             interval_ms: 1,

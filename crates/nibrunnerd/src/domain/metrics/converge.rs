@@ -750,6 +750,18 @@ mod tests {
             started_this_boot: true,
             exit: None,
         });
+        // The guest is up and its tenant is listening: the test is the tenant, on the loopback.
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let listening = protocol::HttpPort::new(listener.local_addr().unwrap().port()).unwrap();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+        host.state
+            .update_record(&app_id(), |record| {
+                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.http_port = listening;
+            })
+            .await;
         crate::domain::reconcile::refresh(host.arc()).await;
         let closed = host.state.snapshot().await.deploys[&app_id()].clone();
         assert!(closed.converged_at_ms >= closed.booted_at_ms, "{closed:?}");
