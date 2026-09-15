@@ -1,0 +1,20 @@
+---
+title: desired.json
+description: Every field of the document a host converges on, from its JSON Schema.
+---
+
+The document a host watches at the path `paths.desired_state_file` names, and converges on with
+every change to it: which apps run here, on which volumes, reachable how. [The document](/docs/desired-state)
+is the guide to it; this is the file field by field. A document the host cannot read is refused
+whole, and `reported.json` says so.
+
+An editor completes and checks a document that names the schema:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json",
+  "hostId": "host-1"
+}
+```
+
+<SchemaReference file="crates/protocol/schema/desired-state.schema.json" />

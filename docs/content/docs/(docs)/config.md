@@ -4,7 +4,8 @@ description: What every key in a host's config.toml is, and the three rules that
 ---
 
 `nibrunnerd install` laid this host out and left you a `config.toml` to make its own. This is what
-every key in that file is.
+every key in that file is. [The reference](/docs/reference/config) is the same file key by key,
+from its JSON Schema — which is also what to point an editor at.
 
 The file is at `/etc/nibrunner/config.toml` unless `NIBRUNNER_CONFIG` names another. It is read
 once, at startup, and validated whole — so a host that starts is a host whose configuration was

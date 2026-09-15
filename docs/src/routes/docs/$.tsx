@@ -1,7 +1,7 @@
 import { createFileRoute, Link, notFound } from '@tanstack/react-router';
 import { createServerFn } from '@tanstack/react-start';
 import { useFumadocsLoader } from 'fumadocs-core/source/client';
-import { DocsLayout } from 'fumadocs-ui/layouts/docs';
+import { DocsLayout } from 'fumadocs-ui/layouts/notebook';
 import {
   DocsBody,
   DocsDescription,
@@ -9,7 +9,8 @@ import {
   DocsTitle,
   MarkdownCopyButton,
   ViewOptionsPopover,
-} from 'fumadocs-ui/layouts/docs/page';
+} from 'fumadocs-ui/layouts/notebook/page';
+import type { GetLayoutTabsOptions } from 'fumadocs-ui/layouts/shared';
 import { Suspense, use } from 'react';
 import { useMDXComponents } from '@/components/mdx';
 import { baseOptions } from '@/lib/layout.shared';
@@ -70,11 +71,35 @@ function Content({ path, markdownUrl }: { path: string; markdownUrl: string }) {
   );
 }
 
+/**
+ * The tab row renders a tab's title and nothing else, so the icon rides inside it — and comes off
+ * the tab, or the sidebar's dropdown, which does render it, would show it twice.
+ */
+const tabs: GetLayoutTabsOptions = {
+  transform: (tab) => ({
+    ...tab,
+    icon: undefined,
+    title: (
+      <>
+        {tab.icon}
+        {tab.title}
+      </>
+    ),
+  }),
+};
+
 function Page() {
   const { pageTree, path, markdownUrl } = useFumadocsLoader(Route.useLoaderData());
+  const options = baseOptions();
 
   return (
-    <DocsLayout {...baseOptions()} tree={pageTree}>
+    <DocsLayout
+      {...options}
+      nav={{ ...options.nav, mode: 'top' }}
+      tree={pageTree}
+      tabMode="navbar"
+      tabs={tabs}
+    >
       <Link to={markdownUrl} hidden />
       <Suspense>
         <Content path={path} markdownUrl={markdownUrl} />
