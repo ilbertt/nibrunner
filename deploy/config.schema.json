@@ -1,0 +1,432 @@
+{
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/config.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HostConfig",
+  "description": "A host's `config.toml`. No key has a default: a key its section declares and the file\nomits is refused by name, and so is a key no section declares. What may be absent is a whole\nsection — `[proxy]`, `[metrics]`, `[volumes.zerofs]` — and one that is present is filled in\ncompletely.",
+  "type": "object",
+  "properties": {
+    "artifacts": {
+      "description": "Where the layers a document names come from.",
+      "$ref": "#/$defs/artifacts"
+    },
+    "exports": {
+      "description": "Where a checkpoint goes when the document asks for it as a bundle.",
+      "$ref": "#/$defs/exports"
+    },
+    "max_apps": {
+      "description": "How many apps this host is laid out for. Everything that counts slots follows from it:\nthe slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,\nwhat the metrics page calls the total. `install` measures what this machine holds and\nwrites the least of memory, disk and ports; `start` says the three against what is set.",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 5567,
+      "minimum": 1
+    },
+    "metrics": {
+      "description": "Absent is a host that scrapes nothing.",
+      "$ref": "#/$defs/metrics"
+    },
+    "network": {
+      "description": "What a guest is denied, by name.",
+      "$ref": "#/$defs/network"
+    },
+    "paths": {
+      "description": "Where this host keeps what is its own.",
+      "$ref": "#/$defs/paths"
+    },
+    "proxy": {
+      "description": "Absent serves nothing: no hostname, no raw port.",
+      "$ref": "#/$defs/proxy"
+    },
+    "volumes": {
+      "description": "Where volumes live, and how.",
+      "$ref": "#/$defs/volumes"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "max_apps",
+    "paths",
+    "artifacts",
+    "volumes",
+    "exports",
+    "network"
+  ],
+  "$defs": {
+    "artifacts": {
+      "description": "One store, in S3 or on this disk.",
+      "type": "object",
+      "properties": {
+        "store_url": {
+          "description": "`s3://bucket[/prefix]`, or an absolute path.",
+          "type": "string",
+          "pattern": "^(s3://[^/]+|/)"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "store_url"
+      ]
+    },
+    "exports": {
+      "description": "The store a bundle is put in, and the disk it is assembled on first.",
+      "type": "object",
+      "properties": {
+        "staging_dir": {
+          "description": "A bundle is assembled here and removed after.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "store_url": {
+          "description": "`s3://bucket[/prefix]`, or an absolute path.",
+          "type": "string",
+          "pattern": "^(s3://[^/]+|/)"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "store_url",
+        "staging_dir"
+      ]
+    },
+    "metrics": {
+      "description": "A Prometheus page, rendered from the same builder that writes `reported.json`. Nothing here\nis an input.",
+      "type": "object",
+      "properties": {
+        "listen_address": {
+          "description": "An IP address to bind.",
+          "type": "string"
+        },
+        "port": {
+          "description": "A free port, outside the range the slots take from 21000, other than `proxy.http.port`,\nand not 9091 on a zerofs host, which ZeroFS holds.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "port",
+        "listen_address"
+      ]
+    },
+    "network": {
+      "description": "The ranges a guest is denied by name, on top of the blanket rules: public addresses that are\nstill yours, and that a tenant must not reach. Both may be empty; both must be there.",
+      "type": "object",
+      "properties": {
+        "denied_egress_addresses_v4": {
+          "description": "Each `a.b.c.d/n`, `n` at most 32.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$"
+          }
+        },
+        "denied_egress_addresses_v6": {
+          "description": "Each `addr/n`, `n` at most 128.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*/[0-9]{1,3}$"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "denied_egress_addresses_v4",
+        "denied_egress_addresses_v6"
+      ]
+    },
+    "paths": {
+      "description": "Every one an absolute path, and every one this host's alone.",
+      "type": "object",
+      "properties": {
+        "api_socket": {
+          "description": "The daemon's own socket.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "desired_state_file": {
+          "description": "The document this host watches and converges on.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "guest_image_dir": {
+          "description": "`vmlinux`, `rootfs.ext4` and `manifest.json`, put there by `install`.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "runtime_dir": {
+          "description": "Sockets and pidfiles that outlive the daemon.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "snapshot_dir": {
+          "description": "Where a sleeping app's memory goes. On a zerofs host it shares its disk with the cache.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "state_dir": {
+          "description": "Everything this host keeps, `state.db` included.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "versions_file": {
+          "description": "What `install` stamped what it laid down into, read back into `reported.json`.",
+          "type": "string",
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state_dir",
+        "runtime_dir",
+        "snapshot_dir",
+        "guest_image_dir",
+        "desired_state_file",
+        "api_socket",
+        "versions_file"
+      ]
+    },
+    "proxy": {
+      "description": "Every way in. Each section under here is absent or complete, and each binds an address of\nits own, because each faces a different machine.",
+      "type": "object",
+      "properties": {
+        "http": {
+          "description": "The one HTTP listener. Absent, a document naming a hostname is refused.",
+          "$ref": "#/$defs/proxy.http"
+        },
+        "raw": {
+          "description": "Ports carried to a guest unread. Absent carries nothing raw.",
+          "$ref": "#/$defs/proxy.raw"
+        }
+      },
+      "additionalProperties": false
+    },
+    "proxy.http": {
+      "description": "The one HTTP listener, where the edge reaches it. One per host: nothing here redirects, so a\nplain port beside a TLS one would serve every app both ways forever.",
+      "type": "object",
+      "properties": {
+        "listen_address": {
+          "description": "An IP address to bind.",
+          "type": "string"
+        },
+        "port": {
+          "description": "A free port, outside the range the slots take from 21000. Not 0.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1
+        },
+        "tls": {
+          "description": "Serve the port encrypted. Absent is plain HTTP, which is what a host behind an edge that\nterminates TLS wants.",
+          "$ref": "#/$defs/proxy.http.tls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "listen_address",
+        "port"
+      ]
+    },
+    "proxy.http.tls": {
+      "description": "One certificate for the whole host — there is no SNI selection, so a wildcard in practice —\nread once, at startup. Obtaining and renewing it is certbot's or the edge's.",
+      "type": "object",
+      "properties": {
+        "certificate": {
+          "description": "PEM.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "client_ca": {
+          "description": "Makes a caller's own certificate the price of the handshake, which on an origin whose IP\nis discoverable is what keeps it reachable only through the edge.",
+          "$ref": "#/$defs/proxy.http.tls.client_ca"
+        },
+        "key": {
+          "description": "PEM.",
+          "type": "string",
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "certificate",
+        "key"
+      ]
+    },
+    "proxy.http.tls.client_ca": {
+      "description": "The certificates a caller may present, as a PEM trust pool.",
+      "type": "object",
+      "properties": {
+        "certificate": {
+          "description": "PEM, holding every certificate the pool trusts.",
+          "type": "string",
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "certificate"
+      ]
+    },
+    "proxy.raw": {
+      "description": "Ports carried to a guest unread — ssh, DNS, WireGuard — reached at a port of their own,\ntcp or udp, where the relay that publishes them reaches this host.",
+      "type": "object",
+      "properties": {
+        "listen_address": {
+          "description": "An IP address to bind: a private one the relay can see, never the world's.",
+          "type": "string"
+        },
+        "max_ports_per_guest": {
+          "description": "How many raw ports an app may name: 1 to 7, what a slot reserves past its HTTP port.",
+          "type": "integer",
+          "format": "uint",
+          "maximum": 7,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "listen_address",
+        "max_ports_per_guest"
+      ]
+    },
+    "volumes": {
+      "description": "The backend, and the prefix every volume on this host is under.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "`local-file` is sparse files under `paths.state_dir`, and no export. `zerofs` is blocks\nin an object store, reached from the guest over NBD.",
+          "type": "string",
+          "enum": [
+            "local-file",
+            "zerofs"
+          ]
+        },
+        "storage_prefix": {
+          "description": "Where this host's volumes live under the store: 1 to 512 bytes, no leading or trailing\n`/`, no empty, `.` or `..` segment. One host, not one app: every tenant here shares it,\nand deleting it destroys all of them.",
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^(?!\\.\\.?(/|$))[^/]+(/(?!\\.\\.?(/|$))[^/]+)*$"
+        },
+        "zerofs": {
+          "description": "Required by the `zerofs` backend, refused by `local-file`.",
+          "$ref": "#/$defs/volumes.zerofs"
+        }
+      },
+      "additionalProperties": false,
+      "else": {
+        "not": {
+          "required": [
+            "zerofs"
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "zerofs"
+          }
+        }
+      },
+      "required": [
+        "backend",
+        "storage_prefix"
+      ],
+      "then": {
+        "required": [
+          "zerofs"
+        ]
+      }
+    },
+    "volumes.zerofs": {
+      "description": "Everything `install` needs to lay ZeroFS down and everything the daemon needs to reach it\nonce systemd has it running. Its two configuration files are rendered from here.",
+      "type": "object",
+      "properties": {
+        "binary": {
+          "description": "Where `install` puts ZeroFS.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "cache_dir": {
+          "description": "The disk cache of the object store.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "cache_disk_gib": {
+          "description": "Whole gibibytes, more than 0. Size it against the disk it is on, which it shares with\n`paths.snapshot_dir`: a full one breaks the filesystem every app on the host runs from.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cache_memory_gib": {
+          "description": "Whole gibibytes, more than 0. Held back from what any guest may be promised.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "checkpoint_cache_dir": {
+          "description": "The checkpoint reader's own cache.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "checkpoint_config_file": {
+          "description": "Rendered by `install`.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "checkpoint_runtime_dir": {
+          "description": "Where the checkpoint reader an export starts keeps its socket.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "config_file": {
+          "description": "Rendered by `install`.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "mount_path": {
+          "description": "This host's own view of the filesystem.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "nbd_socket_path": {
+          "description": "Where ZeroFS serves NBD, which is what a guest's disk is.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "ninep_socket_path": {
+          "description": "Where ZeroFS serves 9P, which is how the host reaches the filesystem itself.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "rpc_socket_path": {
+          "description": "Where ZeroFS answers RPC.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "storage_url": {
+          "description": "`s3://bucket/prefix`, or an absolute path.",
+          "type": "string",
+          "pattern": "^(s3://[^/]+|/)"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "binary",
+        "config_file",
+        "mount_path",
+        "nbd_socket_path",
+        "ninep_socket_path",
+        "rpc_socket_path",
+        "storage_url",
+        "cache_dir",
+        "cache_disk_gib",
+        "cache_memory_gib",
+        "checkpoint_runtime_dir",
+        "checkpoint_config_file",
+        "checkpoint_cache_dir"
+      ]
+    }
+  }
+}

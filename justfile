@@ -115,3 +115,19 @@ check-config-example:
         echo "deploy/config.example.toml is behind the code: run \`just config-example\` and commit the result"
         exit 1
     }
+
+# deploy/config.schema.json — config.toml as a JSON Schema — written afresh from `HostConfig::schema`.
+config-schema:
+    cargo run -q -p nibrunnerd --bin config-schema -- deploy/config.schema.json
+
+# Fails if `just config-schema` would change what is checked in.
+check-config-schema:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fresh=$(mktemp -d)
+    trap 'rm -rf "$fresh"' EXIT
+    cargo run -q -p nibrunnerd --bin config-schema -- "$fresh/config.schema.json"
+    diff -u deploy/config.schema.json "$fresh/config.schema.json" || {
+        echo "deploy/config.schema.json is behind the code: run \`just config-schema\` and commit the result"
+        exit 1
+    }

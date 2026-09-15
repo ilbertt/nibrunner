@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use nibrunnerd::config::HostConfig;
+use nibrunnerd::config::{HostConfig, SCHEMA_ID};
 
 const HEADER: &str = "\
 # Written by `just config-example` from `HostConfig::example` in crates/nibrunnerd/src/config.rs.
@@ -26,7 +26,11 @@ fn main() -> ExitCode {
         eprintln!("usage: config-example <file>");
         return ExitCode::FAILURE;
     };
-    let rendered = format!("{HEADER}{}", HostConfig::example().to_toml());
+    // First, where an editor that reads TOML schemas looks for it.
+    let rendered = format!(
+        "#:schema {SCHEMA_ID}\n{HEADER}{}",
+        HostConfig::example().to_toml()
+    );
     if let Err(error) = std::fs::write(&path, rendered) {
         eprintln!("config-example: {} could not be written: {error}", path.display());
         return ExitCode::FAILURE;

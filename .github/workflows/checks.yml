@@ -67,6 +67,9 @@ jobs:
       - name: Check the example configuration is current
         run: just check-config-example
 
+      - name: Check the configuration schema is current
+        run: just check-config-schema
+
   integration:
     runs-on: ubuntu-latest
     steps:
