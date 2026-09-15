@@ -50,6 +50,25 @@ by naming this key.
 to be a port. The guest network — a `/30` per slot out of a `/16` — fits more than that, so the
 ports are the bound.
 
+**What this machine holds is measured, and said.** To start, `install` assumes an app to be what
+the protocol does until a document says otherwise — 1 vCPU, 256 MiB, an 8 GiB volume — and
+measures three bounds in apps of that size: what the memory runs at once (guest memory, after the
+host and the storage cache, over 256 MiB); what the disk holds (the disk under `snapshot_dir`,
+after the storage cache and the 8 GiB reserve, over one snapshot — plus one volume on a
+`local-file` host, where the volume is a file on it, taken as full); and what the ports fit, which
+is 5567. A host written its configuration by `install` gets the least of the three, with the line
+above the key naming all of them, so it is plain which one won and that it is a measurement. Every
+`nibrunnerd start` then says the three against the number set, and the lower one to set when it is
+above what the disk holds or the ports fit; above what the memory runs at once is only said, since
+that is what sleeping is for:
+
+```
+max_apps = 300: assuming an app is 1 vCPU, 256 MiB and 8 GiB to start, this host runs 29 at once, holds 320 on disk, and fits 5567 on its ports; above 29 counts on apps sleeping
+max_apps = 1000: assuming an app is 1 vCPU, 256 MiB and 8 GiB to start, this host runs 29 at once, holds 320 on disk, and fits 5567 on its ports; above 29 counts on apps sleeping; more than its disk holds: set max_apps = 320
+```
+
+Advice, not refusals: an app given more counts for more, and the number is yours to keep.
+
 **Raising it is an edit and `nibrunnerd start`**, plus a reboot on a zerofs host whose nbd module
 is already loaded with fewer minors — `nbds_max` is read when the module loads and cannot be
 raised in place, and `start` says so rather than reloading a module with volumes attached to it.

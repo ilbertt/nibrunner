@@ -18,6 +18,21 @@ pub fn guest_memory_mib(host_memory_mib: u64, storage_cache_mib: u64) -> u64 {
         .saturating_sub(HOST_BASELINE_MIB)
 }
 
+/// How many apps of `memory_mib` each are up at once in what a host has for guests.
+pub fn apps_up_at_once(guest_memory_mib: u64, memory_mib: u32) -> u32 {
+    apps_that_fit(guest_memory_mib, u64::from(memory_mib))
+}
+
+/// How many apps taking `bytes_each` of the disk its budget holds.
+pub fn apps_held_on_disk(disk_budget_bytes: u64, bytes_each: u64) -> u32 {
+    apps_that_fit(disk_budget_bytes, bytes_each)
+}
+
+fn apps_that_fit(room: u64, each: u64) -> u32 {
+    room.checked_div(each)
+        .map_or(0, |fit| u32::try_from(fit).unwrap_or(u32::MAX))
+}
+
 const HOLDS_NOTHING: [InstanceState; 3] =
     [InstanceState::Idle, InstanceState::Stopped, InstanceState::Failed];
 
@@ -161,6 +176,20 @@ mod tests {
                 &DEFAULT_INSTANCE_RESOURCES
             ) > 0
         );
+    }
+
+    #[test]
+    fn how_many_apps_of_one_size_a_host_runs_at_once_and_holds_on_disk() {
+        let memory_mib = DEFAULT_INSTANCE_RESOURCES.memory_mib;
+        assert_eq!(apps_up_at_once(245 * APP_MEMORY_MIB, memory_mib), 245);
+        assert_eq!(apps_up_at_once(246 * APP_MEMORY_MIB - 1, memory_mib), 245);
+        assert_eq!(apps_up_at_once(0, memory_mib), 0);
+
+        let snapshot = APP_MEMORY_MIB * BYTES_PER_MIB;
+        assert_eq!(apps_held_on_disk(1600 * snapshot, snapshot), 1600);
+        assert_eq!(apps_held_on_disk(snapshot - 1, snapshot), 0);
+        assert_eq!(apps_held_on_disk(u64::MAX, 1), u32::MAX);
+        assert_eq!(apps_held_on_disk(u64::MAX, 0), 0);
     }
 
     #[test]

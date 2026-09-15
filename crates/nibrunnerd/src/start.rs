@@ -324,8 +324,8 @@ mod tests {
 
     fn written(paths: &[PathBuf]) -> Laid {
         Laid {
-            done: Vec::new(),
             written: paths.to_vec(),
+            ..Laid::default()
         }
     }
 
