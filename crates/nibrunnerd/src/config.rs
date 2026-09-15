@@ -144,6 +144,10 @@ pub struct MetricsConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
+    /// How many apps this host is laid out for. Everything that counts slots follows from it —
+    /// the ring the allocator walks, the loopback ports reserved, the nbd minors the module is
+    /// loaded with, what the metrics page calls the total — and nothing holds a copy of it.
+    pub max_apps: u32,
     pub state_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub snapshot_dir: PathBuf,
@@ -228,6 +232,7 @@ mod file {
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct ConfigFile {
+        pub(super) max_apps: Option<u32>,
         pub(super) paths: Option<Paths>,
         pub(super) artifacts: Option<Artifacts>,
         pub(super) volumes: Option<Volumes>,
@@ -376,6 +381,7 @@ impl HostConfig {
     }
 
     fn from_document(document: &file::ConfigFile) -> Result<Self, ConfigError> {
+        let max_apps = apps("max_apps", required("max_apps", document.max_apps)?)?;
         let paths = required("paths", document.paths.as_ref())?;
         let state_dir = absolute(
             "paths.state_dir",
@@ -448,10 +454,11 @@ impl HostConfig {
         let exports = required("exports", document.exports.as_ref())?;
         let artifacts = required("artifacts", document.artifacts.as_ref())?;
 
-        let proxy = proxy(document.proxy.as_ref())?;
-        let metrics = metrics(document.metrics.as_ref(), &proxy, &backend)?;
+        let proxy = proxy(document.proxy.as_ref(), max_apps)?;
+        let metrics = metrics(document.metrics.as_ref(), &proxy, &backend, max_apps)?;
 
         Ok(Self {
+            max_apps,
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
             guest_image_dir: path_key("paths.guest_image_dir", &paths.guest_image_dir)?,
             firecracker_dir: runtime_dir.join("firecracker"),
@@ -520,6 +527,7 @@ impl HostConfig {
 
     fn laid_out(state_dir: PathBuf, runtime_dir: PathBuf, guest_image_dir: PathBuf) -> Self {
         Self {
+            max_apps: 1000,
             snapshot_dir: state_dir.join("snapshots"),
             guest_image_dir,
             firecracker_dir: runtime_dir.join("firecracker"),
@@ -549,6 +557,7 @@ impl HostConfig {
     /// but the newest would otherwise be exactly what nobody noticed.
     pub fn example() -> Self {
         Self {
+            max_apps: 1000,
             state_dir: PathBuf::from("/var/lib/nibrunner"),
             runtime_dir: PathBuf::from("/run/nibrunner"),
             snapshot_dir: PathBuf::from("/data/nibrunner-vm"),
@@ -613,6 +622,7 @@ impl HostConfig {
     fn to_document(&self) -> file::ConfigFile {
         let text = |path: &std::path::Path| Some(path.display().to_string());
         file::ConfigFile {
+            max_apps: Some(self.max_apps),
             paths: Some(file::Paths {
                 state_dir: text(&self.state_dir),
                 runtime_dir: text(&self.runtime_dir),
@@ -685,7 +695,7 @@ fn bind_address(field: &str, value: &Option<String>) -> Result<IpAddr, ConfigErr
         .map_err(|_| ConfigError::invalid(field, "an IP address to bind"))
 }
 
-fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
+fn proxy(document: Option<&file::Proxy>, max_apps: u32) -> Result<ProxyConfig, ConfigError> {
     let Some(document) = document else {
         return Ok(ProxyConfig::default());
     };
@@ -695,7 +705,11 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
         .map(|http| {
             Ok::<_, ConfigError>(HttpListener {
                 listen_address: bind_address("proxy.http.listen_address", &http.listen_address)?,
-                port: listener("proxy.http.port", required("proxy.http.port", http.port)?)?,
+                port: listener(
+                    "proxy.http.port",
+                    required("proxy.http.port", http.port)?,
+                    max_apps,
+                )?,
                 tls: http
                     .tls
                     .as_ref()
@@ -741,15 +755,37 @@ fn proxy(document: Option<&file::Proxy>) -> Result<ProxyConfig, ConfigError> {
 /// What a slot has left over for an app once its HTTP port is taken.
 pub const MAX_RAW_PORTS: usize = nft_render::PORTS_PER_SLOT as usize - 1;
 
+/// A host laid out for no app serves nothing, and one laid out for more than the ports fit would
+/// hand a slot a port that is not one. The guest network fits more slots than the ports do, so
+/// the ports are the bound.
+fn apps(field: &str, count: u32) -> Result<u32, ConfigError> {
+    if count == 0 {
+        return Err(ConfigError::invalid(field, "at least 1"));
+    }
+    let most = nft_render::most_apps_the_ports_fit();
+    if count > most {
+        return Err(ConfigError::invalid(
+            field,
+            format!(
+                "at most {most}, which is as many slots of {} ports as fit above {}",
+                nft_render::PORTS_PER_SLOT,
+                nft_render::HOST_PORT_BASE
+            ),
+        ));
+    }
+    Ok(count)
+}
+
 fn metrics(
     document: Option<&file::Metrics>,
     proxy: &ProxyConfig,
     volumes: &VolumeBackend,
+    max_apps: u32,
 ) -> Result<Option<MetricsConfig>, ConfigError> {
     let Some(document) = document else {
         return Ok(None);
     };
-    let port = listener("metrics.port", required("metrics.port", document.port)?)?;
+    let port = listener("metrics.port", required("metrics.port", document.port)?, max_apps)?;
     for (named, field) in [
         (proxy.http.as_ref().map(|http| http.port), "proxy.http.port"),
         // Rendered into ZeroFS's own config by `nibrunnerd install`, so this host does hold it
@@ -814,14 +850,14 @@ fn mebibytes(field: &str, gibibytes: u64) -> Result<u64, ConfigError> {
         .ok_or_else(|| ConfigError::invalid(field, "a size this machine could hold"))
 }
 
-fn listener(field: &str, port: u16) -> Result<u16, ConfigError> {
+fn listener(field: &str, port: u16, max_apps: u32) -> Result<u16, ConfigError> {
     if port == 0 {
         return Err(ConfigError::invalid(
             field,
             "a port, and 0 is the kernel picking one",
         ));
     }
-    let (base, end) = nft_render::reserved_port_range();
+    let (base, end) = nft_render::reserved_port_range(max_apps);
     if (base..=end).contains(&port) {
         return Err(ConfigError::invalid(
             field,
@@ -942,7 +978,9 @@ mod tests {
 
     /// The smallest document this daemon accepts. Every key it reads is in here, because there is
     /// no key it will supply for itself, so a test about one key starts from the whole document.
-    const WHOLE: &str = r#"[paths]
+    const WHOLE: &str = r#"max_apps = 1000
+
+[paths]
 state_dir = "/var/lib/nibrunner"
 runtime_dir = "/run/nibrunner"
 snapshot_dir = "/var/lib/nibrunner/snapshots"
@@ -967,6 +1005,15 @@ denied_egress_addresses_v4 = []
 denied_egress_addresses_v6 = []
 "#;
 
+    /// A key as the refusals name it: `section.key`, or the bare key above the first section.
+    fn field_of(section: &str, key: &str) -> String {
+        if section.is_empty() {
+            key.to_string()
+        } else {
+            format!("{section}.{key}")
+        }
+    }
+
     /// `WHOLE` with some keys written differently, and anything in `extra` appended. A field named
     /// here that the document does not have is a typo, not a new key, so it fails loudly.
     fn document(changes: &[(&str, &str)], extra: &str) -> String {
@@ -983,7 +1030,7 @@ denied_egress_addresses_v6 = []
                 out.push(line.to_string());
                 continue;
             };
-            let field = format!("{section}.{key}");
+            let field = field_of(&section, key);
             match changes.iter().find(|(named, _)| *named == field) {
                 Some((named, value)) => {
                     seen.push(named);
@@ -1024,7 +1071,7 @@ denied_egress_addresses_v6 = []
             if let Some(name) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
                 section = name.to_string();
             } else if let Some((key, _)) = line.split_once(" = ") {
-                if format!("{section}.{key}") == field {
+                if field_of(&section, key) == field {
                     found = true;
                     continue;
                 }
@@ -1046,6 +1093,7 @@ denied_egress_addresses_v6 = []
     #[test]
     fn a_key_the_document_leaves_out_is_refused_rather_than_filled_in() {
         for field in [
+            "max_apps",
             "paths.state_dir",
             "paths.runtime_dir",
             "paths.snapshot_dir",
@@ -1158,6 +1206,36 @@ denied_egress_addresses_v6 = []
                 .port,
             29000
         );
+    }
+
+    // The range a listener is kept out of is as wide as the host is laid out for, so a smaller
+    // host frees ports a bigger one reserves.
+    #[test]
+    fn the_ports_a_listener_is_kept_out_of_follow_how_many_apps_the_host_is_laid_out_for() {
+        let on_a_small_host = |port: u16| {
+            document(
+                &[("max_apps", "63")],
+                &bound(&format!("[proxy.http]\nport = {port}\n")),
+            )
+        };
+        let message = refused(&on_a_small_host(21503));
+        assert!(message.contains("21000-21503"), "{message}");
+        assert_eq!(parsed(&on_a_small_host(21504)).proxy.http.unwrap().port, 21504);
+    }
+
+    #[test]
+    fn how_many_apps_a_host_is_laid_out_for_is_bounded_by_the_ports_a_slot_takes() {
+        let message = refused(&document(&[("max_apps", "0")], ""));
+        assert!(message.contains("max_apps"), "{message}");
+        assert!(message.contains("at least 1"), "{message}");
+
+        let message = refused(&document(&[("max_apps", "5568")], ""));
+        assert!(message.contains("max_apps"), "{message}");
+        assert!(message.contains("at most 5567"), "{message}");
+        assert!(message.contains("21000"), "{message}");
+
+        assert_eq!(parsed(&document(&[("max_apps", "5567")], "")).max_apps, 5567);
+        assert_eq!(parsed(&whole()).max_apps, 1000);
     }
 
     #[test]

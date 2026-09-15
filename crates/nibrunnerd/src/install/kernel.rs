@@ -18,13 +18,10 @@ pub const MODPROBE_FILE: &str = "/etc/modprobe.d/nibrunner-nbd.conf";
 const IP_FORWARD: &str = "/proc/sys/net/ipv4/ip_forward";
 const NBDS_MAX: &str = "/sys/module/nbd/parameters/nbds_max";
 
-/// What the file asks for. More than this host can use, deliberately: it costs nothing.
-const NBDS_MAX_REQUESTED: u32 = 1024;
-
-/// Slot N takes /dev/nbdN and the export reader holds the last of them, so the minors this host
-/// has to be able to address is one more than the highest slot it will ever allocate.
-pub fn required_minors() -> u32 {
-    nft_render::NBD_SLOT_LIMIT + 1
+/// Slot N takes /dev/nbdN and the export reader holds the one past the last slot, so the minors
+/// this host has to be able to address is one more than the apps it is laid out for.
+pub fn required_minors(config: &HostConfig) -> u32 {
+    config.max_apps + 1
 }
 
 /// Written where the next boot reads them. Returned rather than written here so they go through
@@ -49,9 +46,9 @@ pub fn files(config: &HostConfig, config_file: &Path) -> Vec<(PathBuf, String)> 
         files.push((
             PathBuf::from(MODPROBE_FILE),
             format!(
-                "{}\n# {} minors are needed: one per slot, plus the one the export reader holds.\n# This is read when the module loads and cannot be changed on a loaded one.\noptions nbd nbds_max={NBDS_MAX_REQUESTED}\n",
+                "{}\n# One minor per app max_apps lays the host out for, plus the one the export reader holds.\n# This is read when the module loads and cannot be changed on a loaded one.\noptions nbd nbds_max={}\n",
                 header("How many block devices ZeroFS volumes may be attached on."),
-                required_minors()
+                required_minors(config)
             ),
         ));
     }
@@ -76,19 +73,19 @@ pub fn apply(config: &HostConfig, laid: &mut super::Laid) -> Result<(), InstallE
     if config.volumes.zerofs().is_none() {
         return Ok(());
     }
-    match verdict(loaded_minors(), required_minors()) {
+    let required = required_minors(config);
+    match verdict(loaded_minors(), required) {
         Verdict::Enough => {}
         Verdict::Load => {
-            modprobe(&["nbd", &format!("nbds_max={NBDS_MAX_REQUESTED}")])?;
-            laid.did(format!("nbd loaded with {NBDS_MAX_REQUESTED} minors"));
+            modprobe(&["nbd", &format!("nbds_max={required}")])?;
+            laid.did(format!("nbd loaded with {required} minors"));
         }
         // The only ways out are a reboot, which the file just written makes correct, or unloading
         // the module — which errors every request queued on every attached volume. Neither is a
         // thing to do to a host on the strength of a re-run.
         Verdict::Refuse { loaded } => {
             return Err(InstallError::Refused(format!(
-                "nbd is loaded with {loaded} minors and this host needs {}. nbds_max is read when the module loads, so it cannot be raised in place: reboot, which {MODPROBE_FILE} now makes enough, or unload the module by hand if nothing is attached to it.",
-                required_minors()
+                "nbd is loaded with {loaded} minors and this host needs {required} for max_apps. nbds_max is read when the module loads, so it cannot be raised in place: reboot, which {MODPROBE_FILE} now makes enough, or unload the module by hand if nothing is attached to it."
             )))
         }
     }
@@ -162,14 +159,25 @@ mod tests {
 
     #[test]
     fn what_the_file_asks_for_covers_every_slot_and_the_export_reader() {
-        assert_eq!(required_minors(), nft_render::NBD_SLOT_LIMIT + 1);
-        assert!(NBDS_MAX_REQUESTED >= required_minors());
-        let reader = nft_render::export_reader_device_path();
-        let highest: u32 = reader.trim_start_matches("/dev/nbd").parse().unwrap();
-        assert!(
-            highest < required_minors(),
-            "{reader} is outside what is asked for"
-        );
+        for max_apps in [1, 63, 1000] {
+            let mut config = zerofs_host();
+            config.max_apps = max_apps;
+            assert_eq!(required_minors(&config), max_apps + 1);
+            let reader = nft_render::export_reader_device_path(max_apps);
+            let highest: u32 = reader.trim_start_matches("/dev/nbd").parse().unwrap();
+            assert!(
+                highest < required_minors(&config),
+                "{reader} is outside what is asked for"
+            );
+            let last_slot = nft_render::describe_slot(max_apps - 1, crate::test_support::app_id());
+            assert_ne!(last_slot.nbd_device_path, reader);
+            assert!(named(
+                &files(&config, Path::new("/etc/nibrunner/config.toml")),
+                MODPROBE_FILE
+            )
+            .unwrap()
+            .contains(&format!("options nbd nbds_max={}\n", max_apps + 1)));
+        }
     }
 
     #[test]
@@ -181,7 +189,7 @@ mod tests {
         assert!(named(&files, MODULES_FILE).unwrap().contains("nf_conntrack"));
         assert!(named(&files, MODPROBE_FILE)
             .unwrap()
-            .contains(&format!("options nbd nbds_max={NBDS_MAX_REQUESTED}")));
+            .contains("options nbd nbds_max=1001"));
     }
 
     #[test]

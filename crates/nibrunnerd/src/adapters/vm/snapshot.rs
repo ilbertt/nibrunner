@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn what_snapshots_may_hold_on_a_host() {
-        let asleep = u64::from(nft_render::SLOT_COUNT) * snapshot_bytes_for(256);
+        let asleep = u64::from(crate::config::HostConfig::example().max_apps) * snapshot_bytes_for(256);
         let roomy = SnapshotDisk {
             total_bytes: 512 * GIB,
             ..host_disk()

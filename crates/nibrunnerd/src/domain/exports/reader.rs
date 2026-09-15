@@ -197,8 +197,9 @@ impl<'a> ReaderDevice<'a> {
         devices: &'a NbdDevices,
         socket_path: &Path,
         volume_id: &VolumeId,
+        max_apps: u32,
     ) -> Result<ReaderDevice<'a>, VolumeError> {
-        let device_path = nft_render::export_reader_device_path();
+        let device_path = nft_render::export_reader_device_path(max_apps);
         let _ = devices.detach(&device_path).await;
         let target = NbdTarget {
             socket_path: &socket_path.display().to_string(),
@@ -391,6 +392,7 @@ mod tests {
             &devices,
             Path::new("/run/zerofs-checkpoint/one/nbd.sock"),
             &volume_id,
+            63,
         )
         .await
         .expect("the second attach is taken");
@@ -417,6 +419,7 @@ mod tests {
             &devices,
             Path::new("/run/zerofs-checkpoint/one/nbd.sock"),
             &volume_id,
+            63,
         )
         .await
         .unwrap();
@@ -484,10 +487,12 @@ mod tests {
 
     #[test]
     fn the_reader_device_is_not_one_an_app_could_hold() {
-        let reserved = nft_render::export_reader_device_path();
-        for slot in 0..nft_render::NBD_SLOT_LIMIT {
-            let held = nft_render::describe_slot(slot, crate::test_support::app_id());
-            assert_ne!(held.nbd_device_path, reserved);
+        for max_apps in [1, 63, 1000] {
+            let reserved = nft_render::export_reader_device_path(max_apps);
+            for slot in 0..max_apps {
+                let held = nft_render::describe_slot(slot, crate::test_support::app_id());
+                assert_ne!(held.nbd_device_path, reserved);
+            }
         }
     }
 }

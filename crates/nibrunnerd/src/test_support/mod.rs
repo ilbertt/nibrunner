@@ -448,7 +448,7 @@ async fn test_host_over(
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         guest_image_version: "6.1.180-test".to_string(),
         state: state.clone(),
-        allocator: Arc::new(Mutex::new(SlotAllocator::empty())),
+        allocator: Arc::new(Mutex::new(SlotAllocator::addressing(config.max_apps))),
         cache: Mutex::new(DesiredStateCache::new()),
         vms,
         volumes: Arc::new(LocalFileVolumes::new(

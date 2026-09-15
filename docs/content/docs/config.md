@@ -29,8 +29,32 @@ about at startup because there is no way to write one.
 ```
 volumes.backend is not specified, and nothing here is optional
 volumes.zerofs is not read by the local-file backend, which is what volumes.backend says
-proxy.http.port is not free, because 21000-21999 is what a slot takes for an app's loopback port
+proxy.http.port is not free, because 21000-28999 is what a slot takes for an app's loopback port
 ```
+
+## How many apps
+
+The first key in the file, above every section:
+
+| Key | Type | Must be |
+| --- | --- | --- |
+| `max_apps` | integer | 1–5567 — how many apps this host is laid out for |
+
+**Everything that counts slots follows from it.** The ring the allocator hands slots out of, the
+loopback ports reserved from 21000, the nbd minors the module is loaded with on a zerofs host,
+what the metrics page calls `nibrunner_slots{of="total"}`. There is no second copy of the number
+compiled in, so what the host will take is what this line says, and a host that is full says so
+by naming this key.
+
+**Why 5567.** Each slot reserves eight ports from 21000, and the last port of the last slot has
+to be a port. The guest network — a `/30` per slot out of a `/16` — fits more than that, so the
+ports are the bound.
+
+**Raising it is an edit and `nibrunnerd start`**, plus a reboot on a zerofs host whose nbd module
+is already loaded with fewer minors — `nbds_max` is read when the module loads and cannot be
+raised in place, and `start` says so rather than reloading a module with volumes attached to it.
+**Lowering it below a slot an app holds moves that app to a new slot** on the next start, which is
+a new loopback port and a new guest address.
 
 ## Every host has these
 
@@ -70,7 +94,8 @@ The `flush` that is the durability point becomes the host's page cache rather th
 has to be asked, and an export is **refused** rather than written, because a checkpoint is
 something only an object store can cut.
 
-What it buys is density. A host is bounded by the 1000 loopback ports a slot takes.
+What it buys is a host bounded by `max_apps` alone: no block device per volume, so nothing to
+reload when the number goes up.
 
 ### `backend = "zerofs"`
 
@@ -103,8 +128,10 @@ promised, and reads it back out of the file it rendered — which truncates. A f
 against a number ZeroFS is not taking, and a host that promises memory the cache will take back
 kills tenants.
 
-**This backend caps a host at 63 apps.** Slot *N* takes `/dev/nbdN` and the export reader holds the
-last of them.
+**Slot *N* takes `/dev/nbdN`, and the export reader holds the one past the last.** `install`
+writes `nbds_max = max_apps + 1` where the module reads it at boot, and loads it with that many
+now. A module already loaded with fewer is not reloaded — that drops every device under every
+guest — which is the reboot raising `max_apps` asks for on this backend.
 
 ## What this host serves
 
@@ -174,11 +201,12 @@ becoming a startup failure over there.
 
 ## Ports, across every section
 
-**21000–28999 is refused everywhere.** Each slot reserves eight consecutive ports from 21000, and
-a listener inside that range would be taken out from under you by the next app deployed. A slot
-hands out only as many as the document asked for — one, or two — and the rest are reserve, so that
-raising the limit later moves nobody's ports. `0` is refused separately: that is the kernel picking
-one, and a host should say what it serves on.
+**21000 up to `21000 + 8 × max_apps − 1` is refused everywhere** — 21000–28999 on a host laid out
+for 1000. Each slot reserves eight consecutive ports from 21000, and a listener inside that range
+would be taken out from under you by the next app deployed. A slot hands out only as many as the
+document asked for — one, or two — and the rest are reserve, so that raising the limit later moves
+nobody's ports. `0` is refused separately: that is the kernel picking one, and a host should say
+what it serves on.
 
 `metrics.port` must differ from `proxy.http.port`.
 
