@@ -1,0 +1,209 @@
+---
+title: The document
+description: What an instance may say in desired.json — layers, what a volume starts with, ports, what healthy means, and when an app sleeps.
+---
+
+Which apps a host runs is one JSON document, at the path `paths.desired_state_file` names —
+`/var/lib/nibrunner/desired.json` on a host the installer configured. The daemon watches it and
+converges on every change; nothing else tells the daemon what to do. This is everything that
+document may say.
+
+```json
+{
+  "hostId": "host-1",
+  "volumes": [
+    { "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present" }
+  ],
+  "instances": [
+    {
+      "appId": "app-1",
+      "deploymentId": "dep-1",
+      "volumeId": "vol-1",
+      "desiredState": "on-request",
+      "layers": [
+        {
+          "kind": "executable",
+          "destinationPath": "/app/server",
+          "digest": "<sha256 of the binary, lowercase hex>",
+          "objectKey": "my-server"
+        }
+      ],
+      "config": {
+        "httpPort": 3000,
+        "command": { "program": "/app/server", "args": [], "workingDirectory": "/app", "environment": {} },
+        "resources": { "vcpuCount": 1, "memoryMib": 256 },
+        "healthCheck": { "kind": "http", "path": "/healthz", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
+        "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
+      },
+      "hostnames": [{ "hostname": "app-1.example.com", "kind": "platform" }]
+    }
+  ],
+  "checkpoints": [],
+  "exports": []
+}
+```
+
+`desiredState` says whether an instance should be up: `running` keeps the microVM up,
+`on-request` brings it up for the first deploy and lets it sleep between visitors, `stopped` takes
+it down and leaves the app reachable enough to say so.
+
+## Layers, and what runs in them
+
+The root a microVM's program sees is a stack, bottom to top:
+
+```
+the volume        writable, and the only thing backed up
+layers[n-1]
+…                 the document's layers, in the order it lists them
+layers[0]
+Debian            the guest image nibrunner ships, always at the bottom
+```
+
+Each layer is an object in the store named by its digest and a `kind` saying what the object is.
+An `executable` is one program, which the host packs into an image at `destinationPath`; a
+`filesystem` is an image already — a squashfs or ext4 — attached as it was uploaded. A layer is
+fetched once per host and cached by digest, so ten apps on the same base hold it once.
+
+The volume is not mounted anywhere in particular: it is the writable top of the whole root, so
+every write anywhere lands on it and persists, and nothing else does. An export is the volume's
+contents and the environment — never what a layer already holds.
+
+`command` is what the guest's init runs in that root once it is stacked: `program` with `args`,
+in `workingDirectory`, with `environment`, as uid 65534. The working directory is made if no
+layer holds it, given to that uid, and is where the program's persistent state lives — it is the
+one place under the root the program can write besides `/tmp`. The program cannot reach the
+guest's init, the volume's own bookkeeping, or the host: it is 65534 in a root it cannot leave.
+
+## What a volume starts with
+
+A volume is formatted empty the first time the document names it. One that should not be names
+an archive in the store and where to unpack it:
+
+```json
+"volumes": [
+  {
+    "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present",
+    "initialContents": {
+      "digest": "<sha256 of the archive, lowercase hex>",
+      "objectKey": "seeds/app-1",
+      "destinationPath": "/app/data"
+    }
+  }
+]
+```
+
+The archive is a tar, gzipped or not, or a zip — what `tar -cz` or `zip -r` writes. Its entries
+land under `destinationPath` as the program will see them, so an entry `nested/hello.txt` is
+`/app/data/nested/hello.txt` in the root above, and they are the program's: the directory and
+everything unpacked into it are given to uid 65534, whatever the archive said, with set-id bits
+dropped. The directories above it are made the way init makes the working directory. An entry
+that reaches outside the directory it is unpacked into fails the volume by name, as does a
+symlink in a zip, and so does an archive that does not fit. What the archiver added of its own
+accord — Finder's `.DS_Store` and `__MACOSX`, Explorer's `Thumbs.db`, an editor's swap file — is
+passed over rather than unpacked.
+
+The copy happens as the volume is formatted, which is once: a volume already formatted is its
+app's, and a document that changes or drops `initialContents` on one changes nothing about it.
+The contents are in the volume rather than under it, so an export carries them like anything
+else the app wrote, and a layer that holds a file at the same path is shadowed by the volume's
+copy the way it would be by a write. An export's bundle is itself such an archive, with the
+volume under `data/` and the environment in `.env`: to start a volume from one, give `/` and an
+archive of what is under `data/`.
+
+## A port beside the HTTP one
+
+`httpPort` is what the proxy sends this app's hostnames to. An app may name ports beside it:
+
+```json
+"config": {
+  "httpPort": 3000,
+  "ports": [
+    { "name": "ssh", "guestPort": 22 },
+    { "name": "dns", "guestPort": 53 }
+  ],
+  ...
+}
+```
+
+A port is a port: it carries whatever arrives on it, tcp or udp, the way a firewall rule for one
+would. The host reads none of what crosses it, which is what lets a protocol this daemon does not
+speak arrive at all. Such a port is reached at `<proxy.raw.listen_address>:<host port>` rather
+than by name, because ssh sends no hostname to route on — and that address is the one a relay
+reaches this host on, not the world: a port a tenant publishes to its users is published by
+definition, and that is a machine of its own.
+
+While the app sleeps, the first arrival wakes it, whichever way it came. A connection is accepted
+and held, then spliced once the guest answers, so a client sees a slow banner rather than a closed
+socket. A datagram has no connection to hold, so the datagram itself is kept and delivered after
+the wake.
+
+The host must name a `[proxy.raw]` section to bind such a port, and a `[proxy.http]` one to
+serve a hostname. A document that asks for what this host does not serve is refused by name and
+the instance is reported `failed` saying so.
+
+## Health
+
+What tells this host an instance is well is the instance's to name, and every document names it —
+there is no default, because the one that looks obvious lies. `config.healthCheck` is one of
+three kinds:
+
+| `healthCheck` | Healthy means |
+| --- | --- |
+| `{ "kind": "http", "path": "/healthz", ...timing }` | `path`, requested on `httpPort`, answers 2xx. |
+| `{ "kind": "tcp", ...timing }` | A connection to `httpPort` is accepted. Only that — for a port that does not speak HTTP. |
+| `{ "kind": "boot-completed" }` | The microVM is up and `httpPort` has accepted a connection once. Nothing more is asked of it: a guest this host did not build answers no path it was not told about, so its liveness after that is the microVM being up. |
+
+`...timing` is `intervalMs`, `timeoutMs`, `gracePeriodMs`, `healthyThreshold` and
+`unhealthyThreshold`, as in the document at the top; `boot-completed` carries none, its tenant
+having 30 s to start listening and nothing to time after. The same check is what a wake waits for
+before a caller is handed on, and what liveness is read from after that.
+
+Why `tcp` is not the default: a TCP connect is answered by the guest kernel's accept queue whether
+or not the process behind it will ever read the request, so a program that has stopped answering
+passes it for as long as it lives. It is there for the port that cannot be asked over HTTP, and the
+document says so.
+
+## Activation
+
+What puts an instance back to sleep is the instance's to name. `activation` names it:
+
+```json
+{
+  "desiredState": "on-request",
+  "activation": {
+    "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 }
+  }
+}
+```
+
+| `sleepWhen` | When the microVM is suspended |
+| --- | --- |
+| `{ "kind": "never" }` | Never. The document is the only thing that takes it down. |
+| `{ "kind": "traffic-idle", "timeoutMs": N }` | Nothing has been sent to it for `N` ms. |
+| `{ "kind": "max-lifetime", "ttlMs": N }` | It has been up for `N` ms, however busy it still is. |
+
+Only an `on-request` instance may name a `sleepWhen` other than `never`: nothing on this host
+would wake anything else again, and the next reconcile pass would bring it straight back up. A
+document that says so is refused whole, while an operator is still watching.
+
+`idleTimeoutMs` is the older spelling of `sleepWhen: traffic-idle`, and still means exactly that.
+A document that names both is refused rather than served under whichever a loop read first, and a
+document that names neither means what it has always meant: an `on-request` instance sleeps after
+five minutes, and everything else does not sleep.
+
+## The schema
+
+[`desired-state.schema.json`](https://github.com/ilbertt/nibrunner/blob/main/crates/protocol/schema/desired-state.schema.json)
+is the document above as a JSON Schema (draft 2020-12), and
+[`reported-state.schema.json`](https://github.com/ilbertt/nibrunner/blob/main/crates/protocol/schema/reported-state.schema.json)
+is the one the daemon writes back to `reported.json` in its state directory. Both are generated
+from the Rust types in `crates/protocol`, so a tool built against them is built against what the
+daemon parses. An editor will complete and check a document that names one:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json",
+  "hostId": "host-1",
+  ...
+}
+```
