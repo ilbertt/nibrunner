@@ -55,22 +55,7 @@ included.
   layers, what a volume starts with, ports, what healthy means, and when an app sleeps.
 - [Configuring a host](https://nibrunner.dev/docs/config) — every key in `config.toml`.
 
-## Developing
+## Contributing
 
-`mise install` puts `just` on the path at the version `mise.toml` pins.
-
-```bash
-just test          # everything that needs no kernel
-just integration   # everything that does: root, Linux, nft, mke2fs, /dev/net/tun
-```
-
-The first lane is the planner, the health state machine, the backoff, the ruleset asserted as
-text, the codecs against byte fixtures taken from the C headers, and the reconcile pass driven
-against mocked collaborators. The second is the only place a ruleset load, a real `mke2fs` or a tap
-is ever considered proven.
-
-[`desired-state.schema.json`](crates/protocol/schema/desired-state.schema.json) and
-[`reported-state.schema.json`](crates/protocol/schema/reported-state.schema.json) are generated
-from the Rust types in `crates/protocol`. `just schema` writes them afresh from the code, and
-`just check-schema` fails when what is checked in is behind it — CI runs the latter on every pull
-request, as it does `just check-config-example` for `deploy/config.example.toml`.
+[`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) — the tools, the two test lanes, what CI
+checks, and how a pull request lands.
