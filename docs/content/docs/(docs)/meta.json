@@ -1,0 +1,6 @@
+{
+  "title": "Docs",
+  "icon": "BookOpen",
+  "root": true,
+  "pages": ["index", "quick-start", "desired-state", "config"]
+}

@@ -54,6 +54,8 @@ included.
 - [The document](https://nibrunner.dev/docs/desired-state) — everything an instance may say:
   layers, what a volume starts with, ports, what healthy means, and when an app sleeps.
 - [Configuring a host](https://nibrunner.dev/docs/config) — every key in `config.toml`.
+- [Reference](https://nibrunner.dev/docs/reference) — `config.toml`, `desired.json` and
+  `reported.json` key by key, rendered from their JSON Schemas.
 
 ## Contributing
 

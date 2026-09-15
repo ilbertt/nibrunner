@@ -1,0 +1,27 @@
+---
+title: Reference
+description: Every key of the three documents a host reads and writes, from their JSON Schemas.
+---
+
+The rest of these docs say what a host does. These pages say what it reads and writes, key by key,
+and each is rendered from the JSON Schema of the document, which is written from the Rust type that
+parses it — so a page here cannot fall behind the code. Every page links to its schema, which is the
+URL to point an editor at.
+
+<Cards>
+  <Card
+    title="config.toml"
+    href="/docs/reference/config"
+    description="What a host is: its paths, its stores, its listeners."
+  />
+  <Card
+    title="desired.json"
+    href="/docs/reference/desired-state"
+    description="What a host should be running, which it watches and converges on."
+  />
+  <Card
+    title="reported.json"
+    href="/docs/reference/reported-state"
+    description="What a host is running, which it writes back after every pass."
+  />
+</Cards>
