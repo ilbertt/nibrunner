@@ -84,34 +84,40 @@ docs-dev:
 docs-build:
     cd docs && bun run build
 
-# The JSON Schemas in crates/protocol/schema, written afresh from the protocol crate's types.
-schema:
-    cargo run -q -p nibrunner-protocol --features schema --bin protocol-schema -- crates/protocol/schema
+# Every file in the tree that is written from the code rather than by hand, each with the check
+# CI runs on it: `just <recipe>` writes it afresh, `just check-<recipe>` fails when what is checked
+# in is behind.
+protocol_schemas := "crates/protocol/schema"
+config_example := "deploy/config.example.toml"
+config_schema := "deploy/config.schema.json"
 
-# Fails if `just schema` would change what is checked in.
-check-schema:
+# The JSON Schemas in crates/protocol/schema, from the protocol crate's types.
+schema into=protocol_schemas:
+    cargo run -q -p nibrunner-protocol --features schema --bin protocol-schema -- "{{into}}"
+
+check-schema: (check-generated "schema" protocol_schemas)
+
+# deploy/config.example.toml, from `HostConfig::example` in the daemon crate.
+config-example into=config_example:
+    cargo run -q -p nibrunnerd --bin config-example -- "{{into}}"
+
+check-config-example: (check-generated "config-example" config_example)
+
+# deploy/config.schema.json — config.toml as a JSON Schema — from `HostConfig::schema`.
+config-schema into=config_schema:
+    cargo run -q -p nibrunnerd --bin config-schema -- "{{into}}"
+
+check-config-schema: (check-generated "config-schema" config_schema)
+
+# Runs `recipe` into a scratch copy of `path` — a file, or a directory of them — and diffs the two.
+[private]
+check-generated recipe path:
     #!/usr/bin/env bash
     set -euo pipefail
     fresh=$(mktemp -d)
     trap 'rm -rf "$fresh"' EXIT
-    cargo run -q -p nibrunner-protocol --features schema --bin protocol-schema -- "$fresh"
-    diff -ru crates/protocol/schema "$fresh" || {
-        echo "crates/protocol/schema is behind the code: run \`just schema\` and commit the result"
-        exit 1
-    }
-
-# deploy/config.example.toml, written afresh from `HostConfig::example` in the daemon crate.
-config-example:
-    cargo run -q -p nibrunnerd --bin config-example -- deploy/config.example.toml
-
-# Fails if `just config-example` would change what is checked in.
-check-config-example:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    fresh=$(mktemp -d)
-    trap 'rm -rf "$fresh"' EXIT
-    cargo run -q -p nibrunnerd --bin config-example -- "$fresh/config.example.toml"
-    diff -u deploy/config.example.toml "$fresh/config.example.toml" || {
-        echo "deploy/config.example.toml is behind the code: run \`just config-example\` and commit the result"
+    {{just_executable()}} {{recipe}} "$fresh/$(basename '{{path}}')"
+    diff -ru '{{path}}' "$fresh/$(basename '{{path}}')" || {
+        echo "{{path}} is behind the code: run \`just {{recipe}}\` and commit the result"
         exit 1
     }

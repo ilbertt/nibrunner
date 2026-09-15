@@ -232,119 +232,270 @@ impl HostConfig {
 }
 
 mod file {
+    use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// Every path here is one of this host's own, so each is absolute.
+    const ABSOLUTE_PATH: &str = "^/";
+    /// `s3://bucket`, with or without a prefix under it, or an absolute path.
+    const STORE_URL: &str = "^(s3://[^/]+|/)";
+    /// No leading or trailing `/`, and no empty, `.` or `..` segment.
+    const STORAGE_PREFIX: &str = r"^(?!\.\.?(/|$))[^/]+(/(?!\.\.?(/|$))[^/]+)*$";
+    const CIDR_V4: &str = r"^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$";
+    const CIDR_V6: &str = "^[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*/[0-9]{1,3}$";
+
+    /// A host's `config.toml`. No key has a default: a key its section declares and the file
+    /// omits is refused by name, and so is a key no section declares. What may be absent is a whole
+    /// section — `[proxy]`, `[metrics]`, `[volumes.zerofs]` — and one that is present is filled in
+    /// completely.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "HostConfig")]
     pub(super) struct ConfigFile {
+        /// How many apps this host is laid out for. Everything that counts slots follows from it:
+        /// the slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,
+        /// what the metrics page calls the total. `install` measures what this machine holds and
+        /// writes the least of memory, disk and ports; `start` says the three against what is set.
+        #[schemars(range(min = 1, max = nft_render::most_apps_the_ports_fit()))]
         pub(super) max_apps: Option<u32>,
+        /// Where this host keeps what is its own.
         pub(super) paths: Option<Paths>,
+        /// Where the layers a document names come from.
         pub(super) artifacts: Option<Artifacts>,
+        /// Where volumes live, and how.
         pub(super) volumes: Option<Volumes>,
+        /// Where a checkpoint goes when the document asks for it as a bundle.
         pub(super) exports: Option<Exports>,
+        /// What a guest is denied, by name.
         pub(super) network: Option<Network>,
+        /// Absent serves nothing: no hostname, no raw port.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) proxy: Option<Proxy>,
+        /// Absent is a host that scrapes nothing.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) metrics: Option<Metrics>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// Every one an absolute path, and every one this host's alone.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "paths")]
     pub(super) struct Paths {
+        /// Everything this host keeps, `state.db` included.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) state_dir: Option<String>,
+        /// Sockets and pidfiles that outlive the daemon.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) runtime_dir: Option<String>,
+        /// Where a sleeping app's memory goes. On a zerofs host it shares its disk with the cache.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) snapshot_dir: Option<String>,
+        /// `vmlinux`, `rootfs.ext4` and `manifest.json`, put there by `install`.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) guest_image_dir: Option<String>,
+        /// The document this host watches and converges on.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) desired_state_file: Option<String>,
+        /// The daemon's own socket.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) api_socket: Option<String>,
+        /// What `install` stamped what it laid down into, read back into `reported.json`.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) versions_file: Option<String>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// One store, in S3 or on this disk.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "artifacts")]
     pub(super) struct Artifacts {
+        /// `s3://bucket[/prefix]`, or an absolute path.
+        #[schemars(pattern(STORE_URL))]
         pub(super) store_url: Option<String>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// The store a bundle is put in, and the disk it is assembled on first.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "exports")]
     pub(super) struct Exports {
+        /// `s3://bucket[/prefix]`, or an absolute path.
+        #[schemars(pattern(STORE_URL))]
         pub(super) store_url: Option<String>,
+        /// A bundle is assembled here and removed after.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) staging_dir: Option<String>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// The backend, and the prefix every volume on this host is under.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "volumes")]
+    #[schemars(extend(
+        "if" = { "properties": { "backend": { "const": "zerofs" } } },
+        "then" = { "required": ["zerofs"] },
+        "else" = { "not": { "required": ["zerofs"] } }
+    ))]
     pub(super) struct Volumes {
+        /// `local-file` is sparse files under `paths.state_dir`, and no export. `zerofs` is blocks
+        /// in an object store, reached from the guest over NBD.
+        #[schemars(extend("enum" = ["local-file", "zerofs"]))]
         pub(super) backend: Option<String>,
+        /// Where this host's volumes live under the store: 1 to 512 bytes, no leading or trailing
+        /// `/`, no empty, `.` or `..` segment. One host, not one app: every tenant here shares it,
+        /// and deleting it destroys all of them.
+        #[schemars(length(min = 1, max = super::MAX_STORAGE_PREFIX_BYTES), pattern(STORAGE_PREFIX))]
         pub(super) storage_prefix: Option<String>,
+        /// Required by the `zerofs` backend, refused by `local-file`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) zerofs: Option<Zerofs>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// Everything `install` needs to lay ZeroFS down and everything the daemon needs to reach it
+    /// once systemd has it running. Its two configuration files are rendered from here.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "volumes.zerofs")]
     pub(super) struct Zerofs {
+        /// Where `install` puts ZeroFS.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) binary: Option<String>,
+        /// Rendered by `install`.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) config_file: Option<String>,
+        /// This host's own view of the filesystem.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) mount_path: Option<String>,
+        /// Where ZeroFS serves NBD, which is what a guest's disk is.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) nbd_socket_path: Option<String>,
+        /// Where ZeroFS serves 9P, which is how the host reaches the filesystem itself.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) ninep_socket_path: Option<String>,
+        /// Where ZeroFS answers RPC.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) rpc_socket_path: Option<String>,
+        /// `s3://bucket/prefix`, or an absolute path.
+        #[schemars(pattern(STORE_URL))]
         pub(super) storage_url: Option<String>,
+        /// The disk cache of the object store.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) cache_dir: Option<String>,
+        /// Whole gibibytes, more than 0. Size it against the disk it is on, which it shares with
+        /// `paths.snapshot_dir`: a full one breaks the filesystem every app on the host runs from.
+        #[schemars(range(min = 1))]
         pub(super) cache_disk_gib: Option<u64>,
+        /// Whole gibibytes, more than 0. Held back from what any guest may be promised.
+        #[schemars(range(min = 1))]
         pub(super) cache_memory_gib: Option<u64>,
+        /// Where the checkpoint reader an export starts keeps its socket.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) checkpoint_runtime_dir: Option<String>,
+        /// Rendered by `install`.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) checkpoint_config_file: Option<String>,
+        /// The checkpoint reader's own cache.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) checkpoint_cache_dir: Option<String>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// The ranges a guest is denied by name, on top of the blanket rules: public addresses that are
+    /// still yours, and that a tenant must not reach. Both may be empty; both must be there.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "network")]
     pub(super) struct Network {
+        /// Each `a.b.c.d/n`, `n` at most 32.
+        #[schemars(inner(pattern(CIDR_V4)))]
         pub(super) denied_egress_addresses_v4: Option<Vec<String>>,
+        /// Each `addr/n`, `n` at most 128.
+        #[schemars(inner(pattern(CIDR_V6)))]
         pub(super) denied_egress_addresses_v6: Option<Vec<String>>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// Every way in. Each section under here is absent or complete, and each binds an address of
+    /// its own, because each faces a different machine.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "proxy")]
     pub(super) struct Proxy {
+        /// The one HTTP listener. Absent, a document naming a hostname is refused.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) http: Option<Http>,
+        /// Ports carried to a guest unread. Absent carries nothing raw.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) raw: Option<Raw>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// The one HTTP listener, where the edge reaches it. One per host: nothing here redirects, so a
+    /// plain port beside a TLS one would serve every app both ways forever.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "proxy.http")]
     pub(super) struct Http {
+        /// An IP address to bind.
         pub(super) listen_address: Option<String>,
+        /// A free port, outside the range the slots take from 21000. Not 0.
+        #[schemars(range(min = 1))]
         pub(super) port: Option<u16>,
+        /// Serve the port encrypted. Absent is plain HTTP, which is what a host behind an edge that
+        /// terminates TLS wants.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) tls: Option<Tls>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// One certificate for the whole host — there is no SNI selection, so a wildcard in practice —
+    /// read once, at startup. Obtaining and renewing it is certbot's or the edge's.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "proxy.http.tls")]
     pub(super) struct Tls {
+        /// PEM.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) certificate: Option<String>,
+        /// PEM.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) key: Option<String>,
+        /// Makes a caller's own certificate the price of the handshake, which on an origin whose IP
+        /// is discoverable is what keeps it reachable only through the edge.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) client_ca: Option<ClientCa>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// The certificates a caller may present, as a PEM trust pool.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct Raw {
-        pub(super) listen_address: Option<String>,
-        pub(super) max_ports_per_guest: Option<usize>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
+    #[schemars(rename = "proxy.http.tls.client_ca")]
     pub(super) struct ClientCa {
+        /// PEM, holding every certificate the pool trusts.
+        #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) certificate: Option<String>,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    /// Ports carried to a guest unread — ssh, DNS, WireGuard — reached at a port of their own,
+    /// tcp or udp, where the relay that publishes them reaches this host.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
+    #[schemars(rename = "proxy.raw")]
+    pub(super) struct Raw {
+        /// An IP address to bind: a private one the relay can see, never the world's.
+        pub(super) listen_address: Option<String>,
+        /// How many raw ports an app may name: 1 to 7, what a slot reserves past its HTTP port.
+        #[schemars(range(min = 1, max = super::MAX_RAW_PORTS))]
+        pub(super) max_ports_per_guest: Option<usize>,
+    }
+
+    /// A Prometheus page, rendered from the same builder that writes `reported.json`. Nothing here
+    /// is an input.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[schemars(rename = "metrics")]
     pub(super) struct Metrics {
+        /// A free port, outside the range the slots take from 21000, other than `proxy.http.port`,
+        /// and not 9091 on a zerofs host, which ZeroFS holds.
+        #[schemars(range(min = 1))]
         pub(super) port: Option<u16>,
+        /// An IP address to bind.
         pub(super) listen_address: Option<String>,
     }
 }
@@ -625,6 +776,21 @@ impl HostConfig {
             .expect("every key here is a string, an integer, or a table of them")
     }
 
+    /// The file as a JSON Schema, for an editor and for the reference the docs site renders from
+    /// it. It is the *serialize* contract of the document [`Self::to_document`] writes: every key
+    /// written is one [`Self::from_document`] requires, and the only keys skipped are the sections
+    /// that may be absent, so what is required here is what the round trip already holds to. TOML
+    /// has no null, so the null every `Option` would admit is taken back out.
+    pub fn schema() -> schemars::Schema {
+        let mut schema = schemars::generate::SchemaSettings::draft2020_12()
+            .for_serialize()
+            .with_transform(schemars::transform::RecursiveTransform(without_null))
+            .into_generator()
+            .into_root_schema_for::<file::ConfigFile>();
+        schema.insert("$id".into(), SCHEMA_ID.into());
+        schema
+    }
+
     /// [`Self::from_document`] run backwards. Every key is required on the way in and every
     /// unknown one refused, so a key written here that is not read there, or read there that is
     /// not written here, fails the round trip by name rather than drifting.
@@ -694,6 +860,43 @@ impl HostConfig {
                 listen_address: Some(metrics.listen_address.to_string()),
             }),
         }
+    }
+}
+
+/// Where [`HostConfig::schema`] is published, which is what an editor is pointed at.
+pub const SCHEMA_ID: &str =
+    "https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/config.schema.json";
+
+fn without_null(schema: &mut schemars::Schema) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    if let Some(serde_json::Value::Array(types)) = object.get_mut("type") {
+        types.retain(|named| named != "null");
+        if let [only] = types.as_slice() {
+            let only = only.clone();
+            object.insert("type".into(), only);
+        }
+    }
+    // An `Option<T>` that is not a plain type is `anyOf: [T, null]`.
+    let Some(serde_json::Value::Array(members)) = object.get("anyOf") else {
+        return;
+    };
+    let [first, second] = members.as_slice() else {
+        return;
+    };
+    let is_null = |member: &serde_json::Value| member.get("type") == Some(&"null".into());
+    let only = match (is_null(first), is_null(second)) {
+        (false, true) => first.clone(),
+        (true, false) => second.clone(),
+        _ => return,
+    };
+    let serde_json::Value::Object(only) = only else {
+        return;
+    };
+    object.remove("anyOf");
+    for (key, value) in only {
+        object.entry(key).or_insert(value);
     }
 }
 
@@ -1749,5 +1952,119 @@ listen_address = "127.0.0.1"
                 listen_address: IpAddr::from([127, 0, 0, 1]),
             })
         );
+    }
+
+    mod schema {
+        use super::*;
+
+        fn validator() -> jsonschema::Validator {
+            let schema = HostConfig::schema().to_value();
+            jsonschema::meta::validate(&schema).expect("a schema the draft accepts");
+            jsonschema::validator_for(&schema).expect("a schema that compiles")
+        }
+
+        /// The file as the schema sees it: TOML has no null and no other type JSON lacks, so a
+        /// document is the same document either way.
+        fn json(text: &str) -> serde_json::Value {
+            let document: toml::Value = toml::from_str(text).expect(text);
+            serde_json::to_value(document).expect("a TOML value is a JSON value")
+        }
+
+        /// `WHOLE` on the zerofs backend, with `ZEROFS` as given — or with one line of it
+        /// rewritten, which a rewrite that misses leaves accepted, and so caught below.
+        fn zerofs(section: &str) -> String {
+            document(&[("volumes.backend", "\"zerofs\"")], section)
+        }
+
+        #[test]
+        fn the_schema_accepts_what_the_parser_accepts() {
+            let validator = validator();
+            let accepted = [
+                whole(),
+                zerofs(ZEROFS),
+                HostConfig::starter(320).to_toml(),
+                HostConfig::example().to_toml(),
+                HostConfig::under(Path::new("/srv/one-host")).to_toml(),
+                document(
+                    &[
+                        ("artifacts.store_url", "\"s3://nibrun-artifacts\""),
+                        ("network.denied_egress_addresses_v4", "[\"172.31.0.0/16\"]"),
+                        ("network.denied_egress_addresses_v6", "[\"fd00::/8\"]"),
+                    ],
+                    &bound(
+                        "[proxy.http]\nport = 443\n\n[proxy.http.tls]\ncertificate = \"/etc/nibrunner/origin.crt\"\nkey = \"/etc/nibrunner/origin.key\"\n\n[proxy.http.tls.client_ca]\ncertificate = \"/etc/nibrunner/origin-pull-ca.pem\"\n\n[proxy.raw]\nmax_ports_per_guest = 7\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n",
+                    ),
+                ),
+            ];
+            for text in accepted {
+                parsed(&text);
+                let errors: Vec<String> = validator
+                    .iter_errors(&json(&text))
+                    .map(|e| e.to_string())
+                    .collect();
+                assert!(errors.is_empty(), "{errors:#?}\n{text}");
+            }
+        }
+
+        #[test]
+        fn the_schema_refuses_what_the_parser_refuses() {
+            let validator = validator();
+            let mut broken: Vec<String> = [
+                "max_apps",
+                "paths.state_dir",
+                "paths.versions_file",
+                "artifacts.store_url",
+                "volumes.backend",
+                "volumes.storage_prefix",
+                "exports.staging_dir",
+                "network.denied_egress_addresses_v6",
+            ]
+            .into_iter()
+            .map(without)
+            .collect();
+            broken.extend(
+                [
+                    ("max_apps", "0"),
+                    ("max_apps", "5568"),
+                    ("paths.state_dir", "\"var/lib/nibrunner\""),
+                    ("artifacts.store_url", "\"gs://bucket\""),
+                    ("artifacts.store_url", "\"s3://\""),
+                    ("volumes.backend", "\"nfs\""),
+                    ("volumes.storage_prefix", "\"\""),
+                    ("volumes.storage_prefix", "\"/volumes\""),
+                    ("volumes.storage_prefix", "\"volumes/\""),
+                    ("volumes.storage_prefix", "\"a//b\""),
+                    ("volumes.storage_prefix", "\"a/../b\""),
+                    ("network.denied_egress_addresses_v4", "[\"172.31.0.0\"]"),
+                    ("network.denied_egress_addresses_v4", "[\"fd00::/8\"]"),
+                    ("network.denied_egress_addresses_v6", "[\"172.31.0.0/16\"]"),
+                ]
+                .into_iter()
+                .map(|change| document(&[change], "")),
+            );
+            broken.extend(
+                [
+                    "[proxy.http]\nport = 0\n",
+                    "[proxy.http]\nport = 80\n\n[proxy.http.tls]\ncertificate = \"/etc/nibrunner/origin.crt\"\n",
+                    "[proxy.raw]\nmax_ports_per_guest = 0\n",
+                    "[proxy.raw]\nmax_ports_per_guest = 8\n",
+                    "[metrics]\nport = 9100\n",
+                    "[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\nroute = \"/metrics\"\n",
+                    "[proxy.http]\nport = 80\n\n[storage]\nbackend = \"zerofs\"\n",
+                ]
+                .into_iter()
+                .map(|extra| document(&[], &bound(extra))),
+            );
+            broken.extend([
+                document(&[], ZEROFS),
+                zerofs(""),
+                zerofs(&ZEROFS.replace("cache_disk_gib = 70", "cache_disk_gib = 0")),
+                zerofs(&ZEROFS.replace("s3://filesystems-one/host-1", "filesystems/host-1")),
+            ]);
+            for text in broken {
+                HostConfig::from_toml(&text).expect_err(&text);
+                assert!(!validator.is_valid(&json(&text)), "the schema took\n{text}");
+            }
+        }
     }
 }

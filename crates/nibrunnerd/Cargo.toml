@@ -15,10 +15,13 @@ path = "src/lib.rs"
 name = "nibrunnerd"
 path = "src/main.rs"
 
-# What `just config-example` runs. Not what a host runs: `just build-release` names the one above.
 [[bin]]
 name = "config-example"
 path = "src/bin/config-example.rs"
+
+[[bin]]
+name = "config-schema"
+path = "src/bin/config-schema.rs"
 
 [dependencies]
 protocol.workspace = true
@@ -26,6 +29,7 @@ guest-contract.workspace = true
 nft-render.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 sqlx.workspace = true
 toml.workspace = true
 tar.workspace = true
@@ -67,6 +71,7 @@ testing = ["dep:mockall", "dep:tempfile"]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 mockall.workspace = true
+jsonschema.workspace = true
 nft-render.workspace = true
 nibrunnerd = { path = ".", features = ["testing"] }
 
