@@ -12,14 +12,8 @@ function Intro() {
     <div className="flex flex-col items-start gap-4">
       <h1 className="font-semibold text-3xl tracking-tight">nibrunner</h1>
       <p className="text-fd-muted-foreground">
-        One binary that turns a Linux machine with <code>/dev/kvm</code> into a microVM host.
-        Describe the apps you want in a document; it boots each one in a Firecracker microVM of its
-        own, sleeps the ones nobody is visiting, backs their volumes up, and serves them over HTTPS
-        with logs and metrics.
-      </p>
-      <p className="text-fd-muted-foreground text-sm">
-        Not shipping containers on a cargo ship: parcels on a warehouse floor, each one a whole
-        machine of its own, up in a blink and shelved for nothing while nobody is looking.
+        MicroVM orchestrator for your VPS with built-in sleep/wake policies, backups, snapshots,
+        HTTPS, custom image, logs and metrics.
       </p>
       <div className="flex flex-wrap gap-3">
         <Link
@@ -34,7 +28,7 @@ function Intro() {
           params={{ _splat: '' }}
           className="rounded-lg border px-3 py-2 font-medium text-sm transition-colors hover:bg-fd-accent"
         >
-          Open Docs
+          Docs
         </Link>
       </div>
     </div>

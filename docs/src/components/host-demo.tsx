@@ -4,8 +4,9 @@ import { Warehouse } from '@/components/warehouse';
 import { useHost } from '@/lib/use-host';
 
 /**
- * The document beside the room it describes. `intro` sits above the document, and on a narrow
- * screen the room comes between them so the picture is seen before the controls.
+ * The apps beside the room they run in. `intro` sits above the list, and on a narrow screen the
+ * room comes between them so the picture is seen before the controls. On a wide one the room
+ * stays put while the list, which can outgrow the screen, scrolls beside it.
  */
 export function HostDemo({ intro }: { intro: ReactNode }) {
   const { snapshot, add, remove, visit, resize } = useHost();
@@ -13,7 +14,7 @@ export function HostDemo({ intro }: { intro: ReactNode }) {
   return (
     <div className="grid w-full items-center gap-8 lg:grid-cols-[minmax(0,19rem)_1fr] lg:grid-rows-[auto_auto] lg:gap-x-10 lg:gap-y-8">
       <div className="lg:self-end">{intro}</div>
-      <div className="lg:col-start-2 lg:row-span-2 lg:row-start-1">
+      <div className="lg:sticky lg:top-26 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:self-start">
         <Warehouse
           snapshot={snapshot}
           highlighted={highlighted}

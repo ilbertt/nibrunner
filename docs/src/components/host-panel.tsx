@@ -142,7 +142,7 @@ export function HostPanel({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <span className="shrink-0 font-medium text-sm">The document</span>
+        <span className="shrink-0 font-medium text-sm">Your apps</span>
         <span className="whitespace-nowrap font-mono text-fd-muted-foreground text-xs tabular-nums">
           {running} running · {sleeping} asleep · {MAX_APPS - listed.length} free
         </span>
@@ -169,11 +169,6 @@ export function HostPanel({
         <PlusIcon className="size-4" />
         Add an app
       </button>
-      <p className="text-fd-muted-foreground text-xs leading-relaxed">
-        {full
-          ? `This host is laid out for ${MAX_APPS}: it is full, and says so by naming max_apps.`
-          : 'The room is your VPS. Every app running on /dev/kvm is cabled to the internet; one that goes twenty seconds without a request is snapshotted and shelved for nothing, and the next request brings it straight back. Send one with the plane, or click the crate; pick a size and the robot finds it room.'}
-      </p>
     </div>
   );
 }
