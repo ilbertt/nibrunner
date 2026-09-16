@@ -29,20 +29,25 @@ tap is ever considered proven. `just integration --no-run` builds it without any
 ## What CI checks
 
 Every pull request runs `just fmt --check`, `just lint`, `just test`, `just integration`, and the
-two checks on files written from the code rather than by hand:
+three checks on files written from the code rather than by hand:
 
 - `crates/protocol/schema/*.json` is generated from the types in `crates/protocol`. After
   changing them, `just schema` and commit the result; `just check-schema` fails otherwise.
 - `deploy/config.example.toml` is generated from `HostConfig::example` in
   `crates/nibrunnerd/src/config.rs`. After changing it, `just config-example` and commit the
   result; `just check-config-example` fails otherwise.
+- `deploy/config.schema.json` is generated from `HostConfig::schema` in the same file. After
+  changing it, `just config-schema` and commit the result; `just check-config-schema` fails
+  otherwise.
 
 `just fmt` and `just lint` cover the Rust and the docs site both.
 
 ## The docs site
 
 `docs/` is a Fumadocs app on Bun, served at [nibrunner.dev](https://nibrunner.dev). Pages are
-Markdown under `docs/content/docs/`. `bun install` in there once, then `just docs-dev`.
+Markdown under `docs/content/docs/`, in the two folders that are the site's two tabs: `(docs)/`
+for the guides — the parentheses keep the folder out of the URL — and `reference/`, whose pages
+are rendered from the JSON Schemas. `bun install` in there once, then `just docs-dev`.
 
 ## Pull requests
 

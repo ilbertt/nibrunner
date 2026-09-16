@@ -1,3 +1,4 @@
+#:schema https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/config.schema.json
 # Written by `just config-example` from `HostConfig::example` in crates/nibrunnerd/src/config.rs.
 # Edit that, not this: `just check-config-example` fails when this file is behind it.
 #

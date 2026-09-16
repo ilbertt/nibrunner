@@ -198,7 +198,8 @@ is the document above as a JSON Schema (draft 2020-12), and
 [`reported-state.schema.json`](https://github.com/ilbertt/nibrunner/blob/main/crates/protocol/schema/reported-state.schema.json)
 is the one the daemon writes back to `reported.json` in its state directory. Both are generated
 from the Rust types in `crates/protocol`, so a tool built against them is built against what the
-daemon parses. An editor will complete and check a document that names one:
+daemon parses, and the [reference](/docs/reference) is each of them key by key, rendered from
+the schema. An editor will complete and check a document that names one:
 
 ```json
 {
