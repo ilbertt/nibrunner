@@ -66,7 +66,6 @@ export const ARRIVAL_MS = 380;
 export const PULSE_MS = 420;
 
 const SLEEP_TICK_MS = 1000;
-const FIRST_ARRIVAL_MS = 900;
 
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
@@ -607,13 +606,12 @@ function createHost(): Host {
   }
 
   // The page is prerendered with the opening apps in place; once it is alive, the clock that puts
-  // them to sleep starts from now, and one more app turns up so the robot is seen at work.
+  // them to sleep starts from now. Nothing else happens until the reader does something.
   function start(): () => void {
     const now = performance.now();
     pace = window.matchMedia(REDUCED_MOTION_QUERY).matches ? 0 : 1;
     world.apps = world.apps.map((app) => ({ ...app, since: now, visitedAt: now }));
     publish(now);
-    const arrival = window.setTimeout(add, FIRST_ARRIVAL_MS);
     const clock = window.setInterval(() => {
       if (frame === 0) {
         sweep({ world, now: performance.now() });
@@ -625,7 +623,6 @@ function createHost(): Host {
       }
     }, SLEEP_TICK_MS);
     return () => {
-      window.clearTimeout(arrival);
       window.clearInterval(clock);
       cancelAnimationFrame(frame);
       frame = 0;
