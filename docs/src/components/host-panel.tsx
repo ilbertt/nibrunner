@@ -1,4 +1,4 @@
-import { PlusIcon, SendIcon, XIcon } from 'lucide-react';
+import { GlobeIcon, PlusIcon, XIcon } from 'lucide-react';
 import { type App, MAX_APPS, SIZE_NAMES, SIZES, type Size } from '@/lib/host';
 
 /** What the card says the app is doing, in the words the daemon would use. */
@@ -97,10 +97,10 @@ function AppRow({
           disabled={!settled || app.location.kind !== 'placed'}
           onClick={onVisit}
           aria-label={`Send ${app.name} a request`}
-          title="Send it a request: a sleeping app wakes for it"
+          title="A visit from the internet: a sleeping app wakes for it"
           className="rounded-md p-1 text-fd-muted-foreground transition-colors enabled:hover:bg-fd-accent enabled:hover:text-fd-accent-foreground disabled:opacity-30"
         >
-          <SendIcon className="size-3.5" />
+          <GlobeIcon className="size-3.5" />
         </button>
         <button
           type="button"
