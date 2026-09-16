@@ -311,6 +311,9 @@ function crateSolids({ app, at, y0, fade, opacity, dims, glow }: Standing): Soli
       fade,
       opacity,
       app: app.id,
+      // On the lid as well as the front: a crate in the row ahead hides the front.
+      label: app.name,
+      labelFace: 'top',
     }),
   ];
 }
@@ -495,16 +498,24 @@ function facesOf(one: Solid): Face[] {
   ];
 }
 
-const LABEL = { fontSize: 0.19, mix: 'black 58%' };
+const LABEL = { fontSize: 0.19, mix: 'black 58%', margin: 0.08 };
+/** About what a monospace glyph is wide, in ems. */
+const GLYPH_EM = 0.62;
+
+/** The largest size the name fits a face of this width at, up to the usual one. */
+function labelSize({ label, width }: { label: string; width: number }): number {
+  return Math.min(LABEL.fontSize, (width - LABEL.margin) / (label.length * GLYPH_EM));
+}
 
 /**
- * A name on the front of a crate. A face is a parallelogram on screen, so the text is drawn in
- * the face's own plane: one unit along the edge it reads along, one unit down.
+ * A name on a crate. A face is a parallelogram on screen, so the text is drawn in the face's own
+ * plane: one unit along the edge it reads along, one unit down.
  */
 function FaceLabel({ one }: { one: Solid }) {
   const { x0, x1, z0, z1 } = one.rect;
   const cos = EDGE_COS * UNIT_PX;
   const sin = EDGE_SIN * UNIT_PX;
+  const label = one.label ?? '';
   if (one.labelFace === 'top') {
     const anchor = project({ x: x0, y: one.y1, z: z0 });
     return (
@@ -512,7 +523,7 @@ function FaceLabel({ one }: { one: Solid }) {
         transform={`matrix(${cos} ${sin} ${-cos} ${sin} ${anchor.px} ${anchor.py})`}
         x={(x1 - x0) * HALF}
         y={(z1 - z0) * HALF}
-        fontSize={LABEL.fontSize}
+        fontSize={labelSize({ label, width: x1 - x0 })}
         textAnchor="middle"
         dominantBaseline="central"
         stroke="none"
@@ -534,7 +545,7 @@ function FaceLabel({ one }: { one: Solid }) {
       transform={`matrix(${cos} ${along} 0 ${UNIT_PX} ${anchor.px} ${anchor.py})`}
       x={width * HALF}
       y={(one.y1 - one.y0) * HALF}
-      fontSize={LABEL.fontSize}
+      fontSize={labelSize({ label, width })}
       textAnchor="middle"
       dominantBaseline="central"
       stroke="none"

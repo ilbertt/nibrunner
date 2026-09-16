@@ -172,7 +172,7 @@ export function HostPanel({
       <p className="text-fd-muted-foreground text-xs leading-relaxed">
         {full
           ? `This host is laid out for ${MAX_APPS}: it is full, and says so by naming max_apps.`
-          : 'The room is your VPS. Every app running on /dev/kvm is cabled to the internet; one that goes twelve seconds without a request is snapshotted and shelved for nothing, and the next request brings it straight back. Send one with the plane, or click the crate; pick a size and the robot finds it room.'}
+          : 'The room is your VPS. Every app running on /dev/kvm is cabled to the internet; one that goes twenty seconds without a request is snapshotted and shelved for nothing, and the next request brings it straight back. Send one with the plane, or click the crate; pick a size and the robot finds it room.'}
       </p>
     </div>
   );

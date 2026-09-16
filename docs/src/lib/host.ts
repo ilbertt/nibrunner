@@ -175,7 +175,7 @@ export function createApp({ id, taken, at }: { id: number; taken: string[]; at: 
 }
 
 /** Long enough to be seen running; short enough that the shelving is seen too. */
-export const SLEEP_AFTER_MS = 12_000;
+export const SLEEP_AFTER_MS = 20_000;
 
 function overlaps({ a, b }: { a: Rect; b: Rect }): boolean {
   return a.x0 < b.x1 && b.x0 < a.x1 && a.z0 < b.z1 && b.z0 < a.z1;
