@@ -1,0 +1,65 @@
+---
+title: Layers
+description: How an app's root is built, and what runs in it.
+---
+
+The root a microVM's program sees is a stack, bottom to top:
+
+```
+the volume        writable, and the only thing backed up
+layers[n-1]
+…                 the document's layers, in the order it lists them
+layers[0]
+Debian            the guest image nibrunner ships, always at the bottom
+```
+
+## A layer
+
+Each layer is an object in the artifact store, named by its digest, with a `kind`:
+
+| `kind` | What the object is |
+| --- | --- |
+| `executable` | One program. The host packs it into an image at `destinationPath`. |
+| `filesystem` | An image already — a squashfs or ext4 — attached as it was uploaded. |
+
+```json
+"layers": [
+  { "kind": "filesystem", "digest": "<sha256, lowercase hex>", "objectKey": "base/runtime" },
+  { "kind": "executable", "destinationPath": "/app/server", "digest": "<sha256, lowercase hex>", "objectKey": "my-server" }
+]
+```
+
+A layer is fetched once per host and cached by digest, so ten apps on the same base hold it
+once.
+
+## The volume
+
+The volume is the writable top of the whole root. Every write anywhere lands on it and
+persists; nothing else does. An export is the volume's contents and the environment — never
+what a layer holds. A file a layer holds at the same path as one on the volume is shadowed by
+the volume's copy.
+
+## What runs
+
+`config.command` is what the guest's init runs once the root is stacked: `program` with `args`,
+in `workingDirectory`, with `environment`, as uid 65534.
+
+```json
+"command": {
+  "program": "/app/server",
+  "args": ["--port", "3000"],
+  "workingDirectory": "/app",
+  "environment": { "DATABASE_URL": "sqlite:///app/data.db" }
+}
+```
+
+The working directory is created if no layer holds it, and given to uid 65534. It and `/tmp`
+are the places the program can write. The program cannot reach the guest's init, the volume's
+bookkeeping, or the host.
+
+## Next steps
+
+<Cards>
+  <Card title="Volumes" href="/docs/guides/volumes" description="Start a volume from an archive, and choose where volumes live." />
+  <Card title="desired.json" href="/docs/reference/desired-state" description="Every field of a layer and a command." />
+</Cards>

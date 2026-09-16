@@ -1,6 +1,5 @@
 {
   "title": "Reference",
-  "icon": "Braces",
-  "root": true,
-  "pages": ["index", "config", "desired-state", "reported-state"]
+  "defaultOpen": true,
+  "pages": ["config", "desired-state", "reported-state"]
 }

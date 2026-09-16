@@ -1,0 +1,14 @@
+{
+  "title": "Guides",
+  "defaultOpen": true,
+  "pages": [
+    "layers",
+    "volumes",
+    "sleep-and-wake",
+    "health-checks",
+    "https",
+    "raw-ports",
+    "logs-and-metrics",
+    "host-capacity"
+  ]
+}

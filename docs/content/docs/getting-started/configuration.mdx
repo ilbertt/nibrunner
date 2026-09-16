@@ -1,0 +1,88 @@
+---
+title: Configuration
+description: The host's config.toml — the rules it follows, what the installer wrote, and where secrets go.
+---
+
+A host is one file, `/etc/nibrunner/config.toml`. `nibrunnerd install` writes it, and every
+`nibrunnerd start` reads it. [The reference](/docs/reference/config) is every key in it.
+
+## Changing it
+
+1. Edit `/etc/nibrunner/config.toml`.
+2. Put any secret the configuration now needs in `/etc/nibrunner/host.env`.
+3. Run `nibrunnerd start`.
+
+`start` validates the whole file before it does anything, re-renders what `install` wrote, and
+restarts only what read something that changed. A file that is wrong says which key and why.
+
+## Three rules
+
+Every refusal follows from one of these:
+
+- **No key has a default.** A key its section declares but the file omits is refused by name.
+- **An unknown key is refused.** A mistyped key and a missing one are different errors.
+- **A whole section is what may be absent** — `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]`. A
+  section that is present is complete.
+
+```
+volumes.backend is not specified, and nothing here is optional
+volumes.zerofs is not read by the local-file backend, which is what volumes.backend says
+proxy.http.port is not free, because 21000-28999 is what a slot takes for an app's loopback port
+```
+
+## What the installer wrote
+
+A complete host, which runs as it is:
+
+| Key | Starter value |
+| --- | --- |
+| `max_apps` | What this machine holds, [measured](/docs/guides/host-capacity). |
+| `[paths]` | Everything under `/var/lib/nibrunner`. |
+| `[artifacts]`, `[exports]` | Directories on this disk. |
+| `[volumes]` | `backend = "local-file"`: sparse files on this disk. |
+| `[proxy.http]` | Plain HTTP on every address at `:80`. |
+
+Before putting anything real on it, you will likely change two things:
+
+- **The volume backend.** [`zerofs`](/docs/guides/volumes#in-an-object-store) puts volumes in an
+  object store, which is what lets them outlive the machine and what a backup is cut from.
+- **The listener.** [`[proxy.http.tls]`](/docs/guides/https) for a certificate on this host, or
+  nothing more behind an edge that terminates TLS.
+
+[`deploy/config.example.toml`](https://github.com/ilbertt/nibrunner/blob/main/deploy/config.example.toml)
+is a host with every section filled in.
+
+## Secrets
+
+Nothing in `config.toml` is a secret. Object-store credentials and the ZeroFS encryption
+password go in `/etc/nibrunner/host.env`, which `install` created with every variable named and
+none set. `nibrunnerd start` refuses while one the configuration needs is still empty.
+
+## Ports
+
+Each app slot reserves eight consecutive ports from 21000, so every listener in this file must
+be outside `21000` to `21000 + 8 × max_apps − 1`. `0` is refused too, and `metrics.port` must
+differ from `proxy.http.port`.
+
+<Callout title="Good to know">
+  - `NIBRUNNER_CONFIG` names another file.
+  - `NIBRUNNER_LOG` is a `tracing` filter for the daemon. It stays in the environment.
+  - Which apps run here is `desired.json`, not this file.
+</Callout>
+
+## Editor support
+
+An editor that reads TOML schemas — Even Better TOML in VS Code, taplo — completes and checks
+the file when its first line names the schema:
+
+```toml
+#:schema https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/config.schema.json
+```
+
+## Next steps
+
+<Cards>
+  <Card title="config.toml" href="/docs/reference/config" description="Every key, from the JSON Schema." />
+  <Card title="Volumes" href="/docs/guides/volumes" description="Files on this disk, or blocks in an object store." />
+  <Card title="HTTPS" href="/docs/guides/https" description="TLS on this host, or behind an edge." />
+</Cards>

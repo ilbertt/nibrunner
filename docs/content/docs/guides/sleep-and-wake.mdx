@@ -1,0 +1,61 @@
+---
+title: Sleep and wake
+description: When an app sleeps, and what wakes it.
+---
+
+An app nobody is visiting is snapshotted and suspended. The next request wakes it. Which apps
+sleep, and after how long, is the document's to say, per instance.
+
+## Desired state
+
+`desiredState` says whether an instance should be up:
+
+| `desiredState` | What it means |
+| --- | --- |
+| `running` | Keeps the microVM up. |
+| `on-request` | Brings it up for the first deploy and for every request that finds it asleep, and lets it sleep in between. |
+| `stopped` | Takes it down, and leaves the app reachable enough to say so. |
+
+## When it sleeps
+
+`activation.sleepWhen` says what puts an `on-request` instance back to sleep:
+
+```json
+{
+  "desiredState": "on-request",
+  "activation": {
+    "sleepWhen": { "kind": "traffic-idle", "timeoutMs": 900000 }
+  }
+}
+```
+
+| `sleepWhen` | The microVM is suspended when |
+| --- | --- |
+| `{ "kind": "traffic-idle", "timeoutMs": N }` | Nothing has been sent to it for `N` ms. |
+| `{ "kind": "max-lifetime", "ttlMs": N }` | It has been up for `N` ms, however busy it is. |
+| `{ "kind": "never" }` | Never. Only the document takes it down. |
+
+An instance that names no `sleepWhen` sleeps after five minutes idle if it is `on-request`, and
+never otherwise.
+
+<Callout title="Good to know">
+  - Only an `on-request` instance may name a `sleepWhen` other than `never`: nothing would wake
+    anything else, and the next reconcile pass would bring it straight back up. A document that
+    says so is refused whole.
+  - `idleTimeoutMs` is the older spelling of `sleepWhen: traffic-idle`. A document that names both
+    is refused.
+</Callout>
+
+## What wakes it
+
+Any arrival: an HTTP request on one of its hostnames, or anything on a [raw port](/docs/guides/raw-ports).
+The connection is accepted and held, and spliced through once the app's
+[health check](/docs/guides/health-checks) passes, so a client sees a slow first response
+rather than a closed socket.
+
+## Next steps
+
+<Cards>
+  <Card title="Health checks" href="/docs/guides/health-checks" description="What a wake waits for." />
+  <Card title="Host capacity" href="/docs/guides/host-capacity" description="How many apps a host holds, asleep and awake." />
+</Cards>

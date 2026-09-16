@@ -1,0 +1,65 @@
+---
+title: Health checks
+description: What tells the host an app is up, and the three ways to say it.
+---
+
+`config.healthCheck` is what tells the host an instance is well. Every instance names one —
+there is no default — and it does two jobs: a wake waits for it before handing the caller on,
+and liveness is read from it after that.
+
+```json
+"healthCheck": {
+  "kind": "http",
+  "path": "/healthz",
+  "intervalMs": 5000,
+  "timeoutMs": 2000,
+  "gracePeriodMs": 30000,
+  "healthyThreshold": 1,
+  "unhealthyThreshold": 3
+}
+```
+
+## The three kinds
+
+| `kind` | Healthy means |
+| --- | --- |
+| `http` | `path`, requested on `httpPort`, answers 2xx. |
+| `tcp` | A connection to `httpPort` is accepted. For a port that does not speak HTTP. |
+| `boot-completed` | The microVM is up and `httpPort` has accepted a connection once. For a guest this host did not build, which answers no path it was not told about. |
+
+`http` and `tcp` carry the timing above: `intervalMs`, `timeoutMs`, `gracePeriodMs`,
+`healthyThreshold` and `unhealthyThreshold`. `boot-completed` carries none — the app has 30
+seconds to start listening, and nothing is timed after that. An instance that fails its check
+`unhealthyThreshold` times in a row is reported `unhealthy`, with why.
+
+<Callout title="Good to know">
+  Use `http` when you can. A TCP connect is answered by the guest kernel's accept queue whether
+  or not the process behind it will ever read the request, so a program that has stopped
+  answering passes `tcp` for as long as it lives.
+</Callout>
+
+## Restarts
+
+`config.restartPolicy` is the budget for starting the program again after it exits:
+
+```json
+"restartPolicy": {
+  "maxRestarts": 5,
+  "initialBackoffMs": 500,
+  "maxBackoffMs": 30000,
+  "backoffFactor": 2,
+  "resetAfterMs": 60000
+}
+```
+
+The wait before each attempt grows from `initialBackoffMs` by `backoffFactor`, capped at
+`maxBackoffMs`. A program that stays up for `resetAfterMs` earns the whole budget back. Past
+`maxRestarts`, the instance is reported `failed` and is not started again until it is deployed
+afresh, under a new `deploymentId`.
+
+## Next steps
+
+<Cards>
+  <Card title="Sleep and wake" href="/docs/guides/sleep-and-wake" description="What a wake waits for, and when an app sleeps." />
+  <Card title="desired.json" href="/docs/reference/desired-state" description="Every field of a health check." />
+</Cards>

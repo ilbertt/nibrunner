@@ -13,8 +13,8 @@ const HEADER: &str = "\
 #
 # A host with every section: volumes in an object store, reached from the guest over NBD;
 # artifacts and exports in S3; TLS behind an edge, which presents a client certificate; raw ports
-# for a relay; a metrics page. What each key means is https://nibrunner.dev/docs/config. A host with no
-# configuration is given the smallest one instead, by `nibrunnerd install`.
+# for a relay; a metrics page. What each key means is https://nibrunner.dev/docs/reference/config.
+# A host with no configuration is given the smallest one instead, by `nibrunnerd install`.
 #
 # Nothing here is a secret. The AWS credentials and the ZeroFS encryption password live in
 # host.env beside this file, which `install` creates empty and never writes into.
