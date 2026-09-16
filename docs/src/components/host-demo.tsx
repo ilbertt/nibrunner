@@ -5,15 +5,16 @@ import { useHost } from '@/lib/use-host';
 
 /**
  * The apps beside the room they run in. `intro` sits above the list, and on a narrow screen the
- * room comes between them so the picture is seen before the controls. On a wide one the room
- * stays put while the list, which can outgrow the screen, scrolls beside it.
+ * room comes between them so the picture is seen before the controls. On a wide one the column
+ * is the screen's height and only the list scrolls, so the room, the intro and the button never
+ * move however many apps there are.
  */
 export function HostDemo({ intro }: { intro: ReactNode }) {
   const { snapshot, add, remove, visit, resize } = useHost();
   const [highlighted, setHighlighted] = useState<number | null>(null);
   return (
-    <div className="grid w-full items-center gap-8 lg:grid-cols-[minmax(0,19rem)_1fr] lg:grid-rows-[auto_auto] lg:gap-x-10 lg:gap-y-8">
-      <div className="lg:self-end">{intro}</div>
+    <div className="grid w-full items-start gap-8 lg:h-[calc(100vh-9.5rem)] lg:grid-cols-[minmax(0,19rem)_1fr] lg:grid-rows-[auto_minmax(0,1fr)] lg:gap-x-10 lg:gap-y-8">
+      <div>{intro}</div>
       <div className="lg:sticky lg:top-26 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:self-start">
         <Warehouse
           snapshot={snapshot}
@@ -22,7 +23,7 @@ export function HostDemo({ intro }: { intro: ReactNode }) {
           onHighlight={setHighlighted}
         />
       </div>
-      <div className="lg:self-start">
+      <div className="lg:flex lg:min-h-0 lg:flex-col lg:self-stretch">
         <HostPanel
           apps={snapshot.apps}
           highlighted={highlighted}

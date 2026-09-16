@@ -2,10 +2,10 @@ export type Vec2 = { x: number; z: number };
 export type Rect = { x0: number; x1: number; z0: number; z1: number };
 
 /** What the demo host is laid out for: `max_apps`. */
-export const MAX_APPS = 8;
+export const MAX_APPS = 16;
 
 /** The floor in cells, and how tall the walls stand. */
-export const ROOM = { x: 11, y: 1.6, z: 7.5 };
+export const ROOM = { x: 12, y: 1.6, z: 7.5 };
 
 export type Size = 'S' | 'M' | 'L';
 
@@ -29,7 +29,9 @@ export const SIZE_NAMES = Object.keys(SIZES) as Size[];
 
 /**
  * Asleep, an app is its memory written to disk: one thin slab whatever it runs as, which is why
- * the shelf holds every app the host is laid out for in a corner of the floor.
+ * the shelf holds every app the host is laid out for in a corner of the floor. The floor holds
+ * less than that: what the machine runs at once is what its memory holds, and past it the robot
+ * has only advice.
  */
 export const SLAB: Dims = { w: 1, d: 1, height: 0.14 };
 
@@ -58,8 +60,8 @@ export const BOT = { width: 0.66, height: 0.2, lift: 0.26, speed: 20 };
  * Both fill from the back wall outwards.
  */
 export const ZONES = {
-  floor: { x0: 4.5, x1: 10.5, z0: 0.5, z1: 4.5 },
-  shelf: { x0: 0.5, x1: 2.5, z0: 0.5, z1: 4.5 },
+  floor: { x0: 5.5, x1: 11.5, z0: 0.5, z1: 4.5 },
+  shelf: { x0: 0.5, x1: 4.5, z0: 0.5, z1: 4.5 },
 } satisfies Record<string, Rect>;
 
 export type ZoneName = keyof typeof ZONES;
@@ -70,13 +72,13 @@ export function footprintIn({ zone, size }: { zone: ZoneName; size: Size }): Dim
 }
 
 /** The pad at the room's open edge where a crate declared in the document rises. */
-export const PAD: Vec2 = { x: 9.5, z: 6.25 };
+export const PAD: Vec2 = { x: 10.5, z: 6.25 };
 
 /** Where a removed crate is set down: over the front edge, so it drops out of the picture. */
-export const EXIT: Vec2 = { x: 3.5, z: 7.2 };
+export const EXIT: Vec2 = { x: 4, z: 7.2 };
 
 /** The robot's rest, out of everyone's way. */
-export const PARK: Vec2 = { x: 6, z: 6.3 };
+export const PARK: Vec2 = { x: 7, z: 6.3 };
 
 /** The internet panel on the back wall, and how high on it the cables leave. */
 export const NET_PANEL = { y0: 0.15, y1: 1.3, tap: 1.2 };
@@ -129,6 +131,8 @@ export type App = {
   visitedAt: number;
   /** Set when a request finds it asleep, until it is back on the floor. */
   requestedAt: number | null;
+  /** Declared, but with no room on the floor for it yet; it waits for something to leave. */
+  stranded: boolean;
   asleep: boolean;
   /** What the robot has been asked to do with it and has not finished yet. */
   pending: 'place' | 'shelve' | 'wake' | 'resize' | 'remove' | null;
@@ -167,6 +171,7 @@ export function createApp({ id, taken, at }: { id: number; taken: string[]; at: 
     since: at,
     visitedAt: at,
     requestedAt: null,
+    stranded: false,
     asleep: false,
     pending: null,
     reserved: null,

@@ -18,7 +18,7 @@ function phaseOf(app: App): string {
       break;
   }
   if (app.location.kind !== 'placed') {
-    return 'queued';
+    return app.stranded ? 'no room' : 'queued';
   }
   return app.asleep ? 'sleeping' : 'running';
 }
@@ -136,18 +136,17 @@ export function HostPanel({
   onHighlight: (app: number | null) => void;
 }) {
   const listed = apps.filter((app) => app.location.kind !== 'gone');
-  const full = listed.length >= MAX_APPS;
   const running = listed.filter((app) => app.location.kind === 'placed' && !app.asleep).length;
   const sleeping = listed.filter((app) => app.asleep).length;
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+    <div className="flex flex-col gap-4 lg:min-h-0 lg:flex-1">
+      <div className="flex shrink-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <span className="shrink-0 font-medium text-sm">Your apps</span>
         <span className="whitespace-nowrap font-mono text-fd-muted-foreground text-xs tabular-nums">
           {running} running · {sleeping} asleep · {MAX_APPS - listed.length} free
         </span>
       </div>
-      <ul className="flex flex-col gap-2">
+      <ul className="flex flex-col gap-2 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
         {listed.map((app) => (
           <AppRow
             key={app.id}
@@ -162,12 +161,11 @@ export function HostPanel({
       </ul>
       <button
         type="button"
-        disabled={full}
         onClick={onAdd}
-        className="inline-flex w-full items-center justify-center gap-2 rounded-lg border bg-fd-secondary px-3 py-2 font-medium text-fd-secondary-foreground text-sm transition-colors enabled:hover:bg-fd-accent disabled:opacity-50"
+        className="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-lg border bg-fd-secondary px-3 py-2 font-medium text-fd-secondary-foreground text-sm transition-colors hover:bg-fd-accent"
       >
         <PlusIcon className="size-4" />
-        Add an app
+        Add app
       </button>
     </div>
   );

@@ -38,7 +38,7 @@ function Intro() {
 function Home() {
   return (
     <HomeLayout {...baseOptions()}>
-      <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col justify-center px-4 py-10 lg:py-12">
+      <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-10 lg:py-12">
         <HostDemo intro={<Intro />} />
       </div>
     </HomeLayout>

@@ -19,7 +19,14 @@ import {
   type Vec2,
   ZONES,
 } from '@/lib/host';
-import { ARRIVAL_MS, type Pose, PULSE_MS, type Snapshot } from '@/lib/use-host';
+import {
+  ARRIVAL_MS,
+  NOTICE_MS,
+  type Notice,
+  type Pose,
+  PULSE_MS,
+  type Snapshot,
+} from '@/lib/use-host';
 
 type Vec3 = { x: number; y: number; z: number };
 type Point = { px: number; py: number };
@@ -933,6 +940,50 @@ function Pulse({ app, at, now }: { app: App; at: Vec2; now: number }) {
   );
 }
 
+const BUBBLE = { rise: 1.1, padX: 8, height: 22, fontSize: 11, radius: 6, tail: 5, fadeShare: 0.2 };
+/** About what a monospace glyph is wide at the bubble's size, in pixels. */
+const BUBBLE_GLYPH_PX = 6.7;
+
+/** What the robot has to say, over its head, for a moment. */
+function Speech({ notice, pose, snapshot }: { notice: Notice; pose: Pose; snapshot: Snapshot }) {
+  const { now, pace } = snapshot;
+  const t = progress({ since: notice.at, now, ms: NOTICE_MS, pace });
+  if (t >= 1) {
+    return null;
+  }
+  const opacity = Math.min(1, (1 - t) / BUBBLE.fadeShare);
+  const { px, py } = project({ x: pose.x, y: BUBBLE.rise, z: pose.z });
+  const width = notice.text.length * BUBBLE_GLYPH_PX + BUBBLE.padX * 2;
+  const left = px - width * HALF;
+  const top = py - BUBBLE.height;
+  return (
+    <g opacity={opacity} className="pointer-events-none">
+      <rect
+        x={left}
+        y={top}
+        width={width}
+        height={BUBBLE.height}
+        rx={BUBBLE.radius}
+        className="fill-fd-popover stroke-fd-border"
+      />
+      <polygon
+        points={`${px - BUBBLE.tail},${py} ${px + BUBBLE.tail},${py} ${px},${py + BUBBLE.tail}`}
+        className="fill-fd-popover"
+      />
+      <text
+        x={px}
+        y={top + BUBBLE.height * HALF}
+        fontSize={BUBBLE.fontSize}
+        textAnchor="middle"
+        dominantBaseline="central"
+        className="fill-fd-popover-foreground font-mono"
+      >
+        {notice.text}
+      </text>
+    </g>
+  );
+}
+
 const GRID_STROKE = 0.5;
 const PAD_STROKE = 0.8;
 const PAD_DASH = '3 3';
@@ -1055,6 +1106,9 @@ export function Warehouse({
       {asleep.map((place) => (
         <Snore key={place.app.id} app={place.app} at={place.at} />
       ))}
+      {snapshot.notice !== null && (
+        <Speech notice={snapshot.notice} pose={pose} snapshot={snapshot} />
+      )}
     </svg>
   );
 }

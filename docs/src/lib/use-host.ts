@@ -42,16 +42,32 @@ type Step =
 
 type Running = { steps: Step[]; index: number; startedAt: number; from: Pose };
 
+/** Something the robot has to say, and when it said it. */
+export type Notice = { text: string; at: number };
+
 type World = {
   apps: App[];
   jobs: Job[];
   pose: Pose;
   running: Running | null;
   nextId: number;
+  notice: Notice | null;
 };
 
 /** `pace` is 1, or 0 for a reader who asked for less motion: every duration is multiplied by it. */
-export type Snapshot = { apps: App[]; pose: Pose; now: number; pace: number };
+export type Snapshot = {
+  apps: App[];
+  pose: Pose;
+  now: number;
+  pace: number;
+  notice: Notice | null;
+};
+
+/** How long the robot's advice stays up. */
+export const NOTICE_MS = 3600;
+
+/** What the robot says when the machine has no room for what the document asks of it. */
+const BIGGER_VPS = 'Get a bigger VPS!';
 
 const MS_PER_SECOND = 1000;
 
@@ -73,8 +89,8 @@ const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 function startingWorld(): World {
   const apps: App[] = [];
   const opening: { spot: Spot; asleep: boolean; form: Form }[] = [
-    { spot: { zone: 'floor', x0: 4.5, z0: 0.5 }, asleep: false, form: 'crate' },
     { spot: { zone: 'floor', x0: 5.5, z0: 0.5 }, asleep: false, form: 'crate' },
+    { spot: { zone: 'floor', x0: 6.5, z0: 0.5 }, asleep: false, form: 'crate' },
     { spot: { zone: 'shelf', x0: 0.5, z0: 0.5 }, asleep: true, form: 'slab' },
   ];
   for (const [id, one] of opening.entries()) {
@@ -92,7 +108,12 @@ function startingWorld(): World {
     pose: { x: PARK.x, z: PARK.z, lift: 0, load: null },
     running: null,
     nextId: apps.length,
+    notice: null,
   };
+}
+
+function advise({ world, now }: { world: World; now: number }): void {
+  world.notice = { text: BIGGER_VPS, at: now };
 }
 
 function lengthOf({ from, path }: { from: Vec2; path: Vec2[] }): number {
@@ -262,7 +283,8 @@ function reserve({
 function planPlace({ world, app, now }: { world: World; app: App; now: number }): Step[] {
   const spot = reserve({ world, app, zone: 'floor' });
   if (spot === null) {
-    update({ world, id: app.id, change: { pending: null } });
+    update({ world, id: app.id, change: { pending: null, stranded: true } });
+    advise({ world, now });
     return [];
   }
   update({
@@ -305,10 +327,11 @@ function planShelve({ world, app, now }: { world: World; app: App; now: number }
   });
 }
 
-function planWake({ world, app }: { world: World; app: App }): Step[] {
+function planWake({ world, app, now }: { world: World; app: App; now: number }): Step[] {
   const spot = reserve({ world, app, zone: 'floor' });
   if (spot === null) {
     update({ world, id: app.id, change: { pending: null, requestedAt: null } });
+    advise({ world, now });
     return [];
   }
   return carry({
@@ -322,7 +345,17 @@ function planWake({ world, app }: { world: World; app: App }): Step[] {
 // A crate of another size wants cells of its own: it is lifted, takes its new size, and is set
 // down where that size fits. A slab on the shelf is the same slab at any size, so it only takes
 // note. One that would fit nowhere stays as it is.
-function planResize({ world, app, size }: { world: World; app: App; size: Size }): Step[] {
+function planResize({
+  world,
+  app,
+  size,
+  now,
+}: {
+  world: World;
+  app: App;
+  size: Size;
+  now: number;
+}): Step[] {
   if (app.location.kind !== 'placed' || app.size === size) {
     update({ world, id: app.id, change: { pending: null } });
     return [];
@@ -334,6 +367,7 @@ function planResize({ world, app, size }: { world: World; app: App; size: Size }
   const spot = reserve({ world, app, zone: app.location.spot.zone, size });
   if (spot === null) {
     update({ world, id: app.id, change: { pending: null } });
+    advise({ world, now });
     return [];
   }
   return carry({
@@ -370,9 +404,9 @@ function plan({ world, job, now }: { world: World; job: Job; now: number }): Ste
     case 'shelve':
       return planShelve({ world, app, now });
     case 'wake':
-      return planWake({ world, app });
+      return planWake({ world, app, now });
     case 'resize':
-      return planResize({ world, app, size: job.size });
+      return planResize({ world, app, size: job.size, now });
     default:
       return planRemove({ world, app });
   }
@@ -389,6 +423,7 @@ function landed({ world, app, to, now }: { world: World; app: App; to: Location;
       since: now,
       reserved: null,
       pending: null,
+      stranded: false,
       asleep: !onFloor,
       visitedAt: onFloor ? now : app.visitedAt,
       requestedAt: onFloor ? null : app.requestedAt,
@@ -440,7 +475,9 @@ function settle({ world, step, now }: { world: World; step: Step; now: number })
 /** Queues what the passing of time asks for: a queued crate to be fetched, an idle app shelved. */
 function sweep({ world, now }: { world: World; now: number }): void {
   for (const app of world.apps) {
-    if (app.location.kind === 'queued' && app.pending === null) {
+    const queued = app.location.kind === 'queued' && app.pending === null;
+    const room = !app.stranded || freeSpot({ zone: 'floor', size: app.size, apps: world.apps });
+    if (queued && room) {
       update({ world, id: app.id, change: { pending: 'place' } });
       world.jobs.push({ kind: 'place', app: app.id });
     }
@@ -453,8 +490,10 @@ function sweep({ world, now }: { world: World; now: number }): void {
   }
 }
 
+/** Whether anything drawn from the clock is still in motion: a pulse, or the robot's advice. */
 function pulsing({ world, now }: { world: World; now: number }): boolean {
-  return world.apps.some((app) => now - app.visitedAt < PULSE_MS);
+  const advising = world.notice !== null && now - world.notice.at < NOTICE_MS;
+  return advising || world.apps.some((app) => now - app.visitedAt < PULSE_MS);
 }
 
 /**
@@ -515,12 +554,12 @@ type Host = {
 function createHost(): Host {
   const world = startingWorld();
   const listeners = new Set<() => void>();
-  let snapshot: Snapshot = { apps: world.apps, pose: world.pose, now: 0, pace: 1 };
+  let snapshot: Snapshot = { apps: world.apps, pose: world.pose, now: 0, pace: 1, notice: null };
   let frame = 0;
   let pace = 1;
 
   function publish(now: number): void {
-    snapshot = { apps: world.apps, pose: world.pose, now, pace };
+    snapshot = { apps: world.apps, pose: world.pose, now, pace, notice: world.notice };
     for (const listener of listeners) {
       listener();
     }
@@ -543,10 +582,13 @@ function createHost(): Host {
 
   function add(): void {
     const { apps, nextId } = world;
+    const now = performance.now();
     if (apps.filter((app) => app.location.kind !== 'gone').length >= MAX_APPS) {
+      advise({ world, now });
+      publish(now);
+      run();
       return;
     }
-    const now = performance.now();
     world.apps = [...apps, createApp({ id: nextId, taken: apps.map((app) => app.name), at: now })];
     world.nextId = nextId + 1;
     publish(now);
