@@ -13,9 +13,9 @@ export function HostDemo({ intro }: { intro: ReactNode }) {
   const { snapshot, add, remove, visit, resize } = useHost();
   const [highlighted, setHighlighted] = useState<number | null>(null);
   return (
-    <div className="grid w-full items-start gap-8 lg:h-[calc(100vh-9.5rem)] lg:grid-cols-[minmax(0,19rem)_1fr] lg:grid-rows-[auto_minmax(0,1fr)] lg:gap-x-10 lg:gap-y-8">
+    <div className="grid w-full items-start gap-8 lg:h-[calc(100vh-9.5rem)] lg:grid-cols-[minmax(0,19rem)_1fr] lg:grid-rows-[auto_minmax(0,1fr)] lg:gap-x-12 lg:gap-y-8">
       <div>{intro}</div>
-      <div className="lg:sticky lg:top-26 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:self-start">
+      <div className="lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:flex lg:h-full lg:min-h-0 lg:items-center lg:justify-center">
         <Warehouse
           snapshot={snapshot}
           highlighted={highlighted}

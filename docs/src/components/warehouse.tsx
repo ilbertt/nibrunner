@@ -1050,7 +1050,7 @@ export function Warehouse({
     <svg
       viewBox={VIEW_BOX}
       aria-hidden="true"
-      className="h-auto w-full select-none"
+      className="h-auto max-h-full w-full select-none"
       preserveAspectRatio="xMidYMid meet"
     >
       <g className="fill-fd-accent/50">
