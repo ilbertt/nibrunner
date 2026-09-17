@@ -15,6 +15,7 @@ An app nothing outside needs to reach by name has an empty `hostnames`.
 
 A request for a sleeping app wakes it. A document that names a hostname on a host with no
 `[proxy.http]` is refused by name, and the instance is reported `failed` saying so.
+[The reference](/docs/reference/config) is every key under `[proxy]`.
 
 ## Behind an edge
 
@@ -67,10 +68,3 @@ yourself without one, so turn this on after the plain path is proven.
   A connection whose handshake named one app and whose request names another gets a `421`. That
   is what keeps two apps that share a certificate apart.
 </Callout>
-
-## Next steps
-
-<Cards>
-  <Card title="Raw ports" href="/docs/guides/raw-ports" description="ssh, DNS, WireGuard — a way in that is not HTTP." />
-  <Card title="config.toml" href="/docs/reference/config" description="Every key under [proxy]." />
-</Cards>

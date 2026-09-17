@@ -45,9 +45,10 @@ three checks on files written from the code rather than by hand:
 ## The docs site
 
 `docs/` is a Fumadocs app on Bun, served at [nibrunner.dev](https://nibrunner.dev). Pages are
-MDX under `docs/content/docs/`, in the three folders that are the sidebar's sections:
-`getting-started/`, read in order; `guides/`, one feature per page; and `reference/`, whose pages
-are rendered from the JSON Schemas. `bun install` in there once, then `just docs-dev`.
+MDX under `docs/content/docs/`, in two root folders that are the tabs under the header: `(docs)/`,
+which holds `getting-started/`, read in order, and `guides/`, one feature per page; and
+`reference/`, whose pages are rendered from the JSON Schemas. `bun install` in there once, then
+`just docs-dev`.
 
 ## Pull requests
 
