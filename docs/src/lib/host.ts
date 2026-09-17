@@ -152,7 +152,7 @@ const NAMES = [
   'context-use',
   'open-connector',
   'api',
-  'bot',
+  'telegram-bot',
   'docs',
   'vaultwarden',
   'ntfy',
