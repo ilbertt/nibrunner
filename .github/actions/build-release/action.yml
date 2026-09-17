@@ -8,6 +8,7 @@ runs:
       with:
         cache: enabled
         prepare-for-build: enabled
+        shared-cache-key: build-release
 
     - name: Build
       shell: bash
