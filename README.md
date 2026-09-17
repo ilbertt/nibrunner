@@ -1,4 +1,5 @@
 <div align="center">
+  <img src="docs/public/logo.svg" width="96" alt="">
   <h1>nibrunner</h1>
   <p><em>MicroVM orchestrator for your VPS with built-in sleep/wake policies, backups, snapshots, HTTPS, custom image, logs and metrics</em></p>
 </div>

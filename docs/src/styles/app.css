@@ -2,6 +2,72 @@
 @import "tailwindcss";
 @import "fumadocs-ui/css/neutral.css";
 @import "fumadocs-ui/css/preset.css";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource/space-mono";
+
+/* nibrun's faces and type, in nibrunner's colours: the sites are siblings and should read as such.
+   The primary is the bot's own orange in both modes, with dark text on it; a deeper shade would
+   read as text on white, and as someone else's brand. The ink is what a key stands on and a panel
+   is bolted down with — nibrun's `--border`, dark in light mode and a mid grey in dark, in the
+   bot's hue. Fumadocs' own hairline stays for the lines that are not an object. */
+@theme {
+  --font-sans: "Space Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, monospace;
+  --color-fd-primary: oklch(0.74 0.17 55);
+  --color-fd-primary-foreground: oklch(0.22 0.02 55);
+  --color-ink: oklch(0.22 0.02 55);
+}
+
+.dark {
+  --color-fd-primary: oklch(0.74 0.17 55);
+  --color-fd-primary-foreground: oklch(0.22 0.02 55);
+  --color-ink: oklch(0.42 0.018 55);
+}
+
+/* Links in the prose are nibrun's colour too, not Fumadocs' foreground. */
+.prose {
+  --tw-prose-links: var(--color-fd-primary);
+}
+
+/* The two faces below are nibrun's `globals.css`, verbatim but for the ink, and for the top-left
+   rivet, which something else can take the place of (a callout's icon does). Its radius scale is a
+   third of Tailwind's, so what it calls `rounded-2xl` on a key is `rounded` (4px) here, and its
+   panels' 6px is `rounded-md`. */
+
+/* A key with a throw: it stands on a base the height of that throw, and pressing drops the face by
+   exactly the same and takes the base away.
+
+   The base is a solid side in the ink rather than something the key casts. A shadow needs a ground
+   lighter than itself and dark mode leaves almost none below the page.
+
+   A control much smaller than a button sets `--key-throw` down to keep the base in proportion. */
+@utility key-face {
+  box-shadow:
+    var(--tw-ring-shadow, 0 0 #0000),
+    0 var(--key-throw, 3px) 0 0 var(--color-ink);
+
+  &:active:not(:disabled) {
+    translate: 0 var(--key-throw, 3px);
+    box-shadow: var(--tw-ring-shadow, 0 0 #0000);
+  }
+}
+
+/* A panel bolted down at four corners. */
+@utility panel-face {
+  --rivet-inset: 7px;
+  --rivet: radial-gradient(circle, var(--color-ink) 0 1.5px, transparent 1.6px);
+
+  background-image:
+    var(--rivet-top-left, var(--rivet)), var(--rivet), var(--rivet),
+    var(--rivet);
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+  background-position:
+    var(--rivet-inset) var(--rivet-inset),
+    calc(100% - var(--rivet-inset)) var(--rivet-inset),
+    var(--rivet-inset) calc(100% - var(--rivet-inset)),
+    calc(100% - var(--rivet-inset)) calc(100% - var(--rivet-inset));
+}
 
 html {
   scrollbar-gutter: stable;

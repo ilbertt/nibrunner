@@ -44,7 +44,7 @@ function SizePicker({
             aria-pressed={picked}
             disabled={!enabled}
             onClick={() => onPick(size)}
-            className="flex flex-1 flex-col items-center rounded-sm border py-1 font-mono text-[10px] leading-tight transition-colors enabled:hover:bg-fd-accent disabled:opacity-50"
+            className="key-face flex flex-1 flex-col items-center rounded border border-ink py-1 font-mono text-[10px] leading-tight transition-colors [--key-throw:2px] enabled:hover:bg-fd-accent disabled:opacity-50"
             style={
               picked
                 ? { backgroundColor: app.tint, borderColor: app.tint, color: 'oklch(0.2 0 0)' }
@@ -85,7 +85,7 @@ function AppRow({
       onMouseLeave={() => onHighlight(false)}
       onFocusCapture={() => onHighlight(true)}
       onBlurCapture={() => onHighlight(false)}
-      className="flex flex-col gap-2 rounded-lg border px-3 py-2 transition-colors"
+      className="panel-face flex flex-col gap-2 rounded-md border-2 border-ink bg-fd-card px-3 py-2 transition-colors"
       style={{ borderColor: active ? app.tint : undefined }}
     >
       <div className="flex items-center gap-2.5">
@@ -150,7 +150,7 @@ export function HostPanel({
         <button
           type="button"
           onClick={onAdd}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border bg-fd-secondary px-3 py-1.5 font-medium text-fd-secondary-foreground text-sm transition-colors hover:bg-fd-accent"
+          className="key-face inline-flex shrink-0 items-center gap-1.5 rounded border border-ink bg-fd-secondary px-3 py-1.5 font-medium text-fd-secondary-foreground text-sm transition-colors hover:bg-fd-accent"
         >
           <PlusIcon className="size-4" />
           Add app
