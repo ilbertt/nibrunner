@@ -55,6 +55,9 @@ const loader = createServerFn({
     };
   });
 
+const KEY = 'key-face rounded border-ink';
+const PAGINATION = '[&>a]:panel-face [&>a]:rounded-md [&>a]:border-2 [&>a]:border-ink';
+
 function Content({ path, markdownUrl }: { path: string; markdownUrl: string }) {
   const page = docs.getPage(path);
   if (!page) {
@@ -65,12 +68,13 @@ function Content({ path, markdownUrl }: { path: string; markdownUrl: string }) {
   const MDX = page.body;
 
   return (
-    <DocsPage toc={toc}>
+    <DocsPage toc={toc} footer={{ className: PAGINATION }}>
       <DocsTitle>{page.title}</DocsTitle>
       <DocsDescription>{page.description}</DocsDescription>
       <div className="-mt-4 flex flex-row items-center gap-2 border-b pb-6">
-        <MarkdownCopyButton markdownUrl={markdownUrl} />
+        <MarkdownCopyButton markdownUrl={markdownUrl} className={KEY} />
         <ViewOptionsPopover
+          className={KEY}
           markdownUrl={markdownUrl}
           githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/docs/content/docs/${path}`}
         />
