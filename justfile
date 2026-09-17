@@ -32,14 +32,17 @@ verify-guest-image:
     test "$(wc -l < "$sums")" -eq 2
     cd guest && sha256sum -c "$sums"
 
-# Everything a host installs, in one directory, next to the sums it should hash to.
+# Everything a release ships, in one directory, next to the sums a host should hash to.
 stage-release dist:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p "{{dist}}"
     install -m 0755 target/x86_64-unknown-linux-musl/release/nibrunnerd "{{dist}}/nibrunnerd-linux-x64"
+    install -m 0755 docs/dist/app "{{dist}}/nibrunner-docs-linux-x64"
     install -m 0644 guest/vmlinux guest/rootfs.ext4 guest/manifest.json "{{dist}}"
-    # Written from inside the directory, so it names what `sha256sum -c` will be run next to.
+    # Written from inside the directory, so it names what `sha256sum -c` will be run next to. The
+    # docs site is not in it: the installer fetches only what a host runs, and `sha256sum -c` fails
+    # on a listed file that is not there.
     cd "{{dist}}" && sha256sum nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json > checksums.txt
 
 # The version the next temporary prerelease carries, as CalVer `YYYY.M.D-N`, read off the tags.
