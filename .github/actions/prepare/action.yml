@@ -44,6 +44,9 @@ runs:
       shell: bash
       run: |
         rustup toolchain install --no-self-update
+        # The image ships its own `stable`, which drifts between images and would
+        # otherwise land in the cargo cache key.
+        rustup toolchain uninstall stable
         rustup show
 
     - name: Install the tools mise.toml names
@@ -61,10 +64,6 @@ runs:
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         cache-on-failure: "true"
-        # The key would otherwise hash every toolchain rustup knows about,
-        # including the image's own `stable`, which drifts between images.
-        # rust-toolchain.toml is already covered by the lockfile hash.
-        add-rust-environment-hash-key: "false"
 
     - name: Firecracker Cache
       if: inputs.cache == 'enabled'
