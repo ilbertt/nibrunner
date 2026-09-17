@@ -29,7 +29,8 @@
   --tw-prose-links: var(--color-fd-primary);
 }
 
-/* The two faces below are nibrun's `globals.css`, verbatim but for the ink. Its radius scale is a
+/* The two faces below are nibrun's `globals.css`, verbatim but for the ink, and for the top-left
+   rivet, which something else can take the place of (a callout's icon does). Its radius scale is a
    third of Tailwind's, so what it calls `rounded-2xl` on a key is `rounded` (4px) here, and its
    panels' 6px is `rounded-md`. */
 
@@ -56,7 +57,9 @@
   --rivet-inset: 7px;
   --rivet: radial-gradient(circle, var(--color-ink) 0 1.5px, transparent 1.6px);
 
-  background-image: var(--rivet), var(--rivet), var(--rivet), var(--rivet);
+  background-image:
+    var(--rivet-top-left, var(--rivet)), var(--rivet), var(--rivet),
+    var(--rivet);
   background-size: 4px 4px;
   background-repeat: no-repeat;
   background-position:
