@@ -40,8 +40,9 @@ function kindOf(type: CalloutType): CalloutKind {
 }
 
 /**
- * Fumadocs' callout is a card with a coloured bar down its inside; here the panel itself is the
- * callout — border, rivets, tint and icon in the type's colour. Same props, so the content is
+ * Fumadocs' callout is a card with a coloured bar down its inside and the text indented past the
+ * icon; here the panel itself is the callout — border, rivets, tint and icon in the type's colour —
+ * and the icon heads it, the text running the full width under it. Same props, so the content is
  * unchanged.
  */
 function Callout({
@@ -59,14 +60,14 @@ function Callout({
   const Icon = CALLOUT_ICONS[kind];
   return (
     <div
-      className="panel-face my-4 flex gap-2.5 rounded-md border-(--callout-color) border-2 bg-(--callout-color)/10 p-3 text-fd-foreground text-sm [--color-ink:var(--callout-color)]"
+      className="panel-face my-4 flex flex-col gap-2 rounded-md border-(--callout-color) border-2 bg-(--callout-color)/10 p-3 text-fd-foreground text-sm [--color-ink:var(--callout-color)]"
       style={{ '--callout-color': `var(--color-fd-${kind})` } as CSSProperties}
     >
-      {icon ?? <Icon className="size-5 shrink-0 text-(--callout-color)" />}
-      <div className="flex min-w-0 flex-1 flex-col gap-2">
+      <div className="flex items-center gap-2">
+        {icon ?? <Icon className="size-5 shrink-0 text-(--callout-color)" />}
         {title && <CalloutTitle>{title}</CalloutTitle>}
-        <CalloutDescription>{children}</CalloutDescription>
       </div>
+      <CalloutDescription>{children}</CalloutDescription>
     </div>
   );
 }
