@@ -118,16 +118,21 @@ async fn forward_upgrade(request: Request<Incoming>, host: &str, port: u16) -> R
     Response::from_parts(parts, body.boxed())
 }
 
-// The leg to a tenant is HTTP/1.1, so a request that arrived over HTTP/2 has to be put back into
-// the shape that leg speaks. Two things carry over otherwise: the version, which the pooled client
-// refuses outright, and the authority, which HTTP/2 keeps in the URI instead of a host header — and
-// the URI is about to be rewritten onto loopback, so the tenant would be told it was asked for
-// 127.0.0.1 rather than for the name its visitor typed.
+// The leg to a tenant is HTTP/1.1 whatever the visitor spoke. Carried over as it came, HTTP/2 is a
+// version the pooled client refuses outright, and HTTP/1.0 one the guest honours by closing the
+// connection once it has answered — a visitor speaking it, as `ab` does, cost a connection to the
+// guest per request, and each closed one sat in conntrack for two minutes after. The name the
+// visitor asked for has to be carried over too: HTTP/2 keeps it in the URI rather than a host
+// header, an HTTP/1 request may name it only in its request line, and the URI is about to be
+// rewritten onto loopback, so the tenant would be told it was asked for 127.0.0.1 rather than for
+// the name its visitor typed. A request that names it in both was routed by the header, which stays.
 fn as_the_upstream_speaks(parts: &mut hyper::http::request::Parts) {
-    if parts.version != hyper::Version::HTTP_2 {
+    let named_by_the_uri =
+        parts.version == hyper::Version::HTTP_2 || !parts.headers.contains_key(hyper::header::HOST);
+    parts.version = hyper::Version::HTTP_11;
+    if !named_by_the_uri {
         return;
     }
-    parts.version = hyper::Version::HTTP_11;
     if let Some(asked_for) = parts
         .uri
         .authority()
@@ -275,8 +280,9 @@ mod tests {
     }
 
     #[test]
-    fn a_request_that_arrived_over_http1_is_left_the_way_it_came() {
+    fn a_request_that_arrived_over_http1_1_is_left_the_way_it_came() {
         let arrived = Request::builder()
+            .version(hyper::Version::HTTP_11)
             .uri("/a")
             .header("host", "app-1.apps.example.com")
             .body(())
@@ -287,6 +293,54 @@ mod tests {
         assert_eq!(
             parts.headers.get(hyper::header::HOST).unwrap(),
             "app-1.apps.example.com"
+        );
+    }
+
+    #[test]
+    fn a_request_that_arrived_over_http1_0_reaches_the_tenant_as_http1_1() {
+        let arrived = Request::builder()
+            .version(hyper::Version::HTTP_10)
+            .uri("/a")
+            .header("host", "app-1.apps.example.com")
+            .body(())
+            .unwrap();
+        let (mut parts, ()) = arrived.into_parts();
+        as_the_upstream_speaks(&mut parts);
+        assert_eq!(parts.version, hyper::Version::HTTP_11);
+        assert_eq!(
+            parts.headers.get(hyper::header::HOST).unwrap(),
+            "app-1.apps.example.com"
+        );
+    }
+
+    #[test]
+    fn a_request_that_names_its_host_only_in_the_line_itself_tells_the_tenant_that_name() {
+        let arrived = Request::builder()
+            .version(hyper::Version::HTTP_10)
+            .uri("http://app-1.apps.example.com/a?b=1")
+            .body(())
+            .unwrap();
+        let (mut parts, ()) = arrived.into_parts();
+        as_the_upstream_speaks(&mut parts);
+        assert_eq!(parts.version, hyper::Version::HTTP_11);
+        assert_eq!(
+            parts.headers.get(hyper::header::HOST).unwrap(),
+            "app-1.apps.example.com",
+            "the name the visitor asked for outlives a URI that is about to name loopback"
+        );
+
+        let named_twice = Request::builder()
+            .version(hyper::Version::HTTP_11)
+            .uri("http://line.example.com/")
+            .header("host", "header.example.com")
+            .body(())
+            .unwrap();
+        let (mut parts, ()) = named_twice.into_parts();
+        as_the_upstream_speaks(&mut parts);
+        assert_eq!(
+            parts.headers.get(hyper::header::HOST).unwrap(),
+            "header.example.com",
+            "the header is what the client asked for, and what it was routed by"
         );
     }
 
@@ -495,6 +549,55 @@ mod tests {
             .expect("the pool closed the idle connection on its own")
             .unwrap();
         assert_eq!(ended, 0, "the upstream saw the connection closed, not reused");
+    }
+
+    /// Answers every request with the version it arrived as, and counts the connections it took.
+    async fn counting_connections() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = connections.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(|request: Request<Incoming>| async move {
+                        Ok::<Response<ProxyBody>, std::convert::Infallible>(Response::new(
+                            Full::new(Bytes::from(format!("{:?}", request.version())))
+                                .map_err(|never| match never {})
+                                .boxed(),
+                        ))
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (port, connections)
+    }
+
+    #[tokio::test]
+    async fn requests_that_arrived_over_http1_0_share_one_connection_to_the_upstream() {
+        let (upstream, connections) = counting_connections().await;
+        let proxy = proxying("127.0.0.1", upstream, true).await;
+        for _ in 0..3 {
+            let answered = asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.example.com\r\n\r\n").await;
+            assert_eq!(
+                answered, "HTTP/1.1",
+                "the tenant was spoken to as the version it speaks"
+            );
+        }
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "every request travelled the connection the first one opened"
+        );
     }
 
     async fn echoing_once_it_is_no_longer_http() -> u16 {
