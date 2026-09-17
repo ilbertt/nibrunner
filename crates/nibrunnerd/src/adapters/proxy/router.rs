@@ -176,12 +176,16 @@ impl Router {
         };
         note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
         let response = forward(&self.client, request, LOOPBACK, route.host_port.get(), true).await;
-        self.metrics.proxy.app_answered(
-            &route.app_id,
-            response.status(),
-            response.extensions().get::<Unreachable>().is_none(),
-        );
-        (response, Outcome::Served, Some(route.app_id))
+        let reached = response.extensions().get::<Unreachable>().is_none();
+        self.metrics
+            .proxy
+            .app_answered(&route.app_id, response.status(), reached);
+        let outcome = if reached {
+            Outcome::Served
+        } else {
+            Outcome::Unreachable
+        };
+        (response, outcome, Some(route.app_id))
     }
 }
 
@@ -515,6 +519,100 @@ mod tests {
         let answered = asked(port, "GET / HTTP/1.0\r\nHost: App-1.Apps.Example.Com\r\n\r\n").await;
         assert!(answered.starts_with("HTTP/1.0 200 "), "{answered}");
         assert!(answered.ends_with("served by the tenant\n"), "{answered}");
+    }
+
+    /// A tenant that answers every request with `status`, as one that is up but failing would.
+    async fn answering_with(status: StatusCode) -> HostPort {
+        let upstream = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = upstream.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let service = service_fn(move |_request: Request<Incoming>| async move {
+                        Ok::<_, std::convert::Infallible>(say(status, "the app's own answer\n"))
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        host_port
+    }
+
+    async fn nobody_listening() -> HostPort {
+        let held = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        HostPort::new(held.local_addr().unwrap().port()).unwrap()
+    }
+
+    async fn routed_at(router: &Router, host_port: HostPort) {
+        router
+            .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
+                |record| record.host_port = host_port,
+            )])))
+            .await;
+    }
+
+    fn outcomes(metrics: &HostMetrics) -> Vec<String> {
+        crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            metrics,
+            &crate::state::HostSnapshot::default(),
+            0,
+        )
+        .lines()
+        .filter(|line| line.starts_with("nibrunner_proxy_requests_total{"))
+        .map(str::to_string)
+        .collect()
+    }
+
+    // A 502 is the one status the proxy writes itself, and a tenant may write one too. Only the
+    // proxy's own says the app was not there; the tenant's was served, whatever it said.
+    #[tokio::test]
+    async fn a_502_the_proxy_wrote_itself_is_counted_as_unreachable_and_one_the_app_sent_as_served() {
+        let metrics = Arc::new(HostMetrics::new());
+        let router = Router::new(metrics.clone());
+        let port = serving(router.clone()).await;
+        let request = "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n";
+
+        routed_at(&router, nobody_listening().await).await;
+        let answered = asked(port, request).await;
+        assert!(
+            answered.ends_with("This app could not be reached.\n"),
+            "{answered}"
+        );
+        assert!(
+            asked(
+                port,
+                "GET / HTTP/1.1\r\nHost: app-1.apps.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+            )
+            .await
+            .ends_with("This app could not be reached.\n"),
+            "the upgrade leg writes the same 502 of its own"
+        );
+
+        routed_at(&router, answering_with(StatusCode::BAD_GATEWAY).await).await;
+        let answered = asked(port, request).await;
+        assert!(answered.starts_with("HTTP/1.0 502 "), "{answered}");
+        assert!(answered.ends_with("the app's own answer\n"), "{answered}");
+
+        let counted = outcomes(&metrics);
+        assert!(
+            counted.contains(&"nibrunner_proxy_requests_total{outcome=\"unreachable\"} 2".to_string()),
+            "{counted:?}"
+        );
+        assert!(
+            counted.contains(&"nibrunner_proxy_requests_total{outcome=\"served\"} 1".to_string()),
+            "{counted:?}"
+        );
+        assert_eq!(metrics.proxy.of(&crate::test_support::app_id()).unreachable, 2);
     }
 
     #[test]

@@ -51,6 +51,8 @@ port = 9100
 The page is rendered from the same state `reported.json` is written from, so a scraper and the
 file cannot disagree. Every series is prefixed `nibrunner_`: the state of each instance, volume,
 checkpoint and export as a one-hot; what a converge, a sleep and a wake took, phase by phase;
+the proxy's requests by what it answered with — an app's own answer is `served`, whatever its
+status, and the 502 the proxy writes when an app does not answer at all is `unreachable`;
 each app's requests by status class and the proxy's TLS handshakes; each app's CPU, memory,
 disk and network; the host's slots, memory and capacity.
 

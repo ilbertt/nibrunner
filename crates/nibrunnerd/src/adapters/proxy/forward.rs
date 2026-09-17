@@ -78,19 +78,18 @@ fn upgrade_requested<B>(request: &Request<B>) -> bool {
 // headers that say what the upgrade is are the ones `strip_hop_by_hop` exists to remove, which is
 // why nothing is stripped on the way through here.
 async fn forward_upgrade(request: Request<Incoming>, host: &str, port: u16) -> Response<ProxyBody> {
-    let unreachable = || say(StatusCode::BAD_GATEWAY, "This app could not be reached.\n");
     let (mut parts, body) = request.into_parts();
     parts.uri = rewritten(&parts.uri, host, port);
     let mut forwarded = Request::from_parts(parts, body);
     let downstream = hyper::upgrade::on(&mut forwarded);
 
     let Ok(stream) = tokio::net::TcpStream::connect((host, port)).await else {
-        return unreachable();
+        return could_not_be_reached();
     };
     let Ok((mut sender, connection)) =
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)).await
     else {
-        return unreachable();
+        return could_not_be_reached();
     };
     tokio::spawn(async move {
         let _ = connection.with_upgrades().await;
@@ -99,7 +98,7 @@ async fn forward_upgrade(request: Request<Incoming>, host: &str, port: u16) -> R
         Ok(answered) => answered,
         Err(error) => {
             tracing::warn!(%error, host, port, "an upstream would not take an upgrade");
-            return unreachable();
+            return could_not_be_reached();
         }
     };
     if answered.status() == StatusCode::SWITCHING_PROTOCOLS {
@@ -168,9 +167,7 @@ pub async fn forward(
         }
         Err(error) => {
             tracing::warn!(%error, host, port, "an upstream would not answer");
-            let mut response = say(StatusCode::BAD_GATEWAY, "This app could not be reached.\n");
-            response.extensions_mut().insert(Unreachable);
-            response
+            could_not_be_reached()
         }
     }
 }
@@ -179,6 +176,12 @@ pub async fn forward(
 /// be told from one the app sent.
 #[derive(Debug, Clone, Copy)]
 pub struct Unreachable;
+
+fn could_not_be_reached() -> Response<ProxyBody> {
+    let mut response = say(StatusCode::BAD_GATEWAY, "This app could not be reached.\n");
+    response.extensions_mut().insert(Unreachable);
+    response
+}
 
 // What the visitor's own connection looked like, for a tenant that only ever sees a loopback one.
 // An edge in front of this host has already written down the leg it terminated, and that account is
