@@ -1011,7 +1011,7 @@ const RESERVED_FILL = { waiting: 0.18, coming: 0.08 };
 
 /**
  * Cells kept for a crate on its way, lit until it lands; when a request is what sent for it,
- * the socket it will be cabled to is already lit as well.
+ * the socket it will be cabled to is lit as well, waiting.
  */
 function Reservation({ app }: { app: App }) {
   const spot = app.reserved!;
