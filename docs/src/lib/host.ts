@@ -51,8 +51,12 @@ export function dimsFor({ form, size }: { form: Form; size: Size }): Dims {
 /** A crate stops short of its cells' edges, so neighbours read as two crates rather than one. */
 const CRATE_INSET = 0.06;
 
-/** Low and flat: it slides under a crate and lifts it clear of the floor on its platter. */
-export const BOT = { width: 0.66, height: 0.2, lift: 0.26, speed: 20 };
+/**
+ * Low and flat: it slides under a crate and lifts it clear of the floor on its platter. Just
+ * narrower than the base it goes under, so its name on its side is as large as it can be and
+ * the base still hides it.
+ */
+export const BOT = { width: 0.76, height: 0.2, lift: 0.26, speed: 20 };
 
 /**
  * Two zones: the floor, under the panel on the back wall that every running app is cabled to
