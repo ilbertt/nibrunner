@@ -3,7 +3,7 @@ title: Host capacity
 description: How many apps a host is laid out for, what this machine holds, and how to change it.
 ---
 
-`max_apps` is the first key in `config.toml`, above every section:
+`max_apps` is the first key in [`config.toml`](/docs/reference/config), above every section:
 
 ```toml
 max_apps = 300
@@ -46,10 +46,3 @@ are advice, not refusals: an app given more counts for more, and the number is y
   - **Lowering it below a slot an app holds moves that app** to a new slot on the next start:
     a new loopback port and a new guest address.
 </Callout>
-
-## Next steps
-
-<Cards>
-  <Card title="Sleep and wake" href="/docs/guides/sleep-and-wake" description="How a host holds more apps than it runs at once." />
-  <Card title="config.toml" href="/docs/reference/config" description="max_apps, key by key with the rest." />
-</Cards>

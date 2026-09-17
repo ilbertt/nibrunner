@@ -3,8 +3,9 @@ title: Sleep and wake
 description: When an app sleeps, and what wakes it.
 ---
 
-An app nobody is visiting is snapshotted and suspended. The next request wakes it. Which apps
-sleep, and after how long, is the document's to say, per instance.
+An app nobody is visiting is snapshotted and suspended. The next request wakes it. That is how
+a host [holds more apps than it runs at once](/docs/guides/host-capacity). Which apps sleep,
+and after how long, is the document's to say, per instance.
 
 ## Desired state
 
@@ -52,10 +53,3 @@ Any arrival: an HTTP request on one of its hostnames, or anything on a [raw port
 The connection is accepted and held, and spliced through once the app's
 [health check](/docs/guides/health-checks) passes, so a client sees a slow first response
 rather than a closed socket.
-
-## Next steps
-
-<Cards>
-  <Card title="Health checks" href="/docs/guides/health-checks" description="What a wake waits for." />
-  <Card title="Host capacity" href="/docs/guides/host-capacity" description="How many apps a host holds, asleep and awake." />
-</Cards>
