@@ -8,6 +8,10 @@ inputs:
   prepare-for-build:
     description: Whether to install the host tools that building an artifact needs. `enabled` or `disabled`.
     required: true
+  shared-cache-key:
+    description: A name for jobs that build the same thing to share one cargo cache under. Empty keys the cache by job.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -64,6 +68,7 @@ runs:
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         cache-on-failure: "true"
+        shared-key: ${{ inputs.shared-cache-key }}
 
     - name: Firecracker Cache
       if: inputs.cache == 'enabled'
