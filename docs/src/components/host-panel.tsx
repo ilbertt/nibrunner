@@ -138,25 +138,27 @@ export function HostPanel({
   const listed = apps.filter((app) => app.location.kind !== 'gone');
   const running = listed.filter((app) => app.location.kind === 'placed' && !app.asleep).length;
   const sleeping = listed.filter((app) => app.asleep).length;
+  // The list's scrollbar lives in the gutter beside the column, not over the cards, so a card's
+  // right edge is the button's whether the scrollbar floats or takes its width.
   return (
     <div className="flex flex-col gap-3 lg:min-h-0 lg:flex-1">
-      <div className="flex shrink-0 items-center justify-between gap-3">
-        <div className="flex flex-col gap-0.5">
+      <div className="flex shrink-0 flex-col gap-1">
+        <div className="flex items-center justify-between gap-3">
           <span className="font-medium text-sm">Your apps</span>
-          <span className="whitespace-nowrap font-mono text-fd-muted-foreground text-xs tabular-nums">
-            {running} running · {sleeping} asleep · {MAX_APPS - listed.length} free
-          </span>
+          <button
+            type="button"
+            onClick={onAdd}
+            className="key-face inline-flex shrink-0 items-center gap-1.5 rounded border border-ink bg-fd-secondary px-3 py-1.5 font-medium text-fd-secondary-foreground text-sm transition-colors hover:bg-fd-accent"
+          >
+            <PlusIcon className="size-4" />
+            Add app
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onAdd}
-          className="key-face inline-flex shrink-0 items-center gap-1.5 rounded border border-ink bg-fd-secondary px-3 py-1.5 font-medium text-fd-secondary-foreground text-sm transition-colors hover:bg-fd-accent"
-        >
-          <PlusIcon className="size-4" />
-          Add app
-        </button>
+        <span className="whitespace-nowrap font-mono text-fd-muted-foreground text-xs tabular-nums">
+          {running} running · {sleeping} asleep · {MAX_APPS - listed.length} free
+        </span>
       </div>
-      <ul className="flex flex-col gap-2 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+      <ul className="flex flex-col gap-2 lg:-mr-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-4">
         {listed.map((app) => (
           <AppRow
             key={app.id}
