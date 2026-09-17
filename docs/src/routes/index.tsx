@@ -35,9 +35,13 @@ function Intro() {
   );
 }
 
+/**
+ * The homepage runs edge to edge so the room can fill the screen, and the header follows it: its
+ * own padding lands where the page's does, so the two names line up.
+ */
 function Home() {
   return (
-    <HomeLayout {...baseOptions()}>
+    <HomeLayout {...baseOptions()} className="lg:[--fd-layout-width:calc(100%-3rem)]">
       <div className="flex w-full flex-1 flex-col px-4 py-10 lg:px-10 lg:py-12">
         <HostDemo intro={<Intro />} />
       </div>
