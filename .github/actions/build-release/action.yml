@@ -7,7 +7,7 @@ runs:
     - uses: ./.github/actions/prepare
       with:
         cache: enabled
-        prepare_for_build: enabled
+        prepare-for-build: enabled
 
     - name: Build
       shell: bash

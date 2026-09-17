@@ -16,7 +16,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: disabled
-          prepare_for_build: disabled
+          prepare-for-build: disabled
 
       - name: Check Codestyle
         run: just fmt --check
@@ -30,7 +30,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: enabled
-          prepare_for_build: disabled
+          prepare-for-build: disabled
 
       - name: Lint
         run: just lint
@@ -44,7 +44,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: enabled
-          prepare_for_build: disabled
+          prepare-for-build: disabled
 
       - name: Run Tests
         run: just test
@@ -59,7 +59,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: enabled
-          prepare_for_build: disabled
+          prepare-for-build: disabled
 
       - name: Check the schemas are current
         run: just check-schema
@@ -79,7 +79,7 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           cache: enabled
-          prepare_for_build: enabled
+          prepare-for-build: enabled
 
       - name: Check the machine can host
         run: ls -l /dev/net/tun /dev/kvm

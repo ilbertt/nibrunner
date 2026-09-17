@@ -5,7 +5,7 @@ inputs:
   cache:
     description: Whether to restore and save the cargo and firecracker caches. `enabled` or `disabled`.
     required: true
-  prepare_for_build:
+  prepare-for-build:
     description: Whether to install the host tools that building an artifact needs. `enabled` or `disabled`.
     required: true
 
@@ -16,7 +16,7 @@ runs:
       shell: bash
       env:
         CACHE: ${{ inputs.cache }}
-        PREPARE_FOR_BUILD: ${{ inputs.prepare_for_build }}
+        PREPARE_FOR_BUILD: ${{ inputs.prepare-for-build }}
       run: |
         case "$CACHE" in
           enabled | disabled) ;;
@@ -28,13 +28,13 @@ runs:
         case "$PREPARE_FOR_BUILD" in
           enabled | disabled) ;;
           *)
-            echo "prepare: prepare_for_build must be 'enabled' or 'disabled', got '$PREPARE_FOR_BUILD'"
+            echo "prepare: prepare-for-build must be 'enabled' or 'disabled', got '$PREPARE_FOR_BUILD'"
             exit 1
             ;;
         esac
 
     - name: Install the host tools
-      if: inputs.prepare_for_build == 'enabled'
+      if: inputs.prepare-for-build == 'enabled'
       shell: bash
       run: |
         sudo apt-get update
