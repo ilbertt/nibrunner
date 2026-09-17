@@ -150,10 +150,10 @@ export type App = {
 // open source, which is the program the docs describe. Nothing that wants a runtime and a
 // database beside it. Enough for the host's sixteen, the first three standing at the start.
 const NAMES = [
-  'blog',
+  'context-use',
   'pocketbase',
   'gitea',
-  'context-use',
+  'blog',
   'open-connector',
   'api',
   'telegram-bot',
