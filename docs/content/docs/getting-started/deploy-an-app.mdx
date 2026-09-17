@@ -66,12 +66,14 @@ Name the key and the digest from the step above:
 
 | Field | What it says |
 | --- | --- |
-| `volumes` | One volume per app, formatted empty the first time it is named. Every write the app makes lands on it, and it is the only thing backed up. |
-| `layers` | What the root is built from. An `executable` layer is one program, packed into an image at `destinationPath`. |
-| `config.command` | What runs in that root, as uid 65534. |
-| `config.healthCheck` | What tells the host the app is up. There is no default. |
-| `desiredState` | `on-request` brings the app up now and lets it sleep between visitors. `running` keeps it up. `stopped` takes it down. |
-| `hostnames` | What the proxy routes to `httpPort`. |
+| [`volumes`](/docs/guides/volumes) | One volume per app, formatted empty the first time it is named. Every write the app makes lands on it, and it is the only thing backed up. |
+| [`layers`](/docs/guides/layers) | What the root is built from. An `executable` layer is one program, packed into an image at `destinationPath`. |
+| [`config.command`](/docs/guides/layers#what-runs) | What runs in that root, as uid 65534. |
+| [`config.healthCheck`](/docs/guides/health-checks) | What tells the host the app is up. There is no default. |
+| [`desiredState`](/docs/guides/sleep-and-wake) | `on-request` brings the app up now and lets it sleep between visitors. `running` keeps it up. `stopped` takes it down. |
+| [`hostnames`](/docs/guides/https) | What the proxy routes to `httpPort`. |
+
+[The reference](/docs/reference/desired-state) is every field.
 
 </Step>
 <Step>
@@ -104,12 +106,3 @@ Point `app-1.example.com` at this machine and the same request arrives from anyw
   An editor completes and checks the document when it names the schema:
   `"$schema": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json"`.
 </Callout>
-
-## Next steps
-
-<Cards>
-  <Card title="Layers" href="/docs/guides/layers" description="Build the root from more than one binary, or from an image you made." />
-  <Card title="Sleep and wake" href="/docs/guides/sleep-and-wake" description="When an app sleeps, and what wakes it." />
-  <Card title="Health checks" href="/docs/guides/health-checks" description="What healthy means, and the three ways to say it." />
-  <Card title="desired.json" href="/docs/reference/desired-state" description="Every field of the document." />
-</Cards>

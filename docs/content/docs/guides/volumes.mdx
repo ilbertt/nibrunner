@@ -47,6 +47,7 @@ name an archive in the artifact store and where to unpack it:
 ## Where volumes live
 
 `volumes.backend` in `config.toml` chooses between two backends.
+[The reference](/docs/reference/config) is every key of both.
 
 ### On this disk
 
@@ -129,10 +130,3 @@ On the `zerofs` backend, the document can cut a volume at a point in time, and b
   what is under `data/`, with `destinationPath` `/`.
 
 `reported.json` says what became of each, and why.
-
-## Next steps
-
-<Cards>
-  <Card title="Layers" href="/docs/guides/layers" description="What sits under the volume." />
-  <Card title="config.toml" href="/docs/reference/config" description="Every key of the two backends." />
-</Cards>

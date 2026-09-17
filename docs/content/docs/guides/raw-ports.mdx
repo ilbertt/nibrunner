@@ -31,8 +31,8 @@ max_ports_per_guest = 2
 - `listen_address` is a **private address**, where a relay reaches this host — never the world's.
   A raw port carries no hostname to route on, so it is reached at
   `<listen_address>:<host port>` rather than by name. The host port is the app's `hostPort` in
-  `reported.json` plus the port's position in `ports`, counted from one: `ssh` above is
-  `hostPort + 1`, `dns` is `hostPort + 2`.
+  [`reported.json`](/docs/reference/reported-state) plus the port's position in `ports`, counted
+  from one: `ssh` above is `hostPort + 1`, `dns` is `hostPort + 2`.
 
 <Callout title="Good to know">
   A raw port is never published from this host: an address one app hands to its users would put
@@ -44,10 +44,3 @@ max_ports_per_guest = 2
 While the app sleeps, the first arrival wakes it, whichever way it came. A connection is
 accepted and held, then spliced once the guest answers, so a client sees a slow banner rather
 than a closed socket. A datagram is kept and delivered after the wake.
-
-## Next steps
-
-<Cards>
-  <Card title="HTTPS" href="/docs/guides/https" description="The way in that is HTTP." />
-  <Card title="reported.json" href="/docs/reference/reported-state" description="Where an app's hostPort is said." />
-</Cards>
