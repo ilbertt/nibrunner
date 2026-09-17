@@ -332,6 +332,7 @@ const NET_TINT = 'oklch(0.74 0.14 215)';
 const BOT_PLATTER = { width: 0.46, base: 0.19, top: 0.24 };
 const BOT_LAMP = { width: 0.1, height: 0.04, inset: 0.05 };
 const BOT_CLEARANCE = 0.03;
+const BOT_NAME = 'nibrunner';
 
 function square({ at, width }: { at: Vec2; width: number }): Rect {
   const half = width * HALF;
@@ -349,7 +350,15 @@ function botSolids({
 }): Solid[] {
   const body = square({ at: pose, width: BOT.width });
   const solids = [
-    solid({ key: 'bot', rect: body, y0: BOT_CLEARANCE, y1: BOT.height, tint: BOT_TINT.body }),
+    solid({
+      key: 'bot',
+      rect: body,
+      y0: BOT_CLEARANCE,
+      y1: BOT.height,
+      tint: BOT_TINT.body,
+      label: BOT_NAME,
+      labelFace: 'pz',
+    }),
     solid({
       key: 'bot-platter',
       rect: square({ at: pose, width: BOT_PLATTER.width }),
@@ -514,6 +523,23 @@ function labelSize({ label, width }: { label: string; width: number }): number {
   return Math.min(LABEL.fontSize, (width - LABEL.margin) / (label.length * GLYPH_EM));
 }
 
+const LINE_HEIGHT = 1.1;
+
+/** A hyphenated name that would shrink to fit breaks at its hyphen instead, if that reads larger. */
+function labelLines({ label, width }: { label: string; width: number }): {
+  lines: string[];
+  size: number;
+} {
+  const whole = { lines: [label], size: labelSize({ label, width }) };
+  const hyphen = label.lastIndexOf('-');
+  if (hyphen < 1 || whole.size >= LABEL.fontSize) {
+    return whole;
+  }
+  const lines = [label.slice(0, hyphen + 1), label.slice(hyphen + 1)];
+  const size = Math.min(...lines.map((line) => labelSize({ label: line, width })));
+  return size > whole.size ? { lines, size } : whole;
+}
+
 /**
  * A name on a crate. A face is a parallelogram on screen, so the text is drawn in the face's own
  * plane: one unit along the edge it reads along, one unit down.
@@ -522,44 +548,37 @@ function FaceLabel({ one }: { one: Solid }) {
   const { x0, x1, z0, z1 } = one.rect;
   const cos = EDGE_COS * UNIT_PX;
   const sin = EDGE_SIN * UNIT_PX;
-  const label = one.label ?? '';
-  if (one.labelFace === 'top') {
-    const anchor = project({ x: x0, y: one.y1, z: z0 });
-    return (
-      <text
-        transform={`matrix(${cos} ${sin} ${-cos} ${sin} ${anchor.px} ${anchor.py})`}
-        x={(x1 - x0) * HALF}
-        y={(z1 - z0) * HALF}
-        fontSize={labelSize({ label, width: x1 - x0 })}
-        textAnchor="middle"
-        dominantBaseline="central"
-        stroke="none"
-        style={{
-          fill: faded({ colour: mixed({ tint: one.tint, mix: LABEL.mix }), fade: one.fade }),
-        }}
-        className="pointer-events-none select-none font-mono"
-      >
-        {one.label}
-      </text>
-    );
-  }
+  const top = one.labelFace === 'top';
   const front = one.labelFace === 'pz';
-  const anchor = project({ x: front ? x0 : x1, y: one.y1, z: z1 });
-  const width = front ? x1 - x0 : z1 - z0;
-  const along = sin * (front ? 1 : -1);
+  const anchor = top
+    ? project({ x: x0, y: one.y1, z: z0 })
+    : project({ x: front ? x0 : x1, y: one.y1, z: z1 });
+  const width = top || front ? x1 - x0 : z1 - z0;
+  const height = top ? z1 - z0 : one.y1 - one.y0;
+  const transform = top
+    ? `matrix(${cos} ${sin} ${-cos} ${sin} ${anchor.px} ${anchor.py})`
+    : `matrix(${cos} ${sin * (front ? 1 : -1)} 0 ${UNIT_PX} ${anchor.px} ${anchor.py})`;
+  const { lines, size } = labelLines({ label: one.label ?? '', width });
   return (
     <text
-      transform={`matrix(${cos} ${along} 0 ${UNIT_PX} ${anchor.px} ${anchor.py})`}
-      x={width * HALF}
-      y={(one.y1 - one.y0) * HALF}
-      fontSize={labelSize({ label, width })}
+      transform={transform}
+      fontSize={size}
       textAnchor="middle"
       dominantBaseline="central"
       stroke="none"
       style={{ fill: faded({ colour: mixed({ tint: one.tint, mix: LABEL.mix }), fade: one.fade }) }}
       className="pointer-events-none select-none font-mono"
     >
-      {one.label}
+      {Array.from(lines.entries(), ([row, line]) => (
+        <tspan
+          key={line}
+          x={width * HALF}
+          y={height * HALF + (row - (lines.length - 1) * HALF) * LINE_HEIGHT * size}
+          dominantBaseline="central"
+        >
+          {line}
+        </tspan>
+      ))}
     </text>
   );
 }
