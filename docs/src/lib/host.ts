@@ -142,8 +142,27 @@ export type App = {
   morph: { from: Dims; at: number } | null;
 };
 
-// Things people actually run on a box of their own; none longer than the side of one.
-const NAMES = ['blog', 'gitea', 'umami', 'wiki', 'grafana', 'n8n', 'vault', 'minio', 'ntfy', 'api'];
+// What one runs on a box of one's own: things built for oneself, and the single-binary kind of
+// open source, which is the program the docs describe. Nothing that wants a runtime and a
+// database beside it. Enough for the host's sixteen, the first three standing at the start.
+const NAMES = [
+  'blog',
+  'pocketbase',
+  'gitea',
+  'context-use',
+  'open-connector',
+  'api',
+  'telegram-bot',
+  'docs',
+  'vaultwarden',
+  'ntfy',
+  'memos',
+  'mcp',
+  'meilisearch',
+  'headscale',
+  'agent',
+  'syncthing',
+];
 
 // One family of muted tints, far enough apart to tell neighbours apart, none near the robot's
 // orange or the internet's cyan.
