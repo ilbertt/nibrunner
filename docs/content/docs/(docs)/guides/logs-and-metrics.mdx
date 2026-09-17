@@ -56,6 +56,13 @@ status, and the 502 the proxy writes when an app does not answer at all is `unre
 each app's requests by status class and the proxy's TLS handshakes; each app's CPU, memory,
 disk and network; the host's slots, memory and capacity.
 
+The one to alert on is `nibrunner_conntrack_entries{of="used"}` against `{of="max"}`: the
+kernel's connection-tracking table, which every flow between the proxy and a guest and every
+flow a guest opens is an entry of, for its lifetime and 120 s after. Full, the kernel drops
+packets for every app on the host and says so only in `dmesg`. The daemon says it in its log at
+four fifths, once, and once more when it is back under; [`max_apps`](/docs/guides/host-capacity)
+sizes the table.
+
 <Callout title="Good to know">
   `metrics.port` cannot be `proxy.http.port`, a port in the slot range from 21000, or 9091 on a
   `zerofs` host, which ZeroFS holds.

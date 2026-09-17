@@ -10,8 +10,9 @@ max_apps = 300
 ```
 
 Everything that counts slots follows from it: the slot ring, the eight loopback ports each slot
-reserves from 21000, the nbd minors on a `zerofs` host, and what the metrics page calls
-`nibrunner_slots{of="total"}`. A host that is full says so by naming this key.
+reserves from 21000, the nbd minors on a `zerofs` host, the 1024 entries an app is given in the
+kernel's connection-tracking table, and what the metrics page calls `nibrunner_slots{of="total"}`.
+A host that is full says so by naming this key.
 
 ## What this machine holds
 
