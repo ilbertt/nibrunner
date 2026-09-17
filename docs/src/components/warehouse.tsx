@@ -329,7 +329,7 @@ const BOT_TINT = { body: 'oklch(0.74 0.17 55)', platter: 'oklch(0.36 0.02 55)' }
 const NET_TINT = 'oklch(0.74 0.14 215)';
 
 /** The platter the robot raises under a crate, and a lamp at its corner. */
-const BOT_PLATTER = { width: 0.46, base: 0.19, top: 0.24 };
+const BOT_PLATTER = { width: 0.54, base: 0.19, top: 0.24 };
 const BOT_LAMP = { width: 0.1, height: 0.04, inset: 0.05 };
 const BOT_CLEARANCE = 0.03;
 const BOT_NAME = 'nibrunner';
