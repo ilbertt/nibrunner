@@ -321,6 +321,10 @@ async fn answer_scrape(host: &Arc<Host>, path: &str) -> hyper::Response<http_bod
     }
     let report = crate::domain::report::writer::build(host, host_versions(host)).await;
     let snapshot = host.state.snapshot().await;
+    let conntrack = crate::domain::metrics::Conntrack::read();
+    if let Some(conntrack) = conntrack {
+        host.metrics.conntrack.say(conntrack);
+    }
     let page = crate::domain::metrics::render(
         &host.metrics,
         &crate::domain::metrics::Scrape {
@@ -330,6 +334,7 @@ async fn answer_scrape(host: &Arc<Host>, path: &str) -> hyper::Response<http_bod
             slots_used: host.slots().await.len(),
             slots_total: host.config.max_apps,
             memory_available_bytes: crate::domain::report::capacity::read_memory_available_bytes(),
+            conntrack,
         },
     );
     hyper::Response::builder()

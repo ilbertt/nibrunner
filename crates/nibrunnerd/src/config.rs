@@ -171,7 +171,8 @@ pub const STARTER_STATE_DIR: &str = "/var/lib/nibrunner";
 pub struct HostConfig {
     /// How many apps this host is laid out for. Everything that counts slots follows from it —
     /// the ring the allocator walks, the loopback ports reserved, the nbd minors the module is
-    /// loaded with, what the metrics page calls the total — and nothing holds a copy of it.
+    /// loaded with, the conntrack table's size, what the metrics page calls the total — and
+    /// nothing holds a copy of it.
     pub max_apps: u32,
     pub state_dir: PathBuf,
     pub runtime_dir: PathBuf,
@@ -275,8 +276,9 @@ mod file {
     pub(super) struct ConfigFile {
         /// How many apps this host is laid out for. Everything that counts slots follows from it:
         /// the slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,
-        /// what the metrics page calls the total. `install` measures what this machine holds and
-        /// writes the least of memory, disk and ports; `start` says the three against what is set.
+        /// the kernel's conntrack table at 1024 entries an app, what the metrics page calls the
+        /// total. `install` measures what this machine holds and writes the least of memory, disk
+        /// and ports; `start` says the three against what is set.
         #[schemars(range(min = 1, max = nft_render::most_apps_the_ports_fit()))]
         pub(super) max_apps: Option<u32>,
         /// Where this host keeps what is its own.
