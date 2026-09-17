@@ -18,7 +18,7 @@ function Intro() {
       <div className="flex flex-wrap gap-3">
         <Link
           to="/docs/$"
-          params={{ _splat: 'quick-start' }}
+          params={{ _splat: 'getting-started/installation' }}
           className="rounded-lg bg-fd-primary px-3 py-2 font-medium text-fd-primary-foreground text-sm"
         >
           Quick start
