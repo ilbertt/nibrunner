@@ -94,7 +94,10 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     let logs = TenantLogReceiver::new();
     let sink = Arc::new(RestartRecorder::new(
         state.clone(),
-        Arc::new(FileLogSink::new(config.logs_dir())),
+        Arc::new(FileLogSink::new(
+            config.logs_dir(),
+            config.logs.keep_bytes_per_app,
+        )),
     ));
 
     let processes = VmProcesses::new(config.runtime_dir.clone());

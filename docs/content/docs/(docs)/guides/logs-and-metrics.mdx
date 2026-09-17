@@ -29,6 +29,16 @@ That is when the host saw it, which stream, an id for the microVM's log session 
 sequence in it, then the line. A gap where the host could not keep up says how many bytes it
 dropped, and a restart of the program inside the guest is a line on `stderr` saying why.
 
+The host keeps the newest 256 MiB of each app, in two files: when `<appId>.log` passes the cap
+it becomes `<appId>.log.1`, over the one before it, and a fresh `<appId>.log` starts. `tail -F`
+follows across the cut. An app that floods fills its own share of the disk and no more of it,
+and `[logs]` in `config.toml` is the share:
+
+```toml
+[logs]
+keep_mib_per_app = 256
+```
+
 The daemon's own log is in the journal:
 
 ```bash

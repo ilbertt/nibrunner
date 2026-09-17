@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{BufWriter, ErrorKind, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -17,23 +17,80 @@ const GAP_MESSAGE: &str = "tenant output dropped by host buffering";
 
 pub struct FileLogSink {
     directory: PathBuf,
+    /// Where `<appId>.log` is cut: past this, it becomes `<appId>.log.1` and a fresh one starts,
+    /// so an app has between one and two of these on disk however much it writes. The disk is
+    /// the one every other tenant's volume cache and snapshots are on.
+    keep_bytes_per_app: u64,
     // One handle held open per app: a busy tenant's output is no longer paid for with an
     // open()/close() around every line, which is what capped the drain. Writes are buffered and
     // flushed once the batch the receiver handed us has drained, so a daemon crash loses nothing
     // that a publish returned for.
-    writers: Mutex<BTreeMap<AppId, BufWriter<File>>>,
+    writers: Mutex<BTreeMap<AppId, AppLog>>,
+}
+
+struct AppLog {
+    writer: BufWriter<File>,
+    // Counted here rather than asked of the file: the buffered tail is not on disk yet, and the
+    // handle keeps writing to its inode after a rename, whatever the path then holds.
+    size: u64,
+}
+
+impl AppLog {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let size = file.metadata()?.len();
+        Ok(Self {
+            writer: BufWriter::new(file),
+            size,
+        })
+    }
+}
+
+impl Write for AppLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.writer.write(buf)?;
+        self.size += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
 }
 
 impl FileLogSink {
-    pub fn new(directory: PathBuf) -> Self {
+    pub fn new(directory: PathBuf, keep_bytes_per_app: u64) -> Self {
         Self {
             directory,
+            keep_bytes_per_app,
             writers: Mutex::new(BTreeMap::new()),
         }
     }
 
     pub fn path_for(&self, app_id: &AppId) -> PathBuf {
         self.directory.join(format!("{app_id}.log"))
+    }
+
+    /// What `<appId>.log` held before the last cut.
+    pub fn previous_path_for(&self, app_id: &AppId) -> PathBuf {
+        self.directory.join(format!("{app_id}.log.1"))
+    }
+
+    /// The cut. The file is renamed over the previous one and the handle let go; the next line
+    /// opens a fresh `<appId>.log`, so the newest output is always at the path an operator tails.
+    fn rotate(&self, app_id: &AppId, mut full: AppLog) {
+        if let Err(error) = full.flush() {
+            tracing::warn!(%app_id, %error, "tenant output could not be flushed");
+        }
+        drop(full);
+        match std::fs::rename(self.path_for(app_id), self.previous_path_for(app_id)) {
+            Ok(()) => {}
+            // Already moved out from under the handle, by whoever is reading it: nothing to keep.
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(%app_id, %error, "tenant output could not be rotated")
+            }
+        }
     }
 
     /// One record per event: a header, then the line the tenant wrote or the gap in its place,
@@ -79,10 +136,9 @@ impl LogSink for FileLogSink {
                     tracing::warn!(%error, "tenant logs have nowhere to go");
                     continue;
                 }
-                let path = self.path_for(&event.app_id);
-                match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                    Ok(file) => {
-                        writers.insert(event.app_id.clone(), BufWriter::new(file));
+                match AppLog::open(&self.path_for(&event.app_id)) {
+                    Ok(log) => {
+                        writers.insert(event.app_id.clone(), log);
                     }
                     Err(error) => {
                         tracing::warn!(app_id = %event.app_id, %error, "tenant output could not be written");
@@ -90,21 +146,23 @@ impl LogSink for FileLogSink {
                     }
                 }
             }
-            let Some(writer) = writers.get_mut(&event.app_id) else {
+            let Some(log) = writers.get_mut(&event.app_id) else {
                 continue;
             };
-            match Self::render(&event, writer) {
-                Ok(()) => {
-                    touched.insert(event.app_id);
-                }
-                Err(error) => {
-                    tracing::warn!(app_id = %event.app_id, %error, "tenant output could not be written")
+            if let Err(error) = Self::render(&event, log) {
+                tracing::warn!(app_id = %event.app_id, %error, "tenant output could not be written");
+                continue;
+            }
+            if log.size >= self.keep_bytes_per_app {
+                if let Some(full) = writers.remove(&event.app_id) {
+                    self.rotate(&event.app_id, full);
                 }
             }
+            touched.insert(event.app_id);
         }
         for app_id in touched {
-            if let Some(writer) = writers.get_mut(&app_id) {
-                if let Err(error) = writer.flush() {
+            if let Some(log) = writers.get_mut(&app_id) {
+                if let Err(error) = log.flush() {
                     tracing::warn!(%app_id, %error, "tenant output could not be flushed");
                 }
             }
@@ -117,8 +175,8 @@ impl Drop for FileLogSink {
         // A BufWriter flushes as it drops, but it swallows the error; a torn-down sink says so
         // rather than losing the tail of a tenant's output in silence.
         if let Ok(mut writers) = self.writers.lock() {
-            for (app_id, writer) in writers.iter_mut() {
-                if let Err(error) = writer.flush() {
+            for (app_id, log) in writers.iter_mut() {
+                if let Err(error) = log.flush() {
                     tracing::warn!(%app_id, %error, "tenant output could not be flushed as its sink was torn down");
                 }
             }
@@ -143,10 +201,15 @@ mod tests {
         }
     }
 
+    /// A sink with a cap no test here reaches.
+    fn unbounded(logs: PathBuf) -> FileLogSink {
+        FileLogSink::new(logs, u64::MAX)
+    }
+
     #[tokio::test]
     async fn output_lands_in_one_file_per_app_with_a_gap_in_its_place_in_the_stream() {
         let directory = tempfile::tempdir().unwrap();
-        let sink = FileLogSink::new(directory.path().join("logs"));
+        let sink = unbounded(directory.path().join("logs"));
         sink.publish(vec![
             event(
                 TenantLogBody::Data {
@@ -191,14 +254,14 @@ mod tests {
     async fn a_publish_with_nothing_in_it_does_not_make_a_place_to_put_it() {
         let directory = tempfile::tempdir().unwrap();
         let logs = directory.path().join("logs");
-        FileLogSink::new(logs.clone()).publish(vec![]).await;
+        unbounded(logs.clone()).publish(vec![]).await;
         assert!(!logs.exists());
     }
 
     #[tokio::test]
     async fn no_tenant_ever_reads_a_line_another_tenant_wrote() {
         let directory = tempfile::tempdir().unwrap();
-        let sink = FileLogSink::new(directory.path().join("logs"));
+        let sink = unbounded(directory.path().join("logs"));
         let neighbour = protocol::AppId::parse("app-2").unwrap();
         sink.publish(vec![
             event(
@@ -278,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn a_flood_of_lines_across_many_batches_all_land_in_order() {
         let directory = tempfile::tempdir().unwrap();
-        let sink = FileLogSink::new(directory.path().join("logs"));
+        let sink = unbounded(directory.path().join("logs"));
         let mut sequence = 0u64;
         for _ in 0..200 {
             let batch: Vec<TenantLogEvent> = (0..50)
@@ -307,7 +370,7 @@ mod tests {
     async fn the_handle_is_kept_open_so_a_later_batch_does_not_reopen_the_path() {
         let directory = tempfile::tempdir().unwrap();
         let logs = directory.path().join("logs");
-        let sink = FileLogSink::new(logs.clone());
+        let sink = unbounded(logs.clone());
         sink.publish(vec![event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
@@ -343,7 +406,7 @@ mod tests {
     async fn what_a_sink_buffered_is_on_disk_once_it_is_dropped() {
         let directory = tempfile::tempdir().unwrap();
         let logs = directory.path().join("logs");
-        let sink = FileLogSink::new(logs.clone());
+        let sink = unbounded(logs.clone());
         sink.publish(vec![event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
@@ -355,5 +418,106 @@ mod tests {
         let path = sink.path_for(&app_id());
         drop(sink);
         assert!(std::fs::read_to_string(&path).unwrap().contains("last words"));
+    }
+
+    /// Lines of one width, so a cap is a whole number of them.
+    fn line(sequence: u64) -> TenantLogEvent {
+        event(
+            TenantLogBody::Data {
+                stream: TenantLogStream::Stdout,
+                text: format!("line {sequence:03}"),
+            },
+            sequence,
+        )
+    }
+
+    fn line_bytes() -> u64 {
+        rendered(&line(0)).len() as u64
+    }
+
+    fn lines_in(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| line.rsplit(' ').next().unwrap().to_string())
+            .collect()
+    }
+
+    fn files_in(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn the_file_is_cut_on_the_line_that_reaches_the_cap_and_the_next_line_starts_a_fresh_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("logs");
+        let sink = FileLogSink::new(logs.clone(), 3 * line_bytes());
+        let current = sink.path_for(&app_id());
+        let previous = sink.previous_path_for(&app_id());
+
+        sink.publish(vec![line(0), line(1)]).await;
+        assert_eq!(lines_in(&current), ["000", "001"]);
+        assert!(!previous.exists());
+
+        sink.publish(vec![line(2)]).await;
+        assert_eq!(lines_in(&previous), ["000", "001", "002"]);
+        assert!(!current.exists(), "nothing has been written since the cut");
+
+        sink.publish(vec![line(3)]).await;
+        assert_eq!(lines_in(&current), ["003"]);
+        assert_eq!(lines_in(&previous), ["000", "001", "002"]);
+    }
+
+    #[tokio::test]
+    async fn only_the_newest_two_files_are_kept_however_much_an_app_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("logs");
+        let sink = FileLogSink::new(logs.clone(), 2 * line_bytes());
+        for batch in (0..21).collect::<Vec<u64>>().chunks(3) {
+            sink.publish(batch.iter().copied().map(line).collect()).await;
+        }
+        assert_eq!(files_in(&logs), ["app-1.log", "app-1.log.1"]);
+        assert_eq!(lines_in(&sink.previous_path_for(&app_id())), ["018", "019"]);
+        assert_eq!(lines_in(&sink.path_for(&app_id())), ["020"]);
+    }
+
+    #[tokio::test]
+    async fn what_an_earlier_daemon_left_in_the_file_counts_towards_the_cap() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("logs");
+        let cap = 3 * line_bytes();
+        FileLogSink::new(logs.clone(), cap)
+            .publish(vec![line(0), line(1)])
+            .await;
+
+        let sink = FileLogSink::new(logs.clone(), cap);
+        sink.publish(vec![line(2)]).await;
+        assert_eq!(
+            lines_in(&sink.previous_path_for(&app_id())),
+            ["000", "001", "002"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_moved_out_from_under_the_handle_is_not_the_sinks_to_keep_at_the_cut() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("logs");
+        let sink = FileLogSink::new(logs.clone(), 2 * line_bytes());
+        sink.publish(vec![line(0)]).await;
+        let moved = logs.join("app-1.log.moved");
+        std::fs::rename(sink.path_for(&app_id()), &moved).unwrap();
+
+        // The held-open handle takes the line that reaches the cap; the cut then finds nothing at
+        // the path, and the next line starts afresh there.
+        sink.publish(vec![line(1)]).await;
+        sink.publish(vec![line(2)]).await;
+        assert_eq!(lines_in(&moved), ["000", "001"]);
+        assert_eq!(lines_in(&sink.path_for(&app_id())), ["002"]);
+        assert_eq!(files_in(&logs), ["app-1.log", "app-1.log.moved"]);
     }
 }

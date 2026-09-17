@@ -481,7 +481,10 @@ mod tests {
                 ),
             )),
             logs: TenantLogReceiver::new(),
-            sink: Arc::new(FileLogSink::new(root.join("logs"))),
+            sink: Arc::new(FileLogSink::new(
+                root.join("logs"),
+                crate::config::LogsConfig::default().keep_bytes_per_app,
+            )),
             state: state.clone(),
             in_flight: SnapshotsInFlight::default(),
         };
