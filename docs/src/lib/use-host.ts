@@ -83,8 +83,11 @@ export const PULSE_MS = 420;
 
 const SLEEP_TICK_MS = 1000;
 
-/** How long the internet leaves the sleeping apps alone between requests: somewhere in here. */
-const REQUEST_GAP_MS = { least: 9_000, most: 22_000 };
+/**
+ * How long the internet leaves the sleeping apps alone between requests: somewhere in here,
+ * well under the time an app stays up for one, so that the floor is busier than the shelf.
+ */
+const REQUEST_GAP_MS = { least: 3_000, most: 8_000 };
 
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 

@@ -1011,21 +1011,14 @@ const RESERVED_FILL = { waiting: 0.18, coming: 0.08 };
 
 /**
  * Cells kept for a crate on its way, lit until it lands; when a request is what sent for it,
- * the socket is lit as well and its cable already run out to the rail above them, hanging there
- * until there is a crate to drop onto.
+ * the socket it will be cabled to is lit as well, waiting.
  */
 function Reservation({ app }: { app: App }) {
   const spot = app.reserved!;
   const rect = spotRect({ spot, size: app.size });
-  const at = centreOf(rect);
   const waiting = app.requestedAt !== null;
   return (
-    <g
-      style={{ stroke: NET_TINT, fill: NET_TINT }}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="animate-pulse"
-    >
+    <g style={{ stroke: NET_TINT, fill: NET_TINT }} className="animate-pulse">
       <polygon
         points={polygonPoints(floorQuad(rect))}
         fillOpacity={waiting ? RESERVED_FILL.waiting : RESERVED_FILL.coming}
@@ -1033,15 +1026,7 @@ function Reservation({ app }: { app: App }) {
         strokeDasharray={PAD_DASH}
       />
       {waiting && spot.zone === 'floor' && (
-        <>
-          <polygon points={tapPoints(at.x)} stroke="none" />
-          <polyline
-            points={polylinePoints(cablePoints({ app, at, plug: 0 }))}
-            fill="none"
-            strokeWidth={CABLE.width}
-            strokeOpacity={CABLE.restOpacity}
-          />
-        </>
+        <polygon points={tapPoints(centreOf(rect).x)} stroke="none" />
       )}
     </g>
   );
