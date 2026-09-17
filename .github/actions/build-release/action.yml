@@ -1,5 +1,5 @@
 name: Build release
-description: Prepare the environment and build the host binary
+description: Prepare the environment and build the host binary and the docs site
 
 runs:
   using: composite
@@ -12,3 +12,7 @@ runs:
     - name: Build
       shell: bash
       run: just build-release
+
+    - name: Build the docs site
+      shell: bash
+      run: just docs-build
