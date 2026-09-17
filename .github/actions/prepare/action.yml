@@ -5,9 +5,13 @@ inputs:
   cache:
     description: Whether to restore and save the cargo and firecracker caches. `enabled` or `disabled`.
     required: true
-  prepare_for_build:
+  prepare-for-build:
     description: Whether to install the host tools that building an artifact needs. `enabled` or `disabled`.
     required: true
+  shared-cache-key:
+    description: A name for jobs that build the same thing to share one cargo cache under. Empty keys the cache by job.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -16,7 +20,7 @@ runs:
       shell: bash
       env:
         CACHE: ${{ inputs.cache }}
-        PREPARE_FOR_BUILD: ${{ inputs.prepare_for_build }}
+        PREPARE_FOR_BUILD: ${{ inputs.prepare-for-build }}
       run: |
         case "$CACHE" in
           enabled | disabled) ;;
@@ -28,13 +32,13 @@ runs:
         case "$PREPARE_FOR_BUILD" in
           enabled | disabled) ;;
           *)
-            echo "prepare: prepare_for_build must be 'enabled' or 'disabled', got '$PREPARE_FOR_BUILD'"
+            echo "prepare: prepare-for-build must be 'enabled' or 'disabled', got '$PREPARE_FOR_BUILD'"
             exit 1
             ;;
         esac
 
     - name: Install the host tools
-      if: inputs.prepare_for_build == 'enabled'
+      if: inputs.prepare-for-build == 'enabled'
       shell: bash
       run: |
         sudo apt-get update
@@ -64,6 +68,7 @@ runs:
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         cache-on-failure: "true"
+        shared-key: ${{ inputs.shared-cache-key }}
 
     - name: Firecracker Cache
       if: inputs.cache == 'enabled'
