@@ -6,6 +6,7 @@ pub const CONFIG_FILE_VARIABLE: &str = "NIBRUNNER_CONFIG";
 
 const MAX_STORAGE_PREFIX_BYTES: usize = 512;
 const MEBIBYTES_PER_GIBIBYTE: u64 = 1024;
+const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 
 /// Where ZeroFS serves its own scrape page, on loopback. It is a constant rather than a key
 /// because it is nibrun's, and `nibrunnerd install` renders it into ZeroFS's config — but a host
@@ -142,6 +143,25 @@ pub struct MetricsConfig {
     pub listen_address: IpAddr,
 }
 
+/// How much of each app's output stays on disk. The newest `keep_bytes_per_app`, in two files:
+/// what the sink writes to, and the one before it. Nothing in this daemon reads them back; they
+/// are there for whoever tails them, and the cap is there because the disk they are on is the one
+/// every other tenant's volume cache and snapshots are on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogsConfig {
+    pub keep_bytes_per_app: u64,
+}
+
+/// 256 MiB: weeks of an app that logs a line per request, and about a minute of the one that
+/// wrote 5 GB in twenty — still enough to read what it was doing when someone looked.
+impl Default for LogsConfig {
+    fn default() -> Self {
+        Self {
+            keep_bytes_per_app: 256 * BYTES_PER_MEBIBYTE,
+        }
+    }
+}
+
 /// Where the starting point keeps everything of this host's, which a Linux distribution would
 /// put here. Named so that what `install` measures before there is a configuration is the disk
 /// the configuration it then writes will name.
@@ -168,6 +188,7 @@ pub struct HostConfig {
     pub denied_egress_addresses_v6: Vec<String>,
     pub proxy: ProxyConfig,
     pub metrics: Option<MetricsConfig>,
+    pub logs: LogsConfig,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
 }
@@ -274,6 +295,9 @@ mod file {
         /// Absent is a host that scrapes nothing.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) metrics: Option<Metrics>,
+        /// Absent keeps the newest 256 MiB of each app's output.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) logs: Option<Logs>,
     }
 
     /// Every one an absolute path, and every one this host's alone.
@@ -498,6 +522,20 @@ mod file {
         /// An IP address to bind.
         pub(super) listen_address: Option<String>,
     }
+
+    /// How much of each app's output stays on disk, under `paths.state_dir/logs`. Nothing on the
+    /// host reads it back: it is there to be tailed.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[schemars(rename = "logs")]
+    pub(super) struct Logs {
+        /// Whole mebibytes, more than 0. The newest this many of an app's output, in two files:
+        /// `<appId>.log` becomes `<appId>.log.1` when it passes this, over the one before it, so
+        /// an app holds between one and two of these on disk however fast it writes. 256 is weeks
+        /// of an app that logs a line per request, and about a minute of one that floods.
+        #[schemars(range(min = 1))]
+        pub(super) keep_mib_per_app: Option<u64>,
+    }
 }
 
 impl HostConfig {
@@ -612,6 +650,7 @@ impl HostConfig {
 
         let proxy = proxy(document.proxy.as_ref(), max_apps)?;
         let metrics = metrics(document.metrics.as_ref(), &proxy, &backend, max_apps)?;
+        let logs = logs(document.logs.as_ref())?;
 
         Ok(Self {
             max_apps,
@@ -648,6 +687,7 @@ impl HostConfig {
             )?,
             proxy,
             metrics,
+            logs,
             export_store_url: object_store_url(
                 "exports.store_url",
                 required_str("exports.store_url", &exports.store_url)?,
@@ -701,6 +741,7 @@ impl HostConfig {
             denied_egress_addresses_v6: vec![],
             proxy: ProxyConfig::default(),
             metrics: None,
+            logs: LogsConfig::default(),
             export_store_url: state_dir.join("export-store").display().to_string(),
             export_staging_dir: state_dir.join("exports"),
             state_dir,
@@ -710,7 +751,8 @@ impl HostConfig {
 
     /// A host with every section in it: volumes in an object store reached from the guest over
     /// NBD, artifacts and exports in S3, TLS behind an edge that presents a client certificate,
-    /// raw ports for a relay, a metrics page. `deploy/config.example.toml` is this, rendered.
+    /// raw ports for a relay, a metrics page, what is kept of each app's output.
+    /// `deploy/config.example.toml` is this, rendered.
     ///
     /// Written out field by field rather than as changes to [`Self::starter`], so that a section
     /// added to this daemon has to be decided on here — and an example that showed every section
@@ -764,6 +806,7 @@ impl HostConfig {
                 port: 9100,
                 listen_address: IpAddr::from([127, 0, 0, 1]),
             }),
+            logs: LogsConfig::default(),
             export_store_url: "s3://nibrunner-exports-eu-west-2-123456789012/exports".to_string(),
             export_staging_dir: PathBuf::from("/var/lib/nibrunner/exports"),
         }
@@ -858,6 +901,9 @@ impl HostConfig {
             metrics: self.metrics.as_ref().map(|metrics| file::Metrics {
                 port: Some(metrics.port),
                 listen_address: Some(metrics.listen_address.to_string()),
+            }),
+            logs: Some(file::Logs {
+                keep_mib_per_app: Some(self.logs.keep_bytes_per_app / BYTES_PER_MEBIBYTE),
             }),
         }
     }
@@ -1020,6 +1066,23 @@ fn metrics(
         port,
         listen_address: bind_address("metrics.listen_address", &document.listen_address)?,
     }))
+}
+
+fn logs(document: Option<&file::Logs>) -> Result<LogsConfig, ConfigError> {
+    let Some(document) = document else {
+        return Ok(LogsConfig::default());
+    };
+    let field = "logs.keep_mib_per_app";
+    let mebibytes = required(field, document.keep_mib_per_app)?;
+    // A cap of nothing is a cut on every line, keeping none of them.
+    if mebibytes == 0 {
+        return Err(ConfigError::invalid(field, "more than nothing"));
+    }
+    Ok(LogsConfig {
+        keep_bytes_per_app: mebibytes
+            .checked_mul(BYTES_PER_MEBIBYTE)
+            .ok_or_else(|| ConfigError::invalid(field, "a size this machine could hold"))?,
+    })
 }
 
 /// Nothing this daemon reads has a value it may leave out: a key that is here is a key the
@@ -1362,6 +1425,7 @@ denied_egress_addresses_v6 = []
         assert_eq!(config.storage_prefix, "volumes");
         assert_eq!(config.proxy, ProxyConfig::default());
         assert_eq!(config.metrics, None);
+        assert_eq!(config.logs, LogsConfig::default());
     }
 
     #[test]
@@ -1597,6 +1661,28 @@ denied_egress_addresses_v6 = []
     }
 
     #[test]
+    fn a_host_keeps_256_mib_of_each_app_unless_the_document_says_how_much() {
+        let silent = parsed(&whole()).logs;
+        assert_eq!(silent, LogsConfig::default());
+        assert_eq!(silent.keep_bytes_per_app, 256 * 1024 * 1024);
+
+        assert_eq!(
+            with("[logs]\nkeep_mib_per_app = 8\n").logs.keep_bytes_per_app,
+            8 * 1024 * 1024
+        );
+
+        assert!(refused(&document(&[], "[logs]\n")).contains("logs.keep_mib_per_app"));
+        let nothing = refused(&document(&[], "[logs]\nkeep_mib_per_app = 0\n"));
+        assert!(nothing.contains("logs.keep_mib_per_app"), "{nothing}");
+        assert!(nothing.contains("more than nothing"), "{nothing}");
+        assert!(
+            refused(&document(&[], "[logs]\nkeep_mib_per_app = 9223372036854775807\n"))
+                .contains("logs.keep_mib_per_app")
+        );
+        assert!(refused(&document(&[], "[logs]\nkeep_mib_per_app = 256\nfiles = 3\n")).contains("files"));
+    }
+
+    #[test]
     fn a_range_that_nft_would_reject_is_refused_before_the_ruleset_is_rendered() {
         let bad = |value: &str| refused(&document(&[("network.denied_egress_addresses_v4", value)], ""));
         assert!(bad("[\"172.31.0.0\"]").contains("prefix length"));
@@ -1793,13 +1879,16 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
     }
 
     // What `install` writes a host that has none is the smallest document every test here starts
-    // from, plus the one listener a starting point has to serve on — so the two are held to be one
-    // text.
+    // from, plus the one listener a starting point has to serve on and the log cap written out
+    // rather than left to be found — so the two are held to be one text.
     #[test]
     fn the_configuration_this_binary_carries_is_the_smallest_document_with_a_listener_rendered() {
         assert_eq!(
             HostConfig::starter(1000).to_toml(),
-            document(&[], &bound("\n[proxy.http]\nport = 80\n"))
+            document(
+                &[],
+                &bound("\n[proxy.http]\nport = 80\n\n[logs]\nkeep_mib_per_app = 256\n")
+            )
         );
     }
 
@@ -1917,6 +2006,9 @@ max_ports_per_guest = 1
 [metrics]
 port = 9100
 listen_address = "127.0.0.1"
+
+[logs]
+keep_mib_per_app = 64
 "#,
         ));
         assert_eq!(config.state_dir, PathBuf::from("/srv/nibrunner"));
@@ -1952,6 +2044,7 @@ listen_address = "127.0.0.1"
                 listen_address: IpAddr::from([127, 0, 0, 1]),
             })
         );
+        assert_eq!(config.logs.keep_bytes_per_app, 64 * 1024 * 1024);
     }
 
     mod schema {
@@ -2050,6 +2143,9 @@ listen_address = "127.0.0.1"
                     "[proxy.raw]\nmax_ports_per_guest = 8\n",
                     "[metrics]\nport = 9100\n",
                     "[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\nroute = \"/metrics\"\n",
+                    "[logs]\n",
+                    "[logs]\nkeep_mib_per_app = 0\n",
+                    "[logs]\nkeep_mib_per_app = 256\nfiles = 3\n",
                     "[proxy.http]\nport = 80\n\n[storage]\nbackend = \"zerofs\"\n",
                 ]
                 .into_iter()

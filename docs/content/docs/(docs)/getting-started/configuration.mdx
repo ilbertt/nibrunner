@@ -21,8 +21,8 @@ Every refusal follows from one of these:
 
 - **No key has a default.** A key its section declares but the file omits is refused by name.
 - **An unknown key is refused.** A mistyped key and a missing one are different errors.
-- **A whole section is what may be absent** — `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]`. A
-  section that is present is complete.
+- **A whole section is what may be absent** — `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]`,
+  `[logs]`. A section that is present is complete.
 
 ```
 volumes.backend is not specified, and nothing here is optional
@@ -41,6 +41,7 @@ A complete host, which runs as it is:
 | `[artifacts]`, `[exports]` | Directories on this disk. |
 | `[volumes]` | `backend = "local-file"`: sparse files on this disk. |
 | `[proxy.http]` | Plain HTTP on every address at `:80`. |
+| `[logs]` | The newest 256 MiB of each app's output. |
 
 Before putting anything real on it, you will likely change two things:
 

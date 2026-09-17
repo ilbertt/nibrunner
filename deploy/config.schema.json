@@ -13,6 +13,10 @@
       "description": "Where a checkpoint goes when the document asks for it as a bundle.",
       "$ref": "#/$defs/exports"
     },
+    "logs": {
+      "description": "Absent keeps the newest 256 MiB of each app's output.",
+      "$ref": "#/$defs/logs"
+    },
     "max_apps": {
       "description": "How many apps this host is laid out for. Everything that counts slots follows from it:\nthe slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,\nwhat the metrics page calls the total. `install` measures what this machine holds and\nwrites the least of memory, disk and ports; `start` says the three against what is set.",
       "type": "integer",
@@ -85,6 +89,22 @@
       "required": [
         "store_url",
         "staging_dir"
+      ]
+    },
+    "logs": {
+      "description": "How much of each app's output stays on disk, under `paths.state_dir/logs`. Nothing on the\nhost reads it back: it is there to be tailed.",
+      "type": "object",
+      "properties": {
+        "keep_mib_per_app": {
+          "description": "Whole mebibytes, more than 0. The newest this many of an app's output, in two files:\n`<appId>.log` becomes `<appId>.log.1` when it passes this, over the one before it, so\nan app holds between one and two of these on disk however fast it writes. 256 is weeks\nof an app that logs a line per request, and about a minute of one that floods.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "keep_mib_per_app"
       ]
     },
     "metrics": {

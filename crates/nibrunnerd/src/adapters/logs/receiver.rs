@@ -829,6 +829,7 @@ mod tests {
         let socket_path = tenant_log_socket_path(directory.path());
         let sink = Arc::new(crate::adapters::logs::FileLogSink::new(
             directory.path().join("logs"),
+            crate::config::LogsConfig::default().keep_bytes_per_app,
         ));
         let receiver = TenantLogReceiver::new();
         receiver
