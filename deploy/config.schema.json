@@ -14,7 +14,7 @@
       "$ref": "#/$defs/exports"
     },
     "max_apps": {
-      "description": "How many apps this host is laid out for. Everything that counts slots follows from it:\nthe slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,\nwhat the metrics page calls the total. `install` measures what this machine holds and\nwrites the least of memory, disk and ports; `start` says the three against what is set.",
+      "description": "How many apps this host is laid out for. Everything that counts slots follows from it:\nthe slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,\nthe kernel's conntrack table at 1024 entries an app, what the metrics page calls the\ntotal. `install` measures what this machine holds and writes the least of memory, disk\nand ports; `start` says the three against what is set.",
       "type": "integer",
       "format": "uint32",
       "maximum": 5567,

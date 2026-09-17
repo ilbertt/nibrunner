@@ -1,3 +1,4 @@
+pub mod conntrack;
 pub mod converge;
 pub mod health;
 pub mod passes;
@@ -5,6 +6,7 @@ pub mod proxy;
 pub mod resources;
 pub mod sleep_wake;
 
+pub use conntrack::{Conntrack, ConntrackWatch};
 pub use proxy::{Outcome, ProxyMetrics};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +31,7 @@ pub struct HostMetrics {
     pub passes: PassMetrics,
     pub health: HealthMetrics,
     pub resources: ResourceMetrics,
+    pub conntrack: ConntrackWatch,
 }
 
 /// What a scrape is rendered from besides what the daemon counted: the report as it stands, the
@@ -40,6 +43,7 @@ pub struct Scrape<'a> {
     pub slots_used: usize,
     pub slots_total: u32,
     pub memory_available_bytes: Option<u64>,
+    pub conntrack: Option<Conntrack>,
 }
 
 impl HostMetrics {
@@ -336,6 +340,7 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     converge::render(&mut page, report, &metrics.converge, &snapshot.deploys, now_ms);
     health::render(&mut page, report, &metrics.health, snapshot);
     resources::render(&mut page, &metrics.resources, scrape);
+    conntrack::render(&mut page, scrape.conntrack);
 
     page.0
 }
@@ -392,6 +397,7 @@ pub(crate) mod tests {
                 slots_used: 0,
                 slots_total: 1000,
                 memory_available_bytes: None,
+                conntrack: None,
             },
         )
     }

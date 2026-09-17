@@ -394,6 +394,10 @@ mod tests {
                 slots_used: 7,
                 slots_total: 63,
                 memory_available_bytes: Some(1_000_000),
+                conntrack: Some(crate::domain::metrics::Conntrack {
+                    used: 210_000,
+                    max: 262_144,
+                }),
             },
         );
 
@@ -427,6 +431,8 @@ mod tests {
             "the total is what the host is laid out for"
         );
         assert!(page.contains("nibrunner_host_memory_available_bytes 1000000\n"));
+        assert!(page.contains("nibrunner_conntrack_entries{of=\"used\"} 210000\n"));
+        assert!(page.contains("nibrunner_conntrack_entries{of=\"max\"} 262144\n"));
         assert!(
             page.contains("nibrunner_instance_measured_timestamp_seconds{app=\"app-1\"} 1700000000.000\n")
         );
@@ -448,9 +454,11 @@ mod tests {
                 slots_used: 0,
                 slots_total: 1000,
                 memory_available_bytes: None,
+                conntrack: None,
             },
         );
         assert!(lines_for(&page, "nibrunner_host_memory_available_bytes").is_empty());
+        assert!(lines_for(&page, "nibrunner_conntrack_entries").is_empty());
         assert!(lines_for(&page, "nibrunner_volume_used_bytes").is_empty());
         assert!(page.contains("nibrunner_instance_measured_timestamp_seconds{app=\"app-1\"} 0.000\n"));
     }
