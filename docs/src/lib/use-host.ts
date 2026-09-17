@@ -83,6 +83,9 @@ export const PULSE_MS = 420;
 
 const SLEEP_TICK_MS = 1000;
 
+/** How long the internet leaves the sleeping apps alone between requests: somewhere in here. */
+const REQUEST_GAP_MS = { least: 9_000, most: 22_000 };
+
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 /** Two apps running and one asleep, so the page opens on every state at once. */
@@ -327,8 +330,23 @@ function planShelve({ world, app, now }: { world: World; app: App; now: number }
   });
 }
 
-function planWake({ world, app, now }: { world: World; app: App; now: number }): Step[] {
+/**
+ * A request for an app asleep: its cells and its socket are kept from this moment, lit and
+ * waiting, and the robot is sent for it ahead of everything else. Without room, only advice.
+ */
+function wake({ world, app, now }: { world: World; app: App; now: number }): void {
   const spot = reserve({ world, app, zone: 'floor' });
+  if (spot === null) {
+    update({ world, id: app.id, change: { requestedAt: null } });
+    advise({ world, now });
+    return;
+  }
+  update({ world, id: app.id, change: { requestedAt: now, pending: 'wake' } });
+  world.jobs.unshift({ kind: 'wake', app: app.id });
+}
+
+function planWake({ world, app, now }: { world: World; app: App; now: number }): Step[] {
+  const spot = app.reserved ?? reserve({ world, app, zone: 'floor' });
   if (spot === null) {
     update({ world, id: app.id, change: { pending: null, requestedAt: null } });
     advise({ world, now });
@@ -431,8 +449,7 @@ function landed({ world, app, to, now }: { world: World; app: App; to: Location;
   });
   // A request that came while it was on its way to the shelf brings it straight back.
   if (!onFloor && app.requestedAt !== null) {
-    update({ world, id: app.id, change: { pending: 'wake' } });
-    world.jobs.unshift({ kind: 'wake', app: app.id });
+    wake({ world, app: appOf({ world, id: app.id })!, now });
   }
 }
 
@@ -638,8 +655,7 @@ function createHost(): Host {
     if (onFloor) {
       update({ world, id, change: { visitedAt: now, asleep: false } });
     } else if (app.location.kind === 'placed' && app.pending === null) {
-      update({ world, id, change: { requestedAt: now, pending: 'wake' } });
-      world.jobs.unshift({ kind: 'wake', app: id });
+      wake({ world, app, now });
     } else {
       update({ world, id, change: { requestedAt: now } });
     }
@@ -647,13 +663,37 @@ function createHost(): Host {
     run();
   }
 
+  /** The internet, every so often: a request for one of the apps asleep, chosen at random. */
+  function request(): void {
+    const asleep = world.apps.filter(
+      (app) => app.location.kind === 'placed' && app.asleep && app.pending === null,
+    );
+    const app = asleep[Math.floor(Math.random() * asleep.length)];
+    if (app !== undefined) {
+      visit(app.id);
+    }
+  }
+
   // The page is prerendered with the opening apps in place; once it is alive, the clock that puts
-  // them to sleep starts from now. Nothing else happens until the reader does something.
+  // them to sleep starts from now, and the internet starts calling. Nothing is added until the
+  // reader adds it.
   function start(): () => void {
     const now = performance.now();
     pace = window.matchMedia(REDUCED_MOTION_QUERY).matches ? 0 : 1;
     world.apps = world.apps.map((app) => ({ ...app, since: now, visitedAt: now }));
     publish(now);
+    let internet = 0;
+    function later(): void {
+      const { least, most } = REQUEST_GAP_MS;
+      internet = window.setTimeout(
+        () => {
+          request();
+          later();
+        },
+        least + Math.random() * (most - least),
+      );
+    }
+    later();
     const clock = window.setInterval(() => {
       if (frame === 0) {
         sweep({ world, now: performance.now() });
@@ -665,6 +705,7 @@ function createHost(): Host {
       }
     }, SLEEP_TICK_MS);
     return () => {
+      window.clearTimeout(internet);
       window.clearInterval(clock);
       cancelAnimationFrame(frame);
       frame = 0;
