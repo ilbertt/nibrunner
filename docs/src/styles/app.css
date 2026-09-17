@@ -6,19 +6,21 @@
 @import "@fontsource/space-mono";
 
 /* nibrun's faces and type, in nibrunner's colours: the sites are siblings and should read as such.
-   The bot's orange is the primary, deeper in light mode, where the bot's own shade is too pale to
-   read as text. The ink is what a key stands on and a panel is bolted down with — nibrun's
-   `--border`, dark in light mode and a mid grey in dark, in the bot's hue. Fumadocs' own hairline
-   stays for the lines that are not an object. */
+   The primary is the bot's own orange in both modes, with dark text on it; a deeper shade would
+   read as text on white, and as someone else's brand. The ink is what a key stands on and a panel
+   is bolted down with — nibrun's `--border`, dark in light mode and a mid grey in dark, in the
+   bot's hue. Fumadocs' own hairline stays for the lines that are not an object. */
 @theme {
   --font-sans: "Space Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Space Mono", ui-monospace, monospace;
-  --color-fd-primary: oklch(0.55 0.17 55);
+  --color-fd-primary: oklch(0.74 0.17 55);
+  --color-fd-primary-foreground: oklch(0.22 0.02 55);
   --color-ink: oklch(0.22 0.02 55);
 }
 
 .dark {
   --color-fd-primary: oklch(0.74 0.17 55);
+  --color-fd-primary-foreground: oklch(0.22 0.02 55);
   --color-ink: oklch(0.42 0.018 55);
 }
 
