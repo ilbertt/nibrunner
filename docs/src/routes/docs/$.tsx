@@ -14,7 +14,7 @@ import type { GetLayoutTabsOptions } from 'fumadocs-ui/layouts/shared';
 import { Suspense, use } from 'react';
 import { useMDXComponents } from '@/components/mdx';
 import { baseOptions } from '@/lib/layout.shared';
-import { getPageMarkdownUrl, gitConfig } from '@/lib/shared';
+import { appName, getPageMarkdownUrl, gitConfig, pageMeta } from '@/lib/shared';
 import { docs, source } from '@/lib/source';
 
 // Where the pages that shipped binaries and older READMEs point at went.
@@ -37,6 +37,15 @@ export const Route = createFileRoute('/docs/$')({
     await docs.getPage(data.path)?.preload();
     return data;
   },
+  // After the loader: a `head` above it reads its data as `never`.
+  head: ({ loaderData }) => ({
+    meta: loaderData
+      ? pageMeta({
+          title: `${loaderData.title} — ${appName}`,
+          description: loaderData.description,
+        })
+      : [],
+  }),
 });
 
 const loader = createServerFn({
@@ -51,6 +60,8 @@ const loader = createServerFn({
 
     return {
       path: page.path,
+      title: page.data.title,
+      description: page.data.description ?? '',
       markdownUrl: getPageMarkdownUrl(page).url,
       pageTree: await source.serializePageTree(source.getPageTree()),
     };

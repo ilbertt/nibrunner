@@ -3,6 +3,7 @@ import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { HostDemo } from '@/components/host-demo';
 import { PageBackdrop } from '@/components/page-backdrop';
 import { baseOptions } from '@/lib/layout.shared';
+import { description } from '@/lib/shared';
 
 export const Route = createFileRoute('/')({
   component: Home,
@@ -12,10 +13,7 @@ function Intro() {
   return (
     <div className="flex flex-col items-start gap-4">
       <h1 className="font-semibold text-3xl tracking-tight">nibrunner</h1>
-      <p className="text-fd-muted-foreground">
-        MicroVM orchestrator for your VPS with built-in sleep/wake policies, backups, snapshots,
-        HTTPS, custom image, logs and metrics.
-      </p>
+      <p className="text-fd-muted-foreground">{description}.</p>
       <div className="flex flex-wrap gap-3">
         <Link
           to="/docs/$"
