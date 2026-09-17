@@ -18,6 +18,7 @@ const BUCKET_BOUNDS_SECONDS: [f64; 13] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Served,
+    Unreachable,
     NoSuchHost,
     WrongHost,
     Refused,
@@ -27,6 +28,7 @@ impl Outcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Outcome::Served => "served",
+            Outcome::Unreachable => "unreachable",
             Outcome::NoSuchHost => "no_such_host",
             Outcome::WrongHost => "wrong_host",
             Outcome::Refused => "refused",
@@ -36,9 +38,10 @@ impl Outcome {
 
 // What this proxy decided, which is all it can honestly claim: a 502 or a 503 travelling back
 // through it was the upstream's answer and is counted as served, because serving it is what
-// happened.
-pub const OUTCOMES: [Outcome; 4] = [
+// happened. The one 502 that is not is the one the proxy wrote itself because nothing answered.
+pub const OUTCOMES: [Outcome; 5] = [
     Outcome::Served,
+    Outcome::Unreachable,
     Outcome::NoSuchHost,
     Outcome::WrongHost,
     Outcome::Refused,
@@ -416,7 +419,7 @@ mod tests {
         let metrics = &host.metrics.proxy;
         metrics.answered(Outcome::Served, Duration::from_millis(2), Some(&app_id()));
         metrics.app_answered(&app_id(), StatusCode::OK, true);
-        metrics.answered(Outcome::Served, Duration::from_millis(4), Some(&app_id()));
+        metrics.answered(Outcome::Unreachable, Duration::from_millis(4), Some(&app_id()));
         metrics.app_answered(&app_id(), StatusCode::BAD_GATEWAY, false);
         metrics.raw_session(&other, Protocol::Tcp, RawOutcome::Served);
         metrics.raw_bytes(&other, Protocol::Tcp, 100, 2_000);
@@ -432,6 +435,12 @@ mod tests {
             &host.metrics,
             &host.state.snapshot().await,
             0,
+        );
+        assert!(page.contains("nibrunner_proxy_requests_total{outcome=\"served\"} 1\n"));
+        assert!(page.contains("nibrunner_proxy_requests_total{outcome=\"unreachable\"} 1\n"));
+        assert!(
+            page.contains("nibrunner_proxy_request_duration_seconds_count 2\n"),
+            "the proxy answered both, and how long a failed dial took is worth knowing"
         );
         assert!(page.contains("nibrunner_proxy_requests_in_flight 1\n"));
         assert!(page.contains("nibrunner_proxy_tls_handshakes_total{outcome=\"completed\"} 1\n"));
