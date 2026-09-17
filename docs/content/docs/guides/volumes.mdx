@@ -1,0 +1,138 @@
+---
+title: Volumes
+description: What a volume starts with, where volumes live, and how a backup is cut.
+---
+
+Every app has one volume: the writable top of its root, where every write lands and the only
+thing backed up. The document names it in `volumes`, and an instance points at it by
+`volumeId`.
+
+```json
+"volumes": [
+  { "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present" }
+]
+```
+
+## Starting from an archive
+
+A volume is formatted empty the first time the document names it. To start it with content,
+name an archive in the artifact store and where to unpack it:
+
+```json
+"volumes": [
+  {
+    "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present",
+    "initialContents": {
+      "digest": "<sha256 of the archive, lowercase hex>",
+      "objectKey": "seeds/app-1",
+      "destinationPath": "/app/data"
+    }
+  }
+]
+```
+
+- The archive is a tar, gzipped or not, or a zip — what `tar -cz` or `zip -r` writes.
+- Entries land under `destinationPath` as the app sees them: `nested/hello.txt` becomes
+  `/app/data/nested/hello.txt`. The directory and everything in it are given to uid 65534.
+- What the archiver added on its own — `.DS_Store`, `__MACOSX`, `Thumbs.db`, editor swap
+  files — is skipped.
+- An entry that reaches outside `destinationPath`, a symlink in a zip, or an archive that does
+  not fit fails the volume by name.
+
+<Callout title="Good to know">
+  The copy happens once, as the volume is formatted. Changing or dropping `initialContents` on a
+  volume that exists changes nothing about it.
+</Callout>
+
+## Where volumes live
+
+`volumes.backend` in `config.toml` chooses between two backends.
+
+### On this disk
+
+```toml
+[volumes]
+backend = "local-file"
+storage_prefix = "host-1"
+```
+
+Volumes are sparse files under `paths.state_dir`. Nothing else to configure, and
+`[volumes.zerofs]` is refused rather than ignored. This is what the installer writes.
+
+What it costs is what the other backend exists for: a volume that outlives the machine.
+Checkpoints and exports are refused on this backend, because they are cut in the object store.
+
+### In an object store
+
+```toml
+[volumes]
+backend = "zerofs"
+storage_prefix = "host-1"
+
+[volumes.zerofs]
+binary = "/opt/nibrunner/bin/zerofs"
+config_file = "/etc/zerofs/config.toml"
+mount_path = "/mnt/zerofs"
+nbd_socket_path = "/run/zerofs/nbd.sock"
+ninep_socket_path = "/run/zerofs/9p.sock"
+rpc_socket_path = "/run/zerofs/rpc.sock"
+storage_url = "s3://my-bucket/host-1"
+cache_dir = "/data/zerofs"
+cache_disk_gib = 200
+cache_memory_gib = 2
+checkpoint_runtime_dir = "/run/zerofs-checkpoint"
+checkpoint_config_file = "/etc/zerofs/checkpoint.toml"
+checkpoint_cache_dir = "/data/zerofs-checkpoint"
+```
+
+Blocks live in the object store and reach the guest over NBD, through
+[ZeroFS](https://github.com/Barre/ZeroFS). `install` renders ZeroFS's configuration files and
+the units that supervise it from these keys, so this is the only place any of it is said. The
+object-store credentials and the encryption password go in `host.env`.
+
+- **Size `cache_disk_gib` against the disk it is on.** It shares that disk with the snapshots in
+  `paths.snapshot_dir`. A snapshot lost costs one cold boot; a full disk breaks the filesystem
+  every app on the host runs from.
+- **Whole gibibytes.** The daemon holds `cache_memory_gib` back from what a guest may be
+  promised, and reads it back from the file it rendered, which truncates.
+- **Slot _N_ takes `/dev/nbdN`.** `install` loads the nbd module with `max_apps + 1` minors. A
+  module already loaded with fewer is not reloaded — that would drop every device under every
+  guest — so raising `max_apps` on this backend asks for a reboot.
+
+<Callout title="Good to know">
+  `volumes.storage_prefix` is one host, not one app. Every volume placed here shares it, and
+  deleting it destroys all of them.
+</Callout>
+
+## Checkpoints and exports
+
+On the `zerofs` backend, the document can cut a volume at a point in time, and bundle it:
+
+```json
+"checkpoints": [
+  { "checkpointId": "ckpt-1", "volumeId": "vol-1", "desiredState": "present" }
+],
+"exports": [
+  {
+    "exportId": "exp-1", "appId": "app-1", "volumeId": "vol-1",
+    "objectKey": "exports/app-1/bundle.tar.gz", "desiredState": "present",
+    "environment": { "DATABASE_URL": "sqlite:///app/data.db" }
+  }
+]
+```
+
+- A **checkpoint** is the volume as it was when the checkpoint was cut, kept in the object store
+  until the document says `absent`.
+- An **export** freezes the guest's filesystem, cuts a checkpoint of its own, and writes a
+  gzipped tar — the volume's contents under `data/`, `environment` as `.env` — to `objectKey`
+  in `exports.store_url`. To start another volume from it, give `initialContents` an archive of
+  what is under `data/`, with `destinationPath` `/`.
+
+`reported.json` says what became of each, and why.
+
+## Next steps
+
+<Cards>
+  <Card title="Layers" href="/docs/guides/layers" description="What sits under the volume." />
+  <Card title="config.toml" href="/docs/reference/config" description="Every key of the two backends." />
+</Cards>

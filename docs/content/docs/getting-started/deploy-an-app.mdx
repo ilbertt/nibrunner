@@ -1,0 +1,115 @@
+---
+title: Deploy an app
+description: Put a binary in the artifact store, write desired.json, and reach the app on its hostname.
+---
+
+An app is a program the guest runs in a Debian root, as uid 65534, listening on the port the
+document names. A statically linked Linux x86_64 binary — Go, Rust, Zig, a compiled Bun
+executable — needs nothing from the image. A dynamically linked one has what Debian's slim
+image ships: glibc, libstdc++, CA certificates.
+
+<Steps>
+<Step>
+
+## Upload the binary
+
+Put it in the artifact store under a key of your choosing, and take its digest. On a host the
+installer configured, the store is a directory:
+
+```bash
+install -D -m 0644 ./my-server /var/lib/nibrunner/artifact-store/my-server
+sha256sum ./my-server
+```
+
+</Step>
+<Step>
+
+## Write the document
+
+`nibrunnerd` watches `/var/lib/nibrunner/desired.json` and converges on every change to it.
+Name the key and the digest from the step above:
+
+```json title="/var/lib/nibrunner/desired.json"
+{
+  "hostId": "host-1",
+  "volumes": [
+    { "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present" }
+  ],
+  "instances": [
+    {
+      "appId": "app-1",
+      "deploymentId": "dep-1",
+      "volumeId": "vol-1",
+      "desiredState": "on-request",
+      "layers": [
+        {
+          "kind": "executable",
+          "destinationPath": "/app/server",
+          "digest": "<sha256 of the binary, lowercase hex>",
+          "objectKey": "my-server"
+        }
+      ],
+      "config": {
+        "httpPort": 3000,
+        "command": { "program": "/app/server", "args": [], "workingDirectory": "/app", "environment": {} },
+        "resources": { "vcpuCount": 1, "memoryMib": 256 },
+        "healthCheck": { "kind": "http", "path": "/healthz", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
+        "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
+      },
+      "hostnames": [{ "hostname": "app-1.example.com", "kind": "platform" }]
+    }
+  ],
+  "checkpoints": [],
+  "exports": []
+}
+```
+
+| Field | What it says |
+| --- | --- |
+| `volumes` | One volume per app, formatted empty the first time it is named. Every write the app makes lands on it, and it is the only thing backed up. |
+| `layers` | What the root is built from. An `executable` layer is one program, packed into an image at `destinationPath`. |
+| `config.command` | What runs in that root, as uid 65534. |
+| `config.healthCheck` | What tells the host the app is up. There is no default. |
+| `desiredState` | `on-request` brings the app up now and lets it sleep between visitors. `running` keeps it up. `stopped` takes it down. |
+| `hostnames` | What the proxy routes to `httpPort`. |
+
+</Step>
+<Step>
+
+## Reach it
+
+The daemon formats the volume, packs the binary into an image, boots the microVM, and reports
+the instance `running` once `/healthz` on port 3000 answers 2xx.
+
+The proxy routes on the hostname the request carries, so the app is reachable before any DNS
+exists:
+
+```bash
+curl -H 'Host: app-1.example.com' http://127.0.0.1/
+```
+
+Point `app-1.example.com` at this machine and the same request arrives from anywhere.
+
+</Step>
+</Steps>
+
+## What the host says back
+
+- `/var/lib/nibrunner/reported.json` — the state of every volume, instance, checkpoint and export
+  the document names, and why. An instance that cannot start says so here, not in a log line.
+- `/var/lib/nibrunner/logs/<appId>.log` — the app's output.
+- `journalctl -u nibrunnerd` — the daemon's own.
+
+<Callout title="Good to know">
+  An editor completes and checks the document when it names the schema:
+  `"$schema": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json"`.
+</Callout>
+
+## Next steps
+
+<Cards>
+  <Card title="Layers" href="/docs/guides/layers" description="Build the root from more than one binary, or from an image you made." />
+  <Card title="Sleep and wake" href="/docs/guides/sleep-and-wake" description="When an app sleeps, and what wakes it." />
+  <Card title="Health checks" href="/docs/guides/health-checks" description="What healthy means, and the three ways to say it." />
+  <Card title="desired.json" href="/docs/reference/desired-state" description="Every field of the document." />
+</Cards>

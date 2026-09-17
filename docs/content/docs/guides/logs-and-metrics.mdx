@@ -1,0 +1,67 @@
+---
+title: Logs and metrics
+description: What the host says back — reported.json, each app's log, and a Prometheus page.
+---
+
+## reported.json
+
+After every pass, the daemon writes `reported.json` in `paths.state_dir` —
+`/var/lib/nibrunner/reported.json` on a host the installer configured. It is the state of every
+volume, instance, checkpoint and export the document names, and why, when the why is not
+obvious: an instance that cannot start, a document the host refused, an export that failed.
+
+```bash
+jq '.instances[] | {appId, state, message}' /var/lib/nibrunner/reported.json
+```
+
+[The reference](/docs/reference/reported-state) is every field.
+
+## Logs
+
+Each app's output goes to `<paths.state_dir>/logs/<appId>.log`, one line per line the program
+wrote:
+
+```
+2026-09-16T10:41:07.318Z stdout 6f1c…/42 listening on :3000
+```
+
+That is when the host saw it, which stream, an id for the microVM's log session and the line's
+sequence in it, then the line. A gap where the host could not keep up says how many bytes it
+dropped, and a restart of the program inside the guest is a line on `stderr` saying why.
+
+The daemon's own log is in the journal:
+
+```bash
+journalctl -u nibrunnerd -f
+```
+
+`NIBRUNNER_LOG` in the daemon's environment is a `tracing` filter — `debug`, or
+`nibrunnerd::domain=trace` — for one restart's worth of detail.
+
+## Metrics
+
+Add `[metrics]` to `config.toml` and the host serves a Prometheus page at `/metrics`:
+
+```toml
+[metrics]
+listen_address = "127.0.0.1"
+port = 9100
+```
+
+The page is rendered from the same state `reported.json` is written from, so a scraper and the
+file cannot disagree. Every series is prefixed `nibrunner_`: the state of each instance, volume,
+checkpoint and export as a one-hot; what a converge, a sleep and a wake took, phase by phase;
+each app's requests by status class and the proxy's TLS handshakes; each app's CPU, memory,
+disk and network; the host's slots, memory and capacity.
+
+<Callout title="Good to know">
+  `metrics.port` cannot be `proxy.http.port`, a port in the slot range from 21000, or 9091 on a
+  `zerofs` host, which ZeroFS holds.
+</Callout>
+
+## Next steps
+
+<Cards>
+  <Card title="reported.json" href="/docs/reference/reported-state" description="Every field the host writes back." />
+  <Card title="Host capacity" href="/docs/guides/host-capacity" description="What the host measured this machine holds." />
+</Cards>

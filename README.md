@@ -41,21 +41,27 @@ nibrunnerd start
 ```
 
 Then put a binary in the artifact store, write the document `nibrunnerd` watches, and the daemon
-boots it, watches its health, and routes its hostname to it. The
-**[quick start](https://nibrunner.dev/docs/quick-start)** walks through all four steps, first app
-included.
+boots it, watches its health, and routes its hostname to it:
+**[deploy an app](https://nibrunner.dev/docs/getting-started/deploy-an-app)**.
 
 ## Documentation
 
 [nibrunner.dev/docs](https://nibrunner.dev/docs) — the source is under [`docs/`](docs).
 
-- [Quick start](https://nibrunner.dev/docs/quick-start) — prerequisites, install, configure,
-  start, and a first app.
-- [The document](https://nibrunner.dev/docs/desired-state) — everything an instance may say:
-  layers, what a volume starts with, ports, what healthy means, and when an app sleeps.
-- [Configuring a host](https://nibrunner.dev/docs/config) — every key in `config.toml`.
-- [Reference](https://nibrunner.dev/docs/reference) — `config.toml`, `desired.json` and
-  `reported.json` key by key, rendered from their JSON Schemas.
+- [Getting started](https://nibrunner.dev/docs/getting-started/installation) — install, deploy
+  an app, configure the host.
+- Guides — [layers](https://nibrunner.dev/docs/guides/layers),
+  [volumes](https://nibrunner.dev/docs/guides/volumes),
+  [sleep and wake](https://nibrunner.dev/docs/guides/sleep-and-wake),
+  [health checks](https://nibrunner.dev/docs/guides/health-checks),
+  [HTTPS](https://nibrunner.dev/docs/guides/https),
+  [raw ports](https://nibrunner.dev/docs/guides/raw-ports),
+  [logs and metrics](https://nibrunner.dev/docs/guides/logs-and-metrics),
+  [host capacity](https://nibrunner.dev/docs/guides/host-capacity).
+- Reference — [`config.toml`](https://nibrunner.dev/docs/reference/config),
+  [`desired.json`](https://nibrunner.dev/docs/reference/desired-state) and
+  [`reported.json`](https://nibrunner.dev/docs/reference/reported-state), key by key from their
+  JSON Schemas.
 
 ## Contributing
 

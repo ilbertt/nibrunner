@@ -1,0 +1,53 @@
+---
+title: Raw ports
+description: A way in that is not HTTP — ssh, DNS, WireGuard — carried to the app unread.
+---
+
+`httpPort` is what the proxy sends an app's hostnames to. An app may answer on ports beside it,
+carried to it unread — tcp or udp, whatever arrives, the way a firewall rule would:
+
+```json
+"config": {
+  "httpPort": 3000,
+  "ports": [
+    { "name": "ssh", "guestPort": 22 },
+    { "name": "dns", "guestPort": 53 }
+  ]
+}
+```
+
+## On the host
+
+The host must name `[proxy.raw]` to bind such a port:
+
+```toml
+[proxy.raw]
+listen_address = "10.0.5.18"
+max_ports_per_guest = 2
+```
+
+- `max_ports_per_guest` is how many an app may name: 1 to 7, what a slot reserves past its HTTP
+  port. A document that asks for more is refused by name, and the instance reported `failed`.
+- `listen_address` is a **private address**, where a relay reaches this host — never the world's.
+  A raw port carries no hostname to route on, so it is reached at
+  `<listen_address>:<host port>` rather than by name. The host port is the app's `hostPort` in
+  `reported.json` plus the port's position in `ports`, counted from one: `ssh` above is
+  `hostPort + 1`, `dns` is `hostPort + 2`.
+
+<Callout title="Good to know">
+  A raw port is never published from this host: an address one app hands to its users would put
+  every app on the host in front of them. The relay that publishes it is a machine of its own.
+</Callout>
+
+## Waking
+
+While the app sleeps, the first arrival wakes it, whichever way it came. A connection is
+accepted and held, then spliced once the guest answers, so a client sees a slow banner rather
+than a closed socket. A datagram is kept and delivered after the wake.
+
+## Next steps
+
+<Cards>
+  <Card title="HTTPS" href="/docs/guides/https" description="The way in that is HTTP." />
+  <Card title="reported.json" href="/docs/reference/reported-state" description="Where an app's hostPort is said." />
+</Cards>

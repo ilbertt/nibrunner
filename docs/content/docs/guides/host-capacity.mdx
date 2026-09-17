@@ -1,0 +1,55 @@
+---
+title: Host capacity
+description: How many apps a host is laid out for, what this machine holds, and how to change it.
+---
+
+`max_apps` is the first key in `config.toml`, above every section:
+
+```toml
+max_apps = 300
+```
+
+Everything that counts slots follows from it: the slot ring, the eight loopback ports each slot
+reserves from 21000, the nbd minors on a `zerofs` host, and what the metrics page calls
+`nibrunner_slots{of="total"}`. A host that is full says so by naming this key.
+
+## What this machine holds
+
+`install` measures three bounds, assuming an app to be 1 vCPU, 256 MiB and an 8 GiB volume:
+
+| Bound | What it is |
+| --- | --- |
+| Runs at once | Guest memory, after the host and the storage cache, over 256 MiB. |
+| Holds on disk | The disk under `paths.snapshot_dir`, after the storage cache and an 8 GiB reserve, over one snapshot — plus one volume on a `local-file` host. |
+| Fits on its ports | 5567: each slot reserves eight ports from 21000, and the last port has to be a port. |
+
+A host whose configuration `install` wrote gets the least of the three, with the line above the
+key naming all of them. Every `nibrunnerd start` then says the three against the number set:
+
+```
+max_apps = 300: assuming an app is 1 vCPU, 256 MiB and 8 GiB to start, this host runs 29 at once, holds 320 on disk, and fits 5567 on its ports; above 29 counts on apps sleeping
+```
+
+Above what the memory runs at once is only said — that is what [sleeping](/docs/guides/sleep-and-wake)
+is for. Above what the disk holds or the ports fit, `start` says the number to set instead. Both
+are advice, not refusals: an app given more counts for more, and the number is yours to keep.
+
+## Changing it
+
+1. Edit `max_apps`.
+2. Run `nibrunnerd start`.
+
+<Callout title="Good to know">
+  - **Raising it on a `zerofs` host asks for a reboot.** The nbd module is loaded with
+    `max_apps + 1` minors, which cannot be raised in place, and `start` says so rather than
+    reloading a module with volumes attached to it.
+  - **Lowering it below a slot an app holds moves that app** to a new slot on the next start:
+    a new loopback port and a new guest address.
+</Callout>
+
+## Next steps
+
+<Cards>
+  <Card title="Sleep and wake" href="/docs/guides/sleep-and-wake" description="How a host holds more apps than it runs at once." />
+  <Card title="config.toml" href="/docs/reference/config" description="max_apps, key by key with the rest." />
+</Cards>

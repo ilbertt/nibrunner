@@ -1,0 +1,80 @@
+---
+title: Installation
+description: Install nibrunner on a Linux machine and start the host.
+---
+
+## System requirements
+
+- **A Linux x86_64 machine with `/dev/kvm`.** Every app is a microVM, and a microVM needs
+  hardware virtualisation. A bare-metal server has it; a VPS has it only if the provider passes
+  nested virtualisation through. `ls -l /dev/kvm` shows the device on a machine that has it, and
+  `nibrunnerd install` refuses one that does not.
+- **Debian or Ubuntu, with systemd.** The installer uses `apt-get`, and the host runs as
+  systemd units.
+- **Root, and outbound HTTPS.** The installer fetches the release from GitHub.
+
+<Steps>
+<Step>
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/install.sh | sh
+```
+
+The script installs the packages it needs, downloads the newest release — the daemon, the guest
+kernel and the guest image — checks each against its published digest, puts `nibrunnerd` in
+`/usr/local/bin`, and runs `nibrunnerd install`.
+
+`nibrunnerd install` lays the host out from `/etc/nibrunner/config.toml`, and writes that file
+if there is none: volumes as files on this disk, plain HTTP on `:80`, nothing in an object
+store, and `max_apps` set to what it measured this machine can hold. It starts nothing.
+
+<Callout title="Good to know">
+  `NIBRUNNER_VERSION=<tag>` in front of the command pins a release. Without it, the newest one.
+  On a machine without `apt-get`, install `nftables`, `e2fsprogs`, `kmod`, `curl` and
+  `ca-certificates` yourself and re-run.
+</Callout>
+
+</Step>
+<Step>
+
+## Start
+
+```bash
+nibrunnerd start
+```
+
+`start` lays the host out from `config.toml` as it is now, then starts the units that file
+names. The configuration the installer wrote runs as it is, so there is nothing to edit for a
+first app. When you do edit it, run `nibrunnerd start` again: it restarts only what read
+something that changed.
+
+</Step>
+<Step>
+
+## Verify
+
+```bash
+systemctl status nibrunnerd
+```
+
+`journalctl -u nibrunnerd -f` follows the daemon's log.
+
+</Step>
+</Steps>
+
+## Next steps
+
+<Cards>
+  <Card
+    title="Deploy an app"
+    href="/docs/getting-started/deploy-an-app"
+    description="Put a binary on the host and reach it on a hostname."
+  />
+  <Card
+    title="Configuration"
+    href="/docs/getting-started/configuration"
+    description="What the installer wrote, and what to change before going to production."
+  />
+</Cards>

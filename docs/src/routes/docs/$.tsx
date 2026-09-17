@@ -1,4 +1,4 @@
-import { createFileRoute, Link, notFound } from '@tanstack/react-router';
+import { createFileRoute, Link, notFound, redirect } from '@tanstack/react-router';
 import { createServerFn } from '@tanstack/react-start';
 import { useFumadocsLoader } from 'fumadocs-core/source/client';
 import { DocsLayout } from 'fumadocs-ui/layouts/notebook';
@@ -10,16 +10,27 @@ import {
   MarkdownCopyButton,
   ViewOptionsPopover,
 } from 'fumadocs-ui/layouts/notebook/page';
-import type { GetLayoutTabsOptions } from 'fumadocs-ui/layouts/shared';
 import { Suspense, use } from 'react';
 import { useMDXComponents } from '@/components/mdx';
 import { baseOptions } from '@/lib/layout.shared';
 import { getPageMarkdownUrl, gitConfig } from '@/lib/shared';
 import { docs, source } from '@/lib/source';
 
+// Where the pages that shipped binaries and older READMEs point at went.
+const moved: Record<string, string> = {
+  'quick-start': 'getting-started/installation',
+  config: 'reference/config',
+  'desired-state': 'getting-started/deploy-an-app',
+  reference: 'reference/config',
+};
+
 export const Route = createFileRoute('/docs/$')({
   component: Page,
   loader: async ({ params }) => {
+    const to = moved[params._splat ?? ''];
+    if (to !== undefined) {
+      throw redirect({ to: '/docs/$', params: { _splat: to }, statusCode: 301 });
+    }
     const slugs = params._splat?.split('/') ?? [];
     const data = await loader({ data: slugs });
     await docs.getPage(data.path)?.preload();
@@ -71,35 +82,12 @@ function Content({ path, markdownUrl }: { path: string; markdownUrl: string }) {
   );
 }
 
-/**
- * The tab row renders a tab's title and nothing else, so the icon rides inside it — and comes off
- * the tab, or the sidebar's dropdown, which does render it, would show it twice.
- */
-const tabs: GetLayoutTabsOptions = {
-  transform: (tab) => ({
-    ...tab,
-    icon: undefined,
-    title: (
-      <>
-        {tab.icon}
-        {tab.title}
-      </>
-    ),
-  }),
-};
-
 function Page() {
   const { pageTree, path, markdownUrl } = useFumadocsLoader(Route.useLoaderData());
   const options = baseOptions();
 
   return (
-    <DocsLayout
-      {...options}
-      nav={{ ...options.nav, mode: 'top' }}
-      tree={pageTree}
-      tabMode="navbar"
-      tabs={tabs}
-    >
+    <DocsLayout {...options} nav={{ ...options.nav, mode: 'top' }} tree={pageTree}>
       <Link to={markdownUrl} hidden />
       <Suspense>
         <Content path={path} markdownUrl={markdownUrl} />
