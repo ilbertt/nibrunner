@@ -129,9 +129,13 @@ impl AppActivator {
         // the request is handed straight to it rather than waking it onto a health check it is
         // currently failing (which would wait out the whole grace period and then refuse). A guest
         // that is genuinely down still takes the wake path, which for an app the document wants
-        // running is a wait for the guest the pass is bringing up in its place.
+        // running is a wait for the guest the pass is bringing up in its place. A guest being
+        // written out is the one exception to answering a port that accepts: it accepts right up
+        // to the pause, and a request handed to it then is paused with it, so it goes to the
+        // waker, which waits for the snapshot and restores from it.
         let guest = SocketAddr::from((record.guest_ipv4.addr(), record.http_port.get()));
-        if record.is_idle() || !accepts_a_connection(guest).await {
+        if record.is_idle() || self.state.is_snapshotting(&app_id).await || !accepts_a_connection(guest).await
+        {
             if let Err(refusal) = self.waker.wake(&app_id).await {
                 match refusal {
                     WakeRefusal::NoRoom { shortfall_mib } => {
@@ -484,6 +488,62 @@ mod tests {
         assert_eq!(response.status(), 200);
         assert_eq!(response.text().await.unwrap(), "served though unhealthy\n");
         assert_eq!(waker.count(), 0, "an app already answering its port is not woken");
+    }
+
+    /// Holds every wake until the test lets it through, as the waker does while a snapshot of
+    /// the app is being written.
+    struct HoldingWaker {
+        woken: AtomicUsize,
+        gate: tokio::sync::Semaphore,
+    }
+
+    impl HoldingWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                woken: AtomicUsize::new(0),
+                gate: tokio::sync::Semaphore::new(0),
+            })
+        }
+
+        fn let_through(&self) {
+            self.gate.add_permits(1);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Waker for HoldingWaker {
+        async fn wake(&self, _app_id: &AppId) -> Result<(), WakeRefusal> {
+            self.woken.fetch_add(1, Ordering::SeqCst);
+            self.gate.acquire().await.unwrap().forget();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_to_a_guest_being_written_out_waits_for_the_wake_rather_than_the_port_it_finds_open() {
+        // The sleep hands the port to the activator before it pauses the guest, so for a moment
+        // the guest still accepts a connection. A request handed to it now would be paused with
+        // it; handed to the waker, it waits for the snapshot and the restore.
+        let state = HostState::shared();
+        guest(&state, InstanceState::Running, "answered once restored\n").await;
+        state.mark_snapshotting(&app_id(), true).await;
+        let waker = HoldingWaker::new();
+        let activator = AppActivator::new(state.clone(), waker.clone(), Arc::default());
+        let host_port = serving(&activator, &app_id()).await;
+
+        let mut response = std::pin::pin!(get(host_port));
+        let answered = tokio::time::timeout(std::time::Duration::from_millis(100), &mut response).await;
+        assert!(
+            answered.is_err(),
+            "the request was handed to the guest that is about to be paused"
+        );
+        assert_eq!(waker.woken.load(Ordering::SeqCst), 1);
+
+        state.mark_snapshotting(&app_id(), false).await;
+        waker.let_through();
+        let response = response.await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "answered once restored\n");
     }
 
     #[tokio::test]
