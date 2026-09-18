@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "select app_id, slot from slots order by slot",
+  "query": "select app_id, slot from slots",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "13b7c789e22ba214862199480f8e5f3062bec39591b7b1009f0dcc5680566ea8"
+  "hash": "d1af3efdc2c5c1fdf68a166647741fd1c0ff39dc3a015f00407aa8a40d87d299"
 }

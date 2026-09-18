@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into instances (app_id, record) values (?, ?)\n                     on conflict (app_id) do update set record = excluded.record",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ce40a113ac2ab19e2db88fdf42cd4580ea5e9d84269905bca1a844d10a39f385"
+}
