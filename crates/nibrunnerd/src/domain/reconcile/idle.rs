@@ -3,7 +3,7 @@
 // this pass applies to a document that named none.
 pub use protocol::DEFAULT_IDLE_TIMEOUT_MS;
 
-// What `IdleController` runs this pass at. Only the meters read it, and only to decide how
+// What `ActivityController` runs this pass at. Only the meters read it, and only to decide how
 // much of a late pass is time this host actually watched.
 pub const ACTIVITY_INTERVAL_MS: u64 = 5_000;
 
