@@ -5,7 +5,9 @@ use crate::host::Host;
 #[async_trait::async_trait]
 pub trait IdleService: Send + Sync {
     async fn record_activity(&self);
-    async fn apply_sleep(&self);
+    /// How many due apps the pass left for the next one, as `idle::apply_sleep` counts them: a
+    /// caller handed more than none runs again at once rather than at the interval.
+    async fn apply_sleep(&self) -> usize;
 }
 
 pub struct HostIdle {
@@ -24,8 +26,8 @@ impl IdleService for HostIdle {
         record_activity(&self.host).await;
     }
 
-    async fn apply_sleep(&self) {
-        apply_sleep(&self.host).await;
+    async fn apply_sleep(&self) -> usize {
+        apply_sleep(&self.host).await
     }
 }
 

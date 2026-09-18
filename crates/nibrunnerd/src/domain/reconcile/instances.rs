@@ -94,14 +94,14 @@ pub async fn stop_instance(host: &Host, app_id: &AppId, reason: &str) {
         .await;
 }
 
-pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
+/// Puts the microVM to sleep and says how that went; nothing when there was no microVM to put
+/// down, or no slot for it to come back to and it was stopped instead.
+pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) -> Option<SleepOutcome> {
     let reason = why.as_str();
-    let Some(record) = host.state.record(app_id).await else {
-        return;
-    };
+    let record = host.state.record(app_id).await?;
     let Some(slot) = host.slot_of(app_id).await else {
         stop_instance(host, app_id, reason).await;
-        return;
+        return None;
     };
 
     host.state.mark_snapshotting(app_id, true).await;
@@ -160,6 +160,7 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
         // The guest is still up, and its port was given away for a sleep that did not happen.
         crate::domain::reconcile::network::apply_network(host).await;
     }
+    Some(outcome)
 }
 
 // An attempt is a boot, whether the last one failed on the way up or came up and exited later,

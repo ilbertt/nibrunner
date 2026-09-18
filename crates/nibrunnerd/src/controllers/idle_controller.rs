@@ -22,8 +22,15 @@ impl IdleController {
         Arc::new(Self { idle })
     }
 
+    /// One tick: passes until one leaves nothing due. A pass takes a bite of what is due and
+    /// counts back the rest, and the rest does not wait out an interval for its turn.
     pub async fn idle_once(&self) {
-        self.idle.apply_sleep().await;
+        loop {
+            let left_due = self.idle.apply_sleep().await;
+            if left_due == 0 {
+                break;
+            }
+        }
     }
 }
 
@@ -50,7 +57,18 @@ mod tests {
     async fn a_pass_reads_the_latest_activity_rather_than_taking_a_reading_of_its_own() {
         let mut idle = MockIdleService::new();
         idle.expect_record_activity().never();
-        idle.expect_apply_sleep().times(1).returning(|| ());
+        idle.expect_apply_sleep().times(1).returning(|| 0);
+
+        IdleController::new(Arc::new(idle)).idle_once().await;
+    }
+
+    #[tokio::test]
+    async fn a_pass_that_left_apps_due_is_followed_by_another_at_once_and_one_that_left_none_is_not() {
+        let mut idle = MockIdleService::new();
+        let mut left = [1, 0].into_iter();
+        idle.expect_apply_sleep()
+            .times(2)
+            .returning(move || left.next().expect("no pass after one that left nothing"));
 
         IdleController::new(Arc::new(idle)).idle_once().await;
     }
