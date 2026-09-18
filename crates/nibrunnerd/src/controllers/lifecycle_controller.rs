@@ -3,6 +3,7 @@ use std::sync::Arc;
 use protocol::HostVersions;
 
 use crate::adapters::guest_measurements::VsockMeasurements;
+use crate::controllers::activity_controller::ActivityController;
 use crate::controllers::converge_controller::ConvergeController;
 use crate::controllers::idle_controller::IdleController;
 use crate::controllers::measurement_controller::MeasurementController;
@@ -46,11 +47,13 @@ impl LifecycleController {
         let reconciler = HostReconciler::new(self.host.clone());
         let reports = HostReporter::new(self.host.clone(), self.versions.clone());
         let measurements = VsockMeasurements::new(self.host.clone());
+        let idle = HostIdle::new(self.host.clone());
 
         let held: Vec<Arc<dyn Controller>> = vec![
             ConvergeController::new(self.host.clone(), reconciler.clone()),
             StatusController::new(self.host.clone(), reconciler, reports),
-            IdleController::new(HostIdle::new(self.host.clone())),
+            ActivityController::new(idle.clone()),
+            IdleController::new(idle),
             MeasurementController::new(HostUsage::new(self.host.clone(), measurements)),
         ];
         held
