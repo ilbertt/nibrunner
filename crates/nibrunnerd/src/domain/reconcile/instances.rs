@@ -105,6 +105,13 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
     };
 
     host.state.mark_snapshotting(app_id, true).await;
+    // The port goes to the activator before the guest is paused, not once the batch is done: a
+    // host port still pointing at a paused guest connects to nothing for as long as the snapshot
+    // takes, where one the activator holds keeps the request until the guest is restored. That
+    // is the whole ruleset loaded again, the only way the firewall has of dropping one forward;
+    // the sleeps running side by side render the same ruleset once each has marked itself, and
+    // loading the ruleset already in place costs nothing.
+    crate::domain::reconcile::network::apply_network(host).await;
     let started = std::time::Instant::now();
     settled(host, app_id, reason).await;
     let flushed = started.elapsed();
@@ -149,6 +156,10 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
         .sleep_wake
         .slept(app_id, why, outcome, flushed, snapshotted);
     host.state.mark_snapshotting(app_id, false).await;
+    if outcome != SleepOutcome::Slept {
+        // The guest is still up, and its port was given away for a sleep that did not happen.
+        crate::domain::reconcile::network::apply_network(host).await;
+    }
 }
 
 // An attempt is a boot, whether the last one failed on the way up or came up and exited later,
