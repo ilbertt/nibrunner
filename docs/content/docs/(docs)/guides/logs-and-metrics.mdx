@@ -1,20 +1,20 @@
 ---
 title: Logs and metrics
-description: What the host says back — reported.json, each app's log, and a Prometheus page.
+description: reported.json, per-app logs, and the Prometheus endpoint.
 ---
 
 ## reported.json
 
-After every pass, the daemon writes `reported.json` in `paths.state_dir` —
-`/var/lib/nibrunner/reported.json` on a host the installer configured. It is the state of every
-volume, instance, checkpoint and export the document names, and why, when the why is not
-obvious: an instance that cannot start, a document the host refused, an export that failed.
+After every reconcile pass, the daemon writes `reported.json` to `paths.state_dir`
+(`/var/lib/nibrunner/reported.json` on a host set up by the installer). It holds the state of
+every volume, instance, checkpoint and export in `desired.json`, with a reason where one is
+needed: an instance that cannot start, a file the host rejected, an export that failed.
 
 ```bash
 jq '.instances[] | {appId, state, message}' /var/lib/nibrunner/reported.json
 ```
 
-[The reference](/docs/reference/reported-state) is every field.
+The [reference](/docs/reference/reported-state) lists every field.
 
 ## Logs
 
@@ -25,14 +25,15 @@ wrote:
 2026-09-16T10:41:07.318Z stdout 6f1c…/42 listening on :3000
 ```
 
-That is when the host saw it, which stream, an id for the microVM's log session and the line's
-sequence in it, then the line. A gap where the host could not keep up says how many bytes it
-dropped, and a restart of the program inside the guest is a line on `stderr` saying why.
+The fields are: when the host received the line, the stream, the microVM's log session id and
+the line's sequence number in that session, then the line itself. If the host could not keep up,
+a line says how many bytes were dropped. If the program restarted inside the guest, a line on
+`stderr` says why.
 
-The host keeps the newest 256 MiB of each app, in two files: when `<appId>.log` passes the cap
-it becomes `<appId>.log.1`, over the one before it, and a fresh `<appId>.log` starts. `tail -F`
-follows across the cut. An app that floods fills its own share of the disk and no more of it,
-and `[logs]` in `config.toml` is the share:
+The host keeps the newest 256 MiB per app, in two files. When `<appId>.log` reaches the limit it
+is renamed to `<appId>.log.1`, replacing the previous one, and a new `<appId>.log` starts.
+`tail -F` follows across the rotation. An app that logs too much fills only its own share of the
+disk. `[logs]` in `config.toml` sets that share:
 
 ```toml
 [logs]
@@ -45,12 +46,12 @@ The daemon's own log is in the journal:
 journalctl -u nibrunnerd -f
 ```
 
-`NIBRUNNER_LOG` in the daemon's environment is a `tracing` filter — `debug`, or
-`nibrunnerd::domain=trace` — for one restart's worth of detail.
+`NIBRUNNER_LOG` in the daemon's environment is a `tracing` filter, such as `debug` or
+`nibrunnerd::domain=trace`. Set it for one restart when you need more detail.
 
 ## Metrics
 
-Add `[metrics]` to `config.toml` and the host serves a Prometheus page at `/metrics`:
+Add `[metrics]` to `config.toml` and the host serves Prometheus metrics at `/metrics`:
 
 ```toml
 [metrics]
@@ -58,22 +59,27 @@ listen_address = "127.0.0.1"
 port = 9100
 ```
 
-The page is rendered from the same state `reported.json` is written from, so a scraper and the
-file cannot disagree. Every series is prefixed `nibrunner_`: the state of each instance, volume,
-checkpoint and export as a one-hot; what a converge, a sleep and a wake took, phase by phase;
-the proxy's requests by what it answered with — an app's own answer is `served`, whatever its
-status, and the 502 the proxy writes when an app does not answer at all is `unreachable`;
-each app's requests by status class and the proxy's TLS handshakes; each app's CPU, memory,
-disk and network; the host's slots, memory and capacity.
+The metrics are built from the same state as `reported.json`, so the two never disagree. Every
+series is prefixed `nibrunner_`. They cover:
 
-The one to alert on is `nibrunner_conntrack_entries{of="used"}` against `{of="max"}`: the
-kernel's connection-tracking table, which every flow between the proxy and a guest and every
-flow a guest opens is an entry of, for its lifetime and 120 s after. Full, the kernel drops
-packets for every app on the host and says so only in `dmesg`. The daemon says it in its log at
-four fifths, once, and once more when it is back under; [`max_apps`](/docs/guides/host-capacity)
-sizes the table.
+- The state of each instance, volume, checkpoint and export, one-hot encoded.
+- How long a converge, a sleep and a wake took, by phase.
+- The proxy's requests by outcome. `served` is any answer the app gave, whatever its status.
+  `unreachable` is the 502 the proxy writes when the app did not answer at all.
+- Each app's requests by status class, and the proxy's TLS handshakes.
+- Each app's CPU, memory, disk and network.
+- The host's slots, memory and capacity.
 
-<Callout title="Good to know">
-  `metrics.port` cannot be `proxy.http.port`, a port in the slot range from 21000, or 9091 on a
-  `zerofs` host, which ZeroFS holds.
+### Alert on conntrack
+
+Alert on `nibrunner_conntrack_entries{of="used"}` approaching `{of="max"}`. This is the kernel's
+connection-tracking table. Every flow between the proxy and a guest, and every flow a guest
+opens, is an entry in it for the flow's lifetime plus 120 seconds. When the table is full, the
+kernel drops packets for every app on the host and reports it only in `dmesg`. The daemon logs
+a warning once when usage reaches 80%, and once more when it drops back below.
+[`max_apps`](/docs/guides/host-capacity) sizes the table.
+
+<Callout title="Port restrictions">
+  `metrics.port` cannot be `proxy.http.port`, a port in the slot range starting at 21000, or 9091
+  on a `zerofs` host, which ZeroFS uses.
 </Callout>

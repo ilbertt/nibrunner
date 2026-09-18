@@ -1,10 +1,10 @@
 ---
 title: reported.json
-description: Every field of the document a host writes back, from its JSON Schema.
+description: Every field of the file a host writes back, from its JSON Schema.
 ---
 
-What the host is running, written to `reported.json` in `paths.state_dir` after every pass, and
-rendered as the metrics page from the same builder. A control plane that only reads this file
-learns what became of its last write, and why.
+The file the host writes to `reported.json` in `paths.state_dir` after every reconcile pass. The
+metrics page is built from the same data. A control plane that reads only this file learns the
+result of its last write to `desired.json`, and the reason for any failure.
 
 <SchemaReference file="crates/protocol/schema/reported-state.schema.json" />

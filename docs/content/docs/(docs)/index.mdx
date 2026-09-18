@@ -1,42 +1,40 @@
 ---
 title: Introduction
-description: What nibrunner is, and how these docs are organized.
+description: What nibrunner is and how these docs are organized.
 ---
 
-## What is nibrunner?
+nibrunner runs apps in Firecracker microVMs on one Linux machine. It is a single binary,
+`nibrunnerd`. You list the apps you want in a JSON file. The daemon boots each one in its own
+microVM and keeps it running.
 
-nibrunner is a microVM orchestrator for one Linux machine. Its one binary, `nibrunnerd`, turns a
-machine with `/dev/kvm` into a host: you describe the apps you want in a JSON document, and it
-boots each one in its own Firecracker microVM and keeps it that way.
+## Features
 
-- **Sleep and wake** — an app nobody is visiting is snapshotted and suspended, and the next
-  request wakes it. A machine that runs a few dozen apps at once holds hundreds.
-- **Backups and snapshots** — a volume in an object store outlives the machine it ran on. A
-  checkpoint cuts it at a point in time; an export bundles it as an archive another volume can
-  start from.
-- **HTTPS** — a proxy routes each hostname to its app, terminating TLS here or behind an edge
-  that does. Ports beside HTTP — ssh, DNS, WireGuard — are carried unread, and wake a sleeping
-  app too.
-- **Custom images** — an app's root is a stack of layers over the Debian image nibrunner ships:
-  a bare executable, or a squashfs or ext4 you built. A volume can start from an archive.
-- **Logs and metrics** — every app's output in a file of its own, and a Prometheus page for the
-  host.
+- **Sleep and wake.** An app with no traffic is snapshotted and suspended. The next request
+  wakes it. A machine that runs a few dozen apps at once can hold hundreds.
+- **Backups and snapshots.** Volumes can live in an object store, so they survive the machine.
+  A checkpoint is a point-in-time copy of a volume. An export is an archive of a volume that a
+  new volume can start from.
+- **HTTPS.** A built-in proxy routes each hostname to its app. It terminates TLS itself or sits
+  behind an edge that does. Non-HTTP ports (ssh, DNS, WireGuard) are forwarded as-is and also
+  wake a sleeping app.
+- **Custom images.** An app's root filesystem is a stack of layers on top of the Debian image
+  nibrunner ships. A layer is one executable, or a squashfs or ext4 image you built. A volume
+  can be seeded from an archive.
+- **Logs and metrics.** Each app's output goes to its own log file. The host serves a Prometheus
+  endpoint.
 
-## How to use these docs
+## How these docs are organized
 
-The docs are organized into three sections:
+- **Getting started**: install a host, deploy an app, configure the host. Read in order.
+- **Guides**: one feature per page.
+- **Reference**: every key of `config.toml`, `desired.json` and `reported.json`, generated from
+  their JSON Schemas. It is a separate tab next to **Docs**.
 
-- **Getting started** — install a host, deploy an app, and configure the host. Read these in
-  order.
-- **Guides** — one feature per page. Pick what you need.
-- **Reference** — every key of `config.toml`, `desired.json` and `reported.json`, rendered from
-  their JSON Schemas. It has its own tab, next to **Docs**.
-
-Use the sidebar to navigate, or search (`Ctrl+K` or `Cmd+K`) to find a page.
+Search with `Ctrl+K` or `Cmd+K`.
 
 ## Requirements
 
-- A Linux x86_64 machine with `/dev/kvm`: bare metal, or a VPS whose provider passes hardware
-  virtualisation through.
-- Debian or Ubuntu, with systemd.
+- Linux x86_64 with `/dev/kvm`. Bare metal, or a VPS whose provider enables nested
+  virtualisation.
+- Debian or Ubuntu with systemd.
 - Root, and outbound HTTPS.

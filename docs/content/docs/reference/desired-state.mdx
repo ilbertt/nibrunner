@@ -1,14 +1,14 @@
 ---
 title: desired.json
-description: Every field of the document a host converges on, from its JSON Schema.
+description: Every field of the file a host applies, from its JSON Schema.
 ---
 
-The document a host watches at the path `paths.desired_state_file` names, and converges on with
-every change to it: which apps run here, on which volumes, reachable how.
-[Deploy an app](/docs/getting-started/deploy-an-app) is the guide to it; this is the file field
-by field. A document the host cannot read is refused whole, and `reported.json` says so.
+The file the host watches at `paths.desired_state_file` and applies on every change. It declares
+which apps run on the host, on which volumes, and how they are reached.
+[Deploy an app](/docs/getting-started/deploy-an-app) is the guide; this page lists every field.
+A file the host cannot parse is rejected as a whole, and `reported.json` says why.
 
-An editor completes and checks a document that names the schema:
+An editor validates and autocompletes the file when it names the schema:
 
 ```json
 {

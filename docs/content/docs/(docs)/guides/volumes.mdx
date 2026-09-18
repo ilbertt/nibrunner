@@ -1,11 +1,11 @@
 ---
 title: Volumes
-description: What a volume starts with, where volumes live, and how a backup is cut.
+description: What a volume starts with, where volumes are stored, and how to back one up.
 ---
 
-Every app has one volume: the writable top of its root, where every write lands and the only
-thing backed up. The document names it in `volumes`, and an instance points at it by
-`volumeId`.
+Every app has one volume. It is the writable top of the app's root filesystem: all writes go
+there, and it is the only thing that gets backed up. Declare it in `volumes` and point the
+instance at it with `volumeId`.
 
 ```json
 "volumes": [
@@ -13,10 +13,10 @@ thing backed up. The document names it in `volumes`, and an instance points at i
 ]
 ```
 
-## Starting from an archive
+## Seeding a volume from an archive
 
-A volume is formatted empty the first time the document names it. To start it with content,
-name an archive in the artifact store and where to unpack it:
+A volume is formatted empty the first time it appears in `desired.json`. To start it with
+content, name an archive in the artifact store and where to unpack it:
 
 ```json
 "volumes": [
@@ -31,25 +31,25 @@ name an archive in the artifact store and where to unpack it:
 ]
 ```
 
-- The archive is a tar, gzipped or not, or a zip — what `tar -cz` or `zip -r` writes.
-- Entries land under `destinationPath` as the app sees them: `nested/hello.txt` becomes
-  `/app/data/nested/hello.txt`. The directory and everything in it are given to uid 65534.
-- What the archiver added on its own — `.DS_Store`, `__MACOSX`, `Thumbs.db`, editor swap
-  files — is skipped.
-- An entry that reaches outside `destinationPath`, a symlink in a zip, or an archive that does
-  not fit fails the volume by name.
+- The archive is a tar, gzipped or not, or a zip.
+- Entries are unpacked under `destinationPath`: `nested/hello.txt` becomes
+  `/app/data/nested/hello.txt`. The directory and everything in it are owned by uid 65534.
+- Files the archiver added on its own are skipped: `.DS_Store`, `__MACOSX`, `Thumbs.db`, editor
+  swap files.
+- The volume fails, with the reason in `reported.json`, if an entry escapes `destinationPath`, a
+  zip contains a symlink, or the archive does not fit.
 
-<Callout title="Good to know">
-  The copy happens once, as the volume is formatted. Changing or dropping `initialContents` on a
-  volume that exists changes nothing about it.
+<Callout title="Note">
+  The archive is unpacked once, when the volume is formatted. Changing or removing
+  `initialContents` on an existing volume has no effect.
 </Callout>
 
-## Where volumes live
+## Storage backends
 
-`volumes.backend` in `config.toml` chooses between two backends.
-[The reference](/docs/reference/config) is every key of both.
+`volumes.backend` in `config.toml` selects one of two backends. The
+[reference](/docs/reference/config) lists every key of both.
 
-### On this disk
+### `local-file`
 
 ```toml
 [volumes]
@@ -57,13 +57,14 @@ backend = "local-file"
 storage_prefix = "host-1"
 ```
 
-Volumes are sparse files under `paths.state_dir`. Nothing else to configure, and
-`[volumes.zerofs]` is refused rather than ignored. This is what the installer writes.
+Volumes are sparse files under `paths.state_dir`. There is nothing else to configure. A
+`[volumes.zerofs]` section on this backend is an error, not ignored. This is the installer's
+default.
 
-What it costs is what the other backend exists for: a volume that outlives the machine.
-Checkpoints and exports are refused on this backend, because they are cut in the object store.
+The limitation: volumes do not survive the machine. Checkpoints and exports are not supported on
+this backend, because they are taken in the object store.
 
-### In an object store
+### `zerofs`
 
 ```toml
 [volumes]
@@ -86,28 +87,29 @@ checkpoint_config_file = "/etc/zerofs/checkpoint.toml"
 checkpoint_cache_dir = "/data/zerofs-checkpoint"
 ```
 
-Blocks live in the object store and reach the guest over NBD, through
-[ZeroFS](https://github.com/Barre/ZeroFS). `install` renders ZeroFS's configuration files and
-the units that supervise it from these keys, so this is the only place any of it is said. The
+Volume blocks live in an object store and reach the guest over NBD, through
+[ZeroFS](https://github.com/Barre/ZeroFS). `install` generates ZeroFS's configuration files and
+systemd units from these keys, so this section is the only place to configure it. The
 object-store credentials and the encryption password go in `host.env`.
 
-- **Size `cache_disk_gib` against the disk it is on.** It shares that disk with the snapshots in
-  `paths.snapshot_dir`. A snapshot lost costs one cold boot; a full disk breaks the filesystem
-  every app on the host runs from.
-- **Whole gibibytes.** The daemon holds `cache_memory_gib` back from what a guest may be
-  promised, and reads it back from the file it rendered, which truncates.
-- **Slot _N_ takes `/dev/nbdN`.** `install` loads the nbd module with `max_apps + 1` minors. A
-  module already loaded with fewer is not reloaded — that would drop every device under every
-  guest — so raising `max_apps` on this backend asks for a reboot.
+- **Size `cache_disk_gib` for the disk it is on.** It shares that disk with the snapshots in
+  `paths.snapshot_dir`. Losing a snapshot costs one cold boot. Filling the disk breaks the
+  filesystem every app on the host runs from.
+- **Use whole gibibytes.** The daemon subtracts `cache_memory_gib` from the memory it can promise
+  to guests, and reads the value back from the file it generated, which truncates fractions.
+- **Slot _N_ uses `/dev/nbdN`.** `install` loads the nbd module with `max_apps + 1` minors. If
+  the module is already loaded with fewer, it is not reloaded, because that would detach every
+  device under every guest. Raising `max_apps` on this backend therefore needs a reboot.
 
-<Callout title="Good to know">
-  `volumes.storage_prefix` is one host, not one app. Every volume placed here shares it, and
-  deleting it destroys all of them.
+<Callout type="warn" title="Warning">
+  `volumes.storage_prefix` is per host, not per app. Every volume on the host shares it. Deleting
+  the prefix destroys all of them.
 </Callout>
 
 ## Checkpoints and exports
 
-On the `zerofs` backend, the document can cut a volume at a point in time, and bundle it:
+On the `zerofs` backend, `desired.json` can take a point-in-time copy of a volume and bundle it
+as an archive:
 
 ```json
 "checkpoints": [
@@ -122,11 +124,11 @@ On the `zerofs` backend, the document can cut a volume at a point in time, and b
 ]
 ```
 
-- A **checkpoint** is the volume as it was when the checkpoint was cut, kept in the object store
-  until the document says `absent`.
-- An **export** freezes the guest's filesystem, cuts a checkpoint of its own, and writes a
-  gzipped tar — the volume's contents under `data/`, `environment` as `.env` — to `objectKey`
-  in `exports.store_url`. To start another volume from it, give `initialContents` an archive of
-  what is under `data/`, with `destinationPath` `/`.
+- A **checkpoint** is a copy of the volume at the moment it was taken. It stays in the object
+  store until `desiredState` is `absent`.
+- An **export** freezes the guest's filesystem, takes its own checkpoint, and writes a gzipped
+  tar to `objectKey` in `exports.store_url`. The tar holds the volume's contents under `data/`
+  and `environment` as `.env`. To start a new volume from it, point `initialContents` at an
+  archive of the `data/` contents, with `destinationPath` `/`.
 
-`reported.json` says what became of each, and why.
+`reported.json` reports the state of each checkpoint and export, with the reason on failure.

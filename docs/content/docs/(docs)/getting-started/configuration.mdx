@@ -1,28 +1,30 @@
 ---
 title: Configuration
-description: The host's config.toml — the rules it follows, what the installer wrote, and where secrets go.
+description: The host's config.toml. How to change it, what the installer wrote, and where secrets go.
 ---
 
-A host is one file, `/etc/nibrunner/config.toml`. `nibrunnerd install` writes it, and every
-`nibrunnerd start` reads it. [The reference](/docs/reference/config) is every key in it.
+The host is configured by one file, `/etc/nibrunner/config.toml`. `nibrunnerd install` writes it
+and every `nibrunnerd start` reads it. The [reference](/docs/reference/config) lists every key.
 
 ## Changing it
 
 1. Edit `/etc/nibrunner/config.toml`.
-2. Put any secret the configuration now needs in `/etc/nibrunner/host.env`.
+2. Put any secret the new configuration needs in `/etc/nibrunner/host.env`.
 3. Run `nibrunnerd start`.
 
-`start` validates the whole file before it does anything, re-renders what `install` wrote, and
-restarts only what read something that changed. A file that is wrong says which key and why.
+`start` validates the whole file before doing anything, regenerates the files `install` wrote,
+and restarts only the units whose configuration changed. If the file is invalid, the error names
+the key and the reason.
 
-## Three rules
+## Validation rules
 
-Every refusal follows from one of these:
+- **No key has a default.** If a section is present, every key in it must be set. A missing key
+  is an error that names the key.
+- **Unknown keys are errors.** A typo is reported as an unknown key, not as a missing one.
+- **Only whole sections are optional.** `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]` and
+  `[logs]` can be omitted. If present, they must be complete.
 
-- **No key has a default.** A key its section declares but the file omits is refused by name.
-- **An unknown key is refused.** A mistyped key and a missing one are different errors.
-- **A whole section is what may be absent** — `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]`,
-  `[logs]`. A section that is present is complete.
+Example errors:
 
 ```
 volumes.backend is not specified, and nothing here is optional
@@ -30,51 +32,53 @@ volumes.zerofs is not read by the local-file backend, which is what volumes.back
 proxy.http.port is not free, because 21000-28999 is what a slot takes for an app's loopback port
 ```
 
-## What the installer wrote
+## What the installer writes
 
-A complete host, which runs as it is:
+A complete configuration that works as-is:
 
-| Key | Starter value |
+| Key | Value |
 | --- | --- |
-| `max_apps` | What this machine holds, [measured](/docs/guides/host-capacity). |
+| `max_apps` | What the machine can hold, [measured](/docs/guides/host-capacity) at install time. |
 | `[paths]` | Everything under `/var/lib/nibrunner`. |
-| `[artifacts]`, `[exports]` | Directories on this disk. |
-| `[volumes]` | `backend = "local-file"`: sparse files on this disk. |
-| `[proxy.http]` | Plain HTTP on every address at `:80`. |
+| `[artifacts]`, `[exports]` | Directories on the local disk. |
+| `[volumes]` | `backend = "local-file"`: sparse files on the local disk. |
+| `[proxy.http]` | Plain HTTP on all addresses, port 80. |
 | `[logs]` | The newest 256 MiB of each app's output. |
 
-Before putting anything real on it, you will likely change two things:
+Before running anything real on it, you will probably change two things:
 
-- **The volume backend.** [`zerofs`](/docs/guides/volumes#in-an-object-store) puts volumes in an
-  object store, which is what lets them outlive the machine and what a backup is cut from.
-- **The listener.** [`[proxy.http.tls]`](/docs/guides/https) for a certificate on this host, or
-  nothing more behind an edge that terminates TLS.
+- **The volume backend.** [`zerofs`](/docs/guides/volumes#zerofs) stores volumes in an object
+  store. They survive the machine, and backups are taken from them.
+- **The listener.** Add [`[proxy.http.tls]`](/docs/guides/https) to terminate TLS on the host.
+  Behind an edge that terminates TLS, keep plain HTTP.
 
 [`deploy/config.example.toml`](https://github.com/ilbertt/nibrunner/blob/main/deploy/config.example.toml)
-is a host with every section filled in.
+shows every section filled in.
 
 ## Secrets
 
-Nothing in `config.toml` is a secret. Object-store credentials and the ZeroFS encryption
-password go in `/etc/nibrunner/host.env`, which `install` created with every variable named and
-none set. `nibrunnerd start` refuses while one the configuration needs is still empty.
+`config.toml` holds no secrets. Object-store credentials and the ZeroFS encryption password go in
+`/etc/nibrunner/host.env`. `install` creates that file with every variable named and empty.
+`nibrunnerd start` refuses to run while a variable the configuration needs is still empty.
 
 ## Ports
 
-Each app slot reserves eight consecutive ports from 21000, so every listener in this file must
-be outside `21000` to `21000 + 8 × max_apps − 1`. `0` is refused too, and `metrics.port` must
-differ from `proxy.http.port`.
+Each app slot reserves eight consecutive ports starting at 21000. Every listener in `config.toml`
+must be outside the range `21000` to `21000 + 8 × max_apps − 1`. Port `0` is rejected.
+`metrics.port` must differ from `proxy.http.port`.
 
-<Callout title="Good to know">
-  - `NIBRUNNER_CONFIG` names another file.
-  - `NIBRUNNER_LOG` is a `tracing` filter for the daemon. It stays in the environment.
-  - Which apps run here is `desired.json`, not this file.
-</Callout>
+## Environment variables
+
+- `NIBRUNNER_CONFIG`: path to a different configuration file.
+- `NIBRUNNER_LOG`: a `tracing` filter for the daemon's log. Set it in the environment, not in
+  the file.
+
+Which apps run on the host is defined in `desired.json`, not in `config.toml`.
 
 ## Editor support
 
-An editor that reads TOML schemas — Even Better TOML in VS Code, taplo — completes and checks
-the file when its first line names the schema:
+An editor with TOML schema support (Even Better TOML for VS Code, taplo) validates and
+autocompletes the file when its first line is:
 
 ```toml
 #:schema https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/config.schema.json

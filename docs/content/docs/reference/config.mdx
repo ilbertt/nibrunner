@@ -1,16 +1,16 @@
 ---
 title: config.toml
-description: Every key of a host's configuration file, from its JSON Schema.
+description: Every key of the host configuration file, from its JSON Schema.
 ---
 
-The file `nibrunnerd install` writes and every `nibrunnerd start` reads, at
-`/etc/nibrunner/config.toml` unless `NIBRUNNER_CONFIG` names another.
-[Configuration](/docs/getting-started/configuration) is the guide to it; this is the file key by
-key. Nothing here has a default, so a key its section declares is required unless the table says
-otherwise, and a key no section declares is refused.
+The file `nibrunnerd install` writes and every `nibrunnerd start` reads. It is at
+`/etc/nibrunner/config.toml` unless `NIBRUNNER_CONFIG` points elsewhere.
+[Configuration](/docs/getting-started/configuration) is the guide; this page lists every key.
+No key has a default: every key a section declares is required unless the table says otherwise,
+and unknown keys are rejected.
 
-An editor that reads TOML schemas — Even Better TOML in VS Code, taplo — completes and checks the
-file when its first line names the schema:
+An editor with TOML schema support (Even Better TOML for VS Code, taplo) validates and
+autocompletes the file when its first line is:
 
 ```toml
 #:schema https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/config.schema.json
