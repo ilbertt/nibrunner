@@ -18,6 +18,8 @@ use crate::adapters::vm::UNKNOWN_VM;
 use crate::domain::backoff::NO_START_ATTEMPTS;
 use crate::domain::metrics::converge;
 use crate::domain::metrics::passes::Trigger;
+use crate::domain::metrics::resources::StartRefusal;
+use crate::domain::report::capacity::memory_shortfall_for;
 use crate::host::Host;
 
 pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
@@ -42,10 +44,11 @@ pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
                     exited: !status.active
                         && status.started_this_boot
                         && record.is_some_and(|record| record.started_at.is_some() && !record.stop_requested),
-                    // A refusal leaves the record failed with nothing spent on it; a boot that
-                    // failed, or a guest that exited, cost an attempt or came up first.
+                    // A refusal leaves the record failed — or pending, waiting for room — with
+                    // nothing spent on it; a boot that failed, or a guest that exited, cost an
+                    // attempt or came up first.
                     refused: record.is_some_and(|record| {
-                        record.state == InstanceState::Failed
+                        matches!(record.state, InstanceState::Failed | InstanceState::Pending)
                             && record.started_at.is_none()
                             && record.start_attempts == NO_START_ATTEMPTS
                     }),
@@ -139,10 +142,41 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
             refused = starts.len(),
             "instance starts refused: isolation ruleset not applied"
         );
+        host.metrics
+            .resources
+            .starts_refused(StartRefusal::NotIsolated, starts.len());
         return;
     }
+
+    // Each start is measured against what the host holds, the starts before it in this pass
+    // included, so a wave of them boots what fits and no more. The records are read once and
+    // the one a start touched read back, rather than the thousand of them once per start.
+    let mut records = host.state.records().await;
+    let (mut waiting, mut waiting_mib) = (0, 0u64);
     for desired in starts {
+        let wanted = &desired.config.resources;
+        if let Some(shortfall_mib) =
+            memory_shortfall_for(host.guest_memory_mib, &records, &desired.app_id, wanted)
+        {
+            instances::wait_for_room(host, desired, shortfall_mib).await;
+            waiting += 1;
+            waiting_mib += u64::from(wanted.memory_mib);
+            continue;
+        }
         instances::start_instance(host, desired).await;
+        records.retain(|record| record.app_id != desired.app_id);
+        records.extend(host.state.record(&desired.app_id).await);
+    }
+    if waiting > 0 {
+        tracing::warn!(
+            waiting,
+            memory_mib = waiting_mib,
+            guest_memory_mib = host.guest_memory_mib,
+            "instance starts wait for room on this host"
+        );
+        host.metrics
+            .resources
+            .starts_refused(StartRefusal::NoRoom, waiting);
     }
 }
 
@@ -1017,6 +1051,212 @@ mod tests {
         let host = test_host().await;
         apply_starts(&host, &ReconcilePlan::default()).await;
         assert!(host.vms.calls().is_empty());
+    }
+
+    fn nth_app(n: usize) -> protocol::AppId {
+        protocol::AppId::parse(format!("app-{n}")).unwrap()
+    }
+
+    /// A document naming `count` on-request apps this host has never held, each on a volume of
+    /// its own, in the order the document names them.
+    fn on_request_apps(count: usize) -> protocol::HostDesiredState {
+        desired_state(|state| {
+            for n in 1..=count {
+                let volume_id = protocol::VolumeId::parse(format!("vol-{n}")).unwrap();
+                state.volumes.push(desired_volume(|volume| {
+                    volume.volume_id = volume_id.clone();
+                    volume.app_id = nth_app(n);
+                }));
+                state.instances.push(desired_instance(|instance| {
+                    instance.app_id = nth_app(n);
+                    instance.volume_id = volume_id;
+                    instance.desired_state = DesiredInstanceState::OnRequest;
+                }));
+            }
+        })
+    }
+
+    /// How many apps of the default size the test host has memory for: four.
+    fn apps_that_fit(host: &TestHost) -> usize {
+        crate::domain::report::capacity::apps_up_at_once(
+            host.guest_memory_mib,
+            protocol::DEFAULT_INSTANCE_RESOURCES.memory_mib,
+        ) as usize
+    }
+
+    fn boots(host: &TestHost) -> usize {
+        host.vms
+            .calls()
+            .into_iter()
+            .filter(|call| *call == VmCall::Boot)
+            .count()
+    }
+
+    fn start_refusals_for_room(page: &str) -> String {
+        page.lines()
+            .find(|line| line.starts_with("nibrunner_instance_start_refusals_total{reason=\"no_room\"}"))
+            .map(str::to_string)
+            .unwrap_or_default()
+    }
+
+    const WAITING_FOR_ONE_MORE: &str =
+        "waiting to be started: its host is 256 MiB short of the memory it needs";
+
+    #[tokio::test]
+    async fn a_wave_of_starts_boots_what_the_memory_fits_in_document_order_and_leaves_the_rest_waiting() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let (said, _listening) = Said::listening();
+        let host = test_host().await;
+        let fits = apps_that_fit(&host);
+        let wave = on_request_apps(fits + 2);
+
+        reconcile(host.arc(), &wave, Trigger::Change).await;
+
+        assert_eq!(boots(&host), fits);
+        for n in 1..=fits {
+            let record = host.state.record(&nth_app(n)).await.unwrap();
+            assert_eq!(record.state, InstanceState::Starting, "app-{n}");
+        }
+        for n in fits + 1..=fits + 2 {
+            let record = host.state.record(&nth_app(n)).await.unwrap();
+            assert_eq!(record.state, InstanceState::Pending, "app-{n}");
+            assert_eq!(record.message.as_ref().unwrap().as_str(), WAITING_FOR_ONE_MORE);
+            assert_eq!(
+                record.start_attempts, NO_START_ATTEMPTS,
+                "nothing was spent waiting"
+            );
+            assert!(record.started_at.is_none());
+            assert_eq!(
+                host.metrics.health.of(&nth_app(n)).failures,
+                [0; 8],
+                "waiting is not failing"
+            );
+            assert!(
+                host.slot_of(&nth_app(n)).await.is_some(),
+                "the record answers for its hostnames"
+            );
+        }
+        assert!(
+            start_refusals_for_room(&metrics_page(&host).await).ends_with(" 2"),
+            "{}",
+            metrics_page(&host).await
+        );
+        let warned: Vec<_> = said
+            .lines()
+            .into_iter()
+            .filter(|line| line.contains("wait for room"))
+            .collect();
+        assert_eq!(
+            warned.len(),
+            1,
+            "said once for the pass, not once per app: {warned:?}"
+        );
+        assert!(warned[0].starts_with("WARN "), "{}", warned[0]);
+    }
+
+    #[tokio::test]
+    async fn and_the_next_pass_starts_one_more_for_each_app_that_went_to_sleep() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let host = test_host().await;
+        let fits = apps_that_fit(&host);
+        let wave = on_request_apps(fits + 2);
+        reconcile(host.arc(), &wave, Trigger::Change).await;
+        assert_eq!(boots(&host), fits);
+
+        // A tick over the same document boots nothing more while nothing has made room.
+        reconcile(host.arc(), &wave, Trigger::Tick).await;
+        assert_eq!(boots(&host), fits);
+
+        // The first app's idle timeout put it to sleep, as the idle pass would.
+        host.state
+            .update_record(&nth_app(1), |record| {
+                record.state = InstanceState::Idle;
+                record.stop_requested = true;
+            })
+            .await;
+        reconcile(host.arc(), &wave, Trigger::Tick).await;
+
+        assert_eq!(boots(&host), fits + 1);
+        let started = host.state.record(&nth_app(fits + 1)).await.unwrap();
+        assert_eq!(started.state, InstanceState::Starting);
+        assert!(started.message.is_none());
+        assert_eq!(
+            started.start_attempts.attempts, 1,
+            "the boot is the first attempt"
+        );
+        let waiting = host.state.record(&nth_app(fits + 2)).await.unwrap();
+        assert_eq!(waiting.state, InstanceState::Pending);
+        assert_eq!(waiting.message.as_ref().unwrap().as_str(), WAITING_FOR_ONE_MORE);
+        assert!(
+            start_refusals_for_room(&metrics_page(&host).await).ends_with(" 5"),
+            "two refused, then two, then one: {}",
+            metrics_page(&host).await
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replacement_asking_for_more_than_fits_waits_rather_than_booting_beside_the_others() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
+        let host = test_host().await;
+        let fits = apps_that_fit(&host);
+        let full = desired_state(|state| {
+            let wave = on_request_apps(fits);
+            state.volumes = wave.volumes;
+            state.instances = wave
+                .instances
+                .into_iter()
+                .map(|mut instance| {
+                    instance.desired_state = DesiredInstanceState::Running;
+                    instance
+                })
+                .collect();
+        });
+        reconcile(host.arc(), &full, Trigger::Change).await;
+        assert_eq!(boots(&host), fits);
+        host.vms.set_status(running_vm());
+
+        // A new release of the first app, wanting twice the memory: the old guest goes down for
+        // it, and what is left beside the others is one app's worth short of what it asks.
+        let mut newer = full.clone();
+        newer.instances[0].deployment_id = protocol::DeploymentId::parse("dep-2").unwrap();
+        newer.instances[0].config.resources.memory_mib = protocol::DEFAULT_INSTANCE_RESOURCES.memory_mib * 2;
+        reconcile(host.arc(), &newer, Trigger::Change).await;
+
+        let calls = host.vms.calls();
+        assert_eq!(&calls[fits..], &[VmCall::Stop, VmCall::Discard], "{calls:?}");
+        let replaced = host.state.record(&nth_app(1)).await.unwrap();
+        assert_eq!(replaced.state, InstanceState::Pending);
+        assert_eq!(replaced.deployment_id.as_str(), "dep-2");
+        assert_eq!(replaced.message.as_ref().unwrap().as_str(), WAITING_FOR_ONE_MORE);
+        assert_eq!(replaced.start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn a_record_waiting_for_room_is_left_waiting_by_the_status_loop() {
+        let host = test_host().await;
+        for (app_id, on_request) in [(nth_app(1), false), (nth_app(2), true)] {
+            host.state
+                .put_record(instance_record(|record| {
+                    record.app_id = app_id;
+                    record.on_request = on_request;
+                    record.state = InstanceState::Pending;
+                    record.started_at = None;
+                    record.message = Some(protocol::StateMessage::new(WAITING_FOR_ONE_MORE));
+                }))
+                .await;
+        }
+
+        instances::refresh_states(host.arc()).await;
+
+        for n in 1..=2 {
+            let record = host.state.record(&nth_app(n)).await.unwrap();
+            assert_eq!(record.state, InstanceState::Pending, "app-{n}");
+            assert_eq!(record.message.as_ref().unwrap().as_str(), WAITING_FOR_ONE_MORE);
+            assert!(
+                observe(&host, &desired_state(|_| {})).await.instances[n - 1].refused,
+                "app-{n} is started the pass there is room, on request or not"
+            );
+        }
     }
 
     #[tokio::test]
