@@ -8,9 +8,10 @@ use crate::services::idle_service::IdleService;
 
 // An app sleeps on the first pass that finds it quiet for long enough, so this interval is the
 // overshoot: the least a timeout can be is 60 seconds, and waiting a minute to notice made an app
-// sleep at twice the time it asked for. It is the counters this reads that set the floor — they
-// come from the ruleset, whose size is the number of apps on the host.
-const IDLE_INTERVAL: Duration = Duration::from_millis(crate::domain::reconcile::idle::ACTIVITY_INTERVAL_MS);
+// sleep at twice the time it asked for. A pass reads what `ActivityController` last recorded
+// rather than taking a reading of its own — at most one of its intervals old — so the snapshots
+// a pass waits on hold up the next pass and no reading.
+const IDLE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct IdleController {
     idle: Arc<dyn IdleService>,
@@ -22,7 +23,6 @@ impl IdleController {
     }
 
     pub async fn idle_once(&self) {
-        self.idle.record_activity().await;
         self.idle.apply_sleep().await;
     }
 }
@@ -47,17 +47,10 @@ mod tests {
     use crate::services::idle_service::MockIdleService;
 
     #[tokio::test]
-    async fn a_pass_records_what_moved_before_it_decides_what_is_quiet() {
-        let mut sequence = mockall::Sequence::new();
+    async fn a_pass_reads_the_latest_activity_rather_than_taking_a_reading_of_its_own() {
         let mut idle = MockIdleService::new();
-        idle.expect_record_activity()
-            .times(1)
-            .in_sequence(&mut sequence)
-            .returning(|| ());
-        idle.expect_apply_sleep()
-            .times(1)
-            .in_sequence(&mut sequence)
-            .returning(|| ());
+        idle.expect_record_activity().never();
+        idle.expect_apply_sleep().times(1).returning(|| ());
 
         IdleController::new(Arc::new(idle)).idle_once().await;
     }
