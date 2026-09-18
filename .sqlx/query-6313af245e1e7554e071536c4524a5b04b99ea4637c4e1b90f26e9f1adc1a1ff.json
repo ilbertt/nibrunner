@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "select app_id, record from instances",
+  "describe": {
+    "columns": [
+      {
+        "name": "app_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "record",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6313af245e1e7554e071536c4524a5b04b99ea4637c4e1b90f26e9f1adc1a1ff"
+}

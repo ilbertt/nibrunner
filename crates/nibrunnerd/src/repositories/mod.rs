@@ -2,6 +2,7 @@ pub mod activity_repository;
 pub mod deleted_volumes_repository;
 pub mod host_identity_repository;
 pub mod instances_repository;
+mod last_written;
 pub mod meters_repository;
 pub mod slots_repository;
 

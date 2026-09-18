@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into meters (app_id, running_ms, idle_ms, cpu_ms, rx_bytes, tx_bytes, disk_provisioned_mib_seconds, disk_used_mib_seconds) values (?, ?, ?, ?, ?, ?, ?, ?)\n                     on conflict (app_id) do update set\n                        running_ms = excluded.running_ms,\n                        idle_ms = excluded.idle_ms,\n                        cpu_ms = excluded.cpu_ms,\n                        rx_bytes = excluded.rx_bytes,\n                        tx_bytes = excluded.tx_bytes,\n                        disk_provisioned_mib_seconds = excluded.disk_provisioned_mib_seconds,\n                        disk_used_mib_seconds = excluded.disk_used_mib_seconds",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "b069d2657dca97be5c477a9ab67b751f0b37219473c13b298c2119889f130404"
+}

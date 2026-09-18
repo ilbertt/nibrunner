@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "delete from meters where app_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "c6d10b4ba7055bc7e5cb83bf75b2ad41321bf75a602defbdd2425d380d2fc05a"
+}
