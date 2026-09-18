@@ -14,9 +14,10 @@ pub struct ObservedInstance {
     pub running: bool,
     pub exited: bool,
     /// Whether the record is down from a start this host refused before spending an attempt on
-    /// it: its volume could not be made ready, or its document asked for what this host cannot
-    /// give. Nothing has been served under it, so it is not one asleep, nor one that spent its
-    /// budget: it is started the pass the refusal lifts, on request or not.
+    /// it: its volume could not be made ready, its document asked for what this host cannot
+    /// give, or the host had no memory left for it. Nothing has been served under it, so it is
+    /// not one asleep, nor one that spent its budget: it is started the pass the refusal lifts,
+    /// on request or not.
     pub refused: bool,
 }
 
