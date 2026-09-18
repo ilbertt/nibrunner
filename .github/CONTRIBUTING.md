@@ -30,5 +30,5 @@ We use [Conventional Commits](https://www.conventionalcommits.org/). A pull requ
 squash-merged with its title as the commit subject, so make sure the title is in the correct
 format — `check-pr-title` refuses one that is not.
 
-Everything else — the layout, the code style, the test lanes, what CI checks and the files that are
-generated rather than written — is in [`AGENTS.md`](../AGENTS.md).
+Everything else — the layout, the code style, the test lanes, what CI checks and the files that
+are generated rather than written — is in [`AGENTS.md`](../AGENTS.md).
