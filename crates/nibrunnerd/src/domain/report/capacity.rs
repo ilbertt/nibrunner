@@ -1,5 +1,6 @@
-use protocol::{HostCapacity, InstanceResources, InstanceState};
+use protocol::{AppId, HostCapacity, InstanceResources, InstanceState};
 
+use crate::domain::backoff::NO_START_ATTEMPTS;
 use crate::domain::report::InstanceRecord;
 
 const BYTES_PER_MIB: u64 = 1_048_576;
@@ -36,16 +37,41 @@ fn apps_that_fit(room: u64, each: u64) -> u32 {
 const HOLDS_NOTHING: [InstanceState; 3] =
     [InstanceState::Idle, InstanceState::Stopped, InstanceState::Failed];
 
+/// A record holds what it was given while there is a microVM behind it or one on its way. A
+/// boot in flight is pending with its attempt spent; a record pending with none spent is one
+/// waiting for room, with nothing behind it yet.
+fn holds_something(record: &InstanceRecord) -> bool {
+    !HOLDS_NOTHING.contains(&record.state)
+        && !(record.state == InstanceState::Pending && record.start_attempts == NO_START_ATTEMPTS)
+}
+
 pub fn committed_resources(records: &[InstanceRecord]) -> Vec<InstanceResources> {
     records
         .iter()
-        .filter(|record| !HOLDS_NOTHING.contains(&record.state))
+        .filter(|record| holds_something(record))
         .map(|record| record.resources)
         .collect()
 }
 
 fn committed_memory_mib(committed: &[InstanceResources]) -> u64 {
     committed.iter().map(|entry| u64::from(entry.memory_mib)).sum()
+}
+
+/// What this host is short of bringing `app_id` up wanting `wanted`, beside everything else it
+/// holds; nothing where it fits. The app's own record is left out: it is the one being measured.
+pub fn memory_shortfall_for(
+    guest_memory_mib: u64,
+    records: &[InstanceRecord],
+    app_id: &AppId,
+    wanted: &InstanceResources,
+) -> Option<u64> {
+    let others: Vec<InstanceResources> = records
+        .iter()
+        .filter(|record| &record.app_id != app_id && holds_something(record))
+        .map(|record| record.resources)
+        .collect();
+    let shortfall = memory_shortfall_mib(guest_memory_mib, &others, wanted);
+    (shortfall > 0).then_some(shortfall)
 }
 
 pub fn allocatable_capacity(
@@ -157,6 +183,48 @@ mod tests {
     }
 
     #[test]
+    fn what_a_host_is_short_for_an_app_leaves_out_the_app_itself_and_everything_holding_nothing() {
+        let app = AppId::parse("app-1").unwrap();
+        let mut records = neighbours(NEIGHBOURS_THAT_FIT, InstanceState::Running);
+        assert_eq!(
+            memory_shortfall_for(HOST_MEMORY_MIB, &records, &app, &DEFAULT_INSTANCE_RESOURCES),
+            None
+        );
+        // The app's own record is what the start or the wake puts back, so it is not in the way.
+        records.push(instance_record(|record| {
+            record.app_id = app.clone();
+            record.state = InstanceState::Starting;
+        }));
+        assert_eq!(
+            memory_shortfall_for(HOST_MEMORY_MIB, &records, &app, &DEFAULT_INSTANCE_RESOURCES),
+            None
+        );
+        records.push(instance_record(|record| {
+            record.app_id = AppId::parse("neighbour-asleep").unwrap();
+            record.state = InstanceState::Idle;
+        }));
+        assert_eq!(
+            memory_shortfall_for(HOST_MEMORY_MIB, &records, &app, &DEFAULT_INSTANCE_RESOURCES),
+            None
+        );
+        records.push(instance_record(|record| {
+            record.app_id = AppId::parse("neighbour-up").unwrap();
+        }));
+        assert_eq!(
+            memory_shortfall_for(HOST_MEMORY_MIB, &records, &app, &DEFAULT_INSTANCE_RESOURCES),
+            Some(APP_MEMORY_MIB)
+        );
+        let twice_as_much = InstanceResources {
+            memory_mib: DEFAULT_INSTANCE_RESOURCES.memory_mib * 2,
+            ..DEFAULT_INSTANCE_RESOURCES
+        };
+        assert_eq!(
+            memory_shortfall_for(HOST_MEMORY_MIB, &records, &app, &twice_as_much),
+            Some(APP_MEMORY_MIB * 2)
+        );
+    }
+
+    #[test]
     fn memory_the_host_needs_is_not_memory_a_guest_may_be_given() {
         const HOST_MIB: u64 = 7779;
         const CACHE_MIB: u64 = 2048;
@@ -251,6 +319,20 @@ mod tests {
             record.on_request = true;
         })])
         .is_empty());
+    }
+
+    #[test]
+    fn a_boot_in_flight_holds_its_memory_and_a_record_waiting_for_room_does_not() {
+        let booting = instance_record(|record| {
+            record.state = InstanceState::Pending;
+            record.start_attempts = crate::domain::backoff::AttemptWindow {
+                attempts: 1,
+                last_attempt_at_ms: Some(0),
+            };
+        });
+        assert_eq!(committed_resources(&[booting]).len(), 1);
+        let waiting = instance_record(|record| record.state = InstanceState::Pending);
+        assert!(committed_resources(&[waiting]).is_empty());
     }
 
     #[test]

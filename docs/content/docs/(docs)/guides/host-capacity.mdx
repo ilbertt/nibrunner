@@ -35,6 +35,15 @@ Above what the memory runs at once is only said — that is what [sleeping](/doc
 is for. Above what the disk holds or the ports fit, `start` says the number to set instead. Both
 are advice, not refusals: an app given more counts for more, and the number is yours to keep.
 
+The memory bound is the one the host keeps to. A pass boots an app only where its memory fits
+beside every app that is up or on its way up, the starts before it in the same pass included;
+one that does not fit is left `pending`, with the shortfall on its record
+(`waiting to be started: its host is 256 MiB short of the memory it needs`) and no start attempt
+spent, and is planned again every pass. So a document naming a thousand on-request apps on a
+host that runs 240 at once boots 240, and the rest follow as the first go to sleep. A wake is
+refused the same way, and its request answered 503. How many starts are waiting is said once a
+pass and counted on `nibrunner_instance_start_refusals_total{reason="no_room"}`.
+
 ## Changing it
 
 1. Edit `max_apps`.
