@@ -13,6 +13,12 @@ pub const ACTIVITY_INTERVAL_MS: u64 = 5_000;
 // batch that went quiet together is asleep a few snapshots after the first rather than forty.
 pub const SLEEP_CONCURRENCY: usize = 4;
 
+// How many sleeps one pass takes on before handing back to its caller. A pass acts on one reading
+// of the state, and with two hundred apps due at once the last of them was snapshotted minutes
+// after that reading, having been up and busy for most of them. Two rounds of the disk keep a
+// pass short; what it leaves it counts back, so the caller comes straight back for it.
+pub const SLEEPS_PER_PASS: usize = SLEEP_CONCURRENCY * 2;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use futures::StreamExt;
@@ -20,6 +26,7 @@ use nft_render::AppTraffic;
 use protocol::{ActivationPolicy, AppId, Timestamp};
 
 use crate::domain::activation::{should_sleep, ActivitySignals, SleepReason};
+use crate::domain::metrics::sleep_wake::SleepOutcome;
 use crate::domain::report::InstanceRecord;
 use crate::host::Host;
 use crate::state::HostSnapshot;
@@ -145,37 +152,21 @@ fn allowance_ms(policy: protocol::SleepPolicy) -> Option<u64> {
     }
 }
 
-/// Whether the policy lets this app go now, and what the pass has seen of it that says so.
-fn due(
-    policy: &ActivationPolicy,
-    record: &InstanceRecord,
-    snapshot: &HostSnapshot,
-    now: i64,
-) -> Option<(ActivitySignals, SleepReason)> {
+/// The policy's case for letting this app go now.
+struct Due {
+    reason: SleepReason,
+    /// How long the app has been what the policy sleeps it for: quiet, or up.
+    for_ms: i64,
+    /// How far past what the policy allowed.
+    late_ms: i64,
+}
+
+fn due(policy: &ActivationPolicy, record: &InstanceRecord, snapshot: &HostSnapshot, now: i64) -> Option<Due> {
     let signals = ActivitySignals {
         last_active_at_ms: snapshot.last_active_at_ms.get(&record.app_id).copied(),
         started_at_ms: record.started_at.as_ref().map(Timestamp::epoch_ms),
     };
     let reason = should_sleep(policy, record, &signals, now)?;
-    Some((signals, reason))
-}
-
-async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) {
-    // Held across the flush and the snapshot, and taken by a wake for as long as it is bringing
-    // the guest back: a request that reaches an app mid-snapshot waits for the snapshot and then
-    // restores what it wrote, rather than finding a guest that is paused or half written out.
-    let _transition = host.state.transition(app_id).await;
-    // Decided again under the lock, and against the clock as it is now: an app picked for the
-    // batch may have been asked for while it waited its turn, and how late the policy is acted on
-    // is measured from when it is, not from when the batch was picked.
-    let now = crate::clock::now_ms();
-    let snapshot = host.state.snapshot().await;
-    let Some(record) = snapshot.records.get(app_id) else {
-        return;
-    };
-    let Some((signals, reason)) = due(policy, record, &snapshot, now) else {
-        return;
-    };
     let since = match reason {
         SleepReason::Quiet => signals.last_active_at_ms,
         SleepReason::LivedLongEnough => signals.started_at_ms,
@@ -184,20 +175,58 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) {
     let late_ms = allowance_ms(policy.sleep_when)
         .map_or(0, |allowed| for_ms - allowed as i64)
         .max(0);
-    host.metrics
-        .sleep_wake
-        .sleep_due(reason, std::time::Duration::from_millis(late_ms as u64));
-    tracing::info!(
-        %app_id,
-        reason = reason.as_str(),
+    Some(Due {
+        reason,
         for_ms,
         late_ms,
-        "letting an app sleep"
-    );
-    crate::domain::reconcile::instances::suspend_instance(host, app_id, reason).await;
+    })
 }
 
-pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
+/// Puts the app to sleep if it is still due, and says whether it went.
+async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bool {
+    // Decided again, against the state and the clock as they are now: an app picked for the
+    // batch may have been asked for while it waited its turn, and how late the policy is acted on
+    // is measured from when it is, not from when the batch was picked. Decided before the
+    // transition lock rather than under it, so the lock is held for the move and nothing else.
+    let now = crate::clock::now_ms();
+    let snapshot = host.state.snapshot().await;
+    let Some(record) = snapshot.records.get(app_id) else {
+        return false;
+    };
+    let Some(due) = due(policy, record, &snapshot, now) else {
+        let active_ms_ago = snapshot.last_active_at_ms.get(app_id).map(|at| now - at);
+        tracing::info!(
+            %app_id,
+            state = record.state.as_str(),
+            active_ms_ago,
+            "no longer quiet; left up"
+        );
+        return false;
+    };
+    host.metrics
+        .sleep_wake
+        .sleep_due(due.reason, std::time::Duration::from_millis(due.late_ms as u64));
+    tracing::info!(
+        %app_id,
+        reason = due.reason.as_str(),
+        for_ms = due.for_ms,
+        late_ms = due.late_ms,
+        "letting an app sleep"
+    );
+    // Held across the flush and the snapshot, and taken by a wake for as long as it is bringing
+    // the guest back: a request that reaches an app mid-snapshot waits for the snapshot and then
+    // restores what it wrote, rather than finding a guest that is paused or half written out.
+    let _transition = host.state.transition(app_id).await;
+    crate::domain::reconcile::instances::suspend_instance(host, app_id, due.reason).await
+        == Some(SleepOutcome::Slept)
+}
+
+/// Puts the due apps to sleep, the most overdue first and `SLEEPS_PER_PASS` of them at most, and
+/// returns how many due apps it left for the next pass. A caller handed more than none runs again
+/// at once rather than at the interval: the bound keeps a pass short, not the host slow. A pass
+/// that put nothing to sleep returns none whatever was due, since run again at once it would try
+/// the same apps against the same full disk.
+pub async fn apply_sleep(host: &std::sync::Arc<Host>) -> usize {
     let policies: BTreeMap<AppId, ActivationPolicy> = {
         let cache = host.cache.lock().await;
         cache
@@ -214,23 +243,32 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) {
     let snapshot = host.state.snapshot().await;
     let now = crate::clock::now_ms();
 
-    let letting_go: Vec<(AppId, &ActivationPolicy)> = snapshot
+    let mut letting_go: Vec<(Due, AppId, ActivationPolicy)> = snapshot
         .records
         .values()
         .filter_map(|record| {
             let policy = policies.get(&record.app_id)?;
-            due(policy, record, &snapshot, now).map(|_| (record.app_id.clone(), policy))
+            due(policy, record, &snapshot, now).map(|due| (due, record.app_id.clone(), *policy))
         })
         .collect();
     if letting_go.is_empty() {
-        return;
+        return 0;
     }
-    futures::stream::iter(letting_go)
-        .for_each_concurrent(SLEEP_CONCURRENCY, |(app_id, policy)| async move {
-            let_sleep(host, &app_id, policy).await;
-        })
+    letting_go.sort_by_key(|(due, ..)| std::cmp::Reverse(due.late_ms));
+    let left = letting_go.len().saturating_sub(SLEEPS_PER_PASS);
+    letting_go.truncate(SLEEPS_PER_PASS);
+    let slept = futures::stream::iter(letting_go)
+        .map(|(_, app_id, policy)| async move { let_sleep(host, &app_id, &policy).await })
+        .buffer_unordered(SLEEP_CONCURRENCY)
+        .filter(|slept| std::future::ready(*slept))
+        .count()
         .await;
     crate::domain::reconcile::network::apply_network(host).await;
+    if slept == 0 {
+        0
+    } else {
+        left
+    }
 }
 
 #[cfg(test)]
@@ -645,7 +683,7 @@ mod sleep_tests {
         (host, held)
     }
 
-    fn a_pass_over(host: &TestHost) -> tokio::task::JoinHandle<()> {
+    fn a_pass_over(host: &TestHost) -> tokio::task::JoinHandle<usize> {
         let host = host.arc().clone();
         tokio::spawn(async move { apply_sleep(&host).await })
     }
@@ -673,7 +711,8 @@ mod sleep_tests {
     }
 
     #[tokio::test]
-    async fn an_app_asked_for_while_it_waited_its_turn_is_left_up() {
+    async fn an_app_asked_for_while_it_waited_its_turn_is_left_up_and_the_pass_says_so() {
+        let (said, _listening) = Said::listening();
         let count = SLEEP_CONCURRENCY + 1;
         let (host, held) = quiet_batch(count).await;
         let pass = a_pass_over(&host);
@@ -690,5 +729,70 @@ mod sleep_tests {
         assert_eq!(host.vms.calls(), vec![VmCall::Sleep; SLEEP_CONCURRENCY]);
         let record = host.state.record(&waiting_its_turn).await.unwrap();
         assert_eq!(record.state, InstanceState::Running);
+        assert_eq!(
+            said.lines()
+                .iter()
+                .filter(|line| line == &"INFO no longer quiet; left up")
+                .count(),
+            1,
+            "{:?}",
+            said.lines()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_takes_its_share_of_what_is_due_and_says_how_many_it_left() {
+        let count = SLEEPS_PER_PASS + 3;
+        let (host, held) = quiet_batch(count).await;
+        held.let_through(count);
+
+        let left = a_pass_over(&host).await.unwrap();
+
+        assert_eq!(left, 3);
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; SLEEPS_PER_PASS]);
+
+        let left = a_pass_over(&host).await.unwrap();
+
+        assert_eq!(left, 0);
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; count]);
+        for n in 1..=count {
+            let record = host.state.record(&nth(n)).await.unwrap();
+            assert_eq!(record.state, InstanceState::Idle, "{}", nth(n));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_most_overdue_app_is_in_the_share_a_pass_takes() {
+        let count = SLEEPS_PER_PASS + 1;
+        let (host, held) = quiet_batch(count).await;
+        held.let_through(count);
+        let longest_quiet = nth(count);
+        let quiet_since = host.state.snapshot().await.last_active_at_ms[&longest_quiet];
+        host.state.mark_active(&longest_quiet, quiet_since - 1).await;
+
+        let left = a_pass_over(&host).await.unwrap();
+
+        assert_eq!(left, 1);
+        let record = host.state.record(&longest_quiet).await.unwrap();
+        assert_eq!(record.state, InstanceState::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_pass_that_put_nothing_to_sleep_leaves_nothing_to_come_straight_back_for() {
+        let count = SLEEPS_PER_PASS + 1;
+        let (host, held) = quiet_batch(count).await;
+        held.let_through(count);
+        host.vms.refuse_sleep(crate::ports::VmError::SleepRefused {
+            reason: "the disk has no room for another snapshot".into(),
+        });
+
+        let left = a_pass_over(&host).await.unwrap();
+
+        assert_eq!(left, 0);
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; SLEEPS_PER_PASS]);
+        for n in 1..=count {
+            let record = host.state.record(&nth(n)).await.unwrap();
+            assert_eq!(record.state, InstanceState::Running, "{}", nth(n));
+        }
     }
 }

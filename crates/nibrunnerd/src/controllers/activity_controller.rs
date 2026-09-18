@@ -97,11 +97,12 @@ mod tests {
             self.readings.fetch_add(1, Ordering::SeqCst);
         }
 
-        async fn apply_sleep(&self) {
+        async fn apply_sleep(&self) -> usize {
             self.in_flight.fetch_add(1, Ordering::SeqCst);
             self.begun.notify_one();
             tokio::time::sleep(self.holds_for).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            0
         }
     }
 
