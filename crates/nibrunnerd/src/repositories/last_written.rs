@@ -53,7 +53,20 @@ impl<T: PartialEq> Delta<'_, T> {
     }
 }
 
-impl<V: PartialEq> Delta<'_, BTreeMap<String, V>> {
+impl<V: PartialEq + Clone> Delta<'_, BTreeMap<String, V>> {
+    /// Leaves a row as the table holds it when its move is not `worth_writing`: neither written
+    /// nor remembered as though it had been, so a later pass measures the row's move from what is
+    /// on disk and writes once the small moves add up to one that is.
+    pub(super) fn keep_unless(&mut self, worth_writing: impl Fn(&V, &V) -> bool) {
+        for (key, wanted) in &mut self.wanted {
+            if let Some(held) = self.last.get(key) {
+                if held != wanted && !worth_writing(held, wanted) {
+                    *wanted = held.clone();
+                }
+            }
+        }
+    }
+
     /// The rows of `wanted` the table does not hold, or holds with another value.
     pub(super) fn changed(&self) -> impl Iterator<Item = (&str, &V)> + '_ {
         self.wanted
@@ -163,6 +176,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(delta.changed().collect::<Vec<_>>(), vec![("a", &1)]);
+    }
+
+    #[tokio::test]
+    async fn a_move_not_worth_writing_is_remembered_as_the_table_holds_it() {
+        let memory = LastWritten::unknown();
+        let mut delta = memory
+            .towards(
+                held(&[("a", 4), ("b", 9)]),
+                from_table(held(&[("a", 1), ("b", 1)])),
+            )
+            .await
+            .unwrap();
+        delta.keep_unless(|held, wanted| wanted - held >= 5);
+        assert_eq!(delta.changed().collect::<Vec<_>>(), vec![("b", &9)]);
+        delta.written();
+
+        let delta = memory
+            .towards(held(&[("a", 6), ("b", 9)]), unread())
+            .await
+            .unwrap();
+        assert_eq!(delta.changed().collect::<Vec<_>>(), vec![("a", &6)]);
     }
 
     #[tokio::test]
