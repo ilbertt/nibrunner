@@ -368,6 +368,103 @@ mod tests {
         )
     }
 
+    /// Every ruleset this host loaded, in the order it loaded them.
+    fn rulesets_loaded(host: &TestHost) -> Vec<String> {
+        host.commands
+            .calls()
+            .into_iter()
+            .filter(|request| request.command == ["nft", "-f", "-"])
+            .filter_map(|request| request.stdin)
+            .collect()
+    }
+
+    /// Whether a ruleset carries a host port to any guest at all; this host holds one app.
+    fn forwards_the_guest(ruleset: &str) -> bool {
+        ruleset.contains("dnat to")
+    }
+
+    #[tokio::test]
+    async fn the_port_is_the_activators_before_the_guest_is_asked_to_sleep() {
+        let mut host = test_host().await;
+        let (held, spy) = mocks::vmm_holding_sleeps();
+        Arc::get_mut(&mut host.host)
+            .expect("nothing else holds this host yet")
+            .vms = held.clone();
+        host.vms = spy;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state
+            .put_record(instance_record(|record| record.on_request = true))
+            .await;
+        network::apply_network(&host).await;
+        assert!(forwards_the_guest(&rulesets_loaded(&host)[0]));
+
+        let sleeping = tokio::spawn({
+            let host = host.arc().clone();
+            async move {
+                instances::suspend_instance(&host, &app_id(), crate::domain::activation::SleepReason::Quiet)
+                    .await
+            }
+        });
+        held.held_up(1).await;
+
+        let loaded = rulesets_loaded(&host);
+        assert_eq!(
+            loaded.len(),
+            2,
+            "the ruleset was loaded again before the microVM was asked to sleep"
+        );
+        assert!(
+            !forwards_the_guest(&loaded[1]),
+            "the guest is about to be paused and its port still points at it"
+        );
+
+        held.let_through(1);
+        sleeping.await.unwrap();
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Idle
+        );
+        assert_eq!(
+            rulesets_loaded(&host).len(),
+            2,
+            "an app that slept is Idle, which the ruleset already left out"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_whose_sleep_did_not_happen_gets_its_port_back() {
+        for error in [
+            VmError::SleepRefused {
+                reason: "the disk has no room for its snapshot".into(),
+            },
+            VmError::Host("the snapshot could not be written".into()),
+        ] {
+            let host = test_host().await;
+            host.slot_for(&app_id()).await.unwrap();
+            host.vms.refuse_sleep(error.clone());
+            host.state
+                .put_record(instance_record(|record| record.on_request = true))
+                .await;
+            network::apply_network(&host).await;
+
+            instances::suspend_instance(&host, &app_id(), crate::domain::activation::SleepReason::Quiet)
+                .await;
+
+            let loaded = rulesets_loaded(&host);
+            assert_eq!(
+                loaded.len(),
+                3,
+                "taken for the sleep and given back after {error:?}"
+            );
+            assert!(!forwards_the_guest(&loaded[1]));
+            assert!(
+                forwards_the_guest(&loaded[2]),
+                "a guest left up after {error:?} is unreachable without its port"
+            );
+            assert!(!host.state.snapshot().await.snapshotting.contains(&app_id()));
+        }
+    }
+
     #[tokio::test]
     async fn one_that_may_not_be_snapshotted_is_left_up_rather_than_called_broken() {
         let host = test_host().await;

@@ -129,6 +129,10 @@ impl HostState {
         }
     }
 
+    pub async fn is_snapshotting(&self, app_id: &AppId) -> bool {
+        self.snapshot.read().await.snapshotting.contains(app_id)
+    }
+
     pub async fn probe_at_once(&self, app_id: &AppId) {
         self.snapshot.write().await.next_probe_at_ms.remove(app_id);
     }

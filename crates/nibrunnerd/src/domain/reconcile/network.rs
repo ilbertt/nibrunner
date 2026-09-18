@@ -10,9 +10,13 @@ use crate::domain::report::InstanceRecord;
 use crate::host::Host;
 
 pub async fn forwarded_instances(host: &Host) -> Vec<ForwardedInstance> {
+    let snapshot = host.state.snapshot().await;
     let mut forwarded = Vec::new();
-    for record in host.state.records().await {
-        if record.state != InstanceState::Running {
+    for record in snapshot.records.values() {
+        // A guest being written out reads as Running until the snapshot lands, and is paused for
+        // most of that. Its port is the activator's meanwhile, so that a request finding it is
+        // held for the restore rather than connected to nothing.
+        if record.state != InstanceState::Running || snapshot.snapshotting.contains(&record.app_id) {
             continue;
         }
         let Some(slot) = host.slot_of(&record.app_id).await else {
@@ -257,6 +261,19 @@ mod tests {
             ],
             "the HTTP port first and tcp only, then what the record named, carried whatever arrives"
         );
+    }
+
+    #[tokio::test]
+    async fn a_guest_being_written_out_is_not_forwarded_though_its_record_still_reads_running() {
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(instance_record(|_| {})).await;
+
+        host.state.mark_snapshotting(&app_id(), true).await;
+        assert!(forwarded_instances(&host).await.is_empty());
+
+        host.state.mark_snapshotting(&app_id(), false).await;
+        assert_eq!(forwarded_instances(&host).await.len(), 1);
     }
 
     #[tokio::test]
