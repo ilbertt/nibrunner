@@ -128,7 +128,7 @@ merges.
 
 ## READMEs
 
-The root `README.md` is the project homepage: what nibrunner is, the quick start, and links into
+The root `README.md` is the project homepage: what nibrunner is, the quick start, and one link to
 the docs site. It is the only README. Crates, `deploy/`, `guest/` and `docs/` carry none — the
 layout is this file's to tell, and user-facing documentation is the docs site. Do not add a
 `README.md` elsewhere; add a nested `AGENTS.md` only when a directory needs telling an agent
