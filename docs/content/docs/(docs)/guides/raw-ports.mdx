@@ -1,10 +1,10 @@
 ---
 title: Raw ports
-description: A way in that is not HTTP — ssh, DNS, WireGuard — carried to the app unread.
+description: Forward non-HTTP ports (ssh, DNS, WireGuard) to an app unchanged.
 ---
 
-`httpPort` is what the proxy sends an app's hostnames to. An app may answer on ports beside it,
-carried to it unread — tcp or udp, whatever arrives, the way a firewall rule would:
+The proxy routes an app's hostnames to `httpPort`. An app can also listen on other ports, TCP or
+UDP. Traffic to those ports is forwarded unchanged, like a firewall rule:
 
 ```json
 "config": {
@@ -16,9 +16,9 @@ carried to it unread — tcp or udp, whatever arrives, the way a firewall rule w
 }
 ```
 
-## On the host
+## Host configuration
 
-The host must name `[proxy.raw]` to bind such a port:
+The host must have a `[proxy.raw]` section to bind raw ports:
 
 ```toml
 [proxy.raw]
@@ -26,21 +26,21 @@ listen_address = "10.0.5.18"
 max_ports_per_guest = 2
 ```
 
-- `max_ports_per_guest` is how many an app may name: 1 to 7, what a slot reserves past its HTTP
-  port. A document that asks for more is refused by name, and the instance reported `failed`.
-- `listen_address` is a **private address**, where a relay reaches this host — never the world's.
-  A raw port carries no hostname to route on, so it is reached at
-  `<listen_address>:<host port>` rather than by name. The host port is the app's `hostPort` in
-  [`reported.json`](/docs/reference/reported-state) plus the port's position in `ports`, counted
-  from one: `ssh` above is `hostPort + 1`, `dns` is `hostPort + 2`.
+- `max_ports_per_guest` is how many raw ports an app may declare: 1 to 7, the ports a slot
+  reserves after its HTTP port. An app that declares more is reported `failed`, naming the key.
+- `listen_address` must be a **private address**: one a relay reaches the host on, not a public
+  one. A raw port carries no hostname to route on, so it is reached at
+  `<listen_address>:<host port>`. The host port is the app's `hostPort` in
+  [`reported.json`](/docs/reference/reported-state) plus the port's 1-based position in `ports`.
+  In the example above, `ssh` is `hostPort + 1` and `dns` is `hostPort + 2`.
 
-<Callout title="Good to know">
-  A raw port is never published from this host: an address one app hands to its users would put
-  every app on the host in front of them. The relay that publishes it is a machine of its own.
+<Callout type="warn" title="Do not publish raw ports from the host">
+  If an app gave its users the host's address, they would reach every app's raw ports. Publish
+  them from a separate relay machine.
 </Callout>
 
 ## Waking
 
-While the app sleeps, the first arrival wakes it, whichever way it came. A connection is
-accepted and held, then spliced once the guest answers, so a client sees a slow banner rather
-than a closed socket. A datagram is kept and delivered after the wake.
+If the app is asleep, the first packet on any raw port wakes it. A TCP connection is accepted and
+held, then forwarded once the guest accepts it, so the client sees a delay rather than a refused
+connection. A UDP datagram is queued and delivered after the wake.

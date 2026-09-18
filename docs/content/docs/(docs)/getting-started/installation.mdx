@@ -3,15 +3,15 @@ title: Installation
 description: Install nibrunner on a Linux machine and start the host.
 ---
 
-## System requirements
+## Requirements
 
-- **A Linux x86_64 machine with `/dev/kvm`.** Every app is a microVM, and a microVM needs
-  hardware virtualisation. A bare-metal server has it; a VPS has it only if the provider passes
-  nested virtualisation through. `ls -l /dev/kvm` shows the device on a machine that has it, and
-  `nibrunnerd install` refuses one that does not.
-- **Debian or Ubuntu, with systemd.** The installer uses `apt-get`, and the host runs as
-  systemd units.
-- **Root, and outbound HTTPS.** The installer fetches the release from GitHub.
+- **Linux x86_64 with `/dev/kvm`.** Every app runs in a microVM, which needs hardware
+  virtualisation. Bare metal has it. A VPS has it only if the provider enables nested
+  virtualisation. Check with `ls -l /dev/kvm`. `nibrunnerd install` refuses to run on a machine
+  without it.
+- **Debian or Ubuntu with systemd.** The installer uses `apt-get`. The host runs as systemd
+  units.
+- **Root, and outbound HTTPS.** The installer downloads the release from GitHub.
 
 <Steps>
 <Step>
@@ -22,18 +22,22 @@ description: Install nibrunner on a Linux machine and start the host.
 curl -fsSL https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/install.sh | sh
 ```
 
-The script installs the packages it needs, downloads the newest release — the daemon, the guest
-kernel and the guest image — checks each against its published digest, puts `nibrunnerd` in
-`/usr/local/bin`, and runs `nibrunnerd install`.
+The script:
 
-`nibrunnerd install` lays the host out from `/etc/nibrunner/config.toml`, and writes that file
-if there is none: volumes as files on this disk, plain HTTP on `:80`, nothing in an object
-store, and `max_apps` set to what it measured this machine can hold. It starts nothing.
+1. Installs the packages it needs.
+2. Downloads the latest release: the daemon, the guest kernel and the guest image. Each file is
+   verified against its published digest.
+3. Puts `nibrunnerd` in `/usr/local/bin`.
+4. Runs `nibrunnerd install`.
 
-<Callout title="Good to know">
-  `NIBRUNNER_VERSION=<tag>` in front of the command pins a release. Without it, the newest one.
-  On a machine without `apt-get`, install `nftables`, `e2fsprogs`, `kmod`, `curl` and
-  `ca-certificates` yourself and re-run.
+`nibrunnerd install` sets up the host from `/etc/nibrunner/config.toml`. If the file does not
+exist, it writes one: volumes as files on the local disk, plain HTTP on port 80, no object store,
+and `max_apps` set to what it measured the machine can hold. It does not start anything.
+
+<Callout title="Options">
+  - `NIBRUNNER_VERSION=<tag>` before the command installs that release instead of the latest.
+  - On a machine without `apt-get`, install `nftables`, `e2fsprogs`, `kmod`, `curl` and
+    `ca-certificates` yourself, then run the script again.
 </Callout>
 
 </Step>
@@ -45,10 +49,9 @@ store, and `max_apps` set to what it measured this machine can hold. It starts n
 nibrunnerd start
 ```
 
-`start` lays the host out from `config.toml` as it is now, then starts the units that file
-names. The configuration the installer wrote runs as it is, so there is nothing to edit for a
-first app. When you do edit it, run `nibrunnerd start` again: it restarts only what read
-something that changed.
+`start` reads `config.toml`, applies it, and starts the systemd units it names. The file the
+installer wrote works as-is; you do not need to edit it to deploy a first app. After you edit it,
+run `nibrunnerd start` again. It restarts only the units whose configuration changed.
 
 </Step>
 <Step>
@@ -59,7 +62,11 @@ something that changed.
 systemctl status nibrunnerd
 ```
 
-`journalctl -u nibrunnerd -f` follows the daemon's log.
+To follow the daemon's log:
+
+```bash
+journalctl -u nibrunnerd -f
+```
 
 </Step>
 </Steps>

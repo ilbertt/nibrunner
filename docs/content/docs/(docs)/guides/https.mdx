@@ -1,26 +1,26 @@
 ---
 title: HTTPS
-description: How hostnames reach apps, and where TLS is terminated.
+description: How hostnames are routed to apps, and where TLS is terminated.
 ---
 
-`[proxy.http]` in `config.toml` is the host's one HTTP listener. It routes each request by the
-hostname it carries to the `httpPort` of the app that names that hostname:
+`[proxy.http]` in `config.toml` defines the host's single HTTP listener. It routes each request,
+by the hostname in the request, to the `httpPort` of the app that declares that hostname:
 
 ```json
 "hostnames": [{ "hostname": "app-1.example.com", "kind": "platform" }]
 ```
 
-`kind` is `platform` or `custom`: a label for whatever writes the document, routed the same.
-An app nothing outside needs to reach by name has an empty `hostnames`.
+`kind` is `platform` or `custom`. It is a label for whatever writes `desired.json`; both kinds
+are routed the same way. An app that nothing needs to reach by name has an empty `hostnames`.
 
-A request for a sleeping app wakes it. A document that names a hostname on a host with no
-`[proxy.http]` is refused by name, and the instance is reported `failed` saying so.
-[The reference](/docs/reference/config) is every key under `[proxy]`.
+A request for a sleeping app wakes it. If `desired.json` names a hostname on a host with no
+`[proxy.http]` section, the instance is reported `failed` with that reason. The
+[reference](/docs/reference/config) lists every key under `[proxy]`.
 
 ## Behind an edge
 
-The installer writes plain HTTP, which is what a host behind an edge that terminates TLS —
-Cloudflare, a load balancer, a reverse proxy of your own — wants:
+The installer writes plain HTTP. Use this when something in front of the host terminates TLS:
+Cloudflare, a load balancer, your own reverse proxy.
 
 ```toml
 [proxy.http]
@@ -28,9 +28,9 @@ listen_address = "0.0.0.0"
 port = 80
 ```
 
-## TLS on this host
+## TLS on the host
 
-Add `[proxy.http.tls]` with a certificate and key, both PEM:
+Add `[proxy.http.tls]` with a PEM certificate and key:
 
 ```toml
 [proxy.http]
@@ -42,29 +42,29 @@ certificate = "/etc/nibrunner/tls/origin.crt"
 key = "/etc/nibrunner/tls/origin.key"
 ```
 
-- **One certificate covers the whole host.** There is no SNI selection, so every hostname an
-  app holds must be covered by it — a wildcard, in practice, which matches one label deep:
+- **One certificate for the whole host.** There is no SNI selection. The certificate must cover
+  every hostname of every app. In practice that means a wildcard, which matches one label:
   `app.example.com` but not `a.b.example.com`.
-- **The daemon does not obtain certificates.** ACME and renewal belong to certbot or to the
-  edge. The files are read once, at startup, so a renewed certificate needs
-  `systemctl restart nibrunnerd` — which stops no app.
-- **There is one listener, not a plain one and a TLS one.** Nothing redirects, so two would
-  serve every app both ways forever.
+- **The daemon does not obtain certificates.** Use certbot or the edge for ACME and renewal. The
+  files are read once, at startup. After renewing, run `systemctl restart nibrunnerd`. This does
+  not stop any app.
+- **One listener only.** You cannot run plain HTTP and TLS side by side. Nothing redirects
+  between them, so two listeners would serve every app both ways.
 
-## Only through the edge
+## Client certificates
 
-Add `[proxy.http.tls.client_ca]` to require a client certificate on every handshake. On an
-origin whose IP is discoverable, this is what keeps it reachable only through the edge:
+Add `[proxy.http.tls.client_ca]` to require a client certificate on every TLS handshake. Use this
+when the origin's IP is discoverable and it must be reachable only through the edge:
 
 ```toml
 [proxy.http.tls.client_ca]
 certificate = "/etc/nibrunner/tls/origin-pull-ca.pem"
 ```
 
-`certificate` is a PEM holding every certificate the pool trusts. You cannot reach the host
-yourself without one, so turn this on after the plain path is proven.
+`certificate` is a PEM file holding every CA certificate to trust. Once enabled, you cannot reach
+the host yourself without a client certificate, so enable it after the plain setup works.
 
-<Callout title="Good to know">
-  A connection whose handshake named one app and whose request names another gets a `421`. That
-  is what keeps two apps that share a certificate apart.
+<Callout title="Note">
+  If the TLS handshake names one app (SNI) and the HTTP request names another (`Host`), the proxy
+  answers `421`. This keeps apps that share a certificate separate.
 </Callout>

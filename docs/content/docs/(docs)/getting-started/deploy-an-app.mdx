@@ -1,20 +1,22 @@
 ---
 title: Deploy an app
-description: Put a binary in the artifact store, write desired.json, and reach the app on its hostname.
+description: Upload a binary, write desired.json, and reach the app by hostname.
 ---
 
-An app is a program the guest runs in a Debian root, as uid 65534, listening on the port the
-document names. A statically linked Linux x86_64 binary — Go, Rust, Zig, a compiled Bun
-executable — needs nothing from the image. A dynamically linked one has what Debian's slim
-image ships: glibc, libstdc++, CA certificates.
+An app is a program that runs in a Debian root filesystem inside a microVM, as uid 65534,
+listening on the port you name in `desired.json`.
+
+A statically linked Linux x86_64 binary (Go, Rust, Zig, a compiled Bun executable) needs nothing
+else. A dynamically linked binary gets what Debian's slim image ships: glibc, libstdc++ and CA
+certificates.
 
 <Steps>
 <Step>
 
 ## Upload the binary
 
-Put it in the artifact store under a key of your choosing, and take its digest. On a host the
-installer configured, the store is a directory:
+Copy it into the artifact store under a key of your choice, and record its SHA-256. On a host set
+up by the installer, the artifact store is a directory:
 
 ```bash
 install -D -m 0644 ./my-server /var/lib/nibrunner/artifact-store/my-server
@@ -24,10 +26,10 @@ sha256sum ./my-server
 </Step>
 <Step>
 
-## Write the document
+## Write desired.json
 
-`nibrunnerd` watches `/var/lib/nibrunner/desired.json` and converges on every change to it.
-Name the key and the digest from the step above:
+`nibrunnerd` watches `/var/lib/nibrunner/desired.json` and applies every change to it. Fill in
+the key and the digest from the previous step:
 
 ```json title="/var/lib/nibrunner/desired.json"
 {
@@ -64,16 +66,16 @@ Name the key and the digest from the step above:
 }
 ```
 
-| Field | What it says |
+| Field | Meaning |
 | --- | --- |
-| [`volumes`](/docs/guides/volumes) | One volume per app, formatted empty the first time it is named. Every write the app makes lands on it, and it is the only thing backed up. |
-| [`layers`](/docs/guides/layers) | What the root is built from. An `executable` layer is one program, packed into an image at `destinationPath`. |
-| [`config.command`](/docs/guides/layers#what-runs) | What runs in that root, as uid 65534. |
-| [`config.healthCheck`](/docs/guides/health-checks) | What tells the host the app is up. There is no default. |
-| [`desiredState`](/docs/guides/sleep-and-wake) | `on-request` brings the app up now and lets it sleep between visitors. `running` keeps it up. `stopped` takes it down. |
-| [`hostnames`](/docs/guides/https) | What the proxy routes to `httpPort`. |
+| [`volumes`](/docs/guides/volumes) | One volume per app. It is formatted empty the first time it appears in the file. All of the app's writes go to it, and it is the only thing that gets backed up. |
+| [`layers`](/docs/guides/layers) | What the root filesystem is built from. An `executable` layer is one program, packed into an image at `destinationPath`. |
+| [`config.command`](/docs/guides/layers#what-runs) | The program to run, as uid 65534. |
+| [`config.healthCheck`](/docs/guides/health-checks) | How the host decides the app is up. Required; there is no default. |
+| [`desiredState`](/docs/guides/sleep-and-wake) | `on-request` starts the app now and lets it sleep when idle. `running` keeps it up. `stopped` stops it. |
+| [`hostnames`](/docs/guides/https) | Hostnames the proxy routes to `httpPort`. |
 
-[The reference](/docs/reference/desired-state) is every field.
+The [reference](/docs/reference/desired-state) lists every field.
 
 </Step>
 <Step>
@@ -81,28 +83,29 @@ Name the key and the digest from the step above:
 ## Reach it
 
 The daemon formats the volume, packs the binary into an image, boots the microVM, and reports
-the instance `running` once `/healthz` on port 3000 answers 2xx.
+the instance `running` once `GET /healthz` on port 3000 returns 2xx.
 
-The proxy routes on the hostname the request carries, so the app is reachable before any DNS
-exists:
+The proxy routes on the `Host` header, so you can test before DNS exists:
 
 ```bash
 curl -H 'Host: app-1.example.com' http://127.0.0.1/
 ```
 
-Point `app-1.example.com` at this machine and the same request arrives from anywhere.
+Point `app-1.example.com` at the machine and the same request works from anywhere.
 
 </Step>
 </Steps>
 
-## What the host says back
+## Where to look when something is wrong
 
-- `/var/lib/nibrunner/reported.json` — the state of every volume, instance, checkpoint and export
-  the document names, and why. An instance that cannot start says so here, not in a log line.
-- `/var/lib/nibrunner/logs/<appId>.log` — the app's output.
-- `journalctl -u nibrunnerd` — the daemon's own.
+- `/var/lib/nibrunner/reported.json`: the state of every volume, instance, checkpoint and export
+  in `desired.json`, with a reason when something failed. An instance that cannot start is
+  explained here, not in a log.
+- `/var/lib/nibrunner/logs/<appId>.log`: the app's stdout and stderr.
+- `journalctl -u nibrunnerd`: the daemon's own log.
 
-<Callout title="Good to know">
-  An editor completes and checks the document when it names the schema:
-  `"$schema": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json"`.
+<Callout title="Editor support">
+  Add
+  `"$schema": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json"`
+  to the file and your editor validates and autocompletes it.
 </Callout>

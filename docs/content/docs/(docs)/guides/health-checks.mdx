@@ -1,11 +1,11 @@
 ---
 title: Health checks
-description: What tells the host an app is up, and the three ways to say it.
+description: How the host decides an app is up, and the three kinds of check.
 ---
 
-`config.healthCheck` is what tells the host an instance is well. Every instance names one —
-there is no default — and it does two jobs: a wake waits for it before handing the caller on,
-and liveness is read from it after that.
+`config.healthCheck` tells the host whether an instance is healthy. It is required; there is no
+default. It has two jobs: a wake waits for it to pass before forwarding the request, and after
+that the host polls it for liveness.
 
 ```json
 "healthCheck": {
@@ -19,28 +19,28 @@ and liveness is read from it after that.
 }
 ```
 
-## The three kinds
+## Kinds
 
-| `kind` | Healthy means |
+| `kind` | Healthy when |
 | --- | --- |
-| `http` | `path`, requested on `httpPort`, answers 2xx. |
-| `tcp` | A connection to `httpPort` is accepted. For a port that does not speak HTTP. |
-| `boot-completed` | The microVM is up and `httpPort` has accepted a connection once. For a guest this host did not build, which answers no path it was not told about. |
+| `http` | `GET path` on `httpPort` returns 2xx. |
+| `tcp` | A connection to `httpPort` is accepted. For ports that do not speak HTTP. |
+| `boot-completed` | The microVM is up and `httpPort` has accepted one connection. For a guest image you did not build, which serves no health path. |
 
-`http` and `tcp` carry the timing above: `intervalMs`, `timeoutMs`, `gracePeriodMs`,
-`healthyThreshold` and `unhealthyThreshold`. `boot-completed` carries none — the app has 30
-seconds to start listening, and nothing is timed after that. An instance that fails its check
-`unhealthyThreshold` times in a row is reported `unhealthy`, with why.
+`http` and `tcp` use all the timing fields: `intervalMs`, `timeoutMs`, `gracePeriodMs`,
+`healthyThreshold` and `unhealthyThreshold`. `boot-completed` uses none: the app has 30 seconds
+to start listening, and nothing is checked after that. An instance that fails `unhealthyThreshold`
+checks in a row is reported `unhealthy`, with the reason.
 
-<Callout title="Good to know">
-  Use `http` when you can. A TCP connect is answered by the guest kernel's accept queue whether
-  or not the process behind it will ever read the request, so a program that has stopped
-  answering passes `tcp` for as long as it lives.
+<Callout title="Prefer http">
+  A TCP connect is accepted by the guest kernel whether or not the process behind it will ever
+  read the request. A hung program passes `tcp` for as long as it lives. Use `http` unless the
+  app has no HTTP endpoint.
 </Callout>
 
 ## Restarts
 
-`config.restartPolicy` is the budget for starting the program again after it exits:
+`config.restartPolicy` limits how often the host restarts the program after it exits:
 
 ```json
 "restartPolicy": {
@@ -52,10 +52,10 @@ seconds to start listening, and nothing is timed after that. An instance that fa
 }
 ```
 
-The wait before each attempt grows from `initialBackoffMs` by `backoffFactor`, capped at
-`maxBackoffMs`. A program that stays up for `resetAfterMs` earns the whole budget back. Past
-`maxRestarts`, the instance is reported `failed` and is not started again until it is deployed
-afresh, under a new `deploymentId`.
+The wait before each attempt starts at `initialBackoffMs`, is multiplied by `backoffFactor` each
+time, and is capped at `maxBackoffMs`. If the program stays up for `resetAfterMs`, the restart
+count resets. After `maxRestarts` failures, the instance is reported `failed` and is not restarted
+until it is deployed again with a new `deploymentId`.
 
-[The reference](/docs/reference/desired-state) is every field of a health check and a restart
+The [reference](/docs/reference/desired-state) lists every field of a health check and a restart
 policy.
