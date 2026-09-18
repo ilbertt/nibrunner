@@ -8,10 +8,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 
 ## Stack
 
-- **Language:** Rust, on the toolchain `rust-toolchain.toml` pins. The host binary is one static
-  x86_64 musl binary
-- **Tasks:** `just` — `just` alone lists every recipe. `mise install` puts `just` and `bun` on the
-  path at the versions `mise.toml` pins
+- **Language:** Rust; the host binary is one static x86_64 musl binary
+- **Tasks:** `just`; `mise` installs `just` and `bun`
 - **Linter/Formatter:** rustfmt and clippy for the Rust, Biome (`docs/biome.json`) for the docs
   site; editors format on save
 - **State:** SQLite through sqlx, with the offline query data committed under `.sqlx/`
@@ -110,10 +108,10 @@ e2fsprogs.
 
 ## Run scripts
 
-`just` with no target lists every recipe with what it is for. The docs site's commands are the
-`scripts` in `docs/package.json`, which is their source of truth: the justfile only calls them,
-inside `fmt`, `lint`, `docs-dev` and `docs-build`. A new JS check is a `package.json` script wired
-into `fmt` or `lint`, never a recipe of its own or a command spelled out in the justfile.
+When running a command, check the `justfile` first. The docs site's commands are the `scripts` in
+`docs/package.json`, which is their source of truth: the justfile only calls them, inside `fmt`,
+`lint`, `docs-dev` and `docs-build`. A new JS check is a `package.json` script wired into `fmt` or
+`lint`, never a recipe of its own or a command spelled out in the justfile.
 
 ## The docs site
 
