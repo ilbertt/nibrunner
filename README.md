@@ -66,5 +66,5 @@ boots it, watches its health, and routes its hostname to it:
 
 ## Contributing
 
-[`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) — the tools, the two test lanes, what CI
-checks, and how a pull request lands.
+[`AGENTS.md`](AGENTS.md) — the tools, the layout, the two test lanes, what CI checks, and how a
+pull request lands.
