@@ -2,6 +2,7 @@
   <img src="docs/public/logo.svg" width="96" alt="">
   <h1>nibrunner</h1>
   <p><em>MicroVM orchestrator for your VPS with built-in sleep/wake policies, backups, snapshots, HTTPS, custom image, logs and metrics</em></p>
+  <p><a href="https://nibrunner.dev/"><strong>Documentation</strong></a></p>
 </div>
 
 nibrunner is one binary, `nibrunnerd`, that turns a Linux machine with `/dev/kvm` into a microVM
@@ -44,27 +45,3 @@ nibrunnerd start
 Then put a binary in the artifact store, write the document `nibrunnerd` watches, and the daemon
 boots it, watches its health, and routes its hostname to it:
 **[deploy an app](https://nibrunner.dev/docs/getting-started/deploy-an-app)**.
-
-## Documentation
-
-[nibrunner.dev/docs](https://nibrunner.dev/docs) — the source is under [`docs/`](docs).
-
-- [Getting started](https://nibrunner.dev/docs/getting-started/installation) — install, deploy
-  an app, configure the host.
-- Guides — [layers](https://nibrunner.dev/docs/guides/layers),
-  [volumes](https://nibrunner.dev/docs/guides/volumes),
-  [sleep and wake](https://nibrunner.dev/docs/guides/sleep-and-wake),
-  [health checks](https://nibrunner.dev/docs/guides/health-checks),
-  [HTTPS](https://nibrunner.dev/docs/guides/https),
-  [raw ports](https://nibrunner.dev/docs/guides/raw-ports),
-  [logs and metrics](https://nibrunner.dev/docs/guides/logs-and-metrics),
-  [host capacity](https://nibrunner.dev/docs/guides/host-capacity).
-- Reference — [`config.toml`](https://nibrunner.dev/docs/reference/config),
-  [`desired.json`](https://nibrunner.dev/docs/reference/desired-state) and
-  [`reported.json`](https://nibrunner.dev/docs/reference/reported-state), key by key from their
-  JSON Schemas.
-
-## Contributing
-
-[`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) — the tools, the two test lanes, what CI
-checks, and how a pull request lands.

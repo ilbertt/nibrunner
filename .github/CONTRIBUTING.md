@@ -1,62 +1,29 @@
 # Contributing
 
-## Tools
-
-`rustup` reads `rust-toolchain.toml` and installs the pinned toolchain on the first `cargo`
-command. `mise install` puts `just` and `bun` on the path at the versions `mise.toml` pins.
-`just` with no target lists every recipe.
+## Development setup
 
 ```bash
-just build           # the whole workspace, for the machine you are on
-just build-release   # one static x86_64 Linux binary, what a host runs
+git clone https://github.com/ilbertt/nibrunner.git
+cd nibrunner
+mise install
+just build
 ```
 
-`build-release` links against musl: an x86_64 Linux box needs `musl-tools`, anything else
-crosses through `zig` and `cargo-zigbuild`.
+The docs site: `cd docs && bun install`, then `just docs-dev`.
 
-## Tests
+## Tooling
 
-```bash
-just test          # everything that needs no kernel
-just integration   # everything that does: root, Linux, nft, mke2fs, /dev/net/tun
-```
+- [Rust](https://www.rust-lang.org/) — pinned by `rust-toolchain.toml`
+- [just](https://just.systems/) — task runner
+- [mise](https://mise.jdx.dev/) — installs `just` and `bun`
+- [Bun](https://bun.sh) — runs and builds the docs site
+- [Biome](https://biomejs.dev/) — linter and formatter for the docs site
 
-The first lane is the planner, the health state machine, the backoff, the ruleset asserted as
-text, the codecs against byte fixtures taken from the C headers, and the reconcile pass driven
-against mocked collaborators. The second is the only place a ruleset load, a real `mke2fs` or a
-tap is ever considered proven. `just integration --no-run` builds it without any of that.
+## Commit messages
 
-## What CI checks
+We use [Conventional Commits](https://www.conventionalcommits.org/). A pull request is
+squash-merged with its title as the commit subject, so make sure the title is in the correct
+format — `check-pr-title` refuses one that is not.
 
-Every pull request runs `just fmt --check`, `just lint`, `just test`, `just integration`, and the
-three checks on files written from the code rather than by hand:
-
-- `crates/protocol/schema/*.json` is generated from the types in `crates/protocol`. After
-  changing them, `just schema` and commit the result; `just check-schema` fails otherwise.
-- `deploy/config.example.toml` is generated from `HostConfig::example` in
-  `crates/nibrunnerd/src/config.rs`. After changing it, `just config-example` and commit the
-  result; `just check-config-example` fails otherwise.
-- `deploy/config.schema.json` is generated from `HostConfig::schema` in the same file. After
-  changing it, `just config-schema` and commit the result; `just check-config-schema` fails
-  otherwise.
-
-`just fmt` and `just lint` cover the Rust and the docs site both.
-
-## The docs site
-
-`docs/` is a Fumadocs app on Bun, served at [nibrunner.dev](https://nibrunner.dev). Pages are
-MDX under `docs/content/docs/`, in two root folders that are the tabs under the header: `(docs)/`,
-which holds `getting-started/`, read in order, and `guides/`, one feature per page; and
-`reference/`, whose pages are rendered from the JSON Schemas. `bun install` in there once, then
-`just docs-dev`.
-
-## Pull requests
-
-Work goes on a branch and lands on `main` through a pull request, squash-merged with the pull
-request's title as the commit subject. That title is a
-[Conventional Commit](https://www.conventionalcommits.org/) — `feat:`, `fix:`, `docs:`,
-`chore:`, … — and `check-pr-title` refuses one that is not.
-
-A comment earns its place only when it says something the code cannot: a tradeoff, an external
-constraint, a `Safety:` note. A comment that narrates what the code does is a sign the code
-should say it instead.
+Everything else — the layout, the code style, the test lanes, what CI checks and the files that
+are generated rather than written — is in [`AGENTS.md`](../AGENTS.md).
