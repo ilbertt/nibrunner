@@ -50,6 +50,24 @@ const OPERATIONS: [Operation; 7] = [
 
 const OUTCOMES: [&str; 2] = ["ok", "failed"];
 
+/// Why a pass refused a start, in the word the counter uses for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartRefusal {
+    NoRoom,
+    NotIsolated,
+}
+
+impl StartRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StartRefusal::NoRoom => "no_room",
+            StartRefusal::NotIsolated => "not_isolated",
+        }
+    }
+}
+
+const START_REFUSALS: [StartRefusal; 2] = [StartRefusal::NoRoom, StartRefusal::NotIsolated];
+
 const VOLUME_STATES: [VolumeState; 5] = [
     VolumeState::Pending,
     VolumeState::Ready,
@@ -107,12 +125,13 @@ fn position<T: PartialEq>(of: &[T], value: &T) -> usize {
 }
 
 /// What storage and the artifact store cost this host: every operation timed by how it ended,
-/// and what the layer cache saved.
+/// what the layer cache saved, and the starts the host's memory turned away.
 #[derive(Debug)]
 pub struct ResourceMetrics {
     operations: Vec<Histogram>,
     layers_cached: AtomicU64,
     layer_fetch_bytes: AtomicU64,
+    start_refusals: Vec<AtomicU64>,
 }
 
 impl Default for ResourceMetrics {
@@ -123,6 +142,7 @@ impl Default for ResourceMetrics {
                 .collect(),
             layers_cached: AtomicU64::new(0),
             layer_fetch_bytes: AtomicU64::new(0),
+            start_refusals: START_REFUSALS.iter().map(|_| AtomicU64::new(0)).collect(),
         }
     }
 }
@@ -143,6 +163,10 @@ impl ResourceMetrics {
 
     pub fn layer_cached(&self) {
         self.layers_cached.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn starts_refused(&self, refusal: StartRefusal, count: usize) {
+        self.start_refusals[position(&START_REFUSALS, &refusal)].fetch_add(count as u64, Ordering::Relaxed);
     }
 }
 
@@ -307,6 +331,19 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
     }
 
     page.metric(
+        "nibrunner_instance_start_refusals_total",
+        "Starts a pass refused, by why: no room in memory beside what is already up, or the isolation ruleset not applied. One refused for room waits, pending, and is planned again the next pass.",
+        "counter",
+    );
+    for (index, refusal) in START_REFUSALS.iter().enumerate() {
+        page.value(
+            "nibrunner_instance_start_refusals_total",
+            &[("reason", refusal.as_str())],
+            metrics.start_refusals[index].load(Ordering::Relaxed),
+        );
+    }
+
+    page.metric(
         "nibrunner_instance_measured_timestamp_seconds",
         "When a guest last reported what it was using, as seconds since the epoch. 0 for one that never has; one that stopped is one this host can no longer hear.",
         "gauge",
@@ -351,6 +388,7 @@ mod tests {
         metrics.resources.layer_fetched(1_024, Duration::from_millis(300));
         metrics.resources.layer_cached();
         metrics.resources.layer_cached();
+        metrics.resources.starts_refused(StartRefusal::NoRoom, 742);
 
         let mut report = crate::domain::metrics::tests::report();
         report.volumes = vec![reported_volume(|volume| {
@@ -431,6 +469,8 @@ mod tests {
             "the total is what the host is laid out for"
         );
         assert!(page.contains("nibrunner_host_memory_available_bytes 1000000\n"));
+        assert!(page.contains("nibrunner_instance_start_refusals_total{reason=\"no_room\"} 742\n"));
+        assert!(page.contains("nibrunner_instance_start_refusals_total{reason=\"not_isolated\"} 0\n"));
         assert!(page.contains("nibrunner_conntrack_entries{of=\"used\"} 210000\n"));
         assert!(page.contains("nibrunner_conntrack_entries{of=\"max\"} 262144\n"));
         assert!(

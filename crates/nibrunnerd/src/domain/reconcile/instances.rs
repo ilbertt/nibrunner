@@ -94,14 +94,14 @@ pub async fn stop_instance(host: &Host, app_id: &AppId, reason: &str) {
         .await;
 }
 
-pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
+/// Puts the microVM to sleep and says how that went; nothing when there was no microVM to put
+/// down, or no slot for it to come back to and it was stopped instead.
+pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) -> Option<SleepOutcome> {
     let reason = why.as_str();
-    let Some(record) = host.state.record(app_id).await else {
-        return;
-    };
+    let record = host.state.record(app_id).await?;
     let Some(slot) = host.slot_of(app_id).await else {
         stop_instance(host, app_id, reason).await;
-        return;
+        return None;
     };
 
     host.state.mark_snapshotting(app_id, true).await;
@@ -160,6 +160,7 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) {
         // The guest is still up, and its port was given away for a sleep that did not happen.
         crate::domain::reconcile::network::apply_network(host).await;
     }
+    Some(outcome)
 }
 
 // An attempt is a boot, whether the last one failed on the way up or came up and exited later,
@@ -279,6 +280,33 @@ pub async fn hold_instance(host: &Host, desired: &DesiredInstance) {
         ))
         .await;
     tracing::info!(app_id = %desired.app_id, host_port = %slot.host_port, "app is held stopped");
+}
+
+/// A start this host has no memory for is left pending with the shortfall on it, and planned
+/// again every pass until an app sleeps or stops. Nothing is spent on it: what a guest that
+/// exited had spent is given back, as a stop gives it back, and a record pending with no
+/// attempt spent is how the capacity sums tell one waiting from a boot in flight. Its
+/// `started_at` goes too, or the status loop would read it as that guest having failed rather
+/// than this one waiting.
+pub async fn wait_for_room(host: &Host, desired: &DesiredInstance, shortfall_mib: u64) {
+    let Ok(slot) = host.slot_for(&desired.app_id).await else {
+        tracing::error!(app_id = %desired.app_id, "this host has no slot left to answer for the app");
+        return;
+    };
+    let fields = record_fields(desired, &slot);
+    let mut waiting =
+        host.state.record(&desired.app_id).await.unwrap_or_else(|| {
+            InstanceRecord::new(fields.clone(), InstanceState::Pending, initial_tracker())
+        });
+    waiting.adopt(fields);
+    waiting.state = InstanceState::Pending;
+    waiting.stop_requested = false;
+    waiting.started_at = None;
+    waiting.start_attempts = NO_START_ATTEMPTS;
+    waiting.message = Some(StateMessage::new(format!(
+        "waiting to be started: its host is {shortfall_mib} MiB short of the memory it needs"
+    )));
+    host.state.put_record(waiting).await;
 }
 
 pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
