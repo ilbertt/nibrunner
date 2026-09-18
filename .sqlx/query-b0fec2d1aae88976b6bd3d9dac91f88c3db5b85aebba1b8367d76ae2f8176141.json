@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into deleted_volumes (volume_id, report) values (?, ?)\n                     on conflict (volume_id) do update set report = excluded.report",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b0fec2d1aae88976b6bd3d9dac91f88c3db5b85aebba1b8367d76ae2f8176141"
+}

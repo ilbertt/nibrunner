@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into activity (app_id, last_active_at_ms) values (?, ?)\n                     on conflict (app_id) do update set last_active_at_ms = excluded.last_active_at_ms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f9c3aba22ef64d0eb8e23a3487101dc334399b29d8e38234669e70153ba08bc3"
+}

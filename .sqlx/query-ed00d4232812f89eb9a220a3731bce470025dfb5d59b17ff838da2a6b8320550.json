@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "delete from deleted_volumes where volume_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ed00d4232812f89eb9a220a3731bce470025dfb5d59b17ff838da2a6b8320550"
+}

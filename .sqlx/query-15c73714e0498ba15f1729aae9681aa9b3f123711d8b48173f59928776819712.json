@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "select volume_id, report from deleted_volumes",
+  "describe": {
+    "columns": [
+      {
+        "name": "volume_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "report",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "15c73714e0498ba15f1729aae9681aa9b3f123711d8b48173f59928776819712"
+}

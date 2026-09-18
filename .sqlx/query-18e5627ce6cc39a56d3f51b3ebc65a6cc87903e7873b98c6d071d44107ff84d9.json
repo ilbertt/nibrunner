@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into slots (app_id, slot) values (?, ?)\n                     on conflict (app_id) do update set slot = excluded.slot",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "18e5627ce6cc39a56d3f51b3ebc65a6cc87903e7873b98c6d071d44107ff84d9"
+}
