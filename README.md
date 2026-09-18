@@ -63,8 +63,3 @@ boots it, watches its health, and routes its hostname to it:
   [`desired.json`](https://nibrunner.dev/docs/reference/desired-state) and
   [`reported.json`](https://nibrunner.dev/docs/reference/reported-state), key by key from their
   JSON Schemas.
-
-## Contributing
-
-[`AGENTS.md`](AGENTS.md) — the tools, the layout, the two test lanes, what CI checks, and how a
-pull request lands.

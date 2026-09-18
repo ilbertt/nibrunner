@@ -130,12 +130,12 @@ merges.
 
 ## READMEs
 
-The root `README.md` is the project homepage: what nibrunner is, the quick start, links into the
-docs site, and a pointer to how to contribute. It is the only README. Crates, `deploy/`, `guest/`
-and `docs/` carry none — the layout is this file's to tell, and user-facing documentation is the
-docs site. Do not add a `README.md` elsewhere; add a nested `AGENTS.md` only when a directory
-needs telling an agent something its files cannot show. `.github/CONTRIBUTING.md` is the human
-entry point and points here.
+The root `README.md` is the project homepage: what nibrunner is, the quick start, and links into
+the docs site. It is the only README. Crates, `deploy/`, `guest/` and `docs/` carry none — the
+layout is this file's to tell, and user-facing documentation is the docs site. Do not add a
+`README.md` elsewhere; add a nested `AGENTS.md` only when a directory needs telling an agent
+something its files cannot show. `.github/CONTRIBUTING.md` is the human entry point: how to set
+up locally, the tools, the commit format, and a pointer here for the rest.
 
 ## Keeping this file up to date
 
