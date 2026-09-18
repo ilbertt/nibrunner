@@ -2,7 +2,7 @@
   <img src="docs/public/logo.svg" width="96" alt="">
   <h1>nibrunner</h1>
   <p><em>MicroVM orchestrator for your VPS with built-in sleep/wake policies, backups, snapshots, HTTPS, custom image, logs and metrics</em></p>
-  <p><a href="https://nibrunner.dev/docs"><strong>Documentation</strong></a></p>
+  <p><a href="https://nibrunner.dev/"><strong>Documentation</strong></a></p>
 </div>
 
 nibrunner is one binary, `nibrunnerd`, that turns a Linux machine with `/dev/kvm` into a microVM
