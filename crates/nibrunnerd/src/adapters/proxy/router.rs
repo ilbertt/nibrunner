@@ -425,11 +425,8 @@ mod tests {
             ];
         });
         let table = RouteTable::from_targets(&renderable_routes(std::slice::from_ref(&record)));
-        assert_eq!(
-            table.port_for(app_hostname().hostname.as_str()),
-            Some(record.host_port)
-        );
-        assert_eq!(table.port_for("www.example.com"), Some(record.host_port));
+        assert_eq!(table.port_for(app_hostname().hostname.as_str()), record.host_port);
+        assert_eq!(table.port_for("www.example.com"), record.host_port);
         assert_eq!(table.port_for("nobody.example.com"), None);
         assert_eq!(table.hostnames().len(), 2);
     }
@@ -568,7 +565,7 @@ mod tests {
         let router = Router::new(std::sync::Arc::new(HostMetrics::new()), None);
         router
             .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
-                |record| record.host_port = host_port,
+                |record| record.host_port = Some(host_port),
             )])))
             .await;
         let port = serving(router).await;
@@ -661,7 +658,7 @@ mod tests {
     fn app_at(name: &str, host_port: HostPort) -> crate::domain::report::InstanceRecord {
         instance_record(|record| {
             record.app_id = AppId::parse(name).unwrap();
-            record.host_port = host_port;
+            record.host_port = Some(host_port);
             record.hostnames = vec![AppHostname {
                 hostname: Hostname::parse(format!("{name}.apps.example.com")).unwrap(),
                 kind: AppHostnameKind::Platform,
@@ -869,7 +866,7 @@ mod tests {
     async fn routed_at(router: &Router, host_port: HostPort) {
         router
             .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
-                |record| record.host_port = host_port,
+                |record| record.host_port = Some(host_port),
             )])))
             .await;
     }
@@ -1147,7 +1144,7 @@ mod tests {
         let router = Router::new(std::sync::Arc::new(HostMetrics::new()), None);
         router
             .apply(RouteTable::from_targets(&renderable_routes(&[instance_record(
-                |record| record.host_port = host_port,
+                |record| record.host_port = Some(host_port),
             )])))
             .await;
         serving_as(router, arriving(None, secure)).await
@@ -1210,14 +1207,11 @@ mod tests {
         let mine = instance_record(|_| {});
         let theirs = instance_record(|record| {
             record.app_id = protocol::AppId::parse("app-2").unwrap();
-            record.host_port = HostPort::new(mine.host_port.get() + 1).unwrap();
+            record.host_port = Some(HostPort::new(mine.host_port.unwrap().get() + 1).unwrap());
         });
         let table = RouteTable::from_targets(&renderable_routes(&[mine, theirs.clone()]));
         assert_eq!(table.hostnames().len(), 1);
-        assert_eq!(
-            table.port_for(app_hostname().hostname.as_str()),
-            Some(theirs.host_port)
-        );
+        assert_eq!(table.port_for(app_hostname().hostname.as_str()), theirs.host_port);
     }
 
     // Reading the file whole says how many certificates it holds; the trust store then keeps the

@@ -120,6 +120,12 @@ impl AppActivator {
         if !record.desired_running {
             return (app_is_down(), Answer::Down);
         }
+        let Some(guest_ipv4) = record.guest_ipv4.clone() else {
+            // No slot was ever handed to this app — a start refused before one existed, such as
+            // this host being laid out for fewer apps than it is asked to run — so there is
+            // nowhere a wake could reach it either.
+            return (app_would_not_start(), Answer::WouldNotStart);
+        };
         self.state.mark_active(&app_id, crate::clock::now_ms()).await;
 
         let started = std::time::Instant::now();
@@ -134,7 +140,7 @@ impl AppActivator {
         // written out is the one exception to answering a port that accepts: it accepts right up
         // to the pause, and a request handed to it then is paused with it, so it goes to the
         // waker, which waits for the snapshot and restores from it.
-        let guest = SocketAddr::from((record.guest_ipv4.addr(), record.http_port.get()));
+        let guest = SocketAddr::from((guest_ipv4.addr(), record.http_port.get()));
         if record.is_idle() || self.state.is_snapshotting(&app_id).await || !accepts_a_connection(guest).await
         {
             if let Err(refusal) = self.waker.wake(&app_id).await {
@@ -164,6 +170,9 @@ impl AppActivator {
         let Some(woken) = self.state.record(&app_id).await else {
             return (app_would_not_start(), Answer::WouldNotStart);
         };
+        let Some(woken_guest_ipv4) = woken.guest_ipv4.clone() else {
+            return (app_would_not_start(), Answer::WouldNotStart);
+        };
         if request.headers().get(hyper::header::UPGRADE).is_some() {
             return (come_back(), Answer::ComeBack);
         }
@@ -172,7 +181,7 @@ impl AppActivator {
         let response = forward(
             &upstream,
             request,
-            woken.guest_ipv4.as_str(),
+            woken_guest_ipv4.as_str(),
             woken.http_port.get(),
             false,
             self.metrics.proxy.open(&app_id),
@@ -326,7 +335,7 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = in_state;
-                record.guest_ipv4 = Ipv4Address::parse("127.0.0.1").unwrap();
+                record.guest_ipv4 = Some(Ipv4Address::parse("127.0.0.1").unwrap());
                 record.http_port = HttpPort::new(port).unwrap();
             }))
             .await;
@@ -363,7 +372,7 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = false;
                 record.state = InstanceState::Starting;
-                record.guest_ipv4 = Ipv4Address::parse("127.0.0.1").unwrap();
+                record.guest_ipv4 = Some(Ipv4Address::parse("127.0.0.1").unwrap());
                 record.http_port = HttpPort::new(port).unwrap();
             }))
             .await;
@@ -558,7 +567,7 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
-                record.guest_ipv4 = Ipv4Address::parse("127.0.0.1").unwrap();
+                record.guest_ipv4 = Some(Ipv4Address::parse("127.0.0.1").unwrap());
                 record.http_port = HttpPort::new(port).unwrap();
             }))
             .await;

@@ -782,7 +782,7 @@ mod tests {
         tokio::spawn(async move { while listener.accept().await.is_ok() {} });
         host.state
             .update_record(&app_id(), |record| {
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = listening;
             })
             .await;

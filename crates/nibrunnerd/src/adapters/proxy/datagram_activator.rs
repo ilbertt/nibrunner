@@ -144,8 +144,10 @@ impl DatagramActivator {
         let Some(woken) = self.state.record(app_id).await else {
             return Err(RawOutcome::Down);
         };
-        let address = woken
-            .guest_ipv4
+        let Some(woken_guest_ipv4) = woken.guest_ipv4.as_ref() else {
+            return Err(RawOutcome::Down);
+        };
+        let address = woken_guest_ipv4
             .as_str()
             .parse()
             .map_err(|_| RawOutcome::Unreachable)?;
@@ -311,7 +313,7 @@ mod tests {
                 record.on_request = true;
                 record.desired_running = true;
                 record.state = InstanceState::Idle;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
             }))
             .await;
     }

@@ -344,7 +344,7 @@ mod tests {
                 .routes()
                 .await
                 .port_for(app_hostname().hostname.as_str()),
-            Some(instance_record(|_| {}).host_port)
+            instance_record(|_| {}).host_port
         );
 
         host.state.drop_record(&app_id()).await;

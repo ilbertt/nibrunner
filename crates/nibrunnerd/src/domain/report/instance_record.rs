@@ -24,13 +24,18 @@ pub struct InstanceRecord {
     pub deployment_id: DeploymentId,
     pub volume_id: VolumeId,
     pub hostnames: Vec<AppHostname>,
-    pub host_port: HostPort,
+    /// Absent for a record whose app never held a slot: a start refused before one was ever
+    /// handed out, such as this host being laid out for fewer apps than it was asked to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<HostPort>,
     pub http_port: HttpPort,
     /// Everything this app answers on besides `http_port`. Absent is every record written
     /// before an app could ask for a second port.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<RecordPort>,
-    pub guest_ipv4: Ipv4Address,
+    /// The same absence as `host_port`, for the same reason: neither exists until a slot does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_ipv4: Option<Ipv4Address>,
     pub layer_digests: Vec<Sha256Digest>,
     pub state: InstanceState,
     pub health: HealthTracker,
@@ -72,10 +77,10 @@ pub struct RecordFields {
     pub deployment_id: DeploymentId,
     pub volume_id: VolumeId,
     pub hostnames: Vec<AppHostname>,
-    pub host_port: HostPort,
+    pub host_port: Option<HostPort>,
     pub http_port: HttpPort,
     pub ports: Vec<RecordPort>,
-    pub guest_ipv4: Ipv4Address,
+    pub guest_ipv4: Option<Ipv4Address>,
     pub layer_digests: Vec<Sha256Digest>,
     pub health_check: HealthCheck,
     pub resources: InstanceResources,
@@ -165,9 +170,9 @@ mod tests {
         fields.deployment_id = DeploymentId::parse("dep-2").unwrap();
         fields.volume_id = VolumeId::parse("vol-2").unwrap();
         fields.hostnames = vec![];
-        fields.host_port = HostPort::new(23_456).unwrap();
+        fields.host_port = Some(HostPort::new(23_456).unwrap());
         fields.http_port = HttpPort::new(9_001).unwrap();
-        fields.guest_ipv4 = Ipv4Address::parse("10.9.9.9").unwrap();
+        fields.guest_ipv4 = Some(Ipv4Address::parse("10.9.9.9").unwrap());
         fields.layer_digests = vec![Sha256Digest::parse("a".repeat(64)).unwrap()];
         fields.resources = InstanceResources {
             vcpu_count: 4,

@@ -173,8 +173,11 @@ impl StreamActivator {
         let Some(woken) = self.state.record(app_id).await else {
             return RawOutcome::Down;
         };
+        let Some(woken_guest_ipv4) = woken.guest_ipv4.as_ref() else {
+            return RawOutcome::Down;
+        };
         let upstream = SocketAddr::new(
-            match woken.guest_ipv4.as_str().parse() {
+            match woken_guest_ipv4.as_str().parse() {
                 Ok(address) => address,
                 Err(_) => return RawOutcome::Unreachable,
             },
@@ -319,7 +322,7 @@ mod tests {
                 record.on_request = true;
                 record.desired_running = true;
                 record.state = InstanceState::Idle;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
             }))
             .await;
 
@@ -374,7 +377,7 @@ mod tests {
                 record.on_request = true;
                 record.desired_running = true;
                 record.state = InstanceState::Idle;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.health_check.probe_mut().unwrap().grace_period_ms = 2_000;
             }))
             .await;
@@ -422,7 +425,7 @@ mod tests {
                 record.on_request = true;
                 record.desired_running = true;
                 record.state = InstanceState::Idle;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.health_check.probe_mut().unwrap().grace_period_ms = 200;
             }))
             .await;

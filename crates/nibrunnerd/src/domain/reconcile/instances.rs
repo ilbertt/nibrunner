@@ -51,10 +51,10 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
         deployment_id: desired.deployment_id.clone(),
         volume_id: desired.volume_id.clone(),
         hostnames: desired.hostnames.clone(),
-        host_port: slot.host_port,
+        host_port: Some(slot.host_port),
         http_port: desired.config.http_port,
         ports: record_ports(desired, slot),
-        guest_ipv4: slot.guest_ipv4.clone(),
+        guest_ipv4: Some(slot.guest_ipv4.clone()),
         layer_digests: desired
             .layers
             .iter()
@@ -66,6 +66,62 @@ fn record_fields(desired: &DesiredInstance, slot: &nft_render::AppSlot) -> Recor
         desired_running: desired.desired_state != DesiredInstanceState::Stopped,
         on_request: desired.desired_state == DesiredInstanceState::OnRequest,
     }
+}
+
+/// The same fields, for the one case a slot cannot back them: a start refused before this app
+/// ever held one. No `host_port`, no `guest_ipv4`, no extra `ports` — none of them exist yet.
+fn record_fields_without_slot(desired: &DesiredInstance) -> RecordFields {
+    RecordFields {
+        app_id: desired.app_id.clone(),
+        deployment_id: desired.deployment_id.clone(),
+        volume_id: desired.volume_id.clone(),
+        hostnames: desired.hostnames.clone(),
+        host_port: None,
+        http_port: desired.config.http_port,
+        ports: Vec::new(),
+        guest_ipv4: None,
+        layer_digests: desired
+            .layers
+            .iter()
+            .map(|layer| layer.digest().clone())
+            .collect(),
+        health_check: desired.config.health_check.clone(),
+        resources: desired.config.resources,
+        restart_policy: desired.config.restart_policy.clone(),
+        desired_running: desired.desired_state != DesiredInstanceState::Stopped,
+        on_request: desired.desired_state == DesiredInstanceState::OnRequest,
+    }
+}
+
+/// Puts a sentence on the record for a start refused before its app ever held a slot — the one
+/// case `say` cannot reach, because `say` only updates a record that is already there, and an app
+/// on its very first attempt has none. Without this, that refusal was explained in this host's own
+/// log and nowhere `reported.json` says it, breaking the promise every other refusal keeps: an
+/// instance that cannot start is explained here, not in a log.
+///
+/// Returns whether this is news, the same as `say`, so a caller only counts the failure once.
+async fn report_no_slot(host: &Host, desired: &DesiredInstance, said: StateMessage) -> bool {
+    let fields = record_fields_without_slot(desired);
+    let news = match host.state.record(&desired.app_id).await {
+        Some(mut record) => {
+            let news = record.message.as_ref() != Some(&said);
+            record.adopt(fields);
+            record.state = InstanceState::Failed;
+            if news {
+                record.message = Some(said);
+            }
+            host.state.put_record(record).await;
+            news
+        }
+        None => {
+            let mut record = InstanceRecord::new(fields, InstanceState::Failed, initial_tracker());
+            record.message = Some(said);
+            host.state.put_record(record).await;
+            true
+        }
+    };
+    tracing::error!(app_id = %desired.app_id, "this host has no slot left to answer for the app");
+    news
 }
 
 async fn settled(host: &Host, app_id: &AppId, reason: &str) {
@@ -248,7 +304,7 @@ async fn volume_refusal(host: &Host, volume_id: &VolumeId) -> Option<StateMessag
 
 pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
-        tracing::error!(app_id = %desired.app_id, "this host has no slot left to answer for the app");
+        report_no_slot(host, desired, StateMessage::new("this host has no slot left")).await;
         return;
     };
     let fields = record_fields(desired, &slot);
@@ -276,7 +332,7 @@ pub async fn sleep_instance(host: &Host, desired: &DesiredInstance) {
 /// owed the same one.
 pub async fn hold_instance(host: &Host, desired: &DesiredInstance) {
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
-        tracing::error!(app_id = %desired.app_id, "this host has no slot left to answer for the app");
+        report_no_slot(host, desired, StateMessage::new("this host has no slot left")).await;
         return;
     };
     host.state
@@ -297,7 +353,7 @@ pub async fn hold_instance(host: &Host, desired: &DesiredInstance) {
 /// than this one waiting.
 pub async fn wait_for_room(host: &Host, desired: &DesiredInstance, shortfall_mib: u64) {
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
-        tracing::error!(app_id = %desired.app_id, "this host has no slot left to answer for the app");
+        report_no_slot(host, desired, StateMessage::new("this host has no slot left")).await;
         return;
     };
     let fields = record_fields(desired, &slot);
@@ -326,13 +382,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         return;
     }
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
-        if say(
-            host,
-            &desired.app_id,
-            StateMessage::new("this host has no slot left"),
-        )
-        .await
-        {
+        if report_no_slot(host, desired, StateMessage::new("this host has no slot left")).await {
             host.metrics.health.failed(&desired.app_id, Failure::NoSlot);
         }
         return;
@@ -461,7 +511,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
             })
             .await;
             host.state.probe_at_once(&desired.app_id).await;
-            tracing::info!(app_id = %desired.app_id, host_port = %attempted.host_port, guest_ipv4 = %attempted.guest_ipv4, "instance started");
+            tracing::info!(app_id = %desired.app_id, host_port = ?attempted.host_port, guest_ipv4 = ?attempted.guest_ipv4, "instance started");
         }
         Err((failure, reason)) => {
             host.state
@@ -616,17 +666,19 @@ async fn settle(
 ) {
     let health = if status.active && due {
         let probed = std::time::Instant::now();
-        let outcome = if asks_the_port(&record.health, &record.health_check) {
-            crate::domain::health::probe::probe_instance(
-                &record.guest_ipv4,
-                record.http_port,
-                &record.health_check,
-            )
-            .await
-        } else {
+        let outcome = if !asks_the_port(&record.health, &record.health_check) {
             // A boot-completed tenant found listening is asked nothing more: that its microVM is
             // still up is the whole of what this host reads about it after that.
             Ok(())
+        } else if let Some(guest_ipv4) = record.guest_ipv4.as_ref() {
+            crate::domain::health::probe::probe_instance(guest_ipv4, record.http_port, &record.health_check)
+                .await
+        } else {
+            // A guest this active without a slot cannot happen — a boot always holds one first —
+            // but reads as unreachable rather than a probe this host never sent, if it ever does.
+            Err(crate::domain::health::probe::ProbeFailure::Unreachable {
+                error: "this instance holds no slot to probe".to_string(),
+            })
         };
         host.metrics
             .health
@@ -1082,7 +1134,7 @@ mod tests {
         assert_eq!(record.started_at, None);
         assert_eq!(record.hostnames, vec![app_hostname()]);
         let slot = host.slot_of(&app_id()).await.expect("the slot it answers on");
-        assert_eq!(record.host_port, slot.host_port);
+        assert_eq!(record.host_port, Some(slot.host_port));
         assert!(host.vms.calls().is_empty());
         let routes = crate::domain::report::routes::renderable_routes(&host.state.records().await);
         assert_eq!(routes.len(), 1);
@@ -1144,6 +1196,81 @@ mod tests {
             InstanceState::Failed
         );
         assert!(host.slot_of(&app_id()).await.is_none());
+    }
+
+    // Regression: a start refused for want of a slot used to be explained only in this host's own
+    // log. `say` (and the `update_record` under it) only ever updates a record already there, and
+    // an app on its very first attempt has none — so the refusal reached nowhere `reported.json`
+    // says it, breaking the promise every other refusal keeps: an instance that cannot start is
+    // explained here, not in a log. `report_no_slot` is the fix: it puts one down when none exists.
+    #[tokio::test]
+    async fn a_start_refused_for_want_of_a_slot_is_explained_on_a_record_that_never_existed() {
+        let host = test_host().await;
+        // A host laid out for no apps at all: the first slot this app asks for is already the
+        // one past what it holds.
+        *host.allocator.lock().await = crate::adapters::net::allocator::SlotAllocator::addressing(0);
+
+        start_instance(&host, &desired_instance(|_| {})).await;
+
+        let record =
+            host.state.record(&app_id()).await.expect(
+                "a start refused for want of a slot is still explained on a record, not only in a log",
+            );
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.host_port, None, "no slot, so nothing to report one as");
+        assert_eq!(record.guest_ipv4, None);
+        let said = record.message.expect("no message");
+        assert!(said.as_str().contains("no slot left"), "{}", said.as_str());
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("no_slot", 1)]),
+            "counted once, the same as every other failure kind"
+        );
+
+        // A pass that finds the same refusal again says nothing new and counts nothing again.
+        start_instance(&host, &desired_instance(|_| {})).await;
+        assert_eq!(
+            host.metrics.health.of(&app_id()).failures,
+            failures(&[("no_slot", 1)]),
+            "said once, counted once, however many passes find it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_apps_refusal_for_want_of_a_slot_survives_the_status_loop() {
+        let host = test_host().await;
+        // A host laid out for no apps at all: the slot this stopped app is held for is already
+        // the one past what it holds.
+        *host.allocator.lock().await = crate::adapters::net::allocator::SlotAllocator::addressing(0);
+        let stopped = desired_instance(|instance| instance.desired_state = DesiredInstanceState::Stopped);
+
+        hold_instance(&host, &stopped).await;
+
+        let record =
+            host.state.record(&app_id()).await.expect(
+                "holding a stopped app refused for want of a slot still leaves a record explaining why",
+            );
+        assert_eq!(record.state, InstanceState::Failed);
+        let said = record.message.clone().expect("no message");
+        assert!(said.as_str().contains("no slot left"), "{}", said.as_str());
+
+        // The status loop used to read this never-held record as a clean Stopped once it settled,
+        // the same gap already closed below for an on-request app's first-start failure: it must
+        // keep the refusal it recorded rather than the Stopped a healthy shutdown would report.
+        refresh_states(host.arc()).await;
+
+        let settled = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(
+            settled.state,
+            InstanceState::Failed,
+            "a refused stop is not the same as a clean one"
+        );
+        assert_eq!(
+            settled.message.as_ref(),
+            Some(&said),
+            "the reason it was never held is kept: {:?}",
+            settled.message
+        );
     }
 
     #[tokio::test]
@@ -1525,7 +1652,7 @@ mod tests {
                 record.health_check = protocol::HealthCheck::BootCompleted;
                 record.state = InstanceState::Starting;
                 record.started_at = Some(now_timestamp());
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = listening;
             }))
             .await;
@@ -1552,7 +1679,7 @@ mod tests {
                 record.health_check = protocol::HealthCheck::BootCompleted;
                 record.state = InstanceState::Starting;
                 record.started_at = Some(now_timestamp());
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = nobody_listening;
             }))
             .await;
@@ -1616,7 +1743,7 @@ mod tests {
         instance_record(|record| {
             record.state = InstanceState::Running;
             record.health.ever_healthy = true;
-            record.guest_ipv4 = crate::domain::health::probe::loopback();
+            record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
             record.http_port = http_port;
             record.started_at = Some(protocol::Timestamp::from_epoch_ms(
                 now_ms() - 2 * TCP_HEALTH_CHECK.probe().grace_period_ms as i64,
