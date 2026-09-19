@@ -175,7 +175,8 @@ impl Router {
             );
         };
         note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
-        let response = forward(&self.client, request, LOOPBACK, route.host_port.get(), true).await;
+        let open = self.metrics.proxy.open(&route.app_id);
+        let response = forward(&self.client, request, LOOPBACK, route.host_port.get(), true, open).await;
         let reached = response.extensions().get::<Unreachable>().is_none();
         self.metrics
             .proxy
@@ -613,6 +614,132 @@ mod tests {
             "{counted:?}"
         );
         assert_eq!(metrics.proxy.of(&crate::test_support::app_id()).unreachable, 2);
+    }
+
+    /// A tenant that streams its one answer as the test feeds it: a chunk per message, and the
+    /// end of the body once the feed is dropped.
+    async fn streaming_as_fed() -> (HostPort, futures::channel::mpsc::UnboundedSender<bytes::Bytes>) {
+        use futures::StreamExt;
+
+        let (feed, fed) = futures::channel::mpsc::unbounded::<bytes::Bytes>();
+        let fed = Arc::new(std::sync::Mutex::new(Some(fed)));
+        let upstream = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = upstream.accept().await else {
+                    return;
+                };
+                let fed = fed.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |_request: Request<Incoming>| {
+                        let fed = fed.clone();
+                        async move {
+                            let fed = fed.lock().unwrap().take().expect("the one answer that streams");
+                            let body = http_body_util::StreamBody::new(
+                                fed.map(|chunk| Ok::<_, hyper::Error>(hyper::body::Frame::data(chunk))),
+                            );
+                            Ok::<_, std::convert::Infallible>(Response::new(http_body_util::BodyExt::boxed(
+                                body,
+                            )))
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (host_port, feed)
+    }
+
+    fn open_on_the_app(metrics: &HostMetrics) -> u64 {
+        metrics.proxy.open_requests_for(&crate::test_support::app_id())
+    }
+
+    async fn once_open_on_the_app_reads(metrics: &HostMetrics, expected: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while open_on_the_app(metrics) != expected {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{} open, {expected} expected",
+                open_on_the_app(metrics)
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn asking_for_a_stream(port: u16) -> TcpStream {
+        use tokio::io::AsyncWriteExt;
+        let mut visitor = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        visitor
+            .write_all(b"GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n")
+            .await
+            .unwrap();
+        visitor
+    }
+
+    #[tokio::test]
+    async fn a_request_is_open_on_its_app_until_the_last_of_its_answer_has_been_sent() {
+        use tokio::io::AsyncReadExt;
+        let metrics = Arc::new(HostMetrics::new());
+        let router = Router::new(metrics.clone());
+        let (host_port, feed) = streaming_as_fed().await;
+        routed_at(&router, host_port).await;
+        let port = serving(router).await;
+
+        let mut visitor = asking_for_a_stream(port).await;
+        once_open_on_the_app_reads(&metrics, 1).await;
+
+        feed.unbounded_send(bytes::Bytes::from_static(b"the first of it"))
+            .unwrap();
+        let mut heard = Vec::new();
+        while !heard.ends_with(b"the first of it") {
+            let mut byte = [0u8; 1];
+            assert_eq!(
+                visitor.read(&mut byte).await.unwrap(),
+                1,
+                "the answer ended early"
+            );
+            heard.push(byte[0]);
+        }
+        assert_eq!(
+            open_on_the_app(&metrics),
+            1,
+            "the headers and a chunk are out, and the answer is still being sent"
+        );
+
+        drop(feed);
+        let mut rest = String::new();
+        visitor.read_to_string(&mut rest).await.unwrap();
+        once_open_on_the_app_reads(&metrics, 0).await;
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_visitor_left_before_the_answer_ended_is_no_longer_open() {
+        let metrics = Arc::new(HostMetrics::new());
+        let router = Router::new(metrics.clone());
+        let (host_port, feed) = streaming_as_fed().await;
+        routed_at(&router, host_port).await;
+        let port = serving(router).await;
+
+        let visitor = asking_for_a_stream(port).await;
+        once_open_on_the_app_reads(&metrics, 1).await;
+        drop(visitor);
+
+        // The proxy learns the visitor has gone when a write to it fails, so the tenant keeps
+        // sending until it does.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while open_on_the_app(&metrics) > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "still open after the visitor left"
+            );
+            let _ = feed.unbounded_send(bytes::Bytes::from_static(b"to nobody"));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[test]

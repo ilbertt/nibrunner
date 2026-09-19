@@ -1,16 +1,48 @@
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::header::{HeaderName, HeaderValue, CONNECTION, UPGRADE};
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use std::net::IpAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use crate::domain::metrics::proxy::OpenRequest;
+
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
+
+/// An upstream's body carrying the request it answers, so the request stays open until the body
+/// has been sent whole or dropped: the proxy hands the response on as soon as its headers are in,
+/// and a stream's body is still being written long after that.
+struct HeldOpen<B> {
+    body: B,
+    _request: OpenRequest,
+}
+
+impl<B: Body + Unpin> Body for HeldOpen<B> {
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
 
 const HOP_BY_HOP: [&str; 8] = [
     "connection",
@@ -77,7 +109,12 @@ fn upgrade_requested<B>(request: &Request<B>) -> bool {
 // so this leg dials a connection of its own and keeps it for as long as the two sides talk. The
 // headers that say what the upgrade is are the ones `strip_hop_by_hop` exists to remove, which is
 // why nothing is stripped on the way through here.
-async fn forward_upgrade(request: Request<Incoming>, host: &str, port: u16) -> Response<ProxyBody> {
+async fn forward_upgrade(
+    request: Request<Incoming>,
+    host: &str,
+    port: u16,
+    open: OpenRequest,
+) -> Response<ProxyBody> {
     let (mut parts, body) = request.into_parts();
     parts.uri = rewritten(&parts.uri, host, port);
     let mut forwarded = Request::from_parts(parts, body);
@@ -104,6 +141,7 @@ async fn forward_upgrade(request: Request<Incoming>, host: &str, port: u16) -> R
     if answered.status() == StatusCode::SWITCHING_PROTOCOLS {
         let upstream = hyper::upgrade::on(&mut answered);
         tokio::spawn(async move {
+            let _open_while_they_talk = open;
             let (Ok(downstream), Ok(upstream)) = (downstream.await, upstream.await) else {
                 return;
             };
@@ -113,9 +151,11 @@ async fn forward_upgrade(request: Request<Incoming>, host: &str, port: u16) -> R
             )
             .await;
         });
+        let (parts, body) = answered.into_parts();
+        return Response::from_parts(parts, body.boxed());
     }
     let (parts, body) = answered.into_parts();
-    Response::from_parts(parts, body.boxed())
+    Response::from_parts(parts, HeldOpen { body, _request: open }.boxed())
 }
 
 // The leg to a tenant is HTTP/1.1 whatever the visitor spoke. Carried over as it came, HTTP/2 is a
@@ -148,9 +188,10 @@ pub async fn forward(
     host: &str,
     port: u16,
     keep_alive: bool,
+    open: OpenRequest,
 ) -> Response<ProxyBody> {
     if upgrade_requested(&request) {
-        return forward_upgrade(request, host, port).await;
+        return forward_upgrade(request, host, port, open).await;
     }
     let (mut parts, body) = request.into_parts();
     as_the_upstream_speaks(&mut parts);
@@ -168,7 +209,7 @@ pub async fn forward(
                     HeaderValue::from_static("close"),
                 );
             }
-            Response::from_parts(parts, body.boxed())
+            Response::from_parts(parts, HeldOpen { body, _request: open }.boxed())
         }
         Err(error) => {
             tracing::warn!(%error, host, port, "an upstream would not answer");
@@ -469,6 +510,23 @@ mod tests {
         port: u16,
         keep_alive: bool,
     ) -> u16 {
+        proxying_counted_by(
+            std::sync::Arc::new(crate::domain::metrics::ProxyMetrics::default()),
+            client,
+            host,
+            port,
+            keep_alive,
+        )
+        .await
+    }
+
+    async fn proxying_counted_by(
+        metrics: std::sync::Arc<crate::domain::metrics::ProxyMetrics>,
+        client: Client<HttpConnector, Incoming>,
+        host: &'static str,
+        port: u16,
+        keep_alive: bool,
+    ) -> u16 {
         let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
@@ -479,13 +537,14 @@ mod tests {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
                 };
-                let client = client.clone();
+                let (client, metrics) = (client.clone(), metrics.clone());
                 tokio::spawn(async move {
                     let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-                        let client = client.clone();
+                        let (client, metrics) = (client.clone(), metrics.clone());
                         async move {
+                            let open = metrics.open(&crate::test_support::app_id());
                             Ok::<_, std::convert::Infallible>(
-                                forward(&client, request, host, port, keep_alive).await,
+                                forward(&client, request, host, port, keep_alive, open).await,
                             )
                         }
                     });
@@ -684,6 +743,54 @@ mod tests {
             &echoed, b"ping",
             "the two ends are talking through a proxy that stepped aside"
         );
+    }
+
+    #[tokio::test]
+    async fn a_websocket_is_open_on_its_app_for_as_long_as_the_two_sides_talk() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let patience = std::time::Duration::from_secs(10);
+        let metrics = std::sync::Arc::new(crate::domain::metrics::ProxyMetrics::default());
+        let open = || metrics.open_requests_for(&crate::test_support::app_id());
+        let upstream = echoing_once_it_is_no_longer_http().await;
+        let proxy =
+            proxying_counted_by(metrics.clone(), upstream_client(), "127.0.0.1", upstream, true).await;
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: app-1.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            tokio::time::timeout(patience, stream.read(&mut byte))
+                .await
+                .expect("the upgrade was answered")
+                .unwrap();
+            head.push(byte[0]);
+        }
+        assert_eq!(open(), 1, "upgraded, and the request is still open");
+
+        stream.write_all(b"ping").await.unwrap();
+        let mut echoed = [0u8; 4];
+        tokio::time::timeout(patience, stream.read_exact(&mut echoed))
+            .await
+            .expect("the tenant answered past the proxy")
+            .unwrap();
+        assert_eq!(open(), 1, "talking, and the request is still open");
+
+        drop(stream);
+        let deadline = std::time::Instant::now() + patience;
+        while open() > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "still open after the visitor hung up"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     #[test]

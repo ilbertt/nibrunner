@@ -41,11 +41,18 @@ pub fn activity_after(
     taken: BTreeMap<AppId, AppTraffic>,
     previous_traffic: &BTreeMap<AppId, AppTraffic>,
     previous_moments: &BTreeMap<AppId, i64>,
+    requests_open: &BTreeMap<AppId, u64>,
     now_ms: i64,
 ) -> Activity {
     let mut traffic = BTreeMap::new();
     let mut last_active_at_ms = BTreeMap::new();
-    let mut moved = BTreeSet::new();
+    // A request the proxy is still answering is somebody asking for the app, whatever the
+    // counters say: a stream that has sent nothing for a minute is still a stream.
+    let mut moved: BTreeSet<AppId> = requests_open
+        .iter()
+        .filter(|(_, open)| **open > 0)
+        .map(|(app_id, _)| app_id.clone())
+        .collect();
 
     for (app_id, after) in taken {
         let before = previous_traffic.get(&app_id);
@@ -63,6 +70,9 @@ pub fn activity_after(
         };
         last_active_at_ms.insert(app_id.clone(), moment);
         traffic.insert(app_id, after);
+    }
+    for app_id in &moved {
+        last_active_at_ms.entry(app_id.clone()).or_insert(now_ms);
     }
     for (app_id, recorded) in previous_moments {
         last_active_at_ms.entry(app_id.clone()).or_insert(*recorded);
@@ -84,7 +94,14 @@ pub async fn record_activity(host: &Host) {
             BTreeMap::new()
         }
     };
-    let next = activity_after(taken, &snapshot.app_traffic, &snapshot.last_active_at_ms, now);
+    let requests_open = host.metrics.proxy.open_requests();
+    let next = activity_after(
+        taken,
+        &snapshot.app_traffic,
+        &snapshot.last_active_at_ms,
+        &requests_open,
+        now,
+    );
 
     let held: BTreeSet<AppId> = host.slots().await.into_iter().map(|slot| slot.app_id).collect();
     let traffic: BTreeMap<_, _> = next
@@ -109,6 +126,7 @@ pub async fn record_activity(host: &Host) {
         tracing::info!(
             measured = traffic.len(),
             moved = next.moved.len(),
+            answering = requests_open.len(),
             tracked = last_active_at_ms.len(),
             "app activity measured"
         );
@@ -161,10 +179,17 @@ struct Due {
     late_ms: i64,
 }
 
-fn due(policy: &ActivationPolicy, record: &InstanceRecord, snapshot: &HostSnapshot, now: i64) -> Option<Due> {
+fn due(
+    policy: &ActivationPolicy,
+    record: &InstanceRecord,
+    snapshot: &HostSnapshot,
+    requests_open: u64,
+    now: i64,
+) -> Option<Due> {
     let signals = ActivitySignals {
         last_active_at_ms: snapshot.last_active_at_ms.get(&record.app_id).copied(),
         started_at_ms: record.started_at.as_ref().map(Timestamp::epoch_ms),
+        requests_open,
     };
     let reason = should_sleep(policy, record, &signals, now)?;
     let since = match reason {
@@ -193,12 +218,14 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bo
     let Some(record) = snapshot.records.get(app_id) else {
         return false;
     };
-    let Some(due) = due(policy, record, &snapshot, now) else {
+    let requests_open = host.metrics.proxy.open_requests_for(app_id);
+    let Some(due) = due(policy, record, &snapshot, requests_open, now) else {
         let active_ms_ago = snapshot.last_active_at_ms.get(app_id).map(|at| now - at);
         tracing::info!(
             %app_id,
             state = record.state.as_str(),
             active_ms_ago,
+            requests_open,
             "no longer quiet; left up"
         );
         return false;
@@ -241,6 +268,7 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) -> usize {
             .unwrap_or_default()
     };
     let snapshot = host.state.snapshot().await;
+    let requests_open = host.metrics.proxy.open_requests();
     let now = crate::clock::now_ms();
 
     let mut letting_go: Vec<(Due, AppId, ActivationPolicy)> = snapshot
@@ -248,7 +276,8 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) -> usize {
         .values()
         .filter_map(|record| {
             let policy = policies.get(&record.app_id)?;
-            due(policy, record, &snapshot, now).map(|due| (due, record.app_id.clone(), *policy))
+            let open = requests_open.get(&record.app_id).copied().unwrap_or(0);
+            due(policy, record, &snapshot, open, now).map(|due| (due, record.app_id.clone(), *policy))
         })
         .collect();
     if letting_go.is_empty() {
@@ -302,21 +331,45 @@ mod activity_tests {
         )
     }
 
+    fn nobody_answering() -> BTreeMap<AppId, u64> {
+        BTreeMap::new()
+    }
+
     #[test]
-    fn an_app_is_active_when_its_counter_has_moved() {
+    fn an_app_with_a_request_open_is_active_though_its_counter_has_not_moved() {
         let (traffic, moments) = previously(1024, EARLIER);
-        let after = activity_after(reading(2048), &traffic, &moments, NOW);
+        let answering = BTreeMap::from([(app_id(), 1)]);
+        let after = activity_after(reading(1024), &traffic, &moments, &answering, NOW);
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&NOW));
         assert!(after.moved.contains(&app_id()));
 
-        let same = activity_after(reading(1024), &traffic, &moments, NOW);
+        let none_left = BTreeMap::from([(app_id(), 0)]);
+        let after = activity_after(reading(1024), &traffic, &moments, &none_left, NOW);
+        assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
+        assert!(!after.moved.contains(&app_id()));
+    }
+
+    #[test]
+    fn an_app_is_active_when_its_counter_has_moved() {
+        let (traffic, moments) = previously(1024, EARLIER);
+        let after = activity_after(reading(2048), &traffic, &moments, &nobody_answering(), NOW);
+        assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&NOW));
+        assert!(after.moved.contains(&app_id()));
+
+        let same = activity_after(reading(1024), &traffic, &moments, &nobody_answering(), NOW);
         assert_eq!(same.last_active_at_ms.get(&app_id()), Some(&EARLIER));
         assert!(!same.moved.contains(&app_id()));
     }
 
     #[test]
     fn a_first_reading_is_not_an_app_that_was_just_used() {
-        let after = activity_after(reading(4096), &BTreeMap::new(), &BTreeMap::new(), NOW);
+        let after = activity_after(
+            reading(4096),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &nobody_answering(),
+            NOW,
+        );
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&NOW));
         assert_eq!(after.traffic.get(&app_id()).map(|t| t.received.bytes), Some(4096));
         assert!(!after.moved.contains(&app_id()));
@@ -325,7 +378,7 @@ mod activity_tests {
     #[test]
     fn a_rewritten_ruleset_is_not_an_app_going_quiet() {
         let (traffic, moments) = previously(9_000_000, EARLIER);
-        let after = activity_after(reading(16), &traffic, &moments, NOW);
+        let after = activity_after(reading(16), &traffic, &moments, &nobody_answering(), NOW);
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
         assert!(!after.moved.contains(&app_id()));
         assert_eq!(after.traffic.get(&app_id()).map(|t| t.received.bytes), Some(16));
@@ -334,7 +387,7 @@ mod activity_tests {
     #[test]
     fn an_app_with_no_counter_keeps_the_moment_it_was_last_reached() {
         let (traffic, moments) = previously(1024, EARLIER);
-        let after = activity_after(BTreeMap::new(), &traffic, &moments, NOW);
+        let after = activity_after(BTreeMap::new(), &traffic, &moments, &nobody_answering(), NOW);
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
         assert!(!after.traffic.contains_key(&app_id()));
     }
@@ -342,7 +395,13 @@ mod activity_tests {
     #[test]
     fn every_app_in_the_table_is_read_not_just_the_first() {
         let taken = BTreeMap::from([(app_id(), inbound(10)), (other(), inbound(20))]);
-        let after = activity_after(taken, &BTreeMap::new(), &BTreeMap::new(), NOW);
+        let after = activity_after(
+            taken,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &nobody_answering(),
+            NOW,
+        );
         assert_eq!(after.traffic.len(), 2);
     }
 
@@ -622,6 +681,22 @@ mod sleep_tests {
         apply_sleep(host.arc()).await;
 
         assert!(host.vms.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_app_still_answering_a_request_is_left_up_where_a_quiet_one_would_have_slept() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;
+        let answering = host.metrics.proxy.open(&app_id());
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+        drop(answering);
+
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
     }
 
     #[tokio::test]
