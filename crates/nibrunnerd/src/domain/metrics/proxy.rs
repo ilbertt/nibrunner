@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hyper::StatusCode;
@@ -128,6 +128,7 @@ pub struct AppProxy {
     pub request_count: u64,
     pub request_micros: u64,
     pub unreachable: u64,
+    pub open: u64,
     pub raw_sessions: [[u64; RAW_OUTCOMES.len()]; PROTOCOLS.len()],
     pub raw_bytes_in: [u64; PROTOCOLS.len()],
     pub raw_bytes_out: [u64; PROTOCOLS.len()],
@@ -137,13 +138,33 @@ fn position<T: PartialEq>(of: &[T], value: &T) -> usize {
     of.iter().position(|each| each == value).unwrap_or(0)
 }
 
+type Apps = Arc<Mutex<BTreeMap<AppId, AppProxy>>>;
+
+/// One request routed to an app, open until this is dropped: with the last byte of the response
+/// body, or when a websocket closes. The rx counters see nothing of an answer that is taking its
+/// time, so this is what stands between an open stream and a guest paused underneath it.
+#[derive(Debug)]
+pub struct OpenRequest {
+    apps: Apps,
+    app_id: AppId,
+}
+
+impl Drop for OpenRequest {
+    fn drop(&mut self) {
+        let mut apps = self.apps.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(app) = apps.get_mut(&self.app_id) {
+            app.open = app.open.saturating_sub(1);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProxyMetrics {
     served: [AtomicU64; OUTCOMES.len()],
     answered: Histogram,
     in_flight: AtomicU64,
     handshakes: [AtomicU64; HANDSHAKES.len()],
-    apps: Mutex<BTreeMap<AppId, AppProxy>>,
+    apps: Apps,
 }
 
 impl Default for ProxyMetrics {
@@ -153,7 +174,7 @@ impl Default for ProxyMetrics {
             answered: Histogram::over(&BUCKET_BOUNDS_SECONDS),
             in_flight: AtomicU64::new(0),
             handshakes: Default::default(),
-            apps: Mutex::new(BTreeMap::new()),
+            apps: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -162,6 +183,29 @@ impl ProxyMetrics {
     fn app(&self, app_id: &AppId, change: impl FnOnce(&mut AppProxy)) {
         let mut apps = self.apps.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         change(apps.entry(app_id.clone()).or_default());
+    }
+
+    pub fn open(&self, app_id: &AppId) -> OpenRequest {
+        self.app(app_id, |app| app.open += 1);
+        OpenRequest {
+            apps: self.apps.clone(),
+            app_id: app_id.clone(),
+        }
+    }
+
+    pub fn open_requests_for(&self, app_id: &AppId) -> u64 {
+        self.of(app_id).open
+    }
+
+    /// The apps with a request open, and how many each.
+    pub fn open_requests(&self) -> BTreeMap<AppId, u64> {
+        self.apps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|(_, app)| app.open > 0)
+            .map(|(app_id, app)| (app_id.clone(), app.open))
+            .collect()
     }
 
     pub fn answered(&self, outcome: Outcome, took: Duration, app_id: Option<&AppId>) {
@@ -326,6 +370,19 @@ pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics, snapshot: &HostSna
         );
     }
 
+    page.metric(
+        "nibrunner_app_requests_open",
+        "Requests routed to an app that are still being answered: from arrival until the last byte of the response body, or until a websocket closes. An app with one open is not quiet.",
+        "gauge",
+    );
+    for app_id in &apps {
+        page.value(
+            "nibrunner_app_requests_open",
+            &[("app", app_id.as_str())],
+            metrics.of(app_id).open,
+        );
+    }
+
     let with_raw_ports: Vec<&AppId> = snapshot
         .records
         .values()
@@ -429,6 +486,7 @@ mod tests {
         metrics.ended();
         metrics.handshake(Handshake::Completed);
         metrics.handshake(Handshake::TimedOut);
+        let _still_answering = metrics.open(&app_id());
 
         let page = page(
             &crate::domain::metrics::tests::report(),
@@ -456,6 +514,8 @@ mod tests {
         assert!(requests.contains(&"nibrunner_app_requests_total{app=\"app-1\",class=\"5xx\"} 1"));
         assert!(requests.contains(&"nibrunner_app_requests_total{app=\"app-2\",class=\"2xx\"} 0"));
         assert!(page.contains("nibrunner_app_requests_unreachable_total{app=\"app-1\"} 1\n"));
+        assert!(page.contains("nibrunner_app_requests_open{app=\"app-1\"} 1\n"));
+        assert!(page.contains("nibrunner_app_requests_open{app=\"app-2\"} 0\n"));
         assert!(page.contains("nibrunner_app_request_duration_seconds_sum{app=\"app-1\"} 0.006\n"));
         assert!(page.contains("nibrunner_app_request_duration_seconds_count{app=\"app-1\"} 2\n"));
 
@@ -488,6 +548,39 @@ mod tests {
         metrics.app_answered(&app_id(), StatusCode::OK, true);
         assert_eq!(metrics.of(&app_id()).requests[1], 1);
         metrics.forget(&app_id());
+        assert_eq!(metrics.of(&app_id()), AppProxy::default());
+    }
+
+    #[test]
+    fn a_request_is_open_on_its_app_from_when_it_is_taken_until_it_is_let_go() {
+        let metrics = ProxyMetrics::default();
+        let other = AppId::parse("app-2").unwrap();
+        assert!(metrics.open_requests().is_empty());
+
+        let first = metrics.open(&app_id());
+        let second = metrics.open(&app_id());
+        assert_eq!(metrics.open_requests_for(&app_id()), 2);
+        assert_eq!(
+            metrics.open_requests(),
+            BTreeMap::from([(app_id(), 2)]),
+            "an app with nothing open is not listed"
+        );
+        assert_eq!(metrics.open_requests_for(&other), 0);
+
+        drop(first);
+        assert_eq!(metrics.open_requests_for(&app_id()), 1);
+        drop(second);
+        assert_eq!(metrics.open_requests_for(&app_id()), 0);
+        assert!(metrics.open_requests().is_empty());
+    }
+
+    #[test]
+    fn a_request_still_open_on_an_app_the_document_dropped_goes_with_it() {
+        let metrics = ProxyMetrics::default();
+        let held = metrics.open(&app_id());
+        metrics.forget(&app_id());
+        assert_eq!(metrics.open_requests_for(&app_id()), 0);
+        drop(held);
         assert_eq!(metrics.of(&app_id()), AppProxy::default());
     }
 }

@@ -6,6 +6,11 @@ use crate::domain::report::InstanceRecord;
 /// somewhere already or has nothing to suspend.
 const SLEEPABLE_STATES: [InstanceState; 1] = [InstanceState::Running];
 
+/// How long past its lifetime an app with a request still open is left to finish answering it.
+/// Bounded, because a policy that recycles an app on a clock must not be held off it for ever by
+/// a stream that never ends.
+pub const MAX_LIFETIME_DRAIN_MS: i64 = 30_000;
+
 /// Why this host is putting a microVM to sleep, in the word the log and the report use for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepReason {
@@ -27,6 +32,8 @@ impl SleepReason {
 pub struct ActivitySignals {
     pub last_active_at_ms: Option<i64>,
     pub started_at_ms: Option<i64>,
+    /// Requests the proxy has routed to the app and is still carrying the answer to.
+    pub requests_open: u64,
 }
 
 /// Whether a policy is one this host can act on without any signal from inside the guest.
@@ -39,15 +46,20 @@ pub fn should_sleep(
     if !record.on_request || !record.desired_running || !SLEEPABLE_STATES.contains(&record.state) {
         return None;
     }
+    let answering = signals.requests_open > 0;
     match policy.sleep_when {
         SleepPolicy::Never => None,
         SleepPolicy::TrafficIdle { timeout_ms } => {
+            if answering {
+                return None;
+            }
             let quiet_since = signals.last_active_at_ms?;
             (now_ms - quiet_since >= timeout_ms.get() as i64).then_some(SleepReason::Quiet)
         }
         SleepPolicy::MaxLifetime { ttl_ms } => {
             let up_since = signals.started_at_ms?;
-            (now_ms - up_since >= ttl_ms.get() as i64).then_some(SleepReason::LivedLongEnough)
+            let drain_ms = if answering { MAX_LIFETIME_DRAIN_MS } else { 0 };
+            (now_ms - up_since >= ttl_ms.get() as i64 + drain_ms).then_some(SleepReason::LivedLongEnough)
         }
     }
 }
@@ -96,6 +108,7 @@ mod tests {
         ActivitySignals {
             last_active_at_ms: Some(ms),
             started_at_ms: None,
+            requests_open: 0,
         }
     }
 
@@ -103,6 +116,7 @@ mod tests {
         ActivitySignals {
             last_active_at_ms: None,
             started_at_ms: Some(ms),
+            requests_open: 0,
         }
     }
 
@@ -127,6 +141,7 @@ mod tests {
         let signals = ActivitySignals {
             last_active_at_ms: Some(NOW_MS),
             started_at_ms: Some(NOW_MS - TTL_MS as i64),
+            requests_open: 0,
         };
         assert_eq!(
             should_sleep(&max_lifetime(), &record, &signals, NOW_MS),
@@ -142,6 +157,7 @@ mod tests {
         let busy_but_old = ActivitySignals {
             last_active_at_ms: Some(NOW_MS),
             started_at_ms: Some(NOW_MS - TTL_MS as i64),
+            requests_open: 0,
         };
         assert_eq!(
             should_sleep(&traffic_idle(), &record, &busy_but_old, NOW_MS),
@@ -151,6 +167,7 @@ mod tests {
         let quiet_but_young = ActivitySignals {
             last_active_at_ms: Some(NOW_MS - TIMEOUT_MS as i64),
             started_at_ms: Some(NOW_MS),
+            requests_open: 0,
         };
         assert_eq!(
             should_sleep(&max_lifetime(), &record, &quiet_but_young, NOW_MS),
@@ -164,8 +181,61 @@ mod tests {
         let signals = ActivitySignals {
             last_active_at_ms: Some(0),
             started_at_ms: Some(0),
+            requests_open: 0,
         };
         assert_eq!(should_sleep(&never(), &record, &signals, NOW_MS), None);
+    }
+
+    #[test]
+    fn an_app_with_a_request_open_is_not_quiet_however_long_its_counters_have_stood_still() {
+        let record = serving(InstanceState::Running);
+        let answering = ActivitySignals {
+            requests_open: 1,
+            ..quiet_since(0)
+        };
+        assert_eq!(should_sleep(&traffic_idle(), &record, &answering, NOW_MS), None);
+    }
+
+    #[test]
+    fn an_app_past_its_lifetime_is_left_to_finish_answering_but_not_for_ever() {
+        let record = serving(InstanceState::Running);
+        let still_answering = |lived_ms: i64| ActivitySignals {
+            requests_open: 1,
+            ..up_since(NOW_MS - lived_ms)
+        };
+        assert_eq!(
+            should_sleep(&max_lifetime(), &record, &still_answering(TTL_MS as i64), NOW_MS),
+            None
+        );
+        assert_eq!(
+            should_sleep(
+                &max_lifetime(),
+                &record,
+                &still_answering(TTL_MS as i64 + MAX_LIFETIME_DRAIN_MS - 1),
+                NOW_MS
+            ),
+            None
+        );
+        assert_eq!(
+            should_sleep(
+                &max_lifetime(),
+                &record,
+                &still_answering(TTL_MS as i64 + MAX_LIFETIME_DRAIN_MS),
+                NOW_MS
+            ),
+            Some(SleepReason::LivedLongEnough)
+        );
+    }
+
+    #[test]
+    fn a_policy_that_never_sleeps_is_no_different_with_a_request_open() {
+        let record = serving(InstanceState::Running);
+        let answering = ActivitySignals {
+            last_active_at_ms: Some(0),
+            started_at_ms: Some(0),
+            requests_open: 1,
+        };
+        assert_eq!(should_sleep(&never(), &record, &answering, NOW_MS), None);
     }
 
     #[test]
