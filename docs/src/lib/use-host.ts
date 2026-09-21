@@ -281,7 +281,7 @@ function reserve({
 }): Spot | null {
   const spot = freeSpot({ zone, size, apps: world.apps, except: app.id });
   if (spot !== null) {
-    update({ world, id: app.id, change: { reserved: spot } });
+    update({ world, id: app.id, change: { reserved: { spot, size } } });
   }
   return spot;
 }
@@ -349,7 +349,7 @@ function wake({ world, app, now }: { world: World; app: App; now: number }): voi
 }
 
 function planWake({ world, app, now }: { world: World; app: App; now: number }): Step[] {
-  const spot = app.reserved ?? reserve({ world, app, zone: 'floor' });
+  const spot = app.reserved?.spot ?? reserve({ world, app, zone: 'floor' });
   if (spot === null) {
     update({ world, id: app.id, change: { pending: null, requestedAt: null } });
     advise({ world, now });

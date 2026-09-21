@@ -89,6 +89,13 @@ export const NET_PANEL = { y0: 0.15, y1: 1.3, tap: 1.2 };
 
 export type Spot = { zone: ZoneName; x0: number; z0: number };
 
+/**
+ * Where a crate on its way lands, and the size it lands as. Not its own size: a crate being
+ * resized keeps that until the robot lifts it, and its new cells are held from the moment the
+ * resize is planned, or a request in the meantime is given the ones it grows into.
+ */
+export type Reservation = { spot: Spot; size: Size };
+
 export function spotRect({ spot, size }: { spot: Spot; size: Size }): Rect {
   const { w, d } = footprintIn({ zone: spot.zone, size });
   return { x0: spot.x0, x1: spot.x0 + w, z0: spot.z0, z1: spot.z0 + d };
@@ -141,7 +148,7 @@ export type App = {
   /** What the robot has been asked to do with it and has not finished yet. */
   pending: 'place' | 'shelve' | 'wake' | 'resize' | 'remove' | null;
   /** The cells kept for it while it is on its way. */
-  reserved: Spot | null;
+  reserved: Reservation | null;
   /** What it is growing or shrinking from: a resize, or a snapshot taken or restored. */
   morph: { from: Dims; at: number } | null;
 };
@@ -216,8 +223,8 @@ function heldIn({ zone, apps }: { zone: ZoneName; apps: App[] }): Rect[] {
     if (app.location.kind === 'placed' && app.location.spot.zone === zone) {
       held.push(spotRect({ spot: app.location.spot, size: app.size }));
     }
-    if (app.reserved !== null && app.reserved.zone === zone) {
-      held.push(spotRect({ spot: app.reserved, size: app.size }));
+    if (app.reserved !== null && app.reserved.spot.zone === zone) {
+      held.push(spotRect(app.reserved));
     }
   }
   return held;
