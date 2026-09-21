@@ -223,10 +223,6 @@ impl HostConfig {
         self.in_state_dir("host-id")
     }
 
-    pub fn cached_desired_state_file(&self) -> PathBuf {
-        self.in_state_dir("desired-state.json")
-    }
-
     pub fn deleted_volumes_file(&self) -> PathBuf {
         self.in_state_dir("deleted-volumes.json")
     }
@@ -1936,7 +1932,6 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
             config.slot_cursor_file(),
             config.activity_file(),
             config.host_id_file(),
-            config.cached_desired_state_file(),
             config.deleted_volumes_file(),
             config.artifact_cache_dir(),
             config.vm_dir(),
@@ -1970,7 +1965,6 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
             config.slot_cursor_file(),
             config.activity_file(),
             config.host_id_file(),
-            config.cached_desired_state_file(),
             config.deleted_volumes_file(),
             config.artifact_cache_dir(),
             config.vm_dir(),

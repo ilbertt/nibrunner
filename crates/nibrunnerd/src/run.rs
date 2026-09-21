@@ -358,7 +358,7 @@ mod tests {
             state.volumes = vec![desired_volume(|_| {})];
             state.instances = vec![desired_instance(|_| {})];
         });
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired);
 
         let controller = ConvergeController::new(host.arc().clone(), HostReconciler::new(host.arc().clone()));
         let converging = tokio::spawn(async move { controller.run().await });
@@ -372,7 +372,7 @@ mod tests {
 
         assert!(host.state.record(&app_id()).await.is_some());
         assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Boot]);
-        assert_eq!(host.cached_desired_state().await.as_ref(), Some(&desired));
+        assert_eq!(host.accepted_document().await.as_ref(), Some(&desired));
     }
 
     #[tokio::test]
