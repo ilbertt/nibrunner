@@ -1014,8 +1014,8 @@ const RESERVED_FILL = { waiting: 0.18, coming: 0.08 };
  * the socket it will be cabled to is lit as well, waiting.
  */
 function Reservation({ app }: { app: App }) {
-  const spot = app.reserved!;
-  const rect = spotRect({ spot, size: app.size });
+  const { spot } = app.reserved!;
+  const rect = spotRect(app.reserved!);
   const waiting = app.requestedAt !== null;
   return (
     <g style={{ stroke: NET_TINT, fill: NET_TINT }} className="animate-pulse">
