@@ -58,8 +58,8 @@ so it cannot reach the guest's init, the raw volume, or the host.
 
 ## From a Docker image
 
-nibrunner does not run OCI images, but a `filesystem` layer can be made from one: export the
-image's filesystem and pack it. The Debian image nibrunner ships is built the same way.
+nibrunner does not run OCI images. To make a `filesystem` layer from one, export its filesystem
+and pack it:
 
 ```bash
 container=$(docker create --platform linux/amd64 my-image /bin/true)
@@ -70,18 +70,18 @@ mksquashfs rootfs my-image.squashfs -comp zstd
 sha256sum my-image.squashfs
 ```
 
-Copy `my-image.squashfs` into the artifact store and name it as a `filesystem` layer.
+Put `my-image.squashfs` in the artifact store and list it as a `filesystem` layer. The Debian
+image nibrunner ships is built this way.
 
-What the Dockerfile says about running the image does not travel with its filesystem. Say it in
-`desired.json`:
+The export carries the filesystem only. The rest of the Dockerfile goes in `desired.json`:
 
 | Dockerfile | `desired.json` |
 | --- | --- |
 | `ENTRYPOINT`, `CMD` | `config.command.program` and `args` |
 | `WORKDIR` | `config.command.workingDirectory` |
 | `ENV` | `config.command.environment` |
-| `EXPOSE` | `config.httpPort`, and [`config.ports`](/docs/guides/raw-ports) for the rest |
-| `USER` | Nothing: the program always runs as uid 65534 |
-| `VOLUME` | Nothing: every write goes to [the volume](#the-volume) |
+| `EXPOSE` | `config.httpPort`; other ports, [`config.ports`](/docs/guides/raw-ports) |
+| `USER` | Nothing. The program runs as uid 65534. |
+| `VOLUME` | Nothing. Every write goes to [the volume](#the-volume). |
 
 The [reference](/docs/reference/desired) lists every field of a layer and a command.
