@@ -5,7 +5,8 @@ description: What nibrunner is and how these docs are organized.
 
 nibrunner runs apps in Firecracker microVMs on one Linux machine. It is a single binary,
 `nibrunnerd`. You list the apps you want in a JSON file. The daemon boots each one in its own
-microVM and keeps it running.
+microVM and keeps it running. An app is not a container image: it is a program and the files it
+needs, which the host stacks on a Debian base as [layers](/docs/guides/layers).
 
 ## Features
 
