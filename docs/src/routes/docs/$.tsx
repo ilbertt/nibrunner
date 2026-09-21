@@ -23,6 +23,8 @@ const moved: Record<string, string> = {
   config: 'reference/config',
   'desired-state': 'getting-started/deploy-an-app',
   reference: 'reference/config',
+  'reference/desired-state': 'reference/desired',
+  'reference/reported-state': 'reference/reported',
 };
 
 export const Route = createFileRoute('/docs/$')({
