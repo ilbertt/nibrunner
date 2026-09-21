@@ -1,4 +1,4 @@
--- What this host keeps about itself, and nothing about what it is *told* to be.
+-- What this host keeps about itself.
 --
 -- `desired.json` and `reported.json` stay files on purpose: one is written by whoever deploys and
 -- the other is what anything reads to see status, so both are the interface rather than storage.
@@ -10,6 +10,16 @@
 create table host_identity (
     only_row integer primary key check (only_row = 0),
     host_id  text    not null
+) strict;
+
+-- The document this host last took up, as it was given. A restart sets out on it before reading
+-- `desired.json` again, so that a file which will not parse on the way up is refused the way it
+-- is refused while the daemon runs — with the last good document left running rather than
+-- nothing. The one note here about what the host is *told* to be, and it is the daemon's rather
+-- than the operator's: the file is theirs to edit, this is not.
+create table accepted_document (
+    only_row integer primary key check (only_row = 0),
+    document text    not null
 ) strict;
 
 -- One integer per app, and every per-app resource derives from it: the loopback port, the tap, the

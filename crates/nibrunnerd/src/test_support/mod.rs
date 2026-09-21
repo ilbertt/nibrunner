@@ -274,6 +274,11 @@ pub fn desired_state(edit: impl FnOnce(&mut HostDesiredState)) -> HostDesiredSta
     value
 }
 
+/// The document as whoever deploys writes it: the file the daemon watches.
+pub fn write_desired_state(path: &std::path::Path, state: &HostDesiredState) {
+    crate::json_store::write_json(path, state).expect("a fixture writes where the test can");
+}
+
 pub fn observed_instance(edit: impl FnOnce(&mut ObservedInstance)) -> ObservedInstance {
     let mut value = ObservedInstance {
         app_id: app_id(),

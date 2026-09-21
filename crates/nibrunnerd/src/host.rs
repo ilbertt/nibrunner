@@ -131,10 +131,20 @@ impl Host {
         );
     }
 
-    pub async fn cached_desired_state(&self) -> Option<HostDesiredState> {
-        crate::desired::read_desired_state(&self.config.cached_desired_state_file())
-            .ok()
-            .flatten()
+    pub async fn accepted_document(&self) -> Option<HostDesiredState> {
+        match self.repositories.accepted_document.read().await {
+            Ok(held) => held,
+            Err(error) => {
+                tracing::warn!(error = %error.message(), "the document this host last took up could not be read back");
+                None
+            }
+        }
+    }
+
+    pub async fn remember_accepted_document(&self, document: &HostDesiredState) {
+        if let Err(error) = self.repositories.accepted_document.remember(document).await {
+            tracing::warn!(error = %error.message(), "this host could not write down the document it took up");
+        }
     }
 }
 
@@ -145,6 +155,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::domain::store::StoreError;
+    use crate::repositories::accepted_document_repository::MockAcceptedDocumentRepository;
     use crate::repositories::activity_repository::MockActivityRepository;
     use crate::repositories::deleted_volumes_repository::MockDeletedVolumeRepository;
     use crate::repositories::host_identity_repository::MockHostIdentityRepository;
@@ -178,6 +189,13 @@ mod tests {
         meters
     }
 
+    fn quiet_accepted_document() -> MockAcceptedDocumentRepository {
+        let mut accepted = MockAcceptedDocumentRepository::new();
+        accepted.expect_read().returning(|| Ok(None));
+        accepted.expect_remember().returning(|_| Ok(()));
+        accepted
+    }
+
     fn bundle(
         instances: MockInstanceRepository,
         slots: MockSlotRepository,
@@ -192,6 +210,7 @@ mod tests {
             meters: Arc::new(quiet_meters()),
             deleted_volumes: Arc::new(deleted_volumes),
             identity: Arc::new(identity),
+            accepted_document: Arc::new(quiet_accepted_document()),
         }
     }
 
