@@ -29,15 +29,15 @@ impl ConvergeController {
         Arc::new(Self { host, reconciler })
     }
 
-    pub async fn converge_cached(&self) -> bool {
-        let Some(cached) = self.host.cached_desired_state().await else {
+    pub async fn converge_accepted(&self) -> bool {
+        let Some(accepted) = self.host.accepted_document().await else {
             return false;
         };
-        let Some(changes) = self.accept(&cached).await else {
+        let Some(changes) = self.accept(&accepted).await else {
             return false;
         };
         converge::detected(&self.host, &changes, Cause::Restart, crate::clock::now_ms()).await;
-        self.reconcile(&cached, Trigger::Restart).await;
+        self.reconcile(&accepted, Trigger::Restart).await;
         true
     }
 
@@ -49,10 +49,7 @@ impl ConvergeController {
                 let trigger = match self.accept(&desired).await {
                     Some(changes) => {
                         converge::detected(&self.host, &changes, Cause::Change, crate::clock::now_ms()).await;
-                        let _ = crate::desired::cache_desired_state(
-                            &self.host.config.cached_desired_state_file(),
-                            &desired,
-                        );
+                        self.host.remember_accepted_document(&desired).await;
                         Trigger::Change
                     }
                     None if !self.host.state.snapshot().await.deferred_work => return false,
@@ -131,7 +128,7 @@ impl Controller for ConvergeController {
 
     async fn run(&self) {
         let watch = DesiredStateWatch::on(&self.host.config.desired_state_file);
-        self.converge_cached().await;
+        self.converge_accepted().await;
         self.converge_once().await;
         // The watch outlives a tick so that its backstop, which is the only way a host without
         // inotify hears of the document moving, is not put off by a timer that fires first.
@@ -164,7 +161,7 @@ mod tests {
     async fn a_document_that_appeared_is_converged_on() {
         let host = test_host().await;
         let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired);
 
         let mut reconciler = MockReconcileService::new();
         let wanted = desired.clone();
@@ -181,7 +178,7 @@ mod tests {
     async fn the_moment_a_change_is_noticed_is_written_down_before_the_pass_sets_out() {
         let host = test_host().await;
         let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired);
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(1).returning(|_, _| ());
 
@@ -201,14 +198,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_file_broken_while_the_daemon_was_down_leaves_the_document_it_took_up_running() {
+        let host = test_host().await;
+        let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
+        write_desired_state(&host.config.desired_state_file, &desired);
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().times(1).returning(|_, _| ());
+        assert!(controller(&host, reconciler).converge_once().await);
+
+        std::fs::write(&host.config.desired_state_file, b"{").unwrap();
+        // A restart keeps the store and forgets everything else.
+        *host.cache.lock().await = crate::desired::DesiredStateCache::new();
+        let wanted = desired.clone();
+        let mut reconciler = MockReconcileService::new();
+        reconciler
+            .expect_reconcile()
+            .times(1)
+            .withf(move |seen, trigger| *seen == wanted && *trigger == Trigger::Restart)
+            .returning(|_, _| ());
+        let restarted = controller(&host, reconciler);
+
+        assert!(restarted.converge_accepted().await);
+        assert!(
+            !restarted.converge_once().await,
+            "the file is refused as it would be on a running daemon, and nothing else moves"
+        );
+    }
+
+    #[tokio::test]
     async fn what_a_restart_sets_out_on_is_measured_as_a_restart() {
         let host = test_host().await;
         let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
-        crate::desired::cache_desired_state(&host.config.cached_desired_state_file(), &desired).unwrap();
+        host.repositories
+            .accepted_document
+            .remember(&desired)
+            .await
+            .unwrap();
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(1).returning(|_, _| ());
 
-        assert!(controller(&host, reconciler).converge_cached().await);
+        assert!(controller(&host, reconciler).converge_accepted().await);
         assert_eq!(
             host.state.snapshot().await.deploys[&app_id()].cause,
             Cause::Restart
@@ -238,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn a_document_that_has_not_moved_does_not_run_a_second_pass() {
         let host = test_host().await;
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired_state(|_| {})).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired_state(|_| {}));
 
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(1).returning(|_, _| ());
@@ -250,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn work_the_last_pass_deferred_is_carried_even_though_the_document_stood_still() {
         let host = test_host().await;
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired_state(|_| {})).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired_state(|_| {}));
 
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(2).returning(|_, _| ());
@@ -301,11 +330,10 @@ mod tests {
         );
 
         // A readable document clears it, so the report stops claiming the last write did not land.
-        crate::desired::cache_desired_state(
+        write_desired_state(
             &host.config.desired_state_file,
             &desired_state(|state| state.instances = vec![desired_instance(|_| {})]),
-        )
-        .unwrap();
+        );
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(1).returning(|_, _| ());
         assert!(controller(&host, reconciler).converge_once().await);
@@ -315,12 +343,15 @@ mod tests {
     #[tokio::test]
     async fn the_last_document_this_host_was_given_is_what_a_restart_converges_on_first() {
         let host = test_host().await;
-        crate::desired::cache_desired_state(&host.config.cached_desired_state_file(), &desired_state(|_| {}))
+        host.repositories
+            .accepted_document
+            .remember(&desired_state(|_| {}))
+            .await
             .unwrap();
 
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(1).returning(|_, _| ());
-        assert!(controller(&host, reconciler).converge_cached().await);
+        assert!(controller(&host, reconciler).converge_accepted().await);
     }
 
     #[tokio::test]
@@ -328,14 +359,14 @@ mod tests {
         let host = test_host().await;
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().never();
-        assert!(!controller(&host, reconciler).converge_cached().await);
+        assert!(!controller(&host, reconciler).converge_accepted().await);
     }
 
     #[tokio::test]
     async fn a_tick_passes_over_the_document_the_host_holds_though_it_has_not_moved() {
         let host = test_host().await;
         let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired);
 
         let mut sequence = mockall::Sequence::new();
         let mut reconciler = MockReconcileService::new();
@@ -372,10 +403,7 @@ mod tests {
     #[tokio::test]
     async fn the_loop_passes_over_a_document_that_stands_still_once_a_tick() {
         let host = test_host().await;
-        // Paused once the host is built: opening its store waits on a thread, which a clock that
-        // leaps to the next timer whenever nothing is runnable reads as the pool timing out.
-        tokio::time::pause();
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired_state(|_| {})).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired_state(|_| {}));
         let mut reconciler = MockReconcileService::new();
         reconciler
             .expect_reconcile()
@@ -391,6 +419,20 @@ mod tests {
 
         let running = controller.clone();
         let converging = tokio::spawn(async move { running.run().await });
+        // The first pass writes the document it took up to the store, which waits on a thread; a
+        // clock that leaps to the next timer whenever nothing is runnable reads that as the pool
+        // timing out. So the clock is paused only once that pass is behind the loop, and the
+        // ticks, which touch no store, are what run on it.
+        for _ in 0..200 {
+            if page(&host)
+                .await
+                .contains("nibrunner_reconcile_seconds_count{trigger=\"change\"} 1\n")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::pause();
         tokio::time::sleep(RECONCILE_TICK * 2 + Duration::from_millis(100)).await;
         converging.abort();
         let _ = converging.await;
@@ -413,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn a_tick_that_carries_deferred_work_is_measured_as_deferred_rather_than_as_a_tick() {
         let host = test_host().await;
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired_state(|_| {})).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired_state(|_| {}));
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(2).returning(|_, _| ());
         let controller = controller(&host, reconciler);
@@ -431,7 +473,7 @@ mod tests {
     async fn a_tick_does_not_reread_the_file_so_a_refused_document_is_refused_once_and_not_once_a_tick() {
         let host = test_host().await;
         let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
-        crate::desired::cache_desired_state(&host.config.desired_state_file, &desired).unwrap();
+        write_desired_state(&host.config.desired_state_file, &desired);
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(2).returning(|_, _| ());
         let controller = controller(&host, reconciler);
@@ -523,7 +565,7 @@ mod tests {
         }
 
         async fn converged(host: &TestHost) -> Arc<ConvergeController> {
-            crate::desired::cache_desired_state(&host.config.desired_state_file, &running_app()).unwrap();
+            write_desired_state(&host.config.desired_state_file, &running_app());
             let controller =
                 ConvergeController::new(host.arc().clone(), HostReconciler::new(host.arc().clone()));
             assert!(controller.converge_once().await);
@@ -617,7 +659,7 @@ mod tests {
                 })];
             });
             let budget = asking_too_much.instances[0].config.restart_policy.max_restarts;
-            crate::desired::cache_desired_state(&host.config.desired_state_file, &asking_too_much).unwrap();
+            write_desired_state(&host.config.desired_state_file, &asking_too_much);
             let controller =
                 ConvergeController::new(host.arc().clone(), HostReconciler::new(host.arc().clone()));
             assert!(controller.converge_once().await);

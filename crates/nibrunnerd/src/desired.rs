@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use protocol::{AppId, DesiredInstance, HostDesiredState};
 
-use crate::json_store::{read_json, write_json, StoreError};
+use crate::json_store::{read_json, StoreError};
 
 pub const WATCH_BACKSTOP: Duration = Duration::from_secs(30);
 
@@ -31,10 +31,6 @@ pub fn read_desired_state(path: &Path) -> Result<Option<HostDesiredState>, Desir
             path: path.display().to_string(),
             reason: error.to_string(),
         })
-}
-
-pub fn cache_desired_state(path: &Path, state: &HostDesiredState) -> Result<(), StoreError> {
-    write_json(path, state)
 }
 
 /// What a document asks for that the one before it did not: the apps whose deployment or
@@ -203,7 +199,7 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{desired_instance, desired_state};
+    use crate::test_support::{desired_instance, desired_state, write_desired_state};
 
     #[test]
     fn a_file_that_is_not_there_yet_is_the_ordinary_state_of_a_fresh_host() {
@@ -218,7 +214,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("desired.json");
         let state = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
-        cache_desired_state(&path, &state).unwrap();
+        write_desired_state(&path, &state);
         assert_eq!(read_desired_state(&path).unwrap(), Some(state));
         std::fs::write(&path, r#"{"hostId":"host-1"}"#).unwrap();
         assert!(read_desired_state(&path)
@@ -341,7 +337,7 @@ mod tests {
             let path = path.clone();
             async move {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                cache_desired_state(&path, &desired_state(|_| {})).unwrap();
+                write_desired_state(&path, &desired_state(|_| {}));
             }
         });
         let settled = tokio::time::timeout(Duration::from_secs(5), watch.changed()).await;
@@ -358,7 +354,7 @@ mod tests {
         }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("desired.json");
-        cache_desired_state(&path, &desired_state(|_| {})).unwrap();
+        write_desired_state(&path, &desired_state(|_| {}));
         let watch = DesiredStateWatch::on(&path);
 
         let writer = tokio::spawn({

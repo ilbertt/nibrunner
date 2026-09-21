@@ -1,3 +1,4 @@
+pub mod accepted_document_repository;
 pub mod activity_repository;
 pub mod deleted_volumes_repository;
 pub mod host_identity_repository;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 
+use crate::repositories::accepted_document_repository::{AcceptedDocumentRepository, SqliteAcceptedDocument};
 use crate::repositories::activity_repository::{ActivityRepository, SqliteActivity};
 use crate::repositories::deleted_volumes_repository::{DeletedVolumeRepository, SqliteDeletedVolumes};
 use crate::repositories::host_identity_repository::{HostIdentityRepository, SqliteHostIdentity};
@@ -24,6 +26,7 @@ pub struct Repositories {
     pub meters: Arc<dyn MeterRepository>,
     pub deleted_volumes: Arc<dyn DeletedVolumeRepository>,
     pub identity: Arc<dyn HostIdentityRepository>,
+    pub accepted_document: Arc<dyn AcceptedDocumentRepository>,
 }
 
 impl Repositories {
@@ -34,7 +37,8 @@ impl Repositories {
             activity: Arc::new(SqliteActivity::new(pool.clone())),
             meters: Arc::new(SqliteMeters::new(pool.clone())),
             deleted_volumes: Arc::new(SqliteDeletedVolumes::new(pool.clone())),
-            identity: Arc::new(SqliteHostIdentity::new(pool)),
+            identity: Arc::new(SqliteHostIdentity::new(pool.clone())),
+            accepted_document: Arc::new(SqliteAcceptedDocument::new(pool)),
         }
     }
 
@@ -69,6 +73,7 @@ mod tests {
                 .await
                 .unwrap();
         for expected in [
+            "accepted_document",
             "activity",
             "deleted_volumes",
             "host_identity",
