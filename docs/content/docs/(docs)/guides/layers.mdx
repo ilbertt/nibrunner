@@ -56,4 +56,32 @@ If no layer contains the working directory, the host creates it and gives it to 
 program can write to the working directory and to `/tmp`. It is chrooted into the stacked root,
 so it cannot reach the guest's init, the raw volume, or the host.
 
+## From a Docker image
+
+nibrunner does not run OCI images, but a `filesystem` layer can be made from one: export the
+image's filesystem and pack it. The Debian image nibrunner ships is built the same way.
+
+```bash
+container=$(docker create --platform linux/amd64 my-image /bin/true)
+mkdir rootfs
+docker export "$container" | tar -x -C rootfs
+docker rm "$container"
+mksquashfs rootfs my-image.squashfs -comp zstd
+sha256sum my-image.squashfs
+```
+
+Copy `my-image.squashfs` into the artifact store and name it as a `filesystem` layer.
+
+What the Dockerfile says about running the image does not travel with its filesystem. Say it in
+`desired.json`:
+
+| Dockerfile | `desired.json` |
+| --- | --- |
+| `ENTRYPOINT`, `CMD` | `config.command.program` and `args` |
+| `WORKDIR` | `config.command.workingDirectory` |
+| `ENV` | `config.command.environment` |
+| `EXPOSE` | `config.httpPort`, and [`config.ports`](/docs/guides/raw-ports) for the rest |
+| `USER` | Nothing: the program always runs as uid 65534 |
+| `VOLUME` | Nothing: every write goes to [the volume](#the-volume) |
+
 The [reference](/docs/reference/desired) lists every field of a layer and a command.
