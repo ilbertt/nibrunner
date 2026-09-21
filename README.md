@@ -43,6 +43,6 @@ yet. Edit the file if you want, then:
 nibrunnerd start
 ```
 
-Then put a binary in the artifact store and write the file `nibrunnerd` watches. The daemon boots
-the app, checks its health, and routes its hostname to it:
+Then put a binary in the artifact store and write `/var/lib/nibrunner/desired.json`, the file
+`nibrunnerd` watches. The daemon boots the app, checks its health, and routes its hostname to it:
 **[deploy an app](https://nibrunner.dev/docs/getting-started/deploy-an-app)**.
