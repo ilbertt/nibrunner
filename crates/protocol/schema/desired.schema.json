@@ -1,5 +1,5 @@
 {
-  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired-state.schema.json",
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/desired.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "HostDesiredState",
   "description": "What one host should be running. The daemon watches this document at the path its\n`paths.desired_state_file` names and converges on every change to it.",

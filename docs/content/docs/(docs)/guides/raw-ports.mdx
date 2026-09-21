@@ -31,7 +31,7 @@ max_ports_per_guest = 2
 - `listen_address` must be a **private address**: one a relay reaches the host on, not a public
   one. A raw port carries no hostname to route on, so it is reached at
   `<listen_address>:<host port>`. The host port is the app's `hostPort` in
-  [`reported.json`](/docs/reference/reported-state) plus the port's 1-based position in `ports`.
+  [`reported.json`](/docs/reference/reported) plus the port's 1-based position in `ports`.
   In the example above, `ssh` is `hostPort + 1` and `dns` is `hostPort + 2`.
 
 <Callout type="warn" title="Do not publish raw ports from the host">
