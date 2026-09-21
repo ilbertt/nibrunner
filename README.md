@@ -46,3 +46,7 @@ nibrunnerd start
 Then put a binary in the artifact store and write `/var/lib/nibrunner/desired.json`, the file
 `nibrunnerd` watches. The daemon boots the app, checks its health, and routes its hostname to it:
 **[deploy an app](https://nibrunner.dev/docs/getting-started/deploy-an-app)**.
+
+## License
+
+nibrunner is released into the public domain under the [Unlicense](UNLICENSE).
