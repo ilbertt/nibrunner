@@ -1,5 +1,5 @@
 {
-  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/reported-state.schema.json",
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/reported.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "HostReportedState",
   "description": "What one host is running, as the daemon last wrote it to `reported.json` in its\n`paths.state_dir`.",

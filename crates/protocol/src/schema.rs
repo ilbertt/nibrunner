@@ -6,8 +6,8 @@ use crate::{HostDesiredState, HostReportedState};
 pub const SCHEMA_ID_BASE: &str =
     "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/";
 
-pub const DESIRED_STATE_SCHEMA: &str = "desired-state.schema.json";
-pub const REPORTED_STATE_SCHEMA: &str = "reported-state.schema.json";
+pub const DESIRED_STATE_SCHEMA: &str = "desired.schema.json";
+pub const REPORTED_STATE_SCHEMA: &str = "reported.schema.json";
 
 /// The document a host converges on, as the JSON Schema of [`HostDesiredState`].
 pub fn desired_state() -> Schema {
