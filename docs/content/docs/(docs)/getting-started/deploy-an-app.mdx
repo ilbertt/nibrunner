@@ -3,12 +3,15 @@ title: Deploy an app
 description: Upload a binary, write desired.json, and reach the app by hostname.
 ---
 
-An app is a program that runs in a Debian root filesystem inside a microVM, as uid 65534,
-listening on the port you name in `desired.json`.
+nibrunner does not run container images. An app is one or more layers in the artifact store and
+an entry in `desired.json`. The host stacks the [layers](/docs/guides/layers) on the Debian image
+it ships and runs `config.command` in the result, in a microVM, as uid 65534.
 
-A statically linked Linux x86_64 binary (Go, Rust, Zig, a compiled Bun executable) needs nothing
-else. A dynamically linked binary gets what Debian's slim image ships: glibc, libstdc++ and CA
-certificates.
+This page deploys one binary. A static Linux x86_64 binary (Go, Rust, Zig, a compiled Bun
+executable) needs nothing else. A dynamically linked one gets glibc, libstdc++ and CA
+certificates from Debian's slim image. An app that needs a runtime (PHP, Python, Node), or that
+comes from a Dockerfile, is a `filesystem` layer:
+[from a Docker image](/docs/guides/layers#from-a-docker-image).
 
 <Steps>
 <Step>
