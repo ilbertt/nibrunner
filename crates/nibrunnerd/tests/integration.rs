@@ -207,6 +207,44 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
     );
 }
 
+// A device under a slot that has changed hands is told from the volume it should carry by the
+// uuid the real tool writes into the filesystem, so what that tool gives two volumes has to be
+// two different things.
+#[tokio::test]
+async fn volumes_the_real_tool_formats_carry_a_filesystem_that_names_one_apart_from_another() {
+    if !enabled() {
+        return;
+    }
+    require_root();
+    let directory = tempfile::tempdir().unwrap();
+    let volumes = local_volumes(directory.path(), commands(), Vec::new());
+    let volume_of = |name: &str| protocol::DesiredVolume {
+        volume_id: protocol::VolumeId::parse(name).unwrap(),
+        app_id: protocol::AppId::parse("app-1").unwrap(),
+        size_bytes: 16 * 1024 * 1024,
+        desired_state: protocol::DesiredPresence::Present,
+        initial_contents: None,
+    };
+
+    use nibrunnerd::adapters::volumes::VolumeBackend;
+    let one = volume_of("vol-1");
+    let another = volume_of("vol-2");
+    volumes.provision(&one).await.expect("the volume is made");
+    volumes.provision(&another).await.expect("the volume is made");
+
+    use nibrunnerd::adapters::volumes::filesystem_uuid;
+    let read = |desired: &protocol::DesiredVolume| {
+        filesystem_uuid(&volumes.path_for(&desired.volume_id).display().to_string())
+            .expect("the real tool names every filesystem it makes")
+    };
+    assert_eq!(read(&one), read(&one), "a volume names itself the same twice");
+    assert_ne!(
+        read(&one),
+        read(&another),
+        "two volumes that named themselves the same could not be told apart on a device"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {

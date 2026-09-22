@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use protocol::VolumeId;
 
-use crate::adapters::volumes::VolumeError;
+use crate::adapters::volumes::{filesystem_uuid, VolumeError};
 use crate::ports::{CommandRequest, CommandResult, CommandRunner};
 
 const NBD_CLIENT: &str = "nbd-client";
@@ -37,9 +38,36 @@ const RETRY_PAUSE: Duration = Duration::from_secs(1);
 
 const NO_BYTES: u64 = 0;
 
+/// A device proven to carry the volume it names, and the only thing this adapter will format or
+/// hand to a guest. `/dev/nbd<slot>` is a name the slot allocator hands out afresh to whoever
+/// holds the slot, while the device goes on serving whatever export it was last attached to: a
+/// host that came back without its records once gave every app the device its neighbour's volume
+/// was on, and formatted one app's volume over another's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenDevice {
+    path: String,
+    volume_id: VolumeId,
+}
+
+impl ProvenDevice {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn volume_id(&self) -> &VolumeId {
+        &self.volume_id
+    }
+}
+
 pub struct NbdDevices {
     sysfs_block: PathBuf,
     commands: Arc<dyn CommandRunner>,
+    /// What this daemon attached each device to. The kernel names the export a device serves
+    /// only when the client set an identifier for it — `nbd-client -i`, which wants a 3.27
+    /// client and a 5.14 kernel, newer than the hosts are installed with — so an attach an
+    /// earlier daemon made cannot be read back, and the device has to prove itself by the
+    /// filesystem it carries instead.
+    attached_to: Mutex<BTreeMap<String, VolumeId>>,
 }
 
 impl NbdDevices {
@@ -47,6 +75,7 @@ impl NbdDevices {
         Self {
             sysfs_block: PathBuf::from(SYSFS_BLOCK_DIRECTORY),
             commands,
+            attached_to: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -55,7 +84,66 @@ impl NbdDevices {
         Self {
             sysfs_block,
             commands,
+            attached_to: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn proof(target: &NbdTarget<'_>) -> ProvenDevice {
+        ProvenDevice {
+            path: target.device_path.to_string(),
+            volume_id: target.volume_id.clone(),
+        }
+    }
+
+    fn remember(&self, target: &NbdTarget<'_>) -> ProvenDevice {
+        self.attached_to
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(target.device_path.to_string(), target.volume_id.clone());
+        Self::proof(target)
+    }
+
+    fn forget(&self, device_path: &str) {
+        self.attached_to
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(device_path);
+    }
+
+    fn is_known_to_carry(&self, target: &NbdTarget<'_>) -> bool {
+        self.attached_to
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(target.device_path)
+            == Some(target.volume_id)
+    }
+
+    /// The device as this daemon can prove it, touching nothing: it answers reads, and either
+    /// this daemon attached it to the export or it carries the same filesystem as the image that
+    /// export is served from. A volume no one has formatted yet has no filesystem to be told by
+    /// and is never proven here — only an attach by name can say what such a device serves.
+    pub async fn proven(&self, target: &NbdTarget<'_>) -> Option<ProvenDevice> {
+        if !self.is_usable(target.device_path).await {
+            return None;
+        }
+        if self.is_known_to_carry(target) {
+            return Some(Self::proof(target));
+        }
+        carries_the_image(target).await.then(|| self.remember(target))
+    }
+
+    /// A device that cannot prove which volume it carries is taken down and attached to it by
+    /// name, which is the one other way to know what it serves.
+    pub async fn ready(&self, target: &NbdTarget<'_>) -> Result<ProvenDevice, VolumeError> {
+        if let Some(device) = self.proven(target).await {
+            return Ok(device);
+        }
+        tracing::info!(
+            device = target.device_path,
+            volume_id = %target.volume_id,
+            "the device under this app's slot does not prove it carries its volume; attaching it by name"
+        );
+        self.reattach(target).await
     }
 
     fn attribute(&self, device_path: &str, attribute: &str) -> Option<String> {
@@ -89,7 +177,7 @@ impl NbdDevices {
     /// needs reads of that device to fail at once so that it can tell. The netlink client the
     /// hosts run ignores the flag; the one being written keeps a process behind to reconnect the
     /// device with a 30 s dead-connection timeout, under which reads block instead.
-    pub async fn attach(&self, target: &NbdTarget<'_>) -> Result<(), VolumeError> {
+    pub async fn attach(&self, target: &NbdTarget<'_>) -> Result<ProvenDevice, VolumeError> {
         let timeout = NBD_TIMEOUT_SECONDS.to_string();
         let connections = NBD_CONNECTIONS.to_string();
         let block_size = NBD_BLOCK_SIZE_BYTES.to_string();
@@ -114,10 +202,12 @@ impl NbdDevices {
                 &block_size,
             ],
         )
-        .await
+        .await?;
+        Ok(self.remember(target))
     }
 
     pub async fn detach(&self, device_path: &str) -> Result<(), VolumeError> {
+        self.forget(device_path);
         self.client(
             &format!("{NBD_CLIENT} -d {device_path}"),
             &[NBD_CLIENT, "-d", device_path],
@@ -142,10 +232,11 @@ impl NbdDevices {
     /// Takes the device down if the kernel holds it, then attaches; a refused attach is tried
     /// once more after a pause. A dead device — its server gone, its sockets closed — stays
     /// configured until it is explicitly disconnected, and attaching over it is refused as busy.
-    pub async fn reattach(&self, target: &NbdTarget<'_>) -> Result<(), VolumeError> {
+    pub async fn reattach(&self, target: &NbdTarget<'_>) -> Result<ProvenDevice, VolumeError> {
         self.take_down(target.device_path).await;
-        let Err(refused) = self.attach(target).await else {
-            return Ok(());
+        let refused = match self.attach(target).await {
+            Ok(device) => return Ok(device),
+            Err(refused) => refused,
         };
         tracing::warn!(
             device = target.device_path,
@@ -162,6 +253,7 @@ impl NbdDevices {
     /// refused as busy until it has. Nothing here fails: the attach that follows is what says
     /// whether the device was free.
     async fn take_down(&self, device_path: &str) {
+        self.forget(device_path);
         if !self.is_attached(device_path) {
             return;
         }
@@ -201,6 +293,27 @@ pub struct NbdTarget<'a> {
     pub socket_path: &'a str,
     pub device_path: &'a str,
     pub volume_id: &'a VolumeId,
+    /// The file the export is served from, which the host can read as well as the device can. An
+    /// export the host holds no file for — a checkpoint, served by a server of its own — has
+    /// none, and the device under it is attached by name every time rather than proven.
+    pub image_path: Option<&'a Path>,
+}
+
+/// Whether the device holds the filesystem that is in the volume's own image. mke2fs gives every
+/// filesystem its own uuid, so the device an app was handed carrying its neighbour's volume is
+/// told from one carrying its own without writing anything or taking anything down. Neither side
+/// is read through `O_DIRECT`: [`NbdDevices::is_usable`] has already proven the device answers,
+/// and what is read here was written once, when the volume was formatted.
+async fn carries_the_image(target: &NbdTarget<'_>) -> bool {
+    let Some(image_path) = target.image_path else {
+        return false;
+    };
+    let device = target.device_path.to_string();
+    let image = image_path.display().to_string();
+    let read = tokio::task::spawn_blocking(move || {
+        filesystem_uuid(&image).is_some_and(|carried| filesystem_uuid(&device) == Some(carried))
+    });
+    matches!(tokio::time::timeout(PROBE_TIMEOUT, read).await, Ok(Ok(true)))
 }
 
 async fn reads_first_block(device_path: &str) -> bool {
@@ -239,6 +352,8 @@ fn direct_read(_device_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::volumes::tests::image;
+    use crate::adapters::volumes::FILESYSTEM_UUID_BYTES;
     use crate::test_support::mocks::{self, CommandLog};
 
     fn devices(sysfs: &Path) -> (NbdDevices, CommandLog) {
@@ -289,14 +404,7 @@ mod tests {
         let sysfs = tempfile::tempdir().unwrap();
         let (devices, commands) = devices(sysfs.path());
         let volume_id = VolumeId::parse("vol-1").unwrap();
-        devices
-            .attach(&NbdTarget {
-                socket_path: "/run/zerofs/nbd.sock",
-                device_path: "/dev/nbd0",
-                volume_id: &volume_id,
-            })
-            .await
-            .unwrap();
+        devices.attach(&target(&volume_id)).await.unwrap();
         let asked = asked(&commands);
         assert_eq!(
             asked,
@@ -322,6 +430,7 @@ mod tests {
             socket_path: "/run/zerofs/nbd.sock",
             device_path: "/dev/nbd0",
             volume_id,
+            image_path: None,
         }
     }
 
@@ -485,12 +594,7 @@ mod tests {
         let sysfs = tempfile::tempdir().unwrap();
         let devices = NbdDevices::with_sysfs(sysfs.path().to_path_buf(), refusing());
         let volume_id = VolumeId::parse("vol-1").unwrap();
-        let target = NbdTarget {
-            socket_path: "/run/zerofs/nbd.sock",
-            device_path: "/dev/nbd0",
-            volume_id: &volume_id,
-        };
-        let error = devices.attach(&target).await.unwrap_err();
+        let error = devices.attach(&target(&volume_id)).await.unwrap_err();
         assert!(matches!(error, VolumeError::Unusable(_)), "{error}");
         assert!(error.message().contains("nbd-client"), "{error}");
         assert!(devices.detach("/dev/nbd0").await.is_err());
@@ -539,6 +643,103 @@ mod tests {
         assert_eq!(
             devices.detach("/dev/nbd3").await.unwrap_err().message(),
             "the volume could not be made ready: nbd-client -d /dev/nbd3 exited 1"
+        );
+    }
+
+    fn reading<'a>(device_path: &'a str, image_path: &'a Path, volume_id: &'a VolumeId) -> NbdTarget<'a> {
+        NbdTarget {
+            socket_path: "/run/zerofs/nbd.sock",
+            device_path,
+            volume_id,
+            image_path: Some(image_path),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_carries_the_export_this_daemon_attached_it_to_until_it_is_taken_down() {
+        let sysfs = tempfile::tempdir().unwrap();
+        let (devices, _) = devices(sysfs.path());
+        let held = VolumeId::parse("vol-1").unwrap();
+        let another = VolumeId::parse("vol-2").unwrap();
+        assert!(!devices.is_known_to_carry(&target(&held)));
+
+        devices.attach(&target(&held)).await.unwrap();
+        assert!(devices.is_known_to_carry(&target(&held)));
+        assert!(
+            !devices.is_known_to_carry(&target(&another)),
+            "a device carries the one export it was attached to"
+        );
+
+        devices.attach(&target(&another)).await.unwrap();
+        assert!(
+            !devices.is_known_to_carry(&target(&held)),
+            "the export the device was last attached to is the one it carries"
+        );
+
+        devices.detach("/dev/nbd0").await.unwrap();
+        assert!(
+            !devices.is_known_to_carry(&target(&another)),
+            "a device that has been taken down carries nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_that_answers_no_read_is_not_proven_however_well_this_daemon_knows_it() {
+        let sysfs = tempfile::tempdir().unwrap();
+        let (devices, _) = devices(sysfs.path());
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+        devices.attach(&target(&volume_id)).await.unwrap();
+        assert!(devices.is_known_to_carry(&target(&volume_id)));
+        assert!(devices.proven(&target(&volume_id)).await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_that_cannot_prove_its_volume_is_attached_by_name_before_it_is_handed_over() {
+        let sysfs = tempfile::tempdir().unwrap();
+        attribute(sysfs.path(), "nbd0", "pid", "4123");
+        let (devices, commands) = devices(sysfs.path());
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+
+        let device = devices.ready(&target(&volume_id)).await.unwrap();
+
+        assert_eq!(device.path(), "/dev/nbd0");
+        assert_eq!(device.volume_id(), &volume_id);
+        let asked = asked(&commands);
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(detaches(&asked[0]));
+        assert_eq!(asked[1][4..6], ["-N".to_string(), "vol-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_device_holding_the_volumes_own_filesystem_carries_it_and_one_holding_anothers_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+        let its_own = [1u8; FILESYSTEM_UUID_BYTES];
+        let served_from = image(directory.path(), "vol-1", true, its_own);
+        let device = image(directory.path(), "nbd0", true, its_own);
+        let neighbour = image(directory.path(), "nbd1", true, [2u8; FILESYSTEM_UUID_BYTES]);
+
+        assert!(carries_the_image(&reading(&device, Path::new(&served_from), &volume_id)).await);
+        assert!(!carries_the_image(&reading(&neighbour, Path::new(&served_from), &volume_id)).await);
+    }
+
+    #[tokio::test]
+    async fn a_volume_nothing_has_formatted_yet_is_never_carried_by_a_device_that_only_looks_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let volume_id = VolumeId::parse("vol-1").unwrap();
+        let uuid = [3u8; FILESYSTEM_UUID_BYTES];
+        let bare = image(directory.path(), "vol-1", false, uuid);
+        let device = image(directory.path(), "nbd0", false, uuid);
+        let neighbour = image(directory.path(), "nbd1", true, uuid);
+
+        assert!(
+            !carries_the_image(&reading(&device, Path::new(&bare), &volume_id)).await,
+            "two devices with no filesystem on them are not told apart"
+        );
+        assert!(!carries_the_image(&reading(&neighbour, Path::new(&bare), &volume_id)).await);
+        assert!(
+            !carries_the_image(&target(&volume_id)).await,
+            "an export the host holds no image for cannot be read back at all"
         );
     }
 
