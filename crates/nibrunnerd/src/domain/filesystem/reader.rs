@@ -11,10 +11,6 @@ pub fn guest_vsock_path(host: &Host, app_id: &AppId) -> std::path::PathBuf {
         .join(guest_contract::vsock::GUEST_VSOCK_FILENAME)
 }
 
-pub async fn served_app_ids(host: &Host) -> Vec<AppId> {
-    host.slots().await.into_iter().map(|slot| slot.app_id).collect()
-}
-
 pub async fn list(
     host: &Host,
     app_id: &AppId,
@@ -38,16 +34,6 @@ pub async fn measure(host: &Host, app_id: &AppId) -> GuestReading {
 mod tests {
     use super::*;
     use crate::test_support::*;
-
-    #[tokio::test]
-    async fn only_the_apps_this_host_holds_a_slot_for_are_offered() {
-        let host = test_host().await;
-        assert!(served_app_ids(host.arc()).await.is_empty());
-        host.slot_for(&app_id()).await.unwrap();
-        assert_eq!(served_app_ids(host.arc()).await, vec![app_id()]);
-        host.allocator.lock().await.release(&app_id());
-        assert!(served_app_ids(host.arc()).await.is_empty());
-    }
 
     #[tokio::test]
     async fn each_guest_is_reached_on_a_socket_inside_its_own_microvm_directory() {
