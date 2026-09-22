@@ -19,8 +19,6 @@ use crate::domain::metrics::HostMetrics;
 use crate::ports::{WakeFailure, WakeRefusal, Waker};
 use crate::state::SharedState;
 
-const LOOPBACK: &str = "127.0.0.1";
-
 fn app_is_down() -> Response<ProxyBody> {
     say(StatusCode::SERVICE_UNAVAILABLE, "This app is not running.\n")
 }
@@ -220,8 +218,6 @@ async fn accept(listener: TcpListener, activator: Arc<AppActivator>, app_id: App
         });
     }
 }
-
-pub const GUEST_HOST: &str = LOOPBACK;
 
 #[cfg(test)]
 mod tests {
@@ -704,10 +700,5 @@ mod tests {
         let activator = AppActivator::new(HostState::shared(), CountingWaker::allowing(), Arc::default());
         activator.serve(&[(app_id(), taken)]).await;
         assert!(activator.listening_for().await.is_empty());
-    }
-
-    #[test]
-    fn a_guest_is_reached_on_the_loopback_the_relay_sits_on() {
-        assert_eq!(GUEST_HOST, LOOPBACK);
     }
 }

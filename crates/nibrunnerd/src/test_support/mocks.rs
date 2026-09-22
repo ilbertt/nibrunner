@@ -565,5 +565,3 @@ pub fn network_refusing(error: NetworkError) -> Arc<MockHostNetwork> {
     network.expect_delete_tap().returning(move |_| Ok(()));
     Arc::new(network)
 }
-
-pub type ObservedBackings = BTreeMap<protocol::VolumeId, crate::adapters::volumes::ObservedBacking>;

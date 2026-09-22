@@ -18,8 +18,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 
 ## Layout
 
-- `crates/protocol` — the control-plane protocol: desired state, reported state, session and
-  filesystem query documents. `schema/*.json` is generated from its types
+- `crates/protocol` — the control-plane protocol: the desired and reported state documents.
+  `schema/*.json` is generated from its types
 - `crates/guest-contract` — what host and guest agree on: drive order, kernel args, vsock ports,
   the frame codecs
 - `crates/nft-render` — slot arithmetic, the nftables ruleset rendered whole, the parsers for what

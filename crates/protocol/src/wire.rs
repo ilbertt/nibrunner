@@ -146,15 +146,12 @@ macro_rules! identifier {
     };
 }
 
-identifier!(OwnerId);
 identifier!(AppId);
-identifier!(ArtifactId);
 identifier!(DeploymentId);
 identifier!(HostId);
 identifier!(VolumeId);
 identifier!(CheckpointId);
 identifier!(ExportId);
-identifier!(FilesystemQueryId);
 
 const SHA256_HEX_LENGTH: usize = 64;
 pub const SHA256_HEX_PATTERN: &str = "^[0-9a-f]{64}$";

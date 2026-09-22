@@ -68,10 +68,6 @@ pub fn names_offered_runtime_values(value: &str) -> bool {
     runtime_references(value).iter().all(|(_, allowed)| *allowed)
 }
 
-pub fn interpolable_runtime_value(name: &str) -> String {
-    format!("${{{name}}}")
-}
-
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "SecretString", into = "SecretString")]
 pub struct TenantValue(SecretString);
@@ -267,8 +263,6 @@ impl JsonSchema for TenantArguments {
     }
 }
 
-pub const MIN_HOSTNAMES: usize = 1;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
@@ -371,13 +365,6 @@ impl AppConfig {
 
 /// What the HTTP port is called wherever ports are named together.
 pub const HTTP_PORT_NAME: &str = "http";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AppActivation {
-    Always,
-    OnRequest,
-}
 
 pub const MIN_IDLE_TIMEOUT_MS: u64 = 60_000;
 pub const MAX_IDLE_TIMEOUT_MS: u64 = 86_400_000;
@@ -498,20 +485,6 @@ pub struct ActivationPolicy {
 
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_IDLE_TIMEOUT: IdleTimeoutMs = IdleTimeoutMs(DEFAULT_IDLE_TIMEOUT_MS);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AppState {
-    Active,
-    Suspended,
-    Deleting,
-    Deleted,
-}
-
-pub const MIN_VCPU_COUNT: u32 = 1;
-pub const MAX_VCPU_COUNT: u32 = 32;
-pub const MIN_MEMORY_MIB: u32 = 128;
-pub const MAX_MEMORY_MIB: u32 = 16_384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -771,12 +744,6 @@ pub enum FilesystemEntryKind {
     Other,
 }
 
-pub const MAX_ENTRY_NAME_LENGTH: usize = 255;
-
-pub fn is_entry_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= MAX_ENTRY_NAME_LENGTH && !name.contains(['/', '\0'])
-}
-
 pub const MAX_GUEST_PATH_LENGTH: usize = 4096;
 pub const GUEST_PATH_PATTERN: &str = r#"^/$|^(/(?!\.\.?(/|$))[^/\\"'\x00-\x1f]+)+$"#;
 
@@ -889,33 +856,3 @@ pub struct TenantRestart {
     pub reason: StateMessage,
     pub backoff_ms: u64,
 }
-
-pub const LOG_SOURCES: [&str; 5] = ["tenant", "agent", "firecracker", "zerofs", "caddy"];
-
-pub const LOG_STREAM_FIELDS: [&str; 3] = ["hostId", "SOURCE", "appId"];
-
-pub const MAX_LOG_CHUNK_LENGTH: usize = 65_536;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TenantLogRecord {
-    #[serde(rename = "_time")]
-    pub time: Timestamp,
-    #[serde(rename = "_msg")]
-    pub msg: String,
-    #[serde(rename = "hostId")]
-    pub host_id: HostId,
-    #[serde(rename = "SOURCE")]
-    pub source: String,
-    #[serde(rename = "appId")]
-    pub app_id: AppId,
-    #[serde(rename = "deploymentId")]
-    pub deployment_id: DeploymentId,
-    pub stream: TenantLogStream,
-    #[serde(rename = "sourceId")]
-    pub source_id: String,
-    pub sequence: u64,
-    #[serde(rename = "droppedBytes", default, skip_serializing_if = "Option::is_none")]
-    pub dropped_bytes: Option<u64>,
-}
-
-pub const DEFAULT_LOG_TIMERANGE: &str = "5m";

@@ -1,6 +1,5 @@
 pub const FREEZE_REQUEST: &str = "FREEZE\n";
 pub const FREEZE_HELD: &str = "OK";
-pub const FREEZE_REFUSED_PREFIX: &str = "ERR";
 
 pub const GUEST_SHUTDOWN_GRACE_MS: u64 = 10_000;
 

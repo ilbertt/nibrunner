@@ -180,7 +180,6 @@ pub struct HostConfig {
     pub guest_image_dir: PathBuf,
     pub firecracker_dir: PathBuf,
     pub desired_state_file: PathBuf,
-    pub api_socket: PathBuf,
     pub versions_file: PathBuf,
     pub artifact_store_url: String,
     pub storage_prefix: String,
@@ -217,10 +216,6 @@ impl HostConfig {
 
     pub fn activity_file(&self) -> PathBuf {
         self.in_state_dir("activity.json")
-    }
-
-    pub fn host_id_file(&self) -> PathBuf {
-        self.in_state_dir("host-id")
     }
 
     pub fn deleted_volumes_file(&self) -> PathBuf {
@@ -318,9 +313,6 @@ mod file {
         /// The document this host watches and converges on.
         #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) desired_state_file: Option<String>,
-        /// The daemon's own socket.
-        #[schemars(pattern(ABSOLUTE_PATH))]
-        pub(super) api_socket: Option<String>,
         /// What `install` stamped what it laid down into, read back into `reported.json`.
         #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) versions_file: Option<String>,
@@ -656,7 +648,6 @@ impl HostConfig {
             guest_image_dir: path_key("paths.guest_image_dir", &paths.guest_image_dir)?,
             firecracker_dir: runtime_dir.join("firecracker"),
             desired_state_file: path_key("paths.desired_state_file", &paths.desired_state_file)?,
-            api_socket: path_key("paths.api_socket", &paths.api_socket)?,
             versions_file: path_key("paths.versions_file", &paths.versions_file)?,
             artifact_store_url: object_store_url(
                 "artifacts.store_url",
@@ -730,7 +721,6 @@ impl HostConfig {
             guest_image_dir,
             firecracker_dir: runtime_dir.join("firecracker"),
             desired_state_file: state_dir.join("desired.json"),
-            api_socket: runtime_dir.join("nibrunner.sock"),
             versions_file: state_dir.join("versions.json"),
             artifact_store_url: state_dir.join("artifact-store").display().to_string(),
             storage_prefix: "volumes".to_string(),
@@ -764,7 +754,6 @@ impl HostConfig {
             guest_image_dir: PathBuf::from("/var/lib/nibrunner/guest"),
             firecracker_dir: PathBuf::from("/run/nibrunner/firecracker"),
             desired_state_file: PathBuf::from("/var/lib/nibrunner/desired.json"),
-            api_socket: PathBuf::from("/run/nibrunner/nibrunner.sock"),
             versions_file: PathBuf::from("/var/lib/nibrunner/versions.json"),
             artifact_store_url: "s3://nibrunner-artifacts-eu-west-2-123456789012/artifacts".to_string(),
             storage_prefix: "hetzner-1".to_string(),
@@ -845,7 +834,6 @@ impl HostConfig {
                 snapshot_dir: text(&self.snapshot_dir),
                 guest_image_dir: text(&self.guest_image_dir),
                 desired_state_file: text(&self.desired_state_file),
-                api_socket: text(&self.api_socket),
                 versions_file: text(&self.versions_file),
             }),
             artifacts: Some(file::Artifacts {
@@ -1259,7 +1247,6 @@ runtime_dir = "/run/nibrunner"
 snapshot_dir = "/var/lib/nibrunner/snapshots"
 guest_image_dir = "/var/lib/nibrunner/guest"
 desired_state_file = "/var/lib/nibrunner/desired.json"
-api_socket = "/run/nibrunner/nibrunner.sock"
 versions_file = "/var/lib/nibrunner/versions.json"
 
 [artifacts]
@@ -1372,7 +1359,6 @@ denied_egress_addresses_v6 = []
             "paths.snapshot_dir",
             "paths.guest_image_dir",
             "paths.desired_state_file",
-            "paths.api_socket",
             "paths.versions_file",
             "artifacts.store_url",
             "volumes.backend",
@@ -1415,7 +1401,6 @@ denied_egress_addresses_v6 = []
             config.desired_state_file,
             PathBuf::from("/var/lib/nibrunner/desired.json")
         );
-        assert_eq!(config.api_socket, PathBuf::from("/run/nibrunner/nibrunner.sock"));
         assert_eq!(
             config.firecracker_dir,
             PathBuf::from("/run/nibrunner/firecracker")
@@ -1931,14 +1916,12 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
             config.slots_file(),
             config.slot_cursor_file(),
             config.activity_file(),
-            config.host_id_file(),
             config.deleted_volumes_file(),
             config.artifact_cache_dir(),
             config.vm_dir(),
             config.volumes_dir(),
             config.logs_dir(),
             config.desired_state_file.clone(),
-            config.api_socket.clone(),
             config.versions_file.clone(),
             config.export_staging_dir.clone(),
             config.firecracker_dir.clone(),
@@ -1964,7 +1947,6 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
             config.slots_file(),
             config.slot_cursor_file(),
             config.activity_file(),
-            config.host_id_file(),
             config.deleted_volumes_file(),
             config.artifact_cache_dir(),
             config.vm_dir(),
