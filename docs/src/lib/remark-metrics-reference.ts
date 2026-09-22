@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Heading, InlineCode, PhrasingContent, Root, RootContent, Table, Text } from 'mdast';
-import type { MdxJsxAttribute, MdxJsxFlowElement } from 'mdast-util-mdx-jsx';
+import type { MdxJsxAttribute, MdxJsxFlowElement, MdxJsxTextElement } from 'mdast-util-mdx-jsx';
 import type { Plugin } from 'unified';
 import { z } from 'zod';
 
@@ -18,6 +18,7 @@ type Metric = z.infer<typeof Metric>;
 type Phrasing = PhrasingContent[];
 
 const ELEMENT = 'MetricsReference';
+const KIND_ELEMENT = 'MetricKind';
 const REPOSITORY = resolve(import.meta.dirname, '../../..');
 const SECTION = 2;
 const APP_LABEL = 'app';
@@ -57,7 +58,7 @@ function section({ name, metrics }: { name: string; metrics: Metric[] }): RootCo
       header: ['Series', 'Type', 'Labels', 'What it says'],
       rows: sorted(metrics).map((metric) => [
         [code(metric.name)],
-        [text(metric.kind)],
+        [kind(metric.kind)],
         labels(metric.labels),
         [text(metric.help)],
       ]),
@@ -72,6 +73,16 @@ function sorted(metrics: Metric[]): Metric[] {
 }
 
 const { compare } = new Intl.Collator('en');
+
+/** Rendered by the component of that name, so the page shows the kind's icon beside its word. */
+function kind(name: string): MdxJsxTextElement {
+  return {
+    type: 'mdxJsxTextElement',
+    name: KIND_ELEMENT,
+    attributes: [{ type: 'mdxJsxAttribute', name: 'kind', value: name }],
+    children: [],
+  };
+}
 
 function labels(names: string[]): Phrasing {
   if (names.length === 0) {
