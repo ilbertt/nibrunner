@@ -1668,6 +1668,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nibrunner-test-tenant"
+version = "0.1.0"
+
+[[package]]
 name = "nibrunnerd"
 version = "2026.9.1"
 dependencies = [
