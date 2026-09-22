@@ -19,7 +19,6 @@ runtime_dir = "/run/nibrunner"
 snapshot_dir = "/data/nibrunner-vm"
 guest_image_dir = "/var/lib/nibrunner/guest"
 desired_state_file = "/var/lib/nibrunner/desired.json"
-api_socket = "/run/nibrunner/nibrunner.sock"
 versions_file = "/var/lib/nibrunner/versions.json"
 
 [artifacts]

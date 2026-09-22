@@ -1,6 +1,6 @@
 [package]
 name = "nibrunner-protocol"
-description = "The nibrun control-plane protocol: desired state, reported state, session and filesystem query documents"
+description = "The nibrunner control-plane protocol: the desired and reported state documents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

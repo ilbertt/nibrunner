@@ -303,8 +303,6 @@ pub struct HostDesiredState {
     pub exports: Vec<DesiredExport>,
 }
 
-pub const MAX_DEVICE_PATH_LENGTH: usize = 256;
-
 /// A tenant restart as the host heard of it: what the guest said, and when it said it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -428,92 +426,4 @@ pub struct HostReportedState {
     /// that only reads this file learns from it that its last write did not land, and why.
     #[serde(default)]
     pub message: Option<StateMessage>,
-}
-
-pub const MIN_POLL_INTERVAL_MS: u64 = 100;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentPollSettings {
-    pub min_interval_ms: u64,
-    pub report_interval_ms: u64,
-}
-
-pub const DEFAULT_AGENT_POLL_SETTINGS: AgentPollSettings = AgentPollSettings {
-    min_interval_ms: 250,
-    report_interval_ms: 15_000,
-};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSessionRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_id: Option<HostId>,
-    pub versions: HostVersions,
-    pub capacity: HostCapacity,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSession {
-    pub host_id: HostId,
-    pub session_token: SecretString,
-    pub expires_at: Timestamp,
-    pub poll: AgentPollSettings,
-}
-
-pub const PROTOCOL_VERSION: u32 = 1;
-pub const PROTOCOL_VERSION_HEADER: &str = "x-nibrun-protocol-version";
-
-pub const AGENT_API_PREFIX: &str = "/internal/agent";
-
-pub mod agent_routes {
-    pub const SESSION: &str = "/session";
-    pub const DESIRED_STATE: &str = "/desired-state";
-    pub const REPORTED_STATE: &str = "/reported-state";
-    pub const FILESYSTEM_QUERY: &str = "/filesystem-query";
-    pub const FILESYSTEM_QUERY_RESULT: &str = "/filesystem-query-result";
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct DesiredStateRequest {}
-
-pub type DesiredStateResponse = HostDesiredState;
-
-pub const MAX_QUERY_MESSAGE_LENGTH: usize = 512;
-pub const MAX_SERVED_APPS: usize = 200;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FilesystemQueryRequest {
-    pub served_app_ids: Vec<AppId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FilesystemQuery {
-    pub query_id: FilesystemQueryId,
-    pub app_id: AppId,
-    pub path: GuestPath,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "lowercase")]
-pub enum FilesystemQueryResponse {
-    None,
-    Query { query: FilesystemQuery },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "lowercase")]
-pub enum FilesystemQueryOutcome {
-    Listed { listing: DirectoryListing },
-    Failed { message: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FilesystemQueryResult {
-    pub query_id: FilesystemQueryId,
-    pub outcome: FilesystemQueryOutcome,
 }

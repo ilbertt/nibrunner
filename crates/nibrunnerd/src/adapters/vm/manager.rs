@@ -7,7 +7,7 @@ use protocol::AppId;
 use crate::adapters::logs::receiver::{tenant_log_socket_path, TenantLogReceiver};
 use crate::adapters::net::tap::{HostNetwork, Neighbour, TapInterface};
 use crate::adapters::vm::firecracker_api::FirecrackerApi;
-use crate::adapters::vm::process::{VmProcesses, FIRECRACKER_VERSION};
+use crate::adapters::vm::process::VmProcesses;
 use crate::adapters::vm::snapshot::{
     ensure_loadable, measure_snapshot_disk, refusal_to_sleep, snapshot_bytes_for, snapshot_paths, Reserved,
     SleepSubject, SnapshotStamp, SnapshotsInFlight,
@@ -434,10 +434,6 @@ pub fn verify_guest_image(guest_image_dir: &Path) -> Result<String, GuestImageEr
         }
     }
     Ok(version)
-}
-
-pub fn firecracker_version() -> &'static str {
-    FIRECRACKER_VERSION
 }
 
 #[cfg(test)]
@@ -908,12 +904,6 @@ mod tests {
         let written = config_drive(&fixture.manager.working_dir_for(&app_id()));
         assert!(written.contains("MODE"), "{written}");
         assert_eq!(fixture.manager.logs.attached().await, vec![app_id()]);
-    }
-
-    #[test]
-    fn this_build_names_the_hypervisor_it_carries() {
-        assert_eq!(firecracker_version(), FIRECRACKER_VERSION);
-        assert!(!firecracker_version().is_empty());
     }
 
     fn image(directory: &Path, kernel: &[u8], rootfs: &[u8]) -> String {

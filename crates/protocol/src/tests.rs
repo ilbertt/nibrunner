@@ -256,16 +256,6 @@ fn state_messages_are_cut_to_the_wire_ceiling() {
     assert_eq!(message.as_str().len(), MAX_STATE_MESSAGE_LENGTH);
 }
 
-#[test]
-fn a_filesystem_query_response_is_a_tagged_union() {
-    let none: FilesystemQueryResponse = serde_json::from_str(r#"{"result":"none"}"#).unwrap();
-    assert_eq!(none, FilesystemQueryResponse::None);
-    let query: FilesystemQueryResponse =
-        serde_json::from_str(r#"{"result":"query","query":{"queryId":"q1","appId":"app-1","path":"/"}}"#)
-            .unwrap();
-    assert!(matches!(query, FilesystemQueryResponse::Query { .. }));
-}
-
 fn instance_with(edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
     let mut document = instance_json();
     document

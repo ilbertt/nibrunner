@@ -31,7 +31,6 @@ pub const VOLUME_UPPER_NAME: &str = "upper";
 /// The stacked root the program runs in.
 pub const ROOT_MOUNT: &str = "/mnt/root";
 pub const RESOLV_CONF: &str = "/mnt/root/etc/resolv.conf";
-pub const TENANT_TMP_DIR: &str = "/tmp";
 
 pub const TENANT_UID: u32 = 65534;
 pub const TENANT_GID: u32 = 65534;

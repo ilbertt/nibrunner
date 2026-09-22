@@ -160,11 +160,6 @@
       "description": "Every one an absolute path, and every one this host's alone.",
       "type": "object",
       "properties": {
-        "api_socket": {
-          "description": "The daemon's own socket.",
-          "type": "string",
-          "pattern": "^/"
-        },
         "desired_state_file": {
           "description": "The document this host watches and converges on.",
           "type": "string",
@@ -203,7 +198,6 @@
         "snapshot_dir",
         "guest_image_dir",
         "desired_state_file",
-        "api_socket",
         "versions_file"
       ]
     },
