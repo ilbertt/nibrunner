@@ -92,13 +92,11 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let network = open_network()?;
     let logs = TenantLogReceiver::new();
-    let sink = Arc::new(RestartRecorder::new(
-        state.clone(),
-        Arc::new(FileLogSink::new(
-            config.logs_dir(),
-            config.logs.keep_bytes_per_app,
-        )),
+    let files = Arc::new(FileLogSink::new(
+        config.logs_dir(),
+        config.logs.keep_bytes_per_app,
     ));
+    let sink = Arc::new(RestartRecorder::new(state.clone(), files.clone()));
 
     let processes = VmProcesses::new(config.runtime_dir.clone());
     let reaped = reap_stale_snapshots(&config.snapshot_dir, processes.boot_id());
@@ -189,6 +187,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         commands: commands.clone(),
         cache: Mutex::new(DesiredStateCache::new()),
         vms,
+        logs: files,
         volumes,
         artifacts,
         payloads,

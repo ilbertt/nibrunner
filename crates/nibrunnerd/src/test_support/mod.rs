@@ -469,6 +469,10 @@ async fn test_host_over(
         allocator: Arc::new(Mutex::new(SlotAllocator::addressing(config.max_apps))),
         cache: Mutex::new(DesiredStateCache::new()),
         vms,
+        logs: Arc::new(crate::adapters::logs::FileLogSink::new(
+            config.logs_dir(),
+            config.logs.keep_bytes_per_app,
+        )),
         volumes: Arc::new(LocalFileVolumes::new(
             config.volumes_dir(),
             ObjectKey::parse(&config.storage_prefix).expect("a storage prefix"),
