@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -8,8 +8,6 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use protocol::{AppId, HostPort};
@@ -18,7 +16,9 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::domain::metrics::{HostMetrics, Outcome};
 use tokio::sync::RwLock;
 
-use crate::adapters::proxy::forward::{forward, hostname_of, note_the_hop, say, ProxyBody, Unreachable};
+use crate::adapters::proxy::forward::{
+    forward, hostname_of, note_the_hop, say, ProxyBody, Unreachable, Upstreams,
+};
 use crate::adapters::proxy::pem;
 use crate::domain::metrics::proxy::Handshake;
 use crate::domain::report::routes::RouteTarget;
@@ -77,6 +77,13 @@ impl RouteTable {
         self.by_hostname.keys().map(String::as_str).collect()
     }
 
+    pub fn apps(&self) -> BTreeSet<AppId> {
+        self.by_hostname
+            .values()
+            .map(|route| route.app_id.clone())
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_hostname.is_empty()
     }
@@ -94,7 +101,7 @@ pub struct Arrival {
 
 pub struct Router {
     routes: RwLock<Arc<RouteTable>>,
-    client: Client<HttpConnector, Incoming>,
+    upstreams: Upstreams,
     metrics: Arc<HostMetrics>,
 }
 
@@ -102,13 +109,18 @@ impl Router {
     pub fn new(metrics: Arc<HostMetrics>) -> Arc<Self> {
         Arc::new(Self {
             routes: RwLock::new(Arc::new(RouteTable::default())),
-            client: crate::adapters::proxy::forward::upstream_client(),
+            upstreams: Upstreams::default(),
             metrics,
         })
     }
 
     pub async fn apply(&self, table: RouteTable) {
+        self.upstreams.keep_only(&table.apps()).await;
         *self.routes.write().await = Arc::new(table);
+    }
+
+    pub async fn close_connections_to(&self, app_id: &AppId) {
+        self.upstreams.close_connections_to(app_id).await;
     }
 
     pub async fn routes(&self) -> Arc<RouteTable> {
@@ -176,7 +188,8 @@ impl Router {
         };
         note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
         let open = self.metrics.proxy.open(&route.app_id);
-        let response = forward(&self.client, request, LOOPBACK, route.host_port.get(), true, open).await;
+        let upstream = self.upstreams.to(&route.app_id).await;
+        let response = forward(&upstream, request, LOOPBACK, route.host_port.get(), true, open).await;
         let reached = response.extensions().get::<Unreachable>().is_none();
         self.metrics
             .proxy
@@ -355,6 +368,7 @@ mod tests {
     }
     use crate::domain::report::routes::renderable_routes;
     use crate::test_support::{app_hostname, instance_record};
+    use http_body_util::BodyExt;
     use protocol::{AppHostname, AppHostnameKind, Hostname};
 
     #[test]
@@ -520,6 +534,191 @@ mod tests {
         let answered = asked(port, "GET / HTTP/1.0\r\nHost: App-1.Apps.Example.Com\r\n\r\n").await;
         assert!(answered.starts_with("HTTP/1.0 200 "), "{answered}");
         assert!(answered.ends_with("served by the tenant\n"), "{answered}");
+    }
+
+    /// A tenant that answers every request and counts the connections it was asked over. Its
+    /// answers are keep-alive, unlike `say`'s, so that a second request may travel the first's
+    /// connection and a count above one means the proxy opened another.
+    async fn counting_its_connections() -> (HostPort, Arc<std::sync::atomic::AtomicUsize>) {
+        let upstream = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = connections.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = upstream.accept().await else {
+                    return;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let service = service_fn(|_request: Request<Incoming>| async move {
+                        Ok::<Response<ProxyBody>, std::convert::Infallible>(Response::new(
+                            http_body_util::Full::new(bytes::Bytes::from_static(b"served\n"))
+                                .map_err(|never| match never {})
+                                .boxed(),
+                        ))
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (host_port, connections)
+    }
+
+    fn opened(connections: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        connections.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The pool takes a connection back on a task of its own once the answer has been relayed
+    /// whole, which is not always before the caller has finished reading it.
+    async fn once_the_pool_has_it_back() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    async fn asked_for(proxy: u16, hostname: &str) -> String {
+        asked(proxy, &format!("GET / HTTP/1.0\r\nHost: {hostname}\r\n\r\n")).await
+    }
+
+    fn app_at(name: &str, host_port: HostPort) -> crate::domain::report::InstanceRecord {
+        instance_record(|record| {
+            record.app_id = AppId::parse(name).unwrap();
+            record.host_port = host_port;
+            record.hostnames = vec![AppHostname {
+                hostname: Hostname::parse(format!("{name}.apps.example.com")).unwrap(),
+                kind: AppHostnameKind::Platform,
+            }];
+        })
+    }
+
+    // A request that reused a connection opened before the app was put down was carried into the
+    // guest as it was being paused: the activator never saw it, so nothing woke the app, and the
+    // caller waited out its own timeout for an answer only a restore could give.
+    #[tokio::test]
+    async fn a_request_for_an_app_that_was_put_down_opens_a_connection_of_its_own() {
+        let (host_port, connections) = counting_its_connections().await;
+        let router = Router::new(Arc::new(HostMetrics::new()));
+        routed_at(&router, host_port).await;
+        let proxy = serving(router.clone()).await;
+
+        for _ in 0..2 {
+            assert!(asked_for(proxy, "app-1.apps.example.com")
+                .await
+                .ends_with("served\n"));
+            once_the_pool_has_it_back().await;
+        }
+        assert_eq!(
+            opened(&connections),
+            1,
+            "the second request travelled the connection the first one opened"
+        );
+
+        router.close_connections_to(&crate::test_support::app_id()).await;
+        assert!(asked_for(proxy, "app-1.apps.example.com")
+            .await
+            .ends_with("served\n"));
+        assert_eq!(
+            opened(&connections),
+            2,
+            "the request after the app was put down opened a connection the firewall reads afresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn putting_one_app_down_leaves_the_connections_into_another_app_alone() {
+        let (mine, into_mine) = counting_its_connections().await;
+        let (theirs, into_theirs) = counting_its_connections().await;
+        let router = Router::new(Arc::new(HostMetrics::new()));
+        router
+            .apply(RouteTable::from_targets(&renderable_routes(&[
+                app_at("app-1", mine),
+                app_at("app-2", theirs),
+            ])))
+            .await;
+        let proxy = serving(router.clone()).await;
+
+        for _ in 0..2 {
+            asked_for(proxy, "app-1.apps.example.com").await;
+            asked_for(proxy, "app-2.apps.example.com").await;
+            once_the_pool_has_it_back().await;
+        }
+        assert_eq!((opened(&into_mine), opened(&into_theirs)), (1, 1));
+
+        router.close_connections_to(&AppId::parse("app-1").unwrap()).await;
+        asked_for(proxy, "app-1.apps.example.com").await;
+        asked_for(proxy, "app-2.apps.example.com").await;
+        assert_eq!(
+            (opened(&into_mine), opened(&into_theirs)),
+            (2, 1),
+            "only the app that was put down was opened a new connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_app_this_host_no_longer_answers_for_is_not_one_it_keeps_a_connection_into() {
+        let (host_port, connections) = counting_its_connections().await;
+        let router = Router::new(Arc::new(HostMetrics::new()));
+        routed_at(&router, host_port).await;
+        let proxy = serving(router.clone()).await;
+        asked_for(proxy, "app-1.apps.example.com").await;
+        once_the_pool_has_it_back().await;
+
+        router.apply(RouteTable::default()).await;
+        routed_at(&router, host_port).await;
+
+        asked_for(proxy, "app-1.apps.example.com").await;
+        assert_eq!(
+            opened(&connections),
+            2,
+            "the app left and came back, and nothing was kept from before"
+        );
+    }
+
+    /// Answers one request and then reports how that connection ended: the bytes read next, so
+    /// `0` is the peer closing it.
+    async fn answering_once_then_listening_for_the_close() -> (HostPort, tokio::sync::oneshot::Receiver<usize>)
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let upstream = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
+        let (ended, ending) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = upstream.accept().await else {
+                return;
+            };
+            let mut heard = [0u8; 1024];
+            let _ = stream.read(&mut heard).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await;
+            let _ = ended.send(stream.read(&mut heard).await.unwrap_or(0));
+        });
+        (host_port, ending)
+    }
+
+    #[tokio::test]
+    async fn the_connection_into_an_app_that_was_put_down_is_closed_rather_than_left_to_its_timer() {
+        let (host_port, ending) = answering_once_then_listening_for_the_close().await;
+        let router = Router::new(Arc::new(HostMetrics::new()));
+        routed_at(&router, host_port).await;
+        let proxy = serving(router.clone()).await;
+        asked_for(proxy, "app-1.apps.example.com").await;
+        once_the_pool_has_it_back().await;
+
+        router.close_connections_to(&crate::test_support::app_id()).await;
+
+        // Well inside the idle timer the pool would have closed it on anyway, so that a closed
+        // connection means it was put down with the app rather than left to expire.
+        let ended = tokio::time::timeout(Duration::from_secs(2), ending)
+            .await
+            .expect("the connection outlived the app it led into")
+            .unwrap();
+        assert_eq!(ended, 0, "the tenant saw the connection closed, not held open");
     }
 
     /// A tenant that answers every request with `status`, as one that is up but failing would.
