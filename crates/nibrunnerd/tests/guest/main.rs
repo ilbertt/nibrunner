@@ -18,6 +18,8 @@
 #[cfg(target_os = "linux")]
 mod idle;
 #[cfg(target_os = "linux")]
+mod isolation;
+#[cfg(target_os = "linux")]
 mod lifecycle;
 #[cfg(target_os = "linux")]
 mod sleep;
