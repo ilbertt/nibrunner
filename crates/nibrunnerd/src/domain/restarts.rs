@@ -7,7 +7,7 @@ use crate::ports::{LogSink, TenantLogBody, TenantLogEvent};
 use crate::state::SharedState;
 
 /// What the guest says about restarting its tenant, taken onto the app's record on the way to
-/// the log file: the count `restartCount` and `nibrunner_instance_restarts_total` read, and the
+/// the log file: the count `restartCount` and `nibrunner_app_restarts_total` read, and the
 /// reason `lastRestart` carries. The record is the only place the host keeps it — the console
 /// file the guest also printed it on is made afresh on every restore.
 pub struct RestartRecorder {
@@ -171,7 +171,7 @@ mod tests {
         let page =
             crate::domain::metrics::tests::page(&report, &host.metrics, &host.state.snapshot().await, 0);
         assert!(
-            page.contains("nibrunner_instance_restarts_total{app=\"app-1\"} 1\n"),
+            page.contains("nibrunner_app_restarts_total{app=\"app-1\"} 1\n"),
             "{page}"
         );
     }

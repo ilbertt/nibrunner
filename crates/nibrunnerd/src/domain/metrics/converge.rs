@@ -341,13 +341,13 @@ pub(super) fn render(
         .map(|instance| (&instance.app_id, (&instance.deployment_id, instance.state)))
         .collect();
     page.metric(
-        "nibrunner_instance_converged",
+        "nibrunner_app_converged",
         "1 while an app is what its document asks for, 0 while it is not.",
         "gauge",
     );
     for (app_id, deploy) in deploys {
         page.value(
-            "nibrunner_instance_converged",
+            "nibrunner_app_converged",
             &[("app", app_id.as_str())],
             u8::from(is_converged(
                 &deploy.deployment_id,
@@ -358,7 +358,7 @@ pub(super) fn render(
     }
 
     page.metric(
-        "nibrunner_instance_converging_seconds",
+        "nibrunner_app_converging_seconds",
         "How long an app has been on its way to what its document asks for. 0 once it got there.",
         "gauge",
     );
@@ -369,21 +369,21 @@ pub(super) fn render(
             0
         };
         page.value(
-            "nibrunner_instance_converging_seconds",
+            "nibrunner_app_converging_seconds",
             &[("app", app_id.as_str())],
             as_seconds(waiting),
         );
     }
 
     page.metric(
-        "nibrunner_instance_last_converge_seconds",
+        "nibrunner_app_last_converge_seconds",
         "What the last ask for an app took, by the stretch of the work. Absent while one is under way.",
         "gauge",
     );
     for (app_id, deploy) in deploys {
         for (phase, ms) in deploy.phases() {
             page.value(
-                "nibrunner_instance_last_converge_seconds",
+                "nibrunner_app_last_converge_seconds",
                 &[("app", app_id.as_str()), ("phase", phase.as_str())],
                 as_seconds(ms),
             );
@@ -807,30 +807,30 @@ mod tests {
         };
         let page = page(&report, &metrics, &snapshot, DETECTED + 10_000);
 
-        let converged = lines_for(&page, "nibrunner_instance_converged");
+        let converged = lines_for(&page, "nibrunner_app_converged");
         assert_eq!(
             converged,
             vec![
-                "nibrunner_instance_converged{app=\"app-1\"} 1",
-                "nibrunner_instance_converged{app=\"app-2\"} 0",
+                "nibrunner_app_converged{app=\"app-1\"} 1",
+                "nibrunner_app_converged{app=\"app-2\"} 0",
             ]
         );
-        let converging = lines_for(&page, "nibrunner_instance_converging_seconds");
+        let converging = lines_for(&page, "nibrunner_app_converging_seconds");
         assert_eq!(
             converging,
             vec![
-                "nibrunner_instance_converging_seconds{app=\"app-1\"} 0.000",
-                "nibrunner_instance_converging_seconds{app=\"app-2\"} 10.000",
+                "nibrunner_app_converging_seconds{app=\"app-1\"} 0.000",
+                "nibrunner_app_converging_seconds{app=\"app-2\"} 10.000",
             ]
         );
-        let last = lines_for(&page, "nibrunner_instance_last_converge_seconds");
+        let last = lines_for(&page, "nibrunner_app_last_converge_seconds");
         assert_eq!(
             last,
             vec![
-                "nibrunner_instance_last_converge_seconds{app=\"app-1\",phase=\"layers\"} 1.000",
-                "nibrunner_instance_last_converge_seconds{app=\"app-1\",phase=\"boot\"} 0.250",
-                "nibrunner_instance_last_converge_seconds{app=\"app-1\",phase=\"ready\"} 1.750",
-                "nibrunner_instance_last_converge_seconds{app=\"app-1\",phase=\"total\"} 3.000",
+                "nibrunner_app_last_converge_seconds{app=\"app-1\",phase=\"layers\"} 1.000",
+                "nibrunner_app_last_converge_seconds{app=\"app-1\",phase=\"boot\"} 0.250",
+                "nibrunner_app_last_converge_seconds{app=\"app-1\",phase=\"ready\"} 1.750",
+                "nibrunner_app_last_converge_seconds{app=\"app-1\",phase=\"total\"} 3.000",
             ]
         );
         assert_eq!(
@@ -860,12 +860,12 @@ mod tests {
         };
         let page = page(&report, &metrics, &snapshot, DETECTED + 5_000);
         assert_eq!(
-            lines_for(&page, "nibrunner_instance_converged"),
-            vec!["nibrunner_instance_converged{app=\"app-1\"} 0"]
+            lines_for(&page, "nibrunner_app_converged"),
+            vec!["nibrunner_app_converged{app=\"app-1\"} 0"]
         );
         assert_eq!(
-            lines_for(&page, "nibrunner_instance_converging_seconds"),
-            vec!["nibrunner_instance_converging_seconds{app=\"app-1\"} 0.000"],
+            lines_for(&page, "nibrunner_app_converging_seconds"),
+            vec!["nibrunner_app_converging_seconds{app=\"app-1\"} 0.000"],
             "it got there once; what it is now is the state series' to say"
         );
     }

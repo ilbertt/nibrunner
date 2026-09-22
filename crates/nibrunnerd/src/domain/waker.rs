@@ -531,9 +531,9 @@ mod tests {
         );
         assert!(page.contains("nibrunner_wake_phase_seconds_count{phase=\"total\",outcome=\"restored\"} 1\n"));
         assert!(page.contains("nibrunner_wake_phase_seconds_count{phase=\"ready\",outcome=\"restored\"} 1\n"));
-        assert!(page.contains("nibrunner_instance_wakes_total{app=\"app-1\",outcome=\"restored\"} 1\n"));
+        assert!(page.contains("nibrunner_app_wakes_total{app=\"app-1\",outcome=\"restored\"} 1\n"));
         assert!(
-            page.contains("nibrunner_instance_last_wake_seconds{app=\"app-1\"} 0."),
+            page.contains("nibrunner_app_last_wake_seconds{app=\"app-1\"} 0."),
             "{page}"
         );
     }

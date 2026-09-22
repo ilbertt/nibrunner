@@ -73,8 +73,11 @@ listen_address = "127.0.0.1"
 port = 9100
 ```
 
-This is the only place measurements are published. Every series is prefixed `nibrunner_`. They
-cover:
+This is the only place measurements are published. Every series is prefixed `nibrunner_`, and
+what follows names what is being measured: `app_` for one app, `host_` for the machine,
+`volume_`, `checkpoint_` and `export_` for what it holds, `proxy_` for the listener it is
+reached through, and `vm_` for an operation on a microVM. Anything labelled `app` is about one
+app and nothing else, which is what to filter on for a per-app dashboard. They cover:
 
 - The state of each instance, volume, checkpoint and export, one-hot encoded.
 - How long a converge, a sleep and a wake took, by phase.
@@ -86,7 +89,7 @@ cover:
 
 ### Bill from the totals, not from a rate
 
-`nibrunner_instance_cpu_seconds_total`, `_network_bytes_total`, `_disk_mib_seconds_total` and
+`nibrunner_app_cpu_seconds_total`, `_network_bytes_total`, `_disk_mib_seconds_total` and
 `_time_seconds_total` only ever go up. What a period cost is the figure at its end less the
 figure at its start, so a scrape nobody took is resolution nobody has rather than usage nobody
 billed. A counter that goes backwards is a host that was reinstalled.

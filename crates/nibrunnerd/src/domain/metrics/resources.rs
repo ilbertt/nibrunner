@@ -331,26 +331,26 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
     }
 
     page.metric(
-        "nibrunner_instance_start_refusals_total",
+        "nibrunner_start_refusals_total",
         "Starts a pass refused, by why: no room in memory beside what is already up, or the isolation ruleset not applied. One refused for room waits, pending, and is planned again the next pass.",
         "counter",
     );
     for (index, refusal) in START_REFUSALS.iter().enumerate() {
         page.value(
-            "nibrunner_instance_start_refusals_total",
+            "nibrunner_start_refusals_total",
             &[("reason", refusal.as_str())],
             metrics.start_refusals[index].load(Ordering::Relaxed),
         );
     }
 
     page.metric(
-        "nibrunner_instance_measured_timestamp_seconds",
+        "nibrunner_app_measured_timestamp_seconds",
         "When a guest last reported what it was using, as seconds since the epoch. 0 for one that never has; one that stopped is one this host can no longer hear.",
         "gauge",
     );
     for instance in &scrape.report.instances {
         page.value(
-            "nibrunner_instance_measured_timestamp_seconds",
+            "nibrunner_app_measured_timestamp_seconds",
             &[("app", instance.app_id.as_str())],
             as_seconds(
                 scrape
@@ -480,13 +480,11 @@ mod tests {
             "the total is what the host is laid out for"
         );
         assert!(page.contains("nibrunner_host_memory_available_bytes 1000000\n"));
-        assert!(page.contains("nibrunner_instance_start_refusals_total{reason=\"no_room\"} 742\n"));
-        assert!(page.contains("nibrunner_instance_start_refusals_total{reason=\"not_isolated\"} 0\n"));
+        assert!(page.contains("nibrunner_start_refusals_total{reason=\"no_room\"} 742\n"));
+        assert!(page.contains("nibrunner_start_refusals_total{reason=\"not_isolated\"} 0\n"));
         assert!(page.contains("nibrunner_conntrack_entries{of=\"used\"} 210000\n"));
         assert!(page.contains("nibrunner_conntrack_entries{of=\"max\"} 262144\n"));
-        assert!(
-            page.contains("nibrunner_instance_measured_timestamp_seconds{app=\"app-1\"} 1700000000.000\n")
-        );
+        assert!(page.contains("nibrunner_app_measured_timestamp_seconds{app=\"app-1\"} 1700000000.000\n"));
     }
 
     #[test]
@@ -511,6 +509,6 @@ mod tests {
         assert!(lines_for(&page, "nibrunner_host_memory_available_bytes").is_empty());
         assert!(lines_for(&page, "nibrunner_conntrack_entries").is_empty());
         assert!(lines_for(&page, "nibrunner_volume_used_bytes").is_empty());
-        assert!(page.contains("nibrunner_instance_measured_timestamp_seconds{app=\"app-1\"} 0.000\n"));
+        assert!(page.contains("nibrunner_app_measured_timestamp_seconds{app=\"app-1\"} 0.000\n"));
     }
 }
