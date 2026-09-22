@@ -76,6 +76,25 @@ impl FileLogSink {
         self.directory.join(format!("{app_id}.log.1"))
     }
 
+    /// Everything this host kept for an app that is no longer on it, taken under the lock a
+    /// publish holds too, so that no batch lands between the handle going and the files. The
+    /// handle goes first: one left open holds the bytes against the unlinked inode for as long as
+    /// the daemon runs, and would have whatever is deployed under this name next appending to
+    /// output it never wrote.
+    pub fn discard(&self, app_id: &AppId) {
+        let mut writers = self.writers.lock().expect("no panic holds the log writer lock");
+        drop(writers.remove(app_id));
+        for path in [self.path_for(app_id), self.previous_path_for(app_id)] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(%app_id, %error, "tenant output outlived the app it was kept for")
+                }
+            }
+        }
+    }
+
     /// The cut. The file is renamed over the previous one and the handle let go; the next line
     /// opens a fresh `<appId>.log`, so the newest output is always at the path an operator tails.
     fn rotate(&self, app_id: &AppId, mut full: AppLog) {
@@ -501,6 +520,50 @@ mod tests {
             lines_in(&sink.previous_path_for(&app_id())),
             ["000", "001", "002"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_discarded_app_leaves_behind_neither_the_file_it_was_writing_nor_the_one_before_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("logs");
+        let sink = FileLogSink::new(logs.clone(), 2 * line_bytes());
+        let neighbour = protocol::AppId::parse("app-2").unwrap();
+        for sequence in 0..5 {
+            sink.publish(vec![
+                line(sequence),
+                TenantLogEvent {
+                    app_id: neighbour.clone(),
+                    ..line(sequence)
+                },
+            ])
+            .await;
+        }
+        assert_eq!(files_in(&logs).len(), 4);
+
+        sink.discard(&app_id());
+
+        assert_eq!(files_in(&logs), ["app-2.log", "app-2.log.1"]);
+    }
+
+    #[tokio::test]
+    async fn an_app_deployed_again_under_a_discarded_name_writes_to_a_file_of_its_own() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("logs");
+        let sink = unbounded(logs.clone());
+        sink.publish(vec![line(0)]).await;
+        sink.discard(&app_id());
+
+        sink.publish(vec![line(1)]).await;
+
+        assert_eq!(lines_in(&sink.path_for(&app_id())), ["001"]);
+        assert_eq!(files_in(&logs), ["app-1.log"]);
+    }
+
+    #[tokio::test]
+    async fn discarding_an_app_this_host_kept_no_output_for_is_not_a_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let sink = unbounded(directory.path().join("logs"));
+        sink.discard(&app_id());
     }
 
     #[tokio::test]

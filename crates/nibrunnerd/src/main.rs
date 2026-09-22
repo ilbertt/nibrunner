@@ -310,12 +310,28 @@ async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+/// backhand narrates thirteen lines for every layer it packs, and rustls warns for every client
+/// that presents an IP literal as SNI — a client quirk the proxy handles, not this host
+/// complaining. An error from either still reaches the journal, and both come before the filter
+/// that was asked for, so `NIBRUNNER_LOG` can name either crate again and have that answer win.
+const QUIETED_DEPENDENCIES: &str = "backhand=warn,rustls=error";
+
+const DEFAULT_LOG_FILTER: &str = "info";
+
+fn log_filter(requested: Option<&str>) -> tracing_subscriber::EnvFilter {
+    let quieted =
+        |filter: &str| tracing_subscriber::EnvFilter::try_new(format!("{QUIETED_DEPENDENCIES},{filter}"));
+    requested
+        .and_then(|filter| quieted(filter).ok())
+        .unwrap_or_else(|| {
+            quieted(DEFAULT_LOG_FILTER).expect("the filter a host falls back to is written in this file")
+        })
+}
+
 fn install_logger() {
     use tracing_subscriber::prelude::*;
-    let filter = tracing_subscriber::EnvFilter::try_from_env("NIBRUNNER_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::registry()
-        .with(filter)
+        .with(log_filter(std::env::var("NIBRUNNER_LOG").ok().as_deref()))
         .with(
             tracing_subscriber::fmt::layer()
                 .json()
@@ -396,5 +412,86 @@ mod tests {
         let said = parse(&["--help"]).unwrap_err();
         assert!(said.contains("nibrunnerd install"), "{said}");
         assert!(said.contains("nibrunnerd start"), "{said}");
+    }
+
+    /// The lines below share their callsites across these tests, and interest in a callsite is
+    /// cached for the whole process by whichever thread reaches it first — only one of them may
+    /// be answering the question at a time.
+    static QUIETED_CALLSITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn through_the_filter(requested: Option<&str>) -> Vec<String> {
+        use tracing_subscriber::prelude::*;
+
+        let said = nibrunnerd::test_support::Said::default();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(log_filter(requested))
+                .with(said.clone()),
+        );
+        tracing::callsite::rebuild_interest_cache();
+
+        tracing::info!(target: "backhand::v4::filesystem::writer", "Writing Data");
+        tracing::error!(target: "backhand::v4::filesystem::writer", "the layer could not be packed");
+        tracing::warn!(target: "rustls::msgs::handshake", "Illegal SNI extension");
+        tracing::error!(target: "rustls::server::hs", "the handshake could not be finished");
+        tracing::info!(target: "nibrunnerd::services::layers", "layer image ready");
+
+        drop(guard);
+        said.lines()
+    }
+
+    #[test]
+    fn the_squashfs_packer_and_rustls_are_quiet_while_this_host_is_not() {
+        let _callsites = QUIETED_CALLSITES.lock();
+        let said = through_the_filter(None);
+        assert!(!said.iter().any(|line| line.contains("Writing Data")), "{said:?}");
+        assert!(
+            !said.iter().any(|line| line.contains("Illegal SNI extension")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|line| line.contains("layer image ready")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_quieted_crate_that_actually_fails_still_reaches_the_journal() {
+        let _callsites = QUIETED_CALLSITES.lock();
+        let said = through_the_filter(None);
+        assert!(
+            said.iter()
+                .any(|line| line.contains("the layer could not be packed")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|line| line.contains("the handshake could not be finished")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn the_filter_a_host_asks_for_wins_over_the_levels_these_crates_are_pinned_to() {
+        let _callsites = QUIETED_CALLSITES.lock();
+        let said = through_the_filter(Some("info,rustls=trace"));
+        assert!(
+            said.iter().any(|line| line.contains("Illegal SNI extension")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_filter_that_does_not_parse_falls_back_to_info_with_both_crates_still_quiet() {
+        let _callsites = QUIETED_CALLSITES.lock();
+        let said = through_the_filter(Some("nibrunnerd=loud"));
+        assert!(
+            said.iter().any(|line| line.contains("layer image ready")),
+            "{said:?}"
+        );
+        assert!(
+            !said.iter().any(|line| line.contains("Illegal SNI extension")),
+            "{said:?}"
+        );
     }
 }
