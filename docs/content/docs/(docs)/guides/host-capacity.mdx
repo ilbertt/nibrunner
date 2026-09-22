@@ -45,7 +45,7 @@ consumed, and it is retried every pass. So if `desired.json` names a thousand on
 a host that runs 240 at once, 240 boot and the rest follow as the first ones sleep. A wake that
 does not fit is refused the same way, and its request gets a 503. The number of waiting starts
 is logged once per pass and counted in
-`nibrunner_instance_start_refusals_total{reason="no_room"}`.
+`nibrunner_start_refusals_total{reason="no_room"}`.
 
 ## Changing it
 

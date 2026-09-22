@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use protocol::{CheckpointState, ExportState, VolumeState};
 
-use crate::domain::metrics::{as_seconds, Histogram, Page, Scrape};
+use crate::domain::metrics::{as_seconds, Histogram, Kind, Metric, Page, Scrape};
 
 // A local-file volume is made in milliseconds; one on an object store is made in seconds and
 // exported in minutes, and a layer pulled over a slow link in more.
@@ -170,53 +170,144 @@ impl ResourceMetrics {
     }
 }
 
+static STORAGE_OPERATION_SECONDS: Metric = Metric {
+    name: "nibrunner_storage_operation_seconds",
+    help: "Something done to storage or the artifact store on an app's behalf, by what and how it ended.",
+    kind: Kind::Histogram,
+    labels: &["operation", "outcome"],
+};
+
+static LAYERS_CACHED_TOTAL: Metric = Metric {
+    name: "nibrunner_layers_cached_total",
+    help: "Layers a pass asked for that were already in the cache, so nothing was fetched.",
+    kind: Kind::Counter,
+    labels: &[],
+};
+
+static LAYER_FETCH_BYTES_TOTAL: Metric = Metric {
+    name: "nibrunner_layer_fetch_bytes_total",
+    help: "What has been pulled from the artifact store, as the store sized it.",
+    kind: Kind::Counter,
+    labels: &[],
+};
+
+static VOLUME_STATE: Metric = Metric {
+    name: "nibrunner_volume_state",
+    help: "1 for the state a volume is in, 0 for every state it is not.",
+    kind: Kind::Gauge,
+    labels: &["volume", "app", "state"],
+};
+
+static VOLUME_SIZE_BYTES: Metric = Metric {
+    name: "nibrunner_volume_size_bytes",
+    help: "What a volume was set aside as.",
+    kind: Kind::Gauge,
+    labels: &["volume", "app"],
+};
+
+static VOLUME_USED_BYTES: Metric = Metric {
+    name: "nibrunner_volume_used_bytes",
+    help: "What a guest reported filling of its volume, when it was last measured. Absent until it has been.",
+    kind: Kind::Gauge,
+    labels: &["volume", "app"],
+};
+
+static CHECKPOINT_STATE: Metric = Metric {
+    name: "nibrunner_checkpoint_state",
+    help: "1 for the state a checkpoint is in, 0 for every state it is not.",
+    kind: Kind::Gauge,
+    labels: &["checkpoint", "volume", "state"],
+};
+
+static EXPORT_STATE: Metric = Metric {
+    name: "nibrunner_export_state",
+    help: "1 for the state an export is in, 0 for every state it is not.",
+    kind: Kind::Gauge,
+    labels: &["export", "state"],
+};
+
+static EXPORT_SIZE_BYTES: Metric = Metric {
+    name: "nibrunner_export_size_bytes",
+    help: "What an export came to, once written. Absent until it has been.",
+    kind: Kind::Gauge,
+    labels: &["export"],
+};
+
+static SLOTS: Metric = Metric {
+    name: "nibrunner_slots",
+    help: "Slots on this host: each holds an app's ports, tap and guest address, and an app with none is refused. The total is max_apps in config.toml.",
+    kind: Kind::Gauge,
+    labels: &["of"],
+};
+
+static HOST_MEMORY_AVAILABLE_BYTES: Metric = Metric {
+    name: "nibrunner_host_memory_available_bytes",
+    help: "What the kernel says it could give out without swapping, as against the promises nibrunner_host_allocatable adds up. Absent where the kernel does not say.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static START_REFUSALS_TOTAL: Metric = Metric {
+    name: "nibrunner_start_refusals_total",
+    help: "Starts a pass refused, by why: no room in memory beside what is already up, or the isolation ruleset not applied. One refused for room waits, pending, and is planned again the next pass.",
+    kind: Kind::Counter,
+    labels: &["reason"],
+};
+
+static APP_MEASURED_TIMESTAMP_SECONDS: Metric = Metric {
+    name: "nibrunner_app_measured_timestamp_seconds",
+    help: "When a guest last reported what it was using, as seconds since the epoch. 0 for one that never has; one that stopped is one this host can no longer hear.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+pub(super) static DECLARED: &[&Metric] = &[
+    &STORAGE_OPERATION_SECONDS,
+    &LAYERS_CACHED_TOTAL,
+    &LAYER_FETCH_BYTES_TOTAL,
+    &VOLUME_STATE,
+    &VOLUME_SIZE_BYTES,
+    &VOLUME_USED_BYTES,
+    &CHECKPOINT_STATE,
+    &EXPORT_STATE,
+    &EXPORT_SIZE_BYTES,
+    &SLOTS,
+    &HOST_MEMORY_AVAILABLE_BYTES,
+    &START_REFUSALS_TOTAL,
+    &APP_MEASURED_TIMESTAMP_SECONDS,
+];
+
 pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape<'_>) {
-    page.metric(
-        "nibrunner_storage_operation_seconds",
-        "Something done to storage or the artifact store on an app's behalf, by what and how it ended.",
-        "histogram",
-    );
+    page.declare(&STORAGE_OPERATION_SECONDS);
     for operation in OPERATIONS {
         for (index, outcome) in OUTCOMES.iter().enumerate() {
             page.histogram(
-                "nibrunner_storage_operation_seconds",
+                &STORAGE_OPERATION_SECONDS,
                 &[("operation", operation.as_str()), ("outcome", outcome)],
                 metrics.operation(operation, index == 0),
             );
         }
     }
 
-    page.metric(
-        "nibrunner_layers_cached_total",
-        "Layers a pass asked for that were already in the cache, so nothing was fetched.",
-        "counter",
-    );
+    page.declare(&LAYERS_CACHED_TOTAL);
     page.value(
-        "nibrunner_layers_cached_total",
+        &LAYERS_CACHED_TOTAL,
         &[],
         metrics.layers_cached.load(Ordering::Relaxed),
     );
 
-    page.metric(
-        "nibrunner_layer_fetch_bytes_total",
-        "What has been pulled from the artifact store, as the store sized it.",
-        "counter",
-    );
+    page.declare(&LAYER_FETCH_BYTES_TOTAL);
     page.value(
-        "nibrunner_layer_fetch_bytes_total",
+        &LAYER_FETCH_BYTES_TOTAL,
         &[],
         metrics.layer_fetch_bytes.load(Ordering::Relaxed),
     );
 
-    page.metric(
-        "nibrunner_volume_state",
-        "1 for the state a volume is in, 0 for every state it is not.",
-        "gauge",
-    );
+    page.declare(&VOLUME_STATE);
     for volume in &scrape.report.volumes {
         for state in VOLUME_STATES {
             page.value(
-                "nibrunner_volume_state",
+                &VOLUME_STATE,
                 &[
                     ("volume", volume.volume_id.as_str()),
                     ("app", volume.app_id.as_str()),
@@ -227,14 +318,10 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
         }
     }
 
-    page.metric(
-        "nibrunner_volume_size_bytes",
-        "What a volume was set aside as.",
-        "gauge",
-    );
+    page.declare(&VOLUME_SIZE_BYTES);
     for volume in &scrape.report.volumes {
         page.value(
-            "nibrunner_volume_size_bytes",
+            &VOLUME_SIZE_BYTES,
             &[
                 ("volume", volume.volume_id.as_str()),
                 ("app", volume.app_id.as_str()),
@@ -243,15 +330,11 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
         );
     }
 
-    page.metric(
-        "nibrunner_volume_used_bytes",
-        "What a guest reported filling of its volume, when it was last measured. Absent until it has been.",
-        "gauge",
-    );
+    page.declare(&VOLUME_USED_BYTES);
     for volume in &scrape.report.volumes {
         if let Some(usage) = scrape.snapshot.volume_usage.get(&volume.app_id) {
             page.value(
-                "nibrunner_volume_used_bytes",
+                &VOLUME_USED_BYTES,
                 &[
                     ("volume", volume.volume_id.as_str()),
                     ("app", volume.app_id.as_str()),
@@ -261,15 +344,11 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
         }
     }
 
-    page.metric(
-        "nibrunner_checkpoint_state",
-        "1 for the state a checkpoint is in, 0 for every state it is not.",
-        "gauge",
-    );
+    page.declare(&CHECKPOINT_STATE);
     for checkpoint in &scrape.report.checkpoints {
         for state in CHECKPOINT_STATES {
             page.value(
-                "nibrunner_checkpoint_state",
+                &CHECKPOINT_STATE,
                 &[
                     ("checkpoint", checkpoint.checkpoint_id.as_str()),
                     ("volume", checkpoint.volume_id.as_str()),
@@ -280,15 +359,11 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
         }
     }
 
-    page.metric(
-        "nibrunner_export_state",
-        "1 for the state an export is in, 0 for every state it is not.",
-        "gauge",
-    );
+    page.declare(&EXPORT_STATE);
     for export in &scrape.report.exports {
         for state in EXPORT_STATES {
             page.value(
-                "nibrunner_export_state",
+                &EXPORT_STATE,
                 &[
                     ("export", export.export_id.as_str()),
                     ("state", export_state_str(state)),
@@ -298,59 +373,39 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
         }
     }
 
-    page.metric(
-        "nibrunner_export_size_bytes",
-        "What an export came to, once written. Absent until it has been.",
-        "gauge",
-    );
+    page.declare(&EXPORT_SIZE_BYTES);
     for export in &scrape.report.exports {
         if let Some(size_bytes) = export.size_bytes {
             page.value(
-                "nibrunner_export_size_bytes",
+                &EXPORT_SIZE_BYTES,
                 &[("export", export.export_id.as_str())],
                 size_bytes,
             );
         }
     }
 
-    page.metric(
-        "nibrunner_slots",
-        "Slots on this host: each holds an app's ports, tap and guest address, and an app with none is refused. The total is max_apps in config.toml.",
-        "gauge",
-    );
-    page.value("nibrunner_slots", &[("of", "used")], scrape.slots_used);
-    page.value("nibrunner_slots", &[("of", "total")], scrape.slots_total);
+    page.declare(&SLOTS);
+    page.value(&SLOTS, &[("of", "used")], scrape.slots_used);
+    page.value(&SLOTS, &[("of", "total")], scrape.slots_total);
 
-    page.metric(
-        "nibrunner_host_memory_available_bytes",
-        "What the kernel says it could give out without swapping, as against the promises nibrunner_host_allocatable adds up. Absent where the kernel does not say.",
-        "gauge",
-    );
+    page.declare(&HOST_MEMORY_AVAILABLE_BYTES);
     if let Some(bytes) = scrape.memory_available_bytes {
-        page.value("nibrunner_host_memory_available_bytes", &[], bytes);
+        page.value(&HOST_MEMORY_AVAILABLE_BYTES, &[], bytes);
     }
 
-    page.metric(
-        "nibrunner_instance_start_refusals_total",
-        "Starts a pass refused, by why: no room in memory beside what is already up, or the isolation ruleset not applied. One refused for room waits, pending, and is planned again the next pass.",
-        "counter",
-    );
+    page.declare(&START_REFUSALS_TOTAL);
     for (index, refusal) in START_REFUSALS.iter().enumerate() {
         page.value(
-            "nibrunner_instance_start_refusals_total",
+            &START_REFUSALS_TOTAL,
             &[("reason", refusal.as_str())],
             metrics.start_refusals[index].load(Ordering::Relaxed),
         );
     }
 
-    page.metric(
-        "nibrunner_instance_measured_timestamp_seconds",
-        "When a guest last reported what it was using, as seconds since the epoch. 0 for one that never has; one that stopped is one this host can no longer hear.",
-        "gauge",
-    );
+    page.declare(&APP_MEASURED_TIMESTAMP_SECONDS);
     for instance in &scrape.report.instances {
         page.value(
-            "nibrunner_instance_measured_timestamp_seconds",
+            &APP_MEASURED_TIMESTAMP_SECONDS,
             &[("app", instance.app_id.as_str())],
             as_seconds(
                 scrape
@@ -480,13 +535,11 @@ mod tests {
             "the total is what the host is laid out for"
         );
         assert!(page.contains("nibrunner_host_memory_available_bytes 1000000\n"));
-        assert!(page.contains("nibrunner_instance_start_refusals_total{reason=\"no_room\"} 742\n"));
-        assert!(page.contains("nibrunner_instance_start_refusals_total{reason=\"not_isolated\"} 0\n"));
+        assert!(page.contains("nibrunner_start_refusals_total{reason=\"no_room\"} 742\n"));
+        assert!(page.contains("nibrunner_start_refusals_total{reason=\"not_isolated\"} 0\n"));
         assert!(page.contains("nibrunner_conntrack_entries{of=\"used\"} 210000\n"));
         assert!(page.contains("nibrunner_conntrack_entries{of=\"max\"} 262144\n"));
-        assert!(
-            page.contains("nibrunner_instance_measured_timestamp_seconds{app=\"app-1\"} 1700000000.000\n")
-        );
+        assert!(page.contains("nibrunner_app_measured_timestamp_seconds{app=\"app-1\"} 1700000000.000\n"));
     }
 
     #[test]
@@ -511,6 +564,6 @@ mod tests {
         assert!(lines_for(&page, "nibrunner_host_memory_available_bytes").is_empty());
         assert!(lines_for(&page, "nibrunner_conntrack_entries").is_empty());
         assert!(lines_for(&page, "nibrunner_volume_used_bytes").is_empty());
-        assert!(page.contains("nibrunner_instance_measured_timestamp_seconds{app=\"app-1\"} 0.000\n"));
+        assert!(page.contains("nibrunner_app_measured_timestamp_seconds{app=\"app-1\"} 0.000\n"));
     }
 }

@@ -55,6 +55,12 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - A proper noun in a doc comment that clippy takes for an identifier goes in `clippy.toml`'s
   `doc-valid-idents`, not in backticks.
 - Errors are `thiserror` enums whose messages read as the sentence an operator will find in a log.
+- A metric is a `Metric` static beside the pass that emits it — name, help, kind and labels in one
+  place, because `# HELP` and `# TYPE` are optional and a page whose two halves name a series
+  differently scrapes without complaint. Its prefix says what is measured: `nibrunner_app_` for one
+  app, `host_` for the machine, `volume_`/`checkpoint_`/`export_` for what it holds, `proxy_` for
+  the listener, `vm_` for an operation on a microVM. `metrics::declared()` is the catalogue, and a
+  test holds the page to emitting every series in it.
 - Tests are named as the sentence they prove: `a_booted_vm_is_not_a_running_app`, not `test_boot`.
 - Docs site: Biome is strict — one parameter per function (`useMaxParams: 1`; wrap several in an
   object), no magic numbers, braces on every block, components declared with `function`, no barrel

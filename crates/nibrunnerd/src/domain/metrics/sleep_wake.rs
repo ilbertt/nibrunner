@@ -6,7 +6,7 @@ use std::time::Duration;
 use protocol::AppId;
 
 use crate::domain::activation::SleepReason;
-use crate::domain::metrics::{as_seconds, Histogram, Page};
+use crate::domain::metrics::{as_seconds, Histogram, Kind, Metric, Page};
 use crate::ports::{WakeOutcome, WakeRefusal};
 use crate::state::HostSnapshot;
 
@@ -24,7 +24,7 @@ const SLEEP_BOUNDS_SECONDS: [f64; 13] = [
 
 /// A stretch of a wake as the waker sees it: waiting for what `readyWhen` names once the microVM
 /// is back, and the whole of it. Bringing the microVM back is the difference, and the VMM times
-/// its own part of that on `nibrunner_instance_restore_duration_seconds`.
+/// its own part of that on `nibrunner_vm_restore_duration_seconds`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakePhase {
     Ready,
@@ -42,7 +42,7 @@ impl WakePhase {
 
 /// A stretch of putting an app to sleep: how late the policy was acted on, asking the guest to
 /// flush, and the whole of the flush and the snapshot. The snapshot alone is the VMM's, on
-/// `nibrunner_instance_snapshot_duration_seconds`.
+/// `nibrunner_vm_snapshot_duration_seconds`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepPhase {
     Late,
@@ -296,123 +296,186 @@ impl SleepWakeMetrics {
     }
 }
 
+static WAKE_DURATION_SECONDS: Metric = Metric {
+    name: "nibrunner_wake_duration_seconds",
+    help: "Bringing a sleeping app back for the request that asked for it, from the request reaching the waker to the app being ready to be forwarded one, whether it set the wake going or joined one under way. On an on-request host this is the population that makes the tail of nibrunner_proxy_request_duration_seconds.",
+    kind: Kind::Histogram,
+    labels: &[],
+};
+
+static VM_SNAPSHOT_DURATION_SECONDS: Metric = Metric {
+    name: "nibrunner_vm_snapshot_duration_seconds",
+    help: "Pausing a guest that has gone quiet and writing its memory out. Scales with the memory the app was given, so it is the cost of the sleep rather than of the app.",
+    kind: Kind::Histogram,
+    labels: &[],
+};
+
+static VM_RESTORE_DURATION_SECONDS: Metric = Metric {
+    name: "nibrunner_vm_restore_duration_seconds",
+    help: "Bringing a guest back from the snapshot it slept in. The other half of the sleep, and cheaper than it by orders of magnitude.",
+    kind: Kind::Histogram,
+    labels: &[],
+};
+
+static WAKE_PHASE_SECONDS: Metric = Metric {
+    name: "nibrunner_wake_phase_seconds",
+    help: "One wake, by how it was done and the stretch of it: waiting for what readyWhen names once the microVM was back, and the whole. Total less ready is bringing the microVM back; the VMM's own part of that is nibrunner_vm_restore_duration_seconds.",
+    kind: Kind::Histogram,
+    labels: &["phase", "outcome"],
+};
+
+static WAKE_REQUESTS_COALESCED_TOTAL: Metric = Metric {
+    name: "nibrunner_wake_requests_coalesced_total",
+    help: "Requests that found a wake of their app already under way and waited on it.",
+    kind: Kind::Counter,
+    labels: &[],
+};
+
+static WAKE_FIRST_RESPONSE_SECONDS: Metric = Metric {
+    name: "nibrunner_wake_first_response_seconds",
+    help: "The request that woke an app, from being handed to the app to the app answering it. What being ready was worth.",
+    kind: Kind::Histogram,
+    labels: &[],
+};
+
+static WAKE_REFUSALS_TOTAL: Metric = Metric {
+    name: "nibrunner_wake_refusals_total",
+    help: "Wakes this host refused, by why.",
+    kind: Kind::Counter,
+    labels: &["reason"],
+};
+
+static ACTIVATOR_RESPONSES_TOTAL: Metric = Metric {
+    name: "nibrunner_activator_responses_total",
+    help: "What the HTTP activator answered requests for on-request apps with. The proxy counts every one of these as served, because serving it is what it did.",
+    kind: Kind::Counter,
+    labels: &["answer"],
+};
+
+static SLEEP_PHASE_SECONDS: Metric = Metric {
+    name: "nibrunner_sleep_phase_seconds",
+    help: "Putting an app to sleep, by why and the stretch of it: how late the policy was acted on past what it allowed, asking the guest to flush, and the whole of the flush and the snapshot. The snapshot alone is nibrunner_vm_snapshot_duration_seconds.",
+    kind: Kind::Histogram,
+    labels: &["phase", "reason"],
+};
+
+static SLEEP_OUTCOMES_TOTAL: Metric = Metric {
+    name: "nibrunner_sleep_outcomes_total",
+    help: "Times a policy said an app may sleep, by what came of it: it slept, its microVM refused to be snapshotted, or the snapshot failed.",
+    kind: Kind::Counter,
+    labels: &["reason", "outcome"],
+};
+
+static APP_WAKES_TOTAL: Metric = Metric {
+    name: "nibrunner_app_wakes_total",
+    help: "Times an on-request app was woken by a request, by how.",
+    kind: Kind::Counter,
+    labels: &["app", "outcome"],
+};
+
+static APP_LAST_WAKE_SECONDS: Metric = Metric {
+    name: "nibrunner_app_last_wake_seconds",
+    help: "What the last wake of an on-request app took. Absent until it has been woken.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+static APP_SLEEPS_TOTAL: Metric = Metric {
+    name: "nibrunner_app_sleeps_total",
+    help: "Times a policy said an on-request app may sleep, by what came of it.",
+    kind: Kind::Counter,
+    labels: &["app", "outcome"],
+};
+
+static APP_LAST_SLEEP_SECONDS: Metric = Metric {
+    name: "nibrunner_app_last_sleep_seconds",
+    help: "What the last sleep of an on-request app took, flush and snapshot. Absent until it has slept.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+pub(super) static DECLARED: &[&Metric] = &[
+    &WAKE_DURATION_SECONDS,
+    &VM_SNAPSHOT_DURATION_SECONDS,
+    &VM_RESTORE_DURATION_SECONDS,
+    &WAKE_PHASE_SECONDS,
+    &WAKE_REQUESTS_COALESCED_TOTAL,
+    &WAKE_FIRST_RESPONSE_SECONDS,
+    &WAKE_REFUSALS_TOTAL,
+    &ACTIVATOR_RESPONSES_TOTAL,
+    &SLEEP_PHASE_SECONDS,
+    &SLEEP_OUTCOMES_TOTAL,
+    &APP_WAKES_TOTAL,
+    &APP_LAST_WAKE_SECONDS,
+    &APP_SLEEPS_TOTAL,
+    &APP_LAST_SLEEP_SECONDS,
+];
+
 pub(super) fn render(page: &mut Page, metrics: &SleepWakeMetrics, snapshot: &HostSnapshot) {
-    page.metric(
-        "nibrunner_wake_duration_seconds",
-        "Bringing a sleeping app back for the request that asked for it, from the request reaching the waker to the app being ready to be forwarded one, whether it set the wake going or joined one under way. On an on-request host this is the population that makes the tail of nibrunner_proxy_request_duration_seconds.",
-        "histogram",
-    );
-    page.histogram("nibrunner_wake_duration_seconds", &[], &metrics.wake_wait);
+    page.declare(&WAKE_DURATION_SECONDS);
+    page.histogram(&WAKE_DURATION_SECONDS, &[], &metrics.wake_wait);
 
-    page.metric(
-        "nibrunner_instance_snapshot_duration_seconds",
-        "Pausing a guest that has gone quiet and writing its memory out. Scales with the memory the app was given, so it is the cost of the sleep rather than of the app.",
-        "histogram",
-    );
-    page.histogram(
-        "nibrunner_instance_snapshot_duration_seconds",
-        &[],
-        &metrics.snapshot,
-    );
+    page.declare(&VM_SNAPSHOT_DURATION_SECONDS);
+    page.histogram(&VM_SNAPSHOT_DURATION_SECONDS, &[], &metrics.snapshot);
 
-    page.metric(
-        "nibrunner_instance_restore_duration_seconds",
-        "Bringing a guest back from the snapshot it slept in. The other half of the sleep, and cheaper than it by orders of magnitude.",
-        "histogram",
-    );
-    page.histogram(
-        "nibrunner_instance_restore_duration_seconds",
-        &[],
-        &metrics.restore,
-    );
+    page.declare(&VM_RESTORE_DURATION_SECONDS);
+    page.histogram(&VM_RESTORE_DURATION_SECONDS, &[], &metrics.restore);
 
-    page.metric(
-        "nibrunner_wake_phase_seconds",
-        "One wake, by how it was done and the stretch of it: waiting for what readyWhen names once the microVM was back, and the whole. Total less ready is bringing the microVM back; the VMM's own part of that is nibrunner_instance_restore_duration_seconds.",
-        "histogram",
-    );
+    page.declare(&WAKE_PHASE_SECONDS);
     for phase in WAKE_PHASES {
         for outcome in WAKE_OUTCOMES {
             page.histogram(
-                "nibrunner_wake_phase_seconds",
+                &WAKE_PHASE_SECONDS,
                 &[("phase", phase.as_str()), ("outcome", outcome.as_str())],
                 metrics.wake(phase, outcome),
             );
         }
     }
 
-    page.metric(
-        "nibrunner_wake_requests_coalesced_total",
-        "Requests that found a wake of their app already under way and waited on it.",
-        "counter",
-    );
+    page.declare(&WAKE_REQUESTS_COALESCED_TOTAL);
     page.value(
-        "nibrunner_wake_requests_coalesced_total",
+        &WAKE_REQUESTS_COALESCED_TOTAL,
         &[],
         metrics.coalesced.load(Ordering::Relaxed),
     );
 
-    page.metric(
-        "nibrunner_wake_first_response_seconds",
-        "The request that woke an app, from being handed to the app to the app answering it. What being ready was worth.",
-        "histogram",
-    );
-    page.histogram(
-        "nibrunner_wake_first_response_seconds",
-        &[],
-        &metrics.first_response,
-    );
+    page.declare(&WAKE_FIRST_RESPONSE_SECONDS);
+    page.histogram(&WAKE_FIRST_RESPONSE_SECONDS, &[], &metrics.first_response);
 
-    page.metric(
-        "nibrunner_wake_refusals_total",
-        "Wakes this host refused, by why.",
-        "counter",
-    );
+    page.declare(&WAKE_REFUSALS_TOTAL);
     for (index, reason) in REFUSALS.iter().enumerate() {
         page.value(
-            "nibrunner_wake_refusals_total",
+            &WAKE_REFUSALS_TOTAL,
             &[("reason", reason)],
             metrics.refusals[index].load(Ordering::Relaxed),
         );
     }
 
-    page.metric(
-        "nibrunner_activator_responses_total",
-        "What the HTTP activator answered requests for on-request apps with. The proxy counts every one of these as served, because serving it is what it did.",
-        "counter",
-    );
+    page.declare(&ACTIVATOR_RESPONSES_TOTAL);
     for (index, answer) in ANSWERS.iter().enumerate() {
         page.value(
-            "nibrunner_activator_responses_total",
+            &ACTIVATOR_RESPONSES_TOTAL,
             &[("answer", answer.as_str())],
             metrics.answers[index].load(Ordering::Relaxed),
         );
     }
 
-    page.metric(
-        "nibrunner_sleep_phase_seconds",
-        "Putting an app to sleep, by why and the stretch of it: how late the policy was acted on past what it allowed, asking the guest to flush, and the whole of the flush and the snapshot. The snapshot alone is nibrunner_instance_snapshot_duration_seconds.",
-        "histogram",
-    );
+    page.declare(&SLEEP_PHASE_SECONDS);
     for phase in SLEEP_PHASES {
         for reason in SLEEP_REASONS {
             page.histogram(
-                "nibrunner_sleep_phase_seconds",
+                &SLEEP_PHASE_SECONDS,
                 &[("phase", phase.as_str()), ("reason", reason.as_str())],
                 metrics.sleep(phase, reason),
             );
         }
     }
 
-    page.metric(
-        "nibrunner_sleep_outcomes_total",
-        "Times a policy said an app may sleep, by what came of it: it slept, its microVM refused to be snapshotted, or the snapshot failed.",
-        "counter",
-    );
+    page.declare(&SLEEP_OUTCOMES_TOTAL);
     for reason in SLEEP_REASONS {
         for outcome in SLEEP_OUTCOMES {
             page.value(
-                "nibrunner_sleep_outcomes_total",
+                &SLEEP_OUTCOMES_TOTAL,
                 &[("reason", reason.as_str()), ("outcome", outcome.as_str())],
                 metrics.sleep_outcome(reason, outcome).load(Ordering::Relaxed),
             );
@@ -426,62 +489,46 @@ pub(super) fn render(page: &mut Page, metrics: &SleepWakeMetrics, snapshot: &Hos
         .map(|record| &record.app_id)
         .collect();
 
-    page.metric(
-        "nibrunner_instance_wakes_total",
-        "Times an on-request app was woken by a request, by how.",
-        "counter",
-    );
+    page.declare(&APP_WAKES_TOTAL);
     for app_id in &on_request {
         let app = metrics.of(app_id);
         for (index, outcome) in WAKE_OUTCOMES.iter().enumerate() {
             page.value(
-                "nibrunner_instance_wakes_total",
+                &APP_WAKES_TOTAL,
                 &[("app", app_id.as_str()), ("outcome", outcome.as_str())],
                 app.wakes[index],
             );
         }
     }
 
-    page.metric(
-        "nibrunner_instance_last_wake_seconds",
-        "What the last wake of an on-request app took. Absent until it has been woken.",
-        "gauge",
-    );
+    page.declare(&APP_LAST_WAKE_SECONDS);
     for app_id in &on_request {
         if let Some(ms) = metrics.of(app_id).last_wake_ms {
             page.value(
-                "nibrunner_instance_last_wake_seconds",
+                &APP_LAST_WAKE_SECONDS,
                 &[("app", app_id.as_str())],
                 as_seconds(ms),
             );
         }
     }
 
-    page.metric(
-        "nibrunner_instance_sleeps_total",
-        "Times a policy said an on-request app may sleep, by what came of it.",
-        "counter",
-    );
+    page.declare(&APP_SLEEPS_TOTAL);
     for app_id in &on_request {
         let app = metrics.of(app_id);
         for (index, outcome) in SLEEP_OUTCOMES.iter().enumerate() {
             page.value(
-                "nibrunner_instance_sleeps_total",
+                &APP_SLEEPS_TOTAL,
                 &[("app", app_id.as_str()), ("outcome", outcome.as_str())],
                 app.sleeps[index],
             );
         }
     }
 
-    page.metric(
-        "nibrunner_instance_last_sleep_seconds",
-        "What the last sleep of an on-request app took, flush and snapshot. Absent until it has slept.",
-        "gauge",
-    );
+    page.declare(&APP_LAST_SLEEP_SECONDS);
     for app_id in &on_request {
         if let Some(ms) = metrics.of(app_id).last_sleep_ms {
             page.value(
-                "nibrunner_instance_last_sleep_seconds",
+                &APP_LAST_SLEEP_SECONDS,
                 &[("app", app_id.as_str())],
                 as_seconds(ms),
             );
@@ -579,28 +626,28 @@ mod tests {
             0,
         );
         assert_eq!(
-            lines_for(&page, "nibrunner_instance_wakes_total"),
+            lines_for(&page, "nibrunner_app_wakes_total"),
             vec![
-                "nibrunner_instance_wakes_total{app=\"app-1\",outcome=\"restored\"} 1",
-                "nibrunner_instance_wakes_total{app=\"app-1\",outcome=\"cold-boot\"} 0",
-                "nibrunner_instance_wakes_total{app=\"app-1\",outcome=\"already-running\"} 0",
+                "nibrunner_app_wakes_total{app=\"app-1\",outcome=\"restored\"} 1",
+                "nibrunner_app_wakes_total{app=\"app-1\",outcome=\"cold-boot\"} 0",
+                "nibrunner_app_wakes_total{app=\"app-1\",outcome=\"already-running\"} 0",
             ]
         );
         assert_eq!(
-            lines_for(&page, "nibrunner_instance_last_wake_seconds"),
-            vec!["nibrunner_instance_last_wake_seconds{app=\"app-1\"} 0.036"]
+            lines_for(&page, "nibrunner_app_last_wake_seconds"),
+            vec!["nibrunner_app_last_wake_seconds{app=\"app-1\"} 0.036"]
         );
         assert_eq!(
-            lines_for(&page, "nibrunner_instance_sleeps_total"),
+            lines_for(&page, "nibrunner_app_sleeps_total"),
             vec![
-                "nibrunner_instance_sleeps_total{app=\"app-1\",outcome=\"slept\"} 1",
-                "nibrunner_instance_sleeps_total{app=\"app-1\",outcome=\"refused\"} 1",
-                "nibrunner_instance_sleeps_total{app=\"app-1\",outcome=\"failed\"} 0",
+                "nibrunner_app_sleeps_total{app=\"app-1\",outcome=\"slept\"} 1",
+                "nibrunner_app_sleeps_total{app=\"app-1\",outcome=\"refused\"} 1",
+                "nibrunner_app_sleeps_total{app=\"app-1\",outcome=\"failed\"} 0",
             ]
         );
         assert_eq!(
-            lines_for(&page, "nibrunner_instance_last_sleep_seconds"),
-            vec!["nibrunner_instance_last_sleep_seconds{app=\"app-1\"} 0.600"]
+            lines_for(&page, "nibrunner_app_last_sleep_seconds"),
+            vec!["nibrunner_app_last_sleep_seconds{app=\"app-1\"} 0.600"]
         );
         assert!(
             page.contains("nibrunner_wake_phase_seconds_count{phase=\"total\",outcome=\"cold-boot\"} 1\n")
@@ -609,8 +656,8 @@ mod tests {
             page.contains("nibrunner_wake_phase_seconds_sum{phase=\"ready\",outcome=\"restored\"} 0.006\n")
         );
         assert!(page.contains("nibrunner_wake_duration_seconds_count 2\n"));
-        assert!(page.contains("nibrunner_instance_snapshot_duration_seconds_sum 0.4\n"));
-        assert!(page.contains("nibrunner_instance_restore_duration_seconds_sum 0.008\n"));
+        assert!(page.contains("nibrunner_vm_snapshot_duration_seconds_sum 0.4\n"));
+        assert!(page.contains("nibrunner_vm_restore_duration_seconds_sum 0.008\n"));
         assert!(page.contains("nibrunner_wake_requests_coalesced_total 1\n"));
         assert!(page.contains("nibrunner_wake_first_response_seconds_count 1\n"));
         assert!(

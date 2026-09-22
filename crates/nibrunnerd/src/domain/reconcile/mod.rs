@@ -391,9 +391,9 @@ mod tests {
         assert!(page.contains("nibrunner_sleep_outcomes_total{reason=\"idle\",outcome=\"slept\"} 1\n"));
         assert!(page.contains("nibrunner_sleep_phase_seconds_count{phase=\"flush\",reason=\"idle\"} 1\n"));
         assert!(page.contains("nibrunner_sleep_phase_seconds_count{phase=\"total\",reason=\"idle\"} 1\n"));
-        assert!(page.contains("nibrunner_instance_sleeps_total{app=\"app-1\",outcome=\"slept\"} 1\n"));
+        assert!(page.contains("nibrunner_app_sleeps_total{app=\"app-1\",outcome=\"slept\"} 1\n"));
         assert!(
-            page.contains("nibrunner_instance_last_sleep_seconds{app=\"app-1\"} 0."),
+            page.contains("nibrunner_app_last_sleep_seconds{app=\"app-1\"} 0."),
             "{page}"
         );
     }
@@ -1196,7 +1196,7 @@ mod tests {
 
     fn start_refusals_for_room(page: &str) -> String {
         page.lines()
-            .find(|line| line.starts_with("nibrunner_instance_start_refusals_total{reason=\"no_room\"}"))
+            .find(|line| line.starts_with("nibrunner_start_refusals_total{reason=\"no_room\"}"))
             .map(str::to_string)
             .unwrap_or_default()
     }

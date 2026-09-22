@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use protocol::{AppId, HostReportedState};
 
-use crate::domain::metrics::{as_seconds, Histogram, Page};
+use crate::domain::metrics::{as_seconds, Histogram, Kind, Metric, Page};
 use crate::state::HostSnapshot;
 
 // A probe that answers does so in a millisecond; one that does not runs out the check's timeout,
@@ -128,24 +128,71 @@ impl HealthMetrics {
     }
 }
 
+static HEALTH_PROBE_SECONDS: Metric = Metric {
+    name: "nibrunner_health_probe_seconds",
+    help: "A health probe, by what it found. One that found nothing ran out the check's timeout.",
+    kind: Kind::Histogram,
+    labels: &["result"],
+};
+
+static APP_HEALTH_PROBES_TOTAL: Metric = Metric {
+    name: "nibrunner_app_health_probes_total",
+    help: "Probes of an app, by the kind of check and what it found. For a boot-completed check, a probe is the microVM being up.",
+    kind: Kind::Counter,
+    labels: &["app", "kind", "result"],
+};
+
+static APP_FAILURES_TOTAL: Metric = Metric {
+    name: "nibrunner_app_failures_total",
+    help: "Times an app failed, by where on the way up it did: refused by the document, no slot, its layers, its volume, the boot, the microVM stopping without being asked, nothing answering inside it, or its restarts running out.",
+    kind: Kind::Counter,
+    labels: &["app", "reason"],
+};
+
+static APP_UNHEALTHY_TOTAL: Metric = Metric {
+    name: "nibrunner_app_unhealthy_total",
+    help: "Times an app that had been answering stopped, for long enough to be called unhealthy, by the kind of check that said so.",
+    kind: Kind::Counter,
+    labels: &["app", "kind"],
+};
+
+static APP_LAST_HEALTHY_TIMESTAMP_SECONDS: Metric = Metric {
+    name: "nibrunner_app_last_healthy_timestamp_seconds",
+    help: "When an app last answered a probe, as seconds since the epoch. 0 for one that never has.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+static APP_START_ATTEMPTS: Metric = Metric {
+    name: "nibrunner_app_start_attempts",
+    help: "Starts attempted against an app's restart budget in its current window. Resets when a start has held for the policy's resetAfterMs.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+pub(super) static DECLARED: &[&Metric] = &[
+    &HEALTH_PROBE_SECONDS,
+    &APP_HEALTH_PROBES_TOTAL,
+    &APP_FAILURES_TOTAL,
+    &APP_UNHEALTHY_TOTAL,
+    &APP_LAST_HEALTHY_TIMESTAMP_SECONDS,
+    &APP_START_ATTEMPTS,
+];
+
 pub(super) fn render(
     page: &mut Page,
     report: &HostReportedState,
     metrics: &HealthMetrics,
     snapshot: &HostSnapshot,
 ) {
-    page.metric(
-        "nibrunner_health_probe_seconds",
-        "A health probe, by what it found. One that found nothing ran out the check's timeout.",
-        "histogram",
-    );
+    page.declare(&HEALTH_PROBE_SECONDS);
     page.histogram(
-        "nibrunner_health_probe_seconds",
+        &HEALTH_PROBE_SECONDS,
         &[("result", "healthy")],
         &metrics.probe_healthy,
     );
     page.histogram(
-        "nibrunner_health_probe_seconds",
+        &HEALTH_PROBE_SECONDS,
         &[("result", "unhealthy")],
         &metrics.probe_unhealthy,
     );
@@ -154,11 +201,7 @@ pub(super) fn render(
     // does not carry it — and it is the label that says whether a run of healthy answers came
     // from a path answering 2xx or from a kernel accepting connections for a process that may
     // have stopped reading them.
-    page.metric(
-        "nibrunner_instance_health_probes_total",
-        "Probes of an app, by the kind of check and what it found. For a boot-completed check, a probe is the microVM being up.",
-        "counter",
-    );
+    page.declare(&APP_HEALTH_PROBES_TOTAL);
     for record in snapshot.records.values() {
         let app = metrics.of(&record.app_id);
         for (result, count) in [
@@ -166,7 +209,7 @@ pub(super) fn render(
             ("unhealthy", app.probes_unhealthy),
         ] {
             page.value(
-                "nibrunner_instance_health_probes_total",
+                &APP_HEALTH_PROBES_TOTAL,
                 &[
                     ("app", record.app_id.as_str()),
                     ("kind", record.health_check.kind()),
@@ -177,30 +220,22 @@ pub(super) fn render(
         }
     }
 
-    page.metric(
-        "nibrunner_instance_failures_total",
-        "Times an app failed, by where on the way up it did: refused by the document, no slot, its layers, its volume, the boot, the microVM stopping without being asked, nothing answering inside it, or its restarts running out.",
-        "counter",
-    );
+    page.declare(&APP_FAILURES_TOTAL);
     for instance in &report.instances {
         let app = metrics.of(&instance.app_id);
         for (index, failure) in FAILURES.iter().enumerate() {
             page.value(
-                "nibrunner_instance_failures_total",
+                &APP_FAILURES_TOTAL,
                 &[("app", instance.app_id.as_str()), ("reason", failure.as_str())],
                 app.failures[index],
             );
         }
     }
 
-    page.metric(
-        "nibrunner_instance_unhealthy_total",
-        "Times an app that had been answering stopped, for long enough to be called unhealthy, by the kind of check that said so.",
-        "counter",
-    );
+    page.declare(&APP_UNHEALTHY_TOTAL);
     for record in snapshot.records.values() {
         page.value(
-            "nibrunner_instance_unhealthy_total",
+            &APP_UNHEALTHY_TOTAL,
             &[
                 ("app", record.app_id.as_str()),
                 ("kind", record.health_check.kind()),
@@ -209,14 +244,10 @@ pub(super) fn render(
         );
     }
 
-    page.metric(
-        "nibrunner_instance_last_healthy_timestamp_seconds",
-        "When an app last answered a probe, as seconds since the epoch. 0 for one that never has.",
-        "gauge",
-    );
+    page.declare(&APP_LAST_HEALTHY_TIMESTAMP_SECONDS);
     for record in snapshot.records.values() {
         page.value(
-            "nibrunner_instance_last_healthy_timestamp_seconds",
+            &APP_LAST_HEALTHY_TIMESTAMP_SECONDS,
             &[("app", record.app_id.as_str())],
             as_seconds(
                 record
@@ -228,14 +259,10 @@ pub(super) fn render(
         );
     }
 
-    page.metric(
-        "nibrunner_instance_start_attempts",
-        "Starts attempted against an app's restart budget in its current window. Resets when a start has held for the policy's resetAfterMs.",
-        "gauge",
-    );
+    page.declare(&APP_START_ATTEMPTS);
     for record in snapshot.records.values() {
         page.value(
-            "nibrunner_instance_start_attempts",
+            &APP_START_ATTEMPTS,
             &[("app", record.app_id.as_str())],
             record.start_attempts.attempts,
         );
@@ -279,28 +306,28 @@ mod tests {
         let page = page(&report, &host.metrics, &host.state.snapshot().await, 0);
 
         assert_eq!(
-            lines_for(&page, "nibrunner_instance_health_probes_total"),
+            lines_for(&page, "nibrunner_app_health_probes_total"),
             vec![
-                "nibrunner_instance_health_probes_total{app=\"app-1\",kind=\"tcp\",result=\"healthy\"} 2",
-                "nibrunner_instance_health_probes_total{app=\"app-1\",kind=\"tcp\",result=\"unhealthy\"} 1",
+                "nibrunner_app_health_probes_total{app=\"app-1\",kind=\"tcp\",result=\"healthy\"} 2",
+                "nibrunner_app_health_probes_total{app=\"app-1\",kind=\"tcp\",result=\"unhealthy\"} 1",
             ]
         );
         assert!(page.contains("nibrunner_health_probe_seconds_count{result=\"healthy\"} 2\n"));
         assert!(page.contains("nibrunner_health_probe_seconds_count{result=\"unhealthy\"} 1\n"));
-        let failures = lines_for(&page, "nibrunner_instance_failures_total");
+        let failures = lines_for(&page, "nibrunner_app_failures_total");
         assert_eq!(
             failures.len(),
             FAILURES.len(),
             "every reason is there to be rated from zero"
         );
-        assert!(failures.contains(&"nibrunner_instance_failures_total{app=\"app-1\",reason=\"exited\"} 2"));
-        assert!(failures
-            .contains(&"nibrunner_instance_failures_total{app=\"app-1\",reason=\"out_of_restarts\"} 1"));
-        assert!(failures.contains(&"nibrunner_instance_failures_total{app=\"app-1\",reason=\"boot\"} 0"));
-        assert!(page.contains("nibrunner_instance_unhealthy_total{app=\"app-1\",kind=\"tcp\"} 1\n"));
-        assert!(page
-            .contains("nibrunner_instance_last_healthy_timestamp_seconds{app=\"app-1\"} 1700000000.250\n"));
-        assert!(page.contains("nibrunner_instance_start_attempts{app=\"app-1\"} 3\n"));
+        assert!(failures.contains(&"nibrunner_app_failures_total{app=\"app-1\",reason=\"exited\"} 2"));
+        assert!(
+            failures.contains(&"nibrunner_app_failures_total{app=\"app-1\",reason=\"out_of_restarts\"} 1")
+        );
+        assert!(failures.contains(&"nibrunner_app_failures_total{app=\"app-1\",reason=\"boot\"} 0"));
+        assert!(page.contains("nibrunner_app_unhealthy_total{app=\"app-1\",kind=\"tcp\"} 1\n"));
+        assert!(page.contains("nibrunner_app_last_healthy_timestamp_seconds{app=\"app-1\"} 1700000000.250\n"));
+        assert!(page.contains("nibrunner_app_start_attempts{app=\"app-1\"} 3\n"));
     }
 
     #[tokio::test]
@@ -317,11 +344,9 @@ mod tests {
         let report = crate::domain::metrics::tests::report();
         let page = page(&report, &host.metrics, &host.state.snapshot().await, 0);
         assert!(page.contains(
-            "nibrunner_instance_health_probes_total{app=\"app-1\",kind=\"boot-completed\",result=\"healthy\"} 1\n"
+            "nibrunner_app_health_probes_total{app=\"app-1\",kind=\"boot-completed\",result=\"healthy\"} 1\n"
         ));
-        assert!(
-            page.contains("nibrunner_instance_unhealthy_total{app=\"app-1\",kind=\"boot-completed\"} 0\n")
-        );
+        assert!(page.contains("nibrunner_app_unhealthy_total{app=\"app-1\",kind=\"boot-completed\"} 0\n"));
     }
 
     #[test]
@@ -332,7 +357,7 @@ mod tests {
             ..HostSnapshot::default()
         };
         let page = page(&crate::domain::metrics::tests::report(), &metrics, &snapshot, 0);
-        assert!(page.contains("nibrunner_instance_last_healthy_timestamp_seconds{app=\"app-1\"} 0.000\n"));
+        assert!(page.contains("nibrunner_app_last_healthy_timestamp_seconds{app=\"app-1\"} 0.000\n"));
     }
 
     #[test]

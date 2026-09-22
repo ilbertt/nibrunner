@@ -5,7 +5,7 @@ use std::time::Duration;
 use protocol::{AppId, DeploymentId, HostReportedState, HostState, InstanceState};
 
 use crate::domain::metrics::converge::{is_converged, Deploy};
-use crate::domain::metrics::{as_seconds, Histogram, Page};
+use crate::domain::metrics::{as_seconds, Histogram, Kind, Metric, Page};
 use crate::state::HostSnapshot;
 
 // A pass over a quiet host is milliseconds; one that boots a fleet after a restart is the better
@@ -127,19 +127,114 @@ fn every_app_converged(deploys: &BTreeMap<AppId, Deploy>, report: &HostReportedS
     })
 }
 
+static BUILD_INFO: Metric = Metric {
+    name: "nibrunner_build_info",
+    help: "What this host runs, as labels on a 1.",
+    kind: Kind::Gauge,
+    labels: &["agent", "guest_image", "firecracker", "zerofs"],
+};
+
+static PROCESS_START_TIME_SECONDS: Metric = Metric {
+    name: "nibrunner_process_start_time_seconds",
+    help: "When this daemon started, as seconds since the epoch.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static HOST_STATE: Metric = Metric {
+    name: "nibrunner_host_state",
+    help: "1 for the state the host reports itself in, 0 for every state it is not.",
+    kind: Kind::Gauge,
+    labels: &["state"],
+};
+
+static HOST_RECONCILED: Metric = Metric {
+    name: "nibrunner_host_reconciled",
+    help: "1 once a pass over the document has run to the end since this daemon started.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static HOST_CONVERGED: Metric = Metric {
+    name: "nibrunner_host_converged",
+    help: "1 while every app is what its document asks for.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static HOST_DEFERRED_WORK: Metric = Metric {
+    name: "nibrunner_host_deferred_work",
+    help: "1 while the last pass left work it could not do yet, such as a volume still held by an app on its way down.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static HOST_ISOLATED: Metric = Metric {
+    name: "nibrunner_host_isolated",
+    help: "1 while the isolation ruleset is applied. Nothing is started or woken while it is not.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static RECONCILE_SECONDS: Metric = Metric {
+    name: "nibrunner_reconcile_seconds",
+    help: "A pass from the document to the host, by what set it going.",
+    kind: Kind::Histogram,
+    labels: &["trigger"],
+};
+
+static RECONCILE_LAST_PASS_TIMESTAMP_SECONDS: Metric = Metric {
+    name: "nibrunner_reconcile_last_pass_timestamp_seconds",
+    help: "When the last pass over the document finished, as seconds since the epoch. 0 until one has.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static REFRESH_SECONDS: Metric = Metric {
+    name: "nibrunner_refresh_seconds",
+    help: "A pass from the host to the record: probing what is up, settling each state, applying the ruleset and the routes, writing down what it found.",
+    kind: Kind::Histogram,
+    labels: &[],
+};
+
+static DESIRED_STATE_UNREADABLE_TOTAL: Metric = Metric {
+    name: "nibrunner_desired_state_unreadable_total",
+    help: "Times the desired state file was there and could not be read as a document.",
+    kind: Kind::Counter,
+    labels: &[],
+};
+
+static REPORT_WRITTEN_TIMESTAMP_SECONDS: Metric = Metric {
+    name: "nibrunner_report_written_timestamp_seconds",
+    help: "When reported.json was last written, as seconds since the epoch. 0 until it has been.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+pub(super) static DECLARED: &[&Metric] = &[
+    &BUILD_INFO,
+    &PROCESS_START_TIME_SECONDS,
+    &HOST_STATE,
+    &HOST_RECONCILED,
+    &HOST_CONVERGED,
+    &HOST_DEFERRED_WORK,
+    &HOST_ISOLATED,
+    &RECONCILE_SECONDS,
+    &RECONCILE_LAST_PASS_TIMESTAMP_SECONDS,
+    &REFRESH_SECONDS,
+    &DESIRED_STATE_UNREADABLE_TOTAL,
+    &REPORT_WRITTEN_TIMESTAMP_SECONDS,
+];
+
 pub(super) fn render(
     page: &mut Page,
     report: &HostReportedState,
     metrics: &PassMetrics,
     snapshot: &HostSnapshot,
 ) {
-    page.metric(
-        "nibrunner_build_info",
-        "What this host runs, as labels on a 1.",
-        "gauge",
-    );
+    page.declare(&BUILD_INFO);
     page.value(
-        "nibrunner_build_info",
+        &BUILD_INFO,
         &[
             ("agent", &report.versions.agent),
             ("guest_image", &report.versions.guest_image),
@@ -149,115 +244,67 @@ pub(super) fn render(
         1,
     );
 
-    page.metric(
-        "nibrunner_process_start_time_seconds",
-        "When this daemon started, as seconds since the epoch.",
-        "gauge",
-    );
+    page.declare(&PROCESS_START_TIME_SECONDS);
     page.value(
-        "nibrunner_process_start_time_seconds",
+        &PROCESS_START_TIME_SECONDS,
         &[],
         as_seconds(metrics.started_at_ms.max(0) as u64),
     );
 
-    page.metric(
-        "nibrunner_host_state",
-        "1 for the state the host reports itself in, 0 for every state it is not.",
-        "gauge",
-    );
+    page.declare(&HOST_STATE);
     for state in HOST_STATES {
         page.value(
-            "nibrunner_host_state",
+            &HOST_STATE,
             &[("state", host_state_str(state))],
             u8::from(report.state == state),
         );
     }
 
-    page.metric(
-        "nibrunner_host_reconciled",
-        "1 once a pass over the document has run to the end since this daemon started.",
-        "gauge",
-    );
-    page.value("nibrunner_host_reconciled", &[], u8::from(snapshot.converged));
+    page.declare(&HOST_RECONCILED);
+    page.value(&HOST_RECONCILED, &[], u8::from(snapshot.converged));
 
-    page.metric(
-        "nibrunner_host_converged",
-        "1 while every app is what its document asks for.",
-        "gauge",
-    );
+    page.declare(&HOST_CONVERGED);
     page.value(
-        "nibrunner_host_converged",
+        &HOST_CONVERGED,
         &[],
         u8::from(every_app_converged(&snapshot.deploys, report)),
     );
 
-    page.metric(
-        "nibrunner_host_deferred_work",
-        "1 while the last pass left work it could not do yet, such as a volume still held by an app on its way down.",
-        "gauge",
-    );
-    page.value(
-        "nibrunner_host_deferred_work",
-        &[],
-        u8::from(snapshot.deferred_work),
-    );
+    page.declare(&HOST_DEFERRED_WORK);
+    page.value(&HOST_DEFERRED_WORK, &[], u8::from(snapshot.deferred_work));
 
-    page.metric(
-        "nibrunner_host_isolated",
-        "1 while the isolation ruleset is applied. Nothing is started or woken while it is not.",
-        "gauge",
-    );
-    page.value("nibrunner_host_isolated", &[], u8::from(snapshot.isolated));
+    page.declare(&HOST_ISOLATED);
+    page.value(&HOST_ISOLATED, &[], u8::from(snapshot.isolated));
 
-    page.metric(
-        "nibrunner_reconcile_seconds",
-        "A pass from the document to the host, by what set it going.",
-        "histogram",
-    );
+    page.declare(&RECONCILE_SECONDS);
     for trigger in TRIGGERS {
         page.histogram(
-            "nibrunner_reconcile_seconds",
+            &RECONCILE_SECONDS,
             &[("trigger", trigger.as_str())],
             metrics.reconcile(trigger),
         );
     }
 
-    page.metric(
-        "nibrunner_reconcile_last_pass_timestamp_seconds",
-        "When the last pass over the document finished, as seconds since the epoch. 0 until one has.",
-        "gauge",
-    );
+    page.declare(&RECONCILE_LAST_PASS_TIMESTAMP_SECONDS);
     page.value(
-        "nibrunner_reconcile_last_pass_timestamp_seconds",
+        &RECONCILE_LAST_PASS_TIMESTAMP_SECONDS,
         &[],
         as_seconds(metrics.last_reconcile_at_ms.load(Ordering::Relaxed).max(0) as u64),
     );
 
-    page.metric(
-        "nibrunner_refresh_seconds",
-        "A pass from the host to the record: probing what is up, settling each state, applying the ruleset and the routes, writing down what it found.",
-        "histogram",
-    );
-    page.histogram("nibrunner_refresh_seconds", &[], &metrics.refresh);
+    page.declare(&REFRESH_SECONDS);
+    page.histogram(&REFRESH_SECONDS, &[], &metrics.refresh);
 
-    page.metric(
-        "nibrunner_desired_state_unreadable_total",
-        "Times the desired state file was there and could not be read as a document.",
-        "counter",
-    );
+    page.declare(&DESIRED_STATE_UNREADABLE_TOTAL);
     page.value(
-        "nibrunner_desired_state_unreadable_total",
+        &DESIRED_STATE_UNREADABLE_TOTAL,
         &[],
         metrics.desired_unreadable.load(Ordering::Relaxed),
     );
 
-    page.metric(
-        "nibrunner_report_written_timestamp_seconds",
-        "When reported.json was last written, as seconds since the epoch. 0 until it has been.",
-        "gauge",
-    );
+    page.declare(&REPORT_WRITTEN_TIMESTAMP_SECONDS);
     page.value(
-        "nibrunner_report_written_timestamp_seconds",
+        &REPORT_WRITTEN_TIMESTAMP_SECONDS,
         &[],
         as_seconds(metrics.report_written_at_ms.load(Ordering::Relaxed).max(0) as u64),
     );

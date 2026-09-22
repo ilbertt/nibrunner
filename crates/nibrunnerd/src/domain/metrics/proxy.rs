@@ -6,7 +6,7 @@ use std::time::Duration;
 use hyper::StatusCode;
 use protocol::AppId;
 
-use crate::domain::metrics::{Histogram, Page};
+use crate::domain::metrics::{Histogram, Kind, Metric, Page};
 use crate::state::HostSnapshot;
 
 // Straddling the millisecond a tenant answers in and the tens of milliseconds a stall costs, since
@@ -273,46 +273,113 @@ impl ProxyMetrics {
     }
 }
 
+static PROXY_REQUESTS_TOTAL: Metric = Metric {
+    name: "nibrunner_proxy_requests_total",
+    help: "Requests this proxy answered, by what it answered with.",
+    kind: Kind::Counter,
+    labels: &["outcome"],
+};
+
+static PROXY_REQUEST_DURATION_SECONDS: Metric = Metric {
+    name: "nibrunner_proxy_request_duration_seconds",
+    help: "Deciding a route and getting an answer back from the app. Ends when the response is handed on to be written, so it counts neither the handshake before it nor the write after.",
+    kind: Kind::Histogram,
+    labels: &[],
+};
+
+static PROXY_REQUESTS_IN_FLIGHT: Metric = Metric {
+    name: "nibrunner_proxy_requests_in_flight",
+    help: "Requests the proxy has taken and not yet answered.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static PROXY_TLS_HANDSHAKES_TOTAL: Metric = Metric {
+    name: "nibrunner_proxy_tls_handshakes_total",
+    help: "TLS handshakes at the proxy, by how they ended.",
+    kind: Kind::Counter,
+    labels: &["outcome"],
+};
+
+static APP_REQUEST_DURATION_SECONDS: Metric = Metric {
+    name: "nibrunner_app_request_duration_seconds",
+    help: "What requests to one app cost this proxy. Divide the rate of the sum by the rate of the count for that app's mean.",
+    kind: Kind::Summary,
+    labels: &["app"],
+};
+
+static APP_REQUESTS_TOTAL: Metric = Metric {
+    name: "nibrunner_app_requests_total",
+    help: "Requests routed to an app, by the class of the status that came back. A 502 for an app that could not be reached is the proxy's and counted apart below.",
+    kind: Kind::Counter,
+    labels: &["app", "class"],
+};
+
+static APP_REQUESTS_UNREACHABLE_TOTAL: Metric = Metric {
+    name: "nibrunner_app_requests_unreachable_total",
+    help: "Requests routed to an app that nothing answered, so the proxy answered 502 for it.",
+    kind: Kind::Counter,
+    labels: &["app"],
+};
+
+static APP_REQUESTS_OPEN: Metric = Metric {
+    name: "nibrunner_app_requests_open",
+    help: "Requests routed to an app that are still being answered: from arrival until the last byte of the response body, or until a websocket closes. An app with one open is not quiet.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+static RAW_PORT_SESSIONS_TOTAL: Metric = Metric {
+    name: "nibrunner_raw_port_sessions_total",
+    help: "Sessions on an app's raw ports — a TCP connection, or a UDP client address — by what came of them: relayed, the app was down, its wake was refused, or it would not take the session. Only for apps with a raw port.",
+    kind: Kind::Counter,
+    labels: &["app", "protocol", "outcome"],
+};
+
+static RAW_PORT_BYTES_TOTAL: Metric = Metric {
+    name: "nibrunner_raw_port_bytes_total",
+    help: "What the relay carried on an app's raw ports, by which way it went: in is towards the app. A TCP session's bytes are counted when it ends.",
+    kind: Kind::Counter,
+    labels: &["app", "protocol", "direction"],
+};
+
+pub(super) static DECLARED: &[&Metric] = &[
+    &PROXY_REQUESTS_TOTAL,
+    &PROXY_REQUEST_DURATION_SECONDS,
+    &PROXY_REQUESTS_IN_FLIGHT,
+    &PROXY_TLS_HANDSHAKES_TOTAL,
+    &APP_REQUEST_DURATION_SECONDS,
+    &APP_REQUESTS_TOTAL,
+    &APP_REQUESTS_UNREACHABLE_TOTAL,
+    &APP_REQUESTS_OPEN,
+    &RAW_PORT_SESSIONS_TOTAL,
+    &RAW_PORT_BYTES_TOTAL,
+];
+
 pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics, snapshot: &HostSnapshot) {
-    page.metric(
-        "nibrunner_proxy_requests_total",
-        "Requests this proxy answered, by what it answered with.",
-        "counter",
-    );
+    page.declare(&PROXY_REQUESTS_TOTAL);
     for (index, outcome) in OUTCOMES.iter().enumerate() {
         page.value(
-            "nibrunner_proxy_requests_total",
+            &PROXY_REQUESTS_TOTAL,
             &[("outcome", outcome.as_str())],
             metrics.served[index].load(Ordering::Relaxed),
         );
     }
 
-    page.metric(
-        "nibrunner_proxy_request_duration_seconds",
-        "Deciding a route and getting an answer back from the app. Ends when the response is handed on to be written, so it counts neither the handshake before it nor the write after.",
-        "histogram",
-    );
-    page.histogram("nibrunner_proxy_request_duration_seconds", &[], &metrics.answered);
+    page.declare(&PROXY_REQUEST_DURATION_SECONDS);
+    page.histogram(&PROXY_REQUEST_DURATION_SECONDS, &[], &metrics.answered);
 
-    page.metric(
-        "nibrunner_proxy_requests_in_flight",
-        "Requests the proxy has taken and not yet answered.",
-        "gauge",
-    );
+    page.declare(&PROXY_REQUESTS_IN_FLIGHT);
     page.value(
-        "nibrunner_proxy_requests_in_flight",
+        &PROXY_REQUESTS_IN_FLIGHT,
         &[],
         metrics.in_flight.load(Ordering::Relaxed),
     );
 
-    page.metric(
-        "nibrunner_proxy_tls_handshakes_total",
-        "TLS handshakes at the proxy, by how they ended.",
-        "counter",
-    );
+    page.declare(&PROXY_TLS_HANDSHAKES_TOTAL);
     for (index, handshake) in HANDSHAKES.iter().enumerate() {
         page.value(
-            "nibrunner_proxy_tls_handshakes_total",
+            &PROXY_TLS_HANDSHAKES_TOTAL,
             &[("outcome", handshake.as_str())],
             metrics.handshakes[index].load(Ordering::Relaxed),
         );
@@ -322,62 +389,42 @@ pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics, snapshot: &HostSna
 
     // A summary with no quantiles, which is a sum and a count: what each tenant cost, without
     // fifteen series apiece for the shape of it.
-    page.metric(
-        "nibrunner_app_request_duration_seconds",
-        "What requests to one app cost this proxy. Divide the rate of the sum by the rate of the count for that app's mean.",
-        "summary",
-    );
+    page.declare(&APP_REQUEST_DURATION_SECONDS);
     for app_id in &apps {
         let app = metrics.of(app_id);
-        page.value(
-            "nibrunner_app_request_duration_seconds_sum",
+        page.summary(
+            &APP_REQUEST_DURATION_SECONDS,
             &[("app", app_id.as_str())],
             app.request_micros as f64 / 1_000_000.0,
-        );
-        page.value(
-            "nibrunner_app_request_duration_seconds_count",
-            &[("app", app_id.as_str())],
             app.request_count,
         );
     }
 
-    page.metric(
-        "nibrunner_app_requests_total",
-        "Requests routed to an app, by the class of the status that came back. A 502 for an app that could not be reached is the proxy's and counted apart below.",
-        "counter",
-    );
+    page.declare(&APP_REQUESTS_TOTAL);
     for app_id in &apps {
         let app = metrics.of(app_id);
         for (index, class) in CLASSES.iter().enumerate() {
             page.value(
-                "nibrunner_app_requests_total",
+                &APP_REQUESTS_TOTAL,
                 &[("app", app_id.as_str()), ("class", class)],
                 app.requests[index],
             );
         }
     }
 
-    page.metric(
-        "nibrunner_app_requests_unreachable_total",
-        "Requests routed to an app that nothing answered, so the proxy answered 502 for it.",
-        "counter",
-    );
+    page.declare(&APP_REQUESTS_UNREACHABLE_TOTAL);
     for app_id in &apps {
         page.value(
-            "nibrunner_app_requests_unreachable_total",
+            &APP_REQUESTS_UNREACHABLE_TOTAL,
             &[("app", app_id.as_str())],
             metrics.of(app_id).unreachable,
         );
     }
 
-    page.metric(
-        "nibrunner_app_requests_open",
-        "Requests routed to an app that are still being answered: from arrival until the last byte of the response body, or until a websocket closes. An app with one open is not quiet.",
-        "gauge",
-    );
+    page.declare(&APP_REQUESTS_OPEN);
     for app_id in &apps {
         page.value(
-            "nibrunner_app_requests_open",
+            &APP_REQUESTS_OPEN,
             &[("app", app_id.as_str())],
             metrics.of(app_id).open,
         );
@@ -390,17 +437,13 @@ pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics, snapshot: &HostSna
         .map(|record| &record.app_id)
         .collect();
 
-    page.metric(
-        "nibrunner_raw_port_sessions_total",
-        "Sessions on an app's raw ports — a TCP connection, or a UDP client address — by what came of them: relayed, the app was down, its wake was refused, or it would not take the session. Only for apps with a raw port.",
-        "counter",
-    );
+    page.declare(&RAW_PORT_SESSIONS_TOTAL);
     for app_id in &with_raw_ports {
         let app = metrics.of(app_id);
         for (protocol_index, protocol) in PROTOCOLS.iter().enumerate() {
             for (outcome_index, outcome) in RAW_OUTCOMES.iter().enumerate() {
                 page.value(
-                    "nibrunner_raw_port_sessions_total",
+                    &RAW_PORT_SESSIONS_TOTAL,
                     &[
                         ("app", app_id.as_str()),
                         ("protocol", protocol.as_str()),
@@ -412,17 +455,13 @@ pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics, snapshot: &HostSna
         }
     }
 
-    page.metric(
-        "nibrunner_raw_port_bytes_total",
-        "What the relay carried on an app's raw ports, by which way it went: in is towards the app. A TCP session's bytes are counted when it ends.",
-        "counter",
-    );
+    page.declare(&RAW_PORT_BYTES_TOTAL);
     for app_id in &with_raw_ports {
         let app = metrics.of(app_id);
         for (index, protocol) in PROTOCOLS.iter().enumerate() {
             for (direction, bytes) in [("in", app.raw_bytes_in[index]), ("out", app.raw_bytes_out[index])] {
                 page.value(
-                    "nibrunner_raw_port_bytes_total",
+                    &RAW_PORT_BYTES_TOTAL,
                     &[
                         ("app", app_id.as_str()),
                         ("protocol", protocol.as_str()),
