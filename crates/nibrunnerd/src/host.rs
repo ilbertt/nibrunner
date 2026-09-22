@@ -3,6 +3,7 @@ use std::sync::Arc;
 use protocol::{AppId, HostDesiredState};
 use tokio::sync::Mutex;
 
+use crate::adapters::logs::FileLogSink;
 use crate::adapters::net::allocator::SlotAllocator;
 use crate::adapters::net::firewall::HostFirewall;
 use crate::adapters::proxy::activator::AppActivator;
@@ -27,6 +28,9 @@ pub struct Host {
     pub allocator: Arc<Mutex<SlotAllocator>>,
     pub cache: Mutex<DesiredStateCache>,
     pub vms: Arc<dyn Vmm>,
+    /// What every tenant's output is written to, held here as well as behind the receiver so that
+    /// a pass can let an app's output go once the app itself is no longer on this host.
+    pub logs: Arc<FileLogSink>,
     pub volumes: Arc<dyn VolumeBackend>,
     pub artifacts: Arc<dyn ArtifactStore>,
     pub payloads: Arc<dyn PayloadBuilder>,

@@ -40,6 +40,10 @@ disk. `[logs]` in `config.toml` sets that share:
 keep_mib_per_app = 256
 ```
 
+Both files go when `desired.json` stops naming the app. An app that is stopped, asleep, or being
+replaced by a new `deploymentId` is still named, so it keeps what it has written. Take a copy of
+a log you want to read after the app is gone.
+
 The daemon's own log is in the journal:
 
 ```bash
