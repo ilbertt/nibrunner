@@ -707,6 +707,12 @@ impl HostConfig {
             port: 80,
             tls: None,
         });
+        // What an app has used is published here and nowhere else, so a host laid out from
+        // nothing still has somewhere to read it. On loopback, because it is this host's to read.
+        starter.metrics = Some(MetricsConfig {
+            port: 9100,
+            listen_address: IpAddr::from([127, 0, 0, 1]),
+        });
         starter
     }
 
@@ -1862,15 +1868,18 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
     }
 
     // What `install` writes a host that has none is the smallest document every test here starts
-    // from, plus the one listener a starting point has to serve on and the log cap written out
-    // rather than left to be found — so the two are held to be one text.
+    // from, plus the listener a starting point has to serve on, the page what an app has used is
+    // read from, and the log cap written out rather than left to be found — so the two are held
+    // to be one text.
     #[test]
     fn the_configuration_this_binary_carries_is_the_smallest_document_with_a_listener_rendered() {
         assert_eq!(
             HostConfig::starter(1000).to_toml(),
             document(
                 &[],
-                &bound("\n[proxy.http]\nport = 80\n\n[logs]\nkeep_mib_per_app = 256\n")
+                &bound(
+                    "\n[proxy.http]\nport = 80\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n\n[logs]\nkeep_mib_per_app = 256\n"
+                )
             )
         );
     }

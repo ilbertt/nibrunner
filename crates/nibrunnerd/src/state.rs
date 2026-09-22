@@ -202,7 +202,6 @@ mod tests {
             size_bytes: 1,
             storage_prefix: None,
             device_path: None,
-            usage: None,
             message: None,
         }
     }

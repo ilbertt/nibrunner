@@ -167,6 +167,12 @@ impl Page {
     }
 }
 
+/// An app this host holds a record of but has not metered yet has used nothing, and nothing is a
+/// number rather than an absence.
+fn metered(snapshot: &HostSnapshot, app_id: &protocol::AppId) -> protocol::UsageMeters {
+    snapshot.meters.get(app_id).copied().unwrap_or_default()
+}
+
 pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     let (report, snapshot, now_ms) = (scrape.report, scrape.snapshot, scrape.now_ms);
     let mut page = Page::new();
@@ -240,7 +246,7 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
         "gauge",
     );
     for instance in &report.instances {
-        if let Some(compute) = &instance.compute {
+        if let Some(compute) = snapshot.compute_usage.get(&instance.app_id) {
             page.value(
                 "nibrunner_instance_memory_used_bytes",
                 &[("app", instance.app_id.as_str())],
@@ -255,7 +261,11 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
         "gauge",
     );
     for instance in &report.instances {
-        if let Some(share) = instance.compute.as_ref().and_then(|compute| compute.cpu_share) {
+        if let Some(share) = snapshot
+            .compute_usage
+            .get(&instance.app_id)
+            .and_then(|compute| compute.cpu_share)
+        {
             page.value(
                 "nibrunner_instance_cpu_share",
                 &[("app", instance.app_id.as_str())],
@@ -264,19 +274,17 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
         }
     }
 
-    // The same numbers the report carries, for looking at rather than for billing from: a scrape
-    // that was missed is a stretch a rate over these interpolates, and `reported.json` is where
-    // the figures nobody may guess at are read from.
+    // The only place these are published. They are totals rather than rates on purpose: what a
+    // period cost is the figure at its end less the figure at its start, so a scrape nobody took
+    // is a resolution nobody has rather than usage nobody billed.
     page.metric(
         "nibrunner_instance_time_seconds_total",
         "How long an app has been held, by what it was holding: memory while it runs, a snapshot on disk while it sleeps.",
         "counter",
     );
     for instance in &report.instances {
-        for (holding, ms) in [
-            ("running", instance.meters.running_ms),
-            ("idle", instance.meters.idle_ms),
-        ] {
+        let meters = metered(snapshot, &instance.app_id);
+        for (holding, ms) in [("running", meters.running_ms), ("idle", meters.idle_ms)] {
             page.value(
                 "nibrunner_instance_time_seconds_total",
                 &[("app", instance.app_id.as_str()), ("holding", holding)],
@@ -294,7 +302,7 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
         page.value(
             "nibrunner_instance_cpu_seconds_total",
             &[("app", instance.app_id.as_str())],
-            as_seconds(instance.meters.cpu_ms),
+            as_seconds(metered(snapshot, &instance.app_id).cpu_ms),
         );
     }
 
@@ -304,7 +312,8 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
         "counter",
     );
     for instance in &report.instances {
-        for (direction, bytes) in [("rx", instance.meters.rx_bytes), ("tx", instance.meters.tx_bytes)] {
+        let meters = metered(snapshot, &instance.app_id);
+        for (direction, bytes) in [("rx", meters.rx_bytes), ("tx", meters.tx_bytes)] {
             page.value(
                 "nibrunner_instance_network_bytes_total",
                 &[("app", instance.app_id.as_str()), ("direction", direction)],
@@ -322,9 +331,10 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
         "counter",
     );
     for instance in &report.instances {
+        let meters = metered(snapshot, &instance.app_id);
         for (disk, held) in [
-            ("provisioned", instance.meters.disk_provisioned_mib_seconds),
-            ("used", instance.meters.disk_used_mib_seconds),
+            ("provisioned", meters.disk_provisioned_mib_seconds),
+            ("used", meters.disk_used_mib_seconds),
         ] {
             page.value(
                 "nibrunner_instance_disk_mib_seconds_total",
@@ -601,14 +611,22 @@ pub(crate) mod tests {
         state.instances = vec![crate::test_support::reported_instance(|instance| {
             instance.state = protocol::InstanceState::Idle;
             instance.restart_count = 2;
-            instance.compute = Some(ComputeUsage {
-                memory_total_bytes: 100,
-                memory_used_bytes: 40,
-                cpu_share: Some(0.25),
-                measured_at: Timestamp::from_epoch_ms(0),
-            });
         })];
-        let page = rendered(&state, &HostMetrics::new());
+        let snapshot = HostSnapshot {
+            compute_usage: [(
+                crate::test_support::app_id(),
+                ComputeUsage {
+                    memory_total_bytes: 100,
+                    memory_used_bytes: 40,
+                    cpu_share: Some(0.25),
+                    measured_at: Timestamp::from_epoch_ms(0),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..HostSnapshot::default()
+        };
+        let page = page(&state, &HostMetrics::new(), &snapshot, 0);
 
         let states = lines_for(&page, "nibrunner_instance_state");
         assert_eq!(states.len(), INSTANCE_STATES.len());
@@ -623,18 +641,25 @@ pub(crate) mod tests {
     #[test]
     fn what_an_app_has_used_is_exposed_as_counters_in_the_units_a_scraper_reads() {
         let mut state = report();
-        state.instances = vec![crate::test_support::reported_instance(|instance| {
-            instance.meters = protocol::UsageMeters {
-                running_ms: 3_600_000,
-                idle_ms: 1_500,
-                cpu_ms: 42_150,
-                rx_bytes: 1_073_741_824,
-                tx_bytes: 2_147_483_648,
-                disk_provisioned_mib_seconds: 29_491_200,
-                disk_used_mib_seconds: 5_242_880,
-            };
-        })];
-        let page = rendered(&state, &HostMetrics::new());
+        state.instances = vec![crate::test_support::reported_instance(|_| {})];
+        let snapshot = HostSnapshot {
+            meters: [(
+                crate::test_support::app_id(),
+                protocol::UsageMeters {
+                    running_ms: 3_600_000,
+                    idle_ms: 1_500,
+                    cpu_ms: 42_150,
+                    rx_bytes: 1_073_741_824,
+                    tx_bytes: 2_147_483_648,
+                    disk_provisioned_mib_seconds: 29_491_200,
+                    disk_used_mib_seconds: 5_242_880,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..HostSnapshot::default()
+        };
+        let page = page(&state, &HostMetrics::new(), &snapshot, 0);
 
         let time = lines_for(&page, "nibrunner_instance_time_seconds_total");
         assert_eq!(time.len(), 2, "memory and disk are counted apart: {time:?}");

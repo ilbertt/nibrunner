@@ -94,36 +94,6 @@
         "failed"
       ]
     },
-    "ComputeUsage": {
-      "type": "object",
-      "properties": {
-        "cpuShare": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "measuredAt": {
-          "$ref": "#/$defs/Timestamp"
-        },
-        "memoryTotalBytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "memoryUsedBytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "memoryTotalBytes",
-        "memoryUsedBytes",
-        "measuredAt"
-      ]
-    },
     "DeploymentId": {
       "description": "an identifier",
       "type": "string",
@@ -142,29 +112,6 @@
         "ready",
         "failed",
         "expired"
-      ]
-    },
-    "FilesystemUsage": {
-      "type": "object",
-      "properties": {
-        "measuredAt": {
-          "$ref": "#/$defs/Timestamp"
-        },
-        "totalBytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "usedBytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "totalBytes",
-        "usedBytes",
-        "measuredAt"
       ]
     },
     "HostCapacity": {
@@ -366,16 +313,6 @@
         "appId": {
           "$ref": "#/$defs/AppId"
         },
-        "compute": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComputeUsage"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "convergedAt": {
           "description": "When the instance first became what the document asks of it, for the `deploymentId` and\n`desiredState` it now carries. Absent while it is still on its way there, and for a\ndeployment this host was not there to see arrive.",
           "anyOf": [
@@ -417,16 +354,6 @@
           ],
           "format": "int32"
         },
-        "lastHealthyAt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Timestamp"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "lastRestart": {
           "description": "The last of those restarts. Absent until there has been one.",
           "anyOf": [
@@ -454,18 +381,6 @@
               "type": "null"
             }
           ]
-        },
-        "meters": {
-          "$ref": "#/$defs/UsageMeters",
-          "default": {
-            "cpuMs": 0,
-            "diskProvisionedMibSeconds": 0,
-            "diskUsedMibSeconds": 0,
-            "idleMs": 0,
-            "runningMs": 0,
-            "rxBytes": 0,
-            "txBytes": 0
-          }
         },
         "restartCount": {
           "description": "Times the supervisor inside the guest has restarted the tenant since this host last booted\nthe app afresh. A restore from a snapshot keeps the count; a cold boot starts it over.",
@@ -573,16 +488,6 @@
             }
           ]
         },
-        "usage": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FilesystemUsage"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "volumeId": {
           "$ref": "#/$defs/VolumeId"
         }
@@ -638,59 +543,6 @@
       "description": "an ISO 8601 instant with an offset",
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
-    },
-    "UsageMeters": {
-      "description": "What an app has used since this host first saw it. Every field only ever grows, so what it cost\nover any stretch is the difference between two readings of it, and a reading that was missed\ncosts nothing but resolution. A field that went down is a counter this host restarted.\n\nTime is metered in two, because a running app holds the memory it was promised and an idle one\nholds only the disk its snapshot sits on. Which of those is worth what, this does not say.",
-      "type": "object",
-      "properties": {
-        "cpuMs": {
-          "description": "Summed across the vCPUs the app was given, so a two-vCPU app that stayed busy for a second\nspent two seconds of it.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "diskProvisionedMibSeconds": {
-          "description": "Disk is a level rather than a flow, so what is metered is the level multiplied by the time\nit was held: what was set aside for the app, and what its guest reported having filled.\nMebibyte-seconds, because byte-milliseconds of a large volume outrun a `u64` in months.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "diskUsedMibSeconds": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "idleMs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "runningMs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "rxBytes": {
-          "description": "What reached the guest, and what it put back on the wire. Only what was let out is\ncounted as sent: a packet the ruleset rejected never left, so nobody is charged for it.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "txBytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "runningMs",
-        "idleMs",
-        "cpuMs",
-        "rxBytes",
-        "txBytes",
-        "diskProvisionedMibSeconds",
-        "diskUsedMibSeconds"
-      ]
     },
     "VolumeId": {
       "description": "an identifier",
