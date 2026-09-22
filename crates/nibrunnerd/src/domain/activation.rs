@@ -11,6 +11,12 @@ const SLEEPABLE_STATES: [InstanceState; 1] = [InstanceState::Running];
 /// a stream that never ends.
 pub const MAX_LIFETIME_DRAIN_MS: i64 = 30_000;
 
+/// How old a reading of an app's traffic may be and still stand for what the app is doing. The
+/// counters are read on a clock of their own, a few seconds apart; a reading this far behind is
+/// this host having lost sight of the app rather than the app having gone quiet, and an app it
+/// cannot see is left up.
+pub const MAX_ACTIVITY_AGE_MS: i64 = 15_000;
+
 /// Why this host is putting a microVM to sleep, in the word the log and the report use for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepReason {
@@ -31,9 +37,19 @@ impl SleepReason {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ActivitySignals {
     pub last_active_at_ms: Option<i64>,
+    /// When this host last read the app's traffic counters, and nothing where it never has.
+    pub measured_at_ms: Option<i64>,
     pub started_at_ms: Option<i64>,
     /// Requests the proxy has routed to the app and is still carrying the answer to.
     pub requests_open: u64,
+}
+
+impl ActivitySignals {
+    /// Whether what this host last read of the app's traffic still stands for what it is doing.
+    pub fn measured_lately(&self, now_ms: i64) -> bool {
+        self.measured_at_ms
+            .is_some_and(|measured_at| now_ms - measured_at <= MAX_ACTIVITY_AGE_MS)
+    }
 }
 
 /// Whether a policy is one this host can act on without any signal from inside the guest.
@@ -50,7 +66,9 @@ pub fn should_sleep(
     match policy.sleep_when {
         SleepPolicy::Never => None,
         SleepPolicy::TrafficIdle { timeout_ms } => {
-            if answering {
+            // A stretch nobody read the counters over is not a stretch of quiet: an app taking
+            // hundreds of requests a second reads exactly like one taking none.
+            if answering || !signals.measured_lately(now_ms) {
                 return None;
             }
             let quiet_since = signals.last_active_at_ms?;
@@ -107,6 +125,7 @@ mod tests {
     fn quiet_since(ms: i64) -> ActivitySignals {
         ActivitySignals {
             last_active_at_ms: Some(ms),
+            measured_at_ms: Some(NOW_MS),
             started_at_ms: None,
             requests_open: 0,
         }
@@ -115,6 +134,7 @@ mod tests {
     fn up_since(ms: i64) -> ActivitySignals {
         ActivitySignals {
             last_active_at_ms: None,
+            measured_at_ms: Some(NOW_MS),
             started_at_ms: Some(ms),
             requests_open: 0,
         }
@@ -140,6 +160,7 @@ mod tests {
         let record = serving(InstanceState::Running);
         let signals = ActivitySignals {
             last_active_at_ms: Some(NOW_MS),
+            measured_at_ms: Some(NOW_MS),
             started_at_ms: Some(NOW_MS - TTL_MS as i64),
             requests_open: 0,
         };
@@ -156,6 +177,7 @@ mod tests {
         let record = serving(InstanceState::Running);
         let busy_but_old = ActivitySignals {
             last_active_at_ms: Some(NOW_MS),
+            measured_at_ms: Some(NOW_MS),
             started_at_ms: Some(NOW_MS - TTL_MS as i64),
             requests_open: 0,
         };
@@ -166,6 +188,7 @@ mod tests {
 
         let quiet_but_young = ActivitySignals {
             last_active_at_ms: Some(NOW_MS - TIMEOUT_MS as i64),
+            measured_at_ms: Some(NOW_MS),
             started_at_ms: Some(NOW_MS),
             requests_open: 0,
         };
@@ -180,6 +203,7 @@ mod tests {
         let record = serving(InstanceState::Running);
         let signals = ActivitySignals {
             last_active_at_ms: Some(0),
+            measured_at_ms: Some(NOW_MS),
             started_at_ms: Some(0),
             requests_open: 0,
         };
@@ -194,6 +218,39 @@ mod tests {
             ..quiet_since(0)
         };
         assert_eq!(should_sleep(&traffic_idle(), &record, &answering, NOW_MS), None);
+    }
+
+    #[test]
+    fn an_app_whose_traffic_has_not_been_read_lately_is_not_quiet_however_still_its_counters_look() {
+        let record = serving(InstanceState::Running);
+        let long_enough = quiet_since(NOW_MS - TIMEOUT_MS as i64);
+        let unread = ActivitySignals {
+            measured_at_ms: Some(NOW_MS - MAX_ACTIVITY_AGE_MS - 1),
+            ..long_enough
+        };
+        assert_eq!(should_sleep(&traffic_idle(), &record, &unread, NOW_MS), None);
+
+        let read = ActivitySignals {
+            measured_at_ms: Some(NOW_MS - MAX_ACTIVITY_AGE_MS),
+            ..long_enough
+        };
+        assert_eq!(
+            should_sleep(&traffic_idle(), &record, &read, NOW_MS),
+            Some(SleepReason::Quiet)
+        );
+    }
+
+    #[test]
+    fn a_lifetime_runs_out_on_the_clock_whether_or_not_any_traffic_was_read() {
+        let record = serving(InstanceState::Running);
+        let unread = ActivitySignals {
+            measured_at_ms: None,
+            ..up_since(NOW_MS - TTL_MS as i64)
+        };
+        assert_eq!(
+            should_sleep(&max_lifetime(), &record, &unread, NOW_MS),
+            Some(SleepReason::LivedLongEnough)
+        );
     }
 
     #[test]
@@ -232,6 +289,7 @@ mod tests {
         let record = serving(InstanceState::Running);
         let answering = ActivitySignals {
             last_active_at_ms: Some(0),
+            measured_at_ms: Some(NOW_MS),
             started_at_ms: Some(0),
             requests_open: 1,
         };

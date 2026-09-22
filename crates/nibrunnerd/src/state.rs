@@ -22,6 +22,10 @@ pub struct HostSnapshot {
     pub snapshotting: BTreeSet<AppId>,
     pub app_traffic: BTreeMap<AppId, AppTraffic>,
     pub last_active_at_ms: BTreeMap<AppId, i64>,
+    // When each app's traffic counters were last read. Only ever this daemon's own note of what
+    // it watched, so a restart has measured nothing and must take a reading before it may call
+    // an app quiet.
+    pub last_measured_at_ms: BTreeMap<AppId, i64>,
     pub volume_usage: BTreeMap<AppId, FilesystemUsage>,
     pub compute_usage: BTreeMap<AppId, ComputeUsage>,
     pub compute_ticks: BTreeMap<AppId, guest_contract::filesystem::MeasuredCompute>,

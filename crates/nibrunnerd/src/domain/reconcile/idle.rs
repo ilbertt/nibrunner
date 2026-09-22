@@ -25,7 +25,7 @@ use futures::StreamExt;
 use nft_render::AppTraffic;
 use protocol::{ActivationPolicy, AppId, Timestamp};
 
-use crate::domain::activation::{should_sleep, ActivitySignals, SleepReason};
+use crate::domain::activation::{should_sleep, ActivitySignals, SleepReason, MAX_ACTIVITY_AGE_MS};
 use crate::domain::metrics::sleep_wake::SleepOutcome;
 use crate::domain::report::InstanceRecord;
 use crate::host::Host;
@@ -34,6 +34,7 @@ use crate::state::HostSnapshot;
 pub struct Activity {
     pub traffic: BTreeMap<AppId, AppTraffic>,
     pub last_active_at_ms: BTreeMap<AppId, i64>,
+    pub last_measured_at_ms: BTreeMap<AppId, i64>,
     pub moved: BTreeSet<AppId>,
 }
 
@@ -41,10 +42,16 @@ pub fn activity_after(
     taken: BTreeMap<AppId, AppTraffic>,
     previous_traffic: &BTreeMap<AppId, AppTraffic>,
     previous_moments: &BTreeMap<AppId, i64>,
+    previous_readings: &BTreeMap<AppId, i64>,
     requests_open: &BTreeMap<AppId, u64>,
     now_ms: i64,
 ) -> Activity {
-    let mut traffic = BTreeMap::new();
+    // An app this reading says nothing about keeps the counters it had. Dropping them would leave
+    // the reading after this one nothing to compare against, so an app taking hundreds of requests
+    // a second would be seen to move for the first time two readings later — long enough for a
+    // sleep pass to read the gap as quiet.
+    let mut traffic = previous_traffic.clone();
+    let mut last_measured_at_ms = previous_readings.clone();
     let mut last_active_at_ms = BTreeMap::new();
     // A request the proxy is still answering is somebody asking for the app, whatever the
     // counters say: a stream that has sent nothing for a minute is still a stream.
@@ -69,6 +76,7 @@ pub fn activity_after(
             recorded.unwrap_or(now_ms)
         };
         last_active_at_ms.insert(app_id.clone(), moment);
+        last_measured_at_ms.insert(app_id.clone(), now_ms);
         traffic.insert(app_id, after);
     }
     for app_id in &moved {
@@ -80,51 +88,66 @@ pub fn activity_after(
     Activity {
         traffic,
         last_active_at_ms,
+        last_measured_at_ms,
         moved,
     }
+}
+
+fn of_held_apps<T>(known: BTreeMap<AppId, T>, held: &BTreeSet<AppId>) -> BTreeMap<AppId, T> {
+    known
+        .into_iter()
+        .filter(|(app_id, _)| held.contains(app_id))
+        .collect()
+}
+
+/// How long this host went without reading any app's traffic, where that is longer than a reading
+/// of it stands for. A reading taken on time has nothing to say.
+fn unread_for(previous_readings: &BTreeMap<AppId, i64>, now_ms: i64) -> Option<i64> {
+    let latest = previous_readings.values().max()?;
+    (now_ms - latest > MAX_ACTIVITY_AGE_MS).then_some(now_ms - latest)
 }
 
 pub async fn record_activity(host: &Host) {
     let now = crate::clock::now_ms();
     let snapshot = host.state.snapshot().await;
     let taken = match host.firewall.traffic().await {
-        Ok(taken) => taken,
+        Ok(taken) => {
+            if let Some(unread_ms) = unread_for(&snapshot.last_measured_at_ms, now) {
+                tracing::warn!(unread_ms, "app traffic had gone unread");
+            }
+            taken
+        }
         Err(error) => {
-            tracing::debug!(error = %error.message(), "app traffic could not be read");
+            tracing::warn!(error = %error.message(), "app traffic could not be read");
             BTreeMap::new()
         }
     };
+    let measured = taken.len();
     let requests_open = host.metrics.proxy.open_requests();
     let next = activity_after(
         taken,
         &snapshot.app_traffic,
         &snapshot.last_active_at_ms,
+        &snapshot.last_measured_at_ms,
         &requests_open,
         now,
     );
 
     let held: BTreeSet<AppId> = host.slots().await.into_iter().map(|slot| slot.app_id).collect();
-    let traffic: BTreeMap<_, _> = next
-        .traffic
-        .into_iter()
-        .filter(|(app_id, _)| held.contains(app_id))
-        .collect();
-    let last_active_at_ms: BTreeMap<_, _> = next
-        .last_active_at_ms
-        .into_iter()
-        .filter(|(app_id, _)| held.contains(app_id))
-        .collect();
+    let traffic = of_held_apps(next.traffic, &held);
+    let last_active_at_ms = of_held_apps(next.last_active_at_ms, &held);
+    let last_measured_at_ms = of_held_apps(next.last_measured_at_ms, &held);
 
     // Twelve times a minute, and all but the ones where something moved say the same thing.
     if next.moved.is_empty() {
         tracing::debug!(
-            measured = traffic.len(),
+            measured,
             tracked = last_active_at_ms.len(),
             "app activity measured"
         );
     } else {
         tracing::info!(
-            measured = traffic.len(),
+            measured,
             moved = next.moved.len(),
             answering = requests_open.len(),
             tracked = last_active_at_ms.len(),
@@ -157,6 +180,7 @@ pub async fn record_activity(host: &Host) {
             snapshot.metered_at_ms = Some(now);
             snapshot.app_traffic = traffic;
             snapshot.last_active_at_ms = last_active_at_ms;
+            snapshot.last_measured_at_ms = last_measured_at_ms;
         })
         .await;
 }
@@ -179,19 +203,22 @@ struct Due {
     late_ms: i64,
 }
 
+fn signals(snapshot: &HostSnapshot, record: &InstanceRecord, requests_open: u64) -> ActivitySignals {
+    ActivitySignals {
+        last_active_at_ms: snapshot.last_active_at_ms.get(&record.app_id).copied(),
+        measured_at_ms: snapshot.last_measured_at_ms.get(&record.app_id).copied(),
+        started_at_ms: record.started_at.as_ref().map(Timestamp::epoch_ms),
+        requests_open,
+    }
+}
+
 fn due(
     policy: &ActivationPolicy,
     record: &InstanceRecord,
-    snapshot: &HostSnapshot,
-    requests_open: u64,
+    signals: &ActivitySignals,
     now: i64,
 ) -> Option<Due> {
-    let signals = ActivitySignals {
-        last_active_at_ms: snapshot.last_active_at_ms.get(&record.app_id).copied(),
-        started_at_ms: record.started_at.as_ref().map(Timestamp::epoch_ms),
-        requests_open,
-    };
-    let reason = should_sleep(policy, record, &signals, now)?;
+    let reason = should_sleep(policy, record, signals, now)?;
     let since = match reason {
         SleepReason::Quiet => signals.last_active_at_ms,
         SleepReason::LivedLongEnough => signals.started_at_ms,
@@ -207,6 +234,34 @@ fn due(
     })
 }
 
+/// Why an app picked for a batch was left up after all, in the line an operator will look for.
+fn left_up(
+    app_id: &AppId,
+    record: &InstanceRecord,
+    policy: &ActivationPolicy,
+    signals: &ActivitySignals,
+    now: i64,
+) {
+    let state = record.state.as_str();
+    let reading_wanted = matches!(policy.sleep_when, protocol::SleepPolicy::TrafficIdle { .. });
+    if reading_wanted && !signals.measured_lately(now) {
+        tracing::warn!(
+            %app_id,
+            state,
+            measured_ms_ago = signals.measured_at_ms.map(|at| now - at),
+            "app traffic has not been read lately; left up"
+        );
+        return;
+    }
+    tracing::info!(
+        %app_id,
+        state,
+        active_ms_ago = signals.last_active_at_ms.map(|at| now - at),
+        requests_open = signals.requests_open,
+        "no longer quiet; left up"
+    );
+}
+
 /// Puts the app to sleep if it is still due, and says whether it went.
 async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bool {
     // Decided again, against the state and the clock as they are now: an app picked for the
@@ -219,15 +274,9 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bo
         return false;
     };
     let requests_open = host.metrics.proxy.open_requests_for(app_id);
-    let Some(due) = due(policy, record, &snapshot, requests_open, now) else {
-        let active_ms_ago = snapshot.last_active_at_ms.get(app_id).map(|at| now - at);
-        tracing::info!(
-            %app_id,
-            state = record.state.as_str(),
-            active_ms_ago,
-            requests_open,
-            "no longer quiet; left up"
-        );
+    let signals = signals(&snapshot, record, requests_open);
+    let Some(due) = due(policy, record, &signals, now) else {
+        left_up(app_id, record, policy, &signals, now);
         return false;
     };
     host.metrics
@@ -277,7 +326,8 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) -> usize {
         .filter_map(|record| {
             let policy = policies.get(&record.app_id)?;
             let open = requests_open.get(&record.app_id).copied().unwrap_or(0);
-            due(policy, record, &snapshot, open, now).map(|due| (due, record.app_id.clone(), *policy))
+            let signals = signals(&snapshot, record, open);
+            due(policy, record, &signals, now).map(|due| (due, record.app_id.clone(), *policy))
         })
         .collect();
     if letting_go.is_empty() {
@@ -335,16 +385,38 @@ mod activity_tests {
         BTreeMap::new()
     }
 
+    fn never_measured() -> BTreeMap<AppId, i64> {
+        BTreeMap::new()
+    }
+
+    fn measured(at: i64) -> BTreeMap<AppId, i64> {
+        BTreeMap::from([(app_id(), at)])
+    }
+
     #[test]
     fn an_app_with_a_request_open_is_active_though_its_counter_has_not_moved() {
         let (traffic, moments) = previously(1024, EARLIER);
         let answering = BTreeMap::from([(app_id(), 1)]);
-        let after = activity_after(reading(1024), &traffic, &moments, &answering, NOW);
+        let after = activity_after(
+            reading(1024),
+            &traffic,
+            &moments,
+            &measured(EARLIER),
+            &answering,
+            NOW,
+        );
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&NOW));
         assert!(after.moved.contains(&app_id()));
 
         let none_left = BTreeMap::from([(app_id(), 0)]);
-        let after = activity_after(reading(1024), &traffic, &moments, &none_left, NOW);
+        let after = activity_after(
+            reading(1024),
+            &traffic,
+            &moments,
+            &measured(EARLIER),
+            &none_left,
+            NOW,
+        );
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
         assert!(!after.moved.contains(&app_id()));
     }
@@ -352,11 +424,25 @@ mod activity_tests {
     #[test]
     fn an_app_is_active_when_its_counter_has_moved() {
         let (traffic, moments) = previously(1024, EARLIER);
-        let after = activity_after(reading(2048), &traffic, &moments, &nobody_answering(), NOW);
+        let after = activity_after(
+            reading(2048),
+            &traffic,
+            &moments,
+            &measured(EARLIER),
+            &nobody_answering(),
+            NOW,
+        );
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&NOW));
         assert!(after.moved.contains(&app_id()));
 
-        let same = activity_after(reading(1024), &traffic, &moments, &nobody_answering(), NOW);
+        let same = activity_after(
+            reading(1024),
+            &traffic,
+            &moments,
+            &measured(EARLIER),
+            &nobody_answering(),
+            NOW,
+        );
         assert_eq!(same.last_active_at_ms.get(&app_id()), Some(&EARLIER));
         assert!(!same.moved.contains(&app_id()));
     }
@@ -367,29 +453,72 @@ mod activity_tests {
             reading(4096),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &never_measured(),
             &nobody_answering(),
             NOW,
         );
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&NOW));
         assert_eq!(after.traffic.get(&app_id()).map(|t| t.received.bytes), Some(4096));
+        assert_eq!(after.last_measured_at_ms.get(&app_id()), Some(&NOW));
         assert!(!after.moved.contains(&app_id()));
     }
 
     #[test]
     fn a_rewritten_ruleset_is_not_an_app_going_quiet() {
         let (traffic, moments) = previously(9_000_000, EARLIER);
-        let after = activity_after(reading(16), &traffic, &moments, &nobody_answering(), NOW);
+        let after = activity_after(
+            reading(16),
+            &traffic,
+            &moments,
+            &measured(EARLIER),
+            &nobody_answering(),
+            NOW,
+        );
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
         assert!(!after.moved.contains(&app_id()));
         assert_eq!(after.traffic.get(&app_id()).map(|t| t.received.bytes), Some(16));
     }
 
     #[test]
-    fn an_app_with_no_counter_keeps_the_moment_it_was_last_reached() {
+    fn an_app_this_reading_says_nothing_about_keeps_its_counters_and_the_moment_they_were_read() {
         let (traffic, moments) = previously(1024, EARLIER);
-        let after = activity_after(BTreeMap::new(), &traffic, &moments, &nobody_answering(), NOW);
+        let after = activity_after(
+            BTreeMap::new(),
+            &traffic,
+            &moments,
+            &measured(EARLIER),
+            &nobody_answering(),
+            NOW,
+        );
         assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&EARLIER));
-        assert!(!after.traffic.contains_key(&app_id()));
+        assert_eq!(after.traffic.get(&app_id()).map(|t| t.received.bytes), Some(1024));
+        assert_eq!(after.last_measured_at_ms.get(&app_id()), Some(&EARLIER));
+    }
+
+    #[test]
+    fn a_reading_that_never_happened_does_not_hide_the_movement_the_next_one_finds() {
+        let (traffic, moments) = previously(1024, EARLIER);
+        let missed = activity_after(
+            BTreeMap::new(),
+            &traffic,
+            &moments,
+            &measured(EARLIER),
+            &nobody_answering(),
+            EARLIER + 1,
+        );
+
+        let after = activity_after(
+            reading(2048),
+            &missed.traffic,
+            &missed.last_active_at_ms,
+            &missed.last_measured_at_ms,
+            &nobody_answering(),
+            NOW,
+        );
+
+        assert!(after.moved.contains(&app_id()));
+        assert_eq!(after.last_active_at_ms.get(&app_id()), Some(&NOW));
+        assert_eq!(after.last_measured_at_ms.get(&app_id()), Some(&NOW));
     }
 
     #[test]
@@ -399,6 +528,7 @@ mod activity_tests {
             taken,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &never_measured(),
             &nobody_answering(),
             NOW,
         );
@@ -465,8 +595,7 @@ mod activity_tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_counter_table_that_could_not_be_read_leaves_what_the_host_already_knew_alone() {
+    async fn host_whose_counters_will_not_be_read() -> TestHost {
         let mut host = test_host().await;
         let (commands, _log) = mocks::commands_answering(|_| {
             Err(crate::ports::CommandError::Unstartable {
@@ -480,15 +609,70 @@ mod activity_tests {
         host.slot_for(&app_id()).await.unwrap();
         host.state
             .modify(|snapshot| {
+                snapshot.app_traffic.insert(app_id(), inbound(1024));
                 snapshot.last_active_at_ms.insert(app_id(), EARLIER);
+                snapshot.last_measured_at_ms.insert(app_id(), EARLIER);
             })
             .await;
+        host
+    }
+
+    #[tokio::test]
+    async fn a_counter_table_that_could_not_be_read_leaves_the_last_reading_of_it_standing() {
+        let host = host_whose_counters_will_not_be_read().await;
 
         record_activity(&host).await;
 
         let snapshot = host.state.snapshot().await;
         assert_eq!(snapshot.last_active_at_ms.get(&app_id()), Some(&EARLIER));
-        assert!(snapshot.app_traffic.is_empty());
+        assert_eq!(snapshot.last_measured_at_ms.get(&app_id()), Some(&EARLIER));
+        assert_eq!(
+            snapshot
+                .app_traffic
+                .get(&app_id())
+                .map(|held| held.received.bytes),
+            Some(1024),
+            "the reading after this one has nothing to compare against"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_counter_table_that_could_not_be_read_is_said_aloud_rather_than_taken_for_silence() {
+        let (said, _listening) = Said::listening();
+        let host = host_whose_counters_will_not_be_read().await;
+
+        record_activity(&host).await;
+
+        assert!(
+            said.lines()
+                .iter()
+                .any(|line| line == "WARN app traffic could not be read"),
+            "{:?}",
+            said.lines()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reading_that_lands_after_a_long_gap_says_how_long_traffic_went_unread() {
+        let (said, _listening) = Said::listening();
+        let host = test_host().await;
+        host.slot_for(&app_id()).await.unwrap();
+        let long_ago = crate::clock::now_ms() - MAX_ACTIVITY_AGE_MS - 1;
+        host.state
+            .modify(|snapshot| {
+                snapshot.last_measured_at_ms.insert(app_id(), long_ago);
+            })
+            .await;
+
+        record_activity(&host).await;
+
+        assert!(
+            said.lines()
+                .iter()
+                .any(|line| line == "WARN app traffic had gone unread"),
+            "{:?}",
+            said.lines()
+        );
     }
 }
 
@@ -522,11 +706,7 @@ mod sleep_tests {
 
     async fn last_reached(host: &TestHost, ms_ago: i64) {
         let moment = crate::clock::now_ms() - ms_ago;
-        host.state
-            .modify(|snapshot| {
-                snapshot.last_active_at_ms.insert(app_id(), moment);
-            })
-            .await;
+        measured_quiet_since(&host.state, &app_id(), moment).await;
     }
 
     #[tokio::test]
@@ -622,6 +802,36 @@ mod sleep_tests {
         apply_sleep(host.arc()).await;
 
         assert!(host.vms.calls().is_empty());
+    }
+
+    async fn measured_ms_ago(host: &TestHost, app_id: &AppId, ms_ago: i64) {
+        let moment = crate::clock::now_ms() - ms_ago;
+        host.state
+            .modify(|snapshot| {
+                snapshot.last_measured_at_ms.insert(app_id.clone(), moment);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_app_whose_traffic_has_not_been_read_lately_is_left_up_though_its_timeout_has_run_out() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+        measured_ms_ago(&host, &app_id(), MAX_ACTIVITY_AGE_MS + 1).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert!(host.vms.calls().is_empty());
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Running
+        );
+
+        measured_ms_ago(&host, &app_id(), 0).await;
+
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
     }
 
     async fn host_under(policy: protocol::ActivationPolicy) -> TestHost {
@@ -753,7 +963,7 @@ mod sleep_tests {
             let mut record = quiet_record();
             record.app_id = nth(n);
             host.state.put_record(record).await;
-            host.state.mark_active(&nth(n), quiet_since).await;
+            measured_quiet_since(&host.state, &nth(n), quiet_since).await;
         }
         (host, held)
     }
@@ -808,6 +1018,36 @@ mod sleep_tests {
             said.lines()
                 .iter()
                 .filter(|line| line == &"INFO no longer quiet; left up")
+                .count(),
+            1,
+            "{:?}",
+            said.lines()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_app_whose_traffic_stopped_being_read_while_it_waited_its_turn_is_left_up_and_said_so() {
+        let (said, _listening) = Said::listening();
+        let count = SLEEP_CONCURRENCY + 1;
+        let (host, held) = quiet_batch(count).await;
+        let pass = a_pass_over(&host);
+
+        held.held_up(SLEEP_CONCURRENCY).await;
+        let waiting_its_turn = nth(count);
+        measured_ms_ago(&host, &waiting_its_turn, MAX_ACTIVITY_AGE_MS + 1).await;
+
+        held.let_through(count);
+        pass.await.unwrap();
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; SLEEP_CONCURRENCY]);
+        assert_eq!(
+            host.state.record(&waiting_its_turn).await.unwrap().state,
+            InstanceState::Running
+        );
+        assert_eq!(
+            said.lines()
+                .iter()
+                .filter(|line| line == &"WARN app traffic has not been read lately; left up")
                 .count(),
             1,
             "{:?}",

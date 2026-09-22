@@ -64,11 +64,7 @@ mod tests {
     }
     async fn last_reached(host: &TestHost, ms_ago: i64) {
         let moment = crate::clock::now_ms() - ms_ago;
-        host.state
-            .modify(|snapshot| {
-                snapshot.last_active_at_ms.insert(app_id(), moment);
-            })
-            .await;
+        measured_quiet_since(&host.state, &app_id(), moment).await;
     }
     #[tokio::test]
     async fn the_service_measures_the_host_it_was_built_on() {
