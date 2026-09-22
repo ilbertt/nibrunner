@@ -45,6 +45,9 @@ pub struct Host {
     /// wrong refuses the start, rather than every handshake after it.
     pub tls: Option<tokio_rustls::TlsAcceptor>,
     pub metrics: Arc<HostMetrics>,
+    /// Brings an app up for whatever asked for it: a request at the proxy, a raw port, a question
+    /// about a guest's files.
+    pub waker: Arc<dyn crate::ports::Waker>,
     pub activator: Arc<AppActivator>,
     /// Absent on a host whose configuration names no `[proxy.tcp]`, which is a host that offers
     /// no stream port. A document asking one of those for such a port is refused.
