@@ -205,6 +205,7 @@ impl<'a> ReaderDevice<'a> {
             socket_path: &socket_path.display().to_string(),
             device_path: &device_path,
             volume_id,
+            image_path: None,
         };
         // The server binds its socket before it has opened the checkpoint, so a socket that is
         // there is not a server that will answer, and the only honest test of readiness is the

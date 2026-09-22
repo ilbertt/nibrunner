@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::adapters::net::allocator::SlotAllocator;
 use crate::adapters::volumes::initial_contents::{ContentsStaging, StagedRoot};
-use crate::adapters::volumes::nbd::{NbdDevices, NbdTarget};
+use crate::adapters::volumes::nbd::{NbdDevices, NbdTarget, ProvenDevice};
 use crate::adapters::volumes::{
     align_to_sector, discard_superblock, format_request, has_ext_magic, AttachedVolume, CacheReservation,
     ObservedBacking, VolumeBackend, VolumeError, SUPERBLOCK_MAGIC_OFFSET,
@@ -119,10 +119,10 @@ impl ZerofsVolumes {
         Ok(target)
     }
 
-    async fn is_formatted(&self, device_path: &str) -> Result<bool, VolumeError> {
-        let path = device_path.to_string();
+    async fn is_formatted(&self, device: &ProvenDevice) -> Result<bool, VolumeError> {
+        let path = device.path().to_string();
         let unreadable = || VolumeError::SuperblockUnreadable {
-            device_path: device_path.to_string(),
+            device_path: device.path().to_string(),
         };
         let read = tokio::task::spawn_blocking(move || read_superblock_magic(&path));
         match tokio::time::timeout(SUPERBLOCK_READ_TIMEOUT, read).await {
@@ -131,7 +131,8 @@ impl ZerofsVolumes {
         }
     }
 
-    async fn format(&self, device_path: &str, contents: Option<&StagedRoot>) -> Result<(), VolumeError> {
+    async fn format(&self, device: &ProvenDevice, contents: Option<&StagedRoot>) -> Result<(), VolumeError> {
+        let device_path = device.path();
         self.commands
             .stdout_of(format_request(device_path, contents, false))
             .await
@@ -224,27 +225,29 @@ impl VolumeBackend for ZerofsVolumes {
             .allocate(&desired.app_id)
             .map_err(|error| VolumeError::Unusable(error.message()))?;
         let socket_path = self.filesystem.nbd_socket_path.display().to_string();
-        let target = NbdTarget {
-            socket_path: &socket_path,
-            device_path: &slot.nbd_device_path,
-            volume_id: &desired.volume_id,
-        };
-        if !self.devices.is_usable(&slot.nbd_device_path).await {
-            self.devices.reattach(&target).await?;
-        }
-        if !self.is_formatted(&slot.nbd_device_path).await? {
+        let image_path = self.filesystem.device_file_for(&desired.volume_id);
+        let device = self
+            .devices
+            .ready(&NbdTarget {
+                socket_path: &socket_path,
+                device_path: &slot.nbd_device_path,
+                volume_id: &desired.volume_id,
+                image_path: Some(&image_path),
+            })
+            .await?;
+        if !self.is_formatted(&device).await? {
             let contents = self.contents.stage_for(desired).await?;
-            self.format(&slot.nbd_device_path, contents.as_ref()).await?;
+            self.format(&device, contents.as_ref()).await?;
             tracing::info!(
                 volume_id = %desired.volume_id,
-                device = %slot.nbd_device_path,
+                device = device.path(),
                 seeded = contents.is_some(),
                 "volume formatted"
             );
         }
         Ok(AttachedVolume {
             volume_id: desired.volume_id.clone(),
-            device_path: slot.nbd_device_path,
+            device_path: device.path().to_string(),
             size_bytes,
             storage_prefix: self.filesystem.storage_prefix.clone(),
         })
@@ -255,8 +258,8 @@ impl VolumeBackend for ZerofsVolumes {
         volume_id: &VolumeId,
         app_id: &protocol::AppId,
     ) -> Result<AttachedVolume, VolumeError> {
-        let path = self.filesystem.device_file_for(volume_id);
-        let Some(size_bytes) = device_file_size(&path) else {
+        let image_path = self.filesystem.device_file_for(volume_id);
+        let Some(size_bytes) = device_file_size(&image_path) else {
             return Err(VolumeError::NotHere {
                 volume_id: volume_id.clone(),
             });
@@ -268,17 +271,18 @@ impl VolumeBackend for ZerofsVolumes {
                 volume_id: volume_id.clone(),
             })?;
         let socket_path = self.filesystem.nbd_socket_path.display().to_string();
-        let target = NbdTarget {
-            socket_path: &socket_path,
-            device_path: &device_path,
-            volume_id,
-        };
-        if !self.devices.is_usable(&device_path).await {
-            self.devices.reattach(&target).await?;
-        }
+        let device = self
+            .devices
+            .ready(&NbdTarget {
+                socket_path: &socket_path,
+                device_path: &device_path,
+                volume_id,
+                image_path: Some(&image_path),
+            })
+            .await?;
         Ok(AttachedVolume {
             volume_id: volume_id.clone(),
-            device_path,
+            device_path: device.path().to_string(),
             size_bytes,
             storage_prefix: self.filesystem.storage_prefix.clone(),
         })
@@ -365,6 +369,7 @@ impl VolumeBackend for ZerofsVolumes {
             );
             return Vec::new();
         };
+        let socket_path = self.filesystem.nbd_socket_path.display().to_string();
         let mut observed = Vec::new();
         for entry in entries.flatten() {
             let Ok(volume_id) = VolumeId::parse(entry.file_name().to_string_lossy().as_ref()) else {
@@ -377,11 +382,22 @@ impl VolumeBackend for ZerofsVolumes {
                 Some(app_id) => self.device_for(app_id).await,
                 None => None,
             };
-            let (attached, formatted) = match &device_path {
-                Some(path) if self.devices.is_usable(path).await => {
-                    (true, self.is_formatted(path).await.unwrap_or(false))
+            let proven = match &device_path {
+                Some(path) => {
+                    self.devices
+                        .proven(&NbdTarget {
+                            socket_path: &socket_path,
+                            device_path: path,
+                            volume_id: &volume_id,
+                            image_path: Some(&entry.path()),
+                        })
+                        .await
                 }
-                _ => (false, false),
+                None => None,
+            };
+            let (attached, formatted) = match &proven {
+                Some(device) => (true, self.is_formatted(device).await.unwrap_or(false)),
+                None => (false, false),
             };
             observed.push(ObservedBacking {
                 volume_id,
@@ -818,6 +834,19 @@ mod tests {
         assert!(!observed[0].formatted);
     }
 
+    /// The device as an attach of this daemon's own leaves it: proven to carry the volume named.
+    async fn attached_to(device_path: &str, volume_id: &VolumeId) -> ProvenDevice {
+        NbdDevices::new(mocks::commands_succeeding().0)
+            .attach(&NbdTarget {
+                socket_path: "/run/zerofs/nbd.sock",
+                device_path,
+                volume_id,
+                image_path: None,
+            })
+            .await
+            .unwrap()
+    }
+
     fn sysfs_attribute(sysfs: &Path, device: &str, attribute: &str, value: &str) {
         let directory = sysfs.join(device);
         std::fs::create_dir_all(&directory).unwrap();
@@ -1071,7 +1100,9 @@ mod tests {
             staging(root.path()),
         );
         let error = volumes
-            .is_formatted("/dev/nbd-that-is-not-there")
+            .is_formatted(
+                &attached_to("/dev/nbd-that-is-not-there", &VolumeId::parse("vol-1").unwrap()).await,
+            )
             .await
             .unwrap_err();
         assert_eq!(

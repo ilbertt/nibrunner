@@ -51,8 +51,9 @@ pub struct AttachedVolume {
 /// A volume as the host finds it. `attached` and `formatted` are two different facts: a device
 /// can answer reads and still carry no filesystem, which is what a seeded format that was refused
 /// leaves behind, and a guest booted onto that only dies failing to mount it. `attached` is
-/// whether the device answers, not whether the host holds one: a `device_path` under a volume
-/// that is not attached is a device that stopped answering under whatever holds it.
+/// whether the device answers and proves it carries this volume, not whether the host holds one:
+/// a `device_path` under a volume that is not attached is a device that stopped answering under
+/// whatever holds it, or one that has yet to prove which volume it serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedBacking {
     pub volume_id: VolumeId,
@@ -106,6 +107,32 @@ const EXT_MAGIC: u16 = 0xef53;
 
 pub fn has_ext_magic(bytes: &[u8]) -> bool {
     bytes.len() >= 2 && u16::from_le_bytes([bytes[0], bytes[1]]) == EXT_MAGIC
+}
+
+/// `s_uuid`, sixteen bytes at 0x68 into a superblock that itself starts 1024 bytes in.
+const SUPERBLOCK_UUID_OFFSET: u64 = 1128;
+pub const FILESYSTEM_UUID_BYTES: usize = 16;
+
+pub type FilesystemUuid = [u8; FILESYSTEM_UUID_BYTES];
+
+/// The uuid mke2fs gave the filesystem, read from a device or from the image an export is served
+/// from. `None` for anything that cannot name a filesystem apart from another: bytes that are not
+/// an ext filesystem at all, and the all-zero uuid, which is what a filesystem made by something
+/// that never set one carries. Telling volumes apart is all this is for, so unlike
+/// [`has_ext_magic`] it says nothing about whether a device holds a filesystem to be mounted.
+pub fn filesystem_uuid(path: &str) -> Option<FilesystemUuid> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(SUPERBLOCK_MAGIC_OFFSET)).ok()?;
+    let mut magic = [0u8; 2];
+    file.read_exact(&mut magic).ok()?;
+    if !has_ext_magic(&magic) {
+        return None;
+    }
+    file.seek(SeekFrom::Start(SUPERBLOCK_UUID_OFFSET)).ok()?;
+    let mut uuid = [0u8; FILESYSTEM_UUID_BYTES];
+    file.read_exact(&mut uuid).ok()?;
+    (uuid != [0u8; FILESYSTEM_UUID_BYTES]).then_some(uuid)
 }
 
 pub const FILESYSTEM_LABEL: &str = "nibrun-data";
@@ -162,7 +189,7 @@ pub(crate) fn discard_superblock(device_path: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -178,6 +205,77 @@ mod tests {
         assert!(has_ext_magic(&0xef53u16.to_le_bytes()));
         assert!(!has_ext_magic(&0u16.to_le_bytes()));
         assert!(!has_ext_magic(&[0x53]));
+    }
+
+    pub(crate) fn image(
+        directory: &std::path::Path,
+        name: &str,
+        formatted: bool,
+        uuid: FilesystemUuid,
+    ) -> String {
+        let path = directory.join(name);
+        let mut bytes = vec![0u8; 2048];
+        if formatted {
+            bytes[SUPERBLOCK_MAGIC_OFFSET as usize..SUPERBLOCK_MAGIC_OFFSET as usize + 2]
+                .copy_from_slice(&0xef53u16.to_le_bytes());
+        }
+        bytes[SUPERBLOCK_UUID_OFFSET as usize..SUPERBLOCK_UUID_OFFSET as usize + FILESYSTEM_UUID_BYTES]
+            .copy_from_slice(&uuid);
+        std::fs::write(&path, &bytes).unwrap();
+        path.display().to_string()
+    }
+
+    #[test]
+    fn a_filesystem_is_named_by_the_uuid_in_its_superblock() {
+        let directory = tempfile::tempdir().unwrap();
+        let uuid = [7u8; FILESYSTEM_UUID_BYTES];
+        assert_eq!(
+            filesystem_uuid(&image(directory.path(), "one", true, uuid)),
+            Some(uuid)
+        );
+        assert_eq!(
+            filesystem_uuid(&image(
+                directory.path(),
+                "another",
+                true,
+                [9u8; FILESYSTEM_UUID_BYTES]
+            )),
+            Some([9u8; FILESYSTEM_UUID_BYTES])
+        );
+    }
+
+    #[test]
+    fn nothing_that_cannot_tell_one_volume_from_another_is_read_as_a_uuid() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            filesystem_uuid(&image(
+                directory.path(),
+                "bare",
+                false,
+                [7u8; FILESYSTEM_UUID_BYTES]
+            )),
+            None,
+            "bytes that are not a filesystem name no volume"
+        );
+        assert_eq!(
+            filesystem_uuid(&image(
+                directory.path(),
+                "unnamed",
+                true,
+                [0u8; FILESYSTEM_UUID_BYTES]
+            )),
+            None,
+            "the uuid every filesystem without one carries names no volume either"
+        );
+        std::fs::write(directory.path().join("short"), b"tiny").unwrap();
+        assert_eq!(
+            filesystem_uuid(&directory.path().join("short").display().to_string()),
+            None
+        );
+        assert_eq!(
+            filesystem_uuid(&directory.path().join("absent").display().to_string()),
+            None
+        );
     }
 
     #[test]
