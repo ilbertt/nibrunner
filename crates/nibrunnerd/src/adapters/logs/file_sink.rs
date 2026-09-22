@@ -76,17 +76,14 @@ impl FileLogSink {
         self.directory.join(format!("{app_id}.log.1"))
     }
 
-    /// Everything this host kept for an app that is no longer on it. The handle goes before the
-    /// files do: one left open holds the bytes against the unlinked inode for as long as the
-    /// daemon runs, and would have whatever is deployed under this name next appending to output
-    /// it never wrote.
+    /// Everything this host kept for an app that is no longer on it, taken under the lock a
+    /// publish holds too, so that no batch lands between the handle going and the files. The
+    /// handle goes first: one left open holds the bytes against the unlinked inode for as long as
+    /// the daemon runs, and would have whatever is deployed under this name next appending to
+    /// output it never wrote.
     pub fn discard(&self, app_id: &AppId) {
-        drop(
-            self.writers
-                .lock()
-                .expect("no panic holds the log writer lock")
-                .remove(app_id),
-        );
+        let mut writers = self.writers.lock().expect("no panic holds the log writer lock");
+        drop(writers.remove(app_id));
         for path in [self.path_for(app_id), self.previous_path_for(app_id)] {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
