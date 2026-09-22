@@ -24,6 +24,8 @@ mod lifecycle;
 #[cfg(target_os = "linux")]
 mod sleep;
 #[cfg(target_os = "linux")]
+mod tenant;
+#[cfg(target_os = "linux")]
 mod volumes;
 
 #[cfg(target_os = "linux")]
