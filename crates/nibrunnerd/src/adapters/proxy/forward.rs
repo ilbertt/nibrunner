@@ -7,10 +7,13 @@ use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
+use protocol::AppId;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 use crate::domain::metrics::proxy::OpenRequest;
 
@@ -63,10 +66,8 @@ fn strip_hop_by_hop(headers: &mut hyper::HeaderMap) {
 
 // A connection the pool keeps to a guest is one that guest's kernel probes when nothing is on it,
 // and this host's answer is counted as traffic addressed to the app — Go servers probe every
-// fifteen seconds, so an app written in one never slept. It is also pinned to that guest by
-// conntrack, so a request reusing it after the guest was snapshotted would go to a paused machine
-// rather than to the activator. The pool evicts somewhere between once and twice this, which is
-// before the first probe and long before an idle window runs out.
+// fifteen seconds, so an app written in one never slept. The pool evicts somewhere between once
+// and twice this, which is before the first probe and long before an idle window runs out.
 const UPSTREAM_IDLE: Duration = Duration::from_secs(5);
 
 pub fn upstream_client() -> Client<HttpConnector, Incoming> {
@@ -80,6 +81,58 @@ fn upstream_client_dropping_idle_after(idle: Duration) -> Client<HttpConnector, 
         .pool_timer(TokioTimer::new())
         .pool_idle_timeout(idle)
         .build(connector)
+}
+
+/// The connections this proxy keeps into the guests, a pool of its own for each app.
+///
+/// An open connection is pinned to its guest by conntrack, and the ruleset that hands an app's
+/// host port to the activator does not touch it: a request reusing one after the guest was paused
+/// is carried into the paused machine rather than to the activator, and waits there for a restore
+/// nobody has asked for. Hyper's pool cannot be told to forget one address, so an app's
+/// connections are held apart from every other app's in order to be droppable at all.
+pub struct Upstreams {
+    clients: RwLock<BTreeMap<AppId, Client<HttpConnector, Incoming>>>,
+    idle: Duration,
+}
+
+impl Upstreams {
+    fn dropping_idle_after(idle: Duration) -> Self {
+        Self {
+            clients: RwLock::new(BTreeMap::new()),
+            idle,
+        }
+    }
+
+    pub async fn to(&self, app_id: &AppId) -> Client<HttpConnector, Incoming> {
+        if let Some(client) = self.clients.read().await.get(app_id) {
+            return client.clone();
+        }
+        self.clients
+            .write()
+            .await
+            .entry(app_id.clone())
+            .or_insert_with(|| upstream_client_dropping_idle_after(self.idle))
+            .clone()
+    }
+
+    /// What is idle is closed now, and what is still carrying an answer is left to finish and
+    /// closed when it has: either way the next request for this app opens a connection of its own.
+    pub async fn close_connections_to(&self, app_id: &AppId) {
+        self.clients.write().await.remove(app_id);
+    }
+
+    pub async fn keep_only(&self, apps: &BTreeSet<AppId>) {
+        self.clients
+            .write()
+            .await
+            .retain(|app_id, _| apps.contains(app_id));
+    }
+}
+
+impl Default for Upstreams {
+    fn default() -> Self {
+        Self::dropping_idle_after(UPSTREAM_IDLE)
+    }
 }
 
 fn rewritten(uri: &Uri, host: &str, port: u16) -> Uri {

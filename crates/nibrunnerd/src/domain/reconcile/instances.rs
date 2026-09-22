@@ -112,6 +112,9 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) -> 
     // the sleeps running side by side render the same ruleset once each has marked itself, and
     // loading the ruleset already in place costs nothing.
     crate::domain::reconcile::network::apply_network(host).await;
+    // That handover reaches only the connections still to be opened, so what the proxy already
+    // holds into this guest goes down with it.
+    host.router.close_connections_to(app_id).await;
     let started = std::time::Instant::now();
     settled(host, app_id, reason).await;
     let flushed = started.elapsed();
