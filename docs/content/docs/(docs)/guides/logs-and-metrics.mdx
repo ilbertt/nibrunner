@@ -49,6 +49,11 @@ journalctl -u nibrunnerd -f
 `NIBRUNNER_LOG` in the daemon's environment is a `tracing` filter, such as `debug` or
 `nibrunnerd::domain=trace`. Set it for one restart when you need more detail.
 
+Two libraries the daemon uses are held below that: `backhand`, which narrates every filesystem
+layer it packs, and `rustls`, which warns about clients that put an IP address where a hostname
+belongs. Errors from both still reach the journal, and naming either in `NIBRUNNER_LOG` —
+`backhand=info` — brings the rest back.
+
 ## Metrics
 
 Add `[metrics]` to `config.toml` and the host serves Prometheus metrics at `/metrics`:
