@@ -87,6 +87,14 @@ jobs:
       - name: Install nftables
         run: sudo apt-get install -y nftables
 
+      # Not checked in — a few hundred megabytes rebuilt from the pins in guest/manifest.json,
+      # which is what a guest the tests boot has to be built from.
+      - name: Build the guest image
+        run: just guest-image
+
+      - name: Check the guest image is the one its manifest describes
+        run: just verify-guest-image
+
       - name: Build the integration tests
         run: just integration --no-run
 

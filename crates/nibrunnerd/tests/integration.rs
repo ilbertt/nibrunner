@@ -425,3 +425,130 @@ async fn every_browse_verb_answers_from_a_running_guest() {
     );
     println!("every verb answered");
 }
+
+/// The guest image is built rather than checked in, so a machine that has not built one says so
+/// instead of failing on a file it was never going to have.
+#[cfg(target_os = "linux")]
+fn guest_image() -> Option<std::path::PathBuf> {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest");
+    directory.join("rootfs.ext4").exists().then_some(directory)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Default)]
+struct Heard(Arc<std::sync::Mutex<Vec<String>>>);
+
+#[cfg(target_os = "linux")]
+#[async_trait::async_trait]
+impl nibrunnerd::ports::LogSink for Heard {
+    async fn publish(&self, events: Vec<nibrunnerd::ports::TenantLogEvent>) {
+        let mut held = self.0.lock().unwrap();
+        for event in events {
+            if let nibrunnerd::ports::TenantLogBody::Data { text, .. } = event.body {
+                held.push(text);
+            }
+        }
+    }
+}
+
+// Nothing in this suite has ever booted a guest: the hypervisor is asked its version and no
+// further. This boots one the way the daemon boots one — the volume the real tool formatted, the
+// tap, the config image, the kernel this repository pins — and waits for the guest to say the
+// thing the document told it to say, which it can only say through init and the log socket.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_microvm_boots_and_its_guest_says_what_the_document_told_it_to() {
+    if !enabled() {
+        return;
+    }
+    require_root();
+    let Some(guest_image_dir) = guest_image() else {
+        eprintln!("guest/rootfs.ext4 is built rather than checked in, so nothing is booted");
+        return;
+    };
+    use nibrunnerd::adapters::volumes::VolumeBackend;
+    use nibrunnerd::ports::Vmm;
+    use nibrunnerd::test_support::{app_config, app_id, desired_instance};
+
+    const SAID: &str = "this guest ran what it was given";
+
+    let directory = tempfile::tempdir().unwrap();
+    let volumes: Arc<dyn VolumeBackend> = Arc::new(local_volumes(directory.path(), commands(), Vec::new()));
+    let attached = volumes
+        .provision(&protocol::DesiredVolume {
+            volume_id: protocol::VolumeId::parse("vol-1").unwrap(),
+            app_id: app_id(),
+            size_bytes: 64 * 1024 * 1024,
+            desired_state: protocol::DesiredPresence::Present,
+            initial_contents: None,
+        })
+        .await
+        .expect("the volume is made");
+
+    let heard = Heard::default();
+    let processes = nibrunnerd::adapters::vm::process::VmProcesses::new(directory.path().join("run"));
+    let console = processes.console_path(&app_id());
+    let vms = nibrunnerd::adapters::vm::manager::VmManager {
+        vm_dir: directory.path().join("vm"),
+        snapshot_dir: directory.path().join("snapshots"),
+        guest_image_version: nibrunnerd::adapters::vm::manager::verify_guest_image(&guest_image_dir)
+            .expect("the guest image is what its manifest describes"),
+        guest_image_dir,
+        firecracker: nibrunnerd::adapters::vm::process::extract_firecracker(directory.path())
+            .expect("a hypervisor"),
+        processes,
+        network: Arc::new(nibrunnerd::adapters::net::tap::KernelNetwork::open().expect("netlink")),
+        volumes: volumes.clone(),
+        logs: nibrunnerd::adapters::logs::receiver::TenantLogReceiver::new(),
+        sink: Arc::new(heard.clone()),
+        state: nibrunnerd::state::HostState::shared(),
+        metrics: Arc::new(nibrunnerd::domain::metrics::HostMetrics::new()),
+        in_flight: nibrunnerd::adapters::vm::snapshot::SnapshotsInFlight::default(),
+    };
+
+    let slot = nft_render::describe_slot(nft_render::FIRST_SLOT, app_id());
+    let desired = desired_instance(|instance| {
+        instance.layers = vec![];
+        instance.config = app_config(|config| {
+            config.command.program = protocol::GuestPath::parse("/bin/sh").unwrap();
+            config.command.args = vec!["-c".to_string(), format!("echo {SAID}; sleep 600")]
+                .try_into()
+                .unwrap();
+        });
+    });
+    vms.boot(nibrunnerd::ports::BootRequest {
+        desired,
+        slot: slot.clone(),
+        data_device_path: attached.device_path.clone(),
+        payload: nibrunnerd::ports::PreparedPayload {
+            layer_image_paths: vec![],
+            fetched_bytes: 0,
+        },
+    })
+    .await
+    .expect("the microVM starts");
+
+    let booted = std::time::Instant::now();
+    let said = loop {
+        if heard.0.lock().unwrap().iter().any(|line| line.contains(SAID)) {
+            break true;
+        }
+        if booted.elapsed() > std::time::Duration::from_secs(60) {
+            break false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    if !said {
+        println!(
+            "--- the guest's console ---\n{}",
+            std::fs::read_to_string(&console).unwrap_or_default()
+        );
+        println!("--- what was heard ---\n{:?}", heard.0.lock().unwrap());
+    }
+
+    let _ = vms.stop(&app_id()).await;
+    let _ = vms.delete_tap(&slot.tap_name).await;
+
+    assert!(said, "the guest never said it in 60s");
+    println!("the guest spoke {} ms after boot", booted.elapsed().as_millis());
+}
