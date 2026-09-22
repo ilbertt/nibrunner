@@ -214,12 +214,13 @@ pub(super) fn render(
         "When an app last answered a probe, as seconds since the epoch. 0 for one that never has.",
         "gauge",
     );
-    for instance in &report.instances {
+    for record in snapshot.records.values() {
         page.value(
             "nibrunner_instance_last_healthy_timestamp_seconds",
-            &[("app", instance.app_id.as_str())],
+            &[("app", record.app_id.as_str())],
             as_seconds(
-                instance
+                record
+                    .health
                     .last_healthy_at
                     .as_ref()
                     .map_or(0, |at| at.epoch_ms().max(0) as u64),
@@ -261,6 +262,7 @@ mod tests {
         host.state
             .put_record(instance_record(|record| {
                 record.start_attempts.attempts = 3;
+                record.health.last_healthy_at = Some(Timestamp::from_epoch_ms(1_700_000_000_250));
             }))
             .await;
         let metrics = &host.metrics.health;
@@ -273,9 +275,7 @@ mod tests {
         metrics.went_unhealthy(&app_id());
 
         let mut report = crate::domain::metrics::tests::report();
-        report.instances = vec![reported_instance(|instance| {
-            instance.last_healthy_at = Some(Timestamp::from_epoch_ms(1_700_000_000_250));
-        })];
+        report.instances = vec![reported_instance(|_| {})];
         let page = page(&report, &host.metrics, &host.state.snapshot().await, 0);
 
         assert_eq!(
@@ -327,9 +327,11 @@ mod tests {
     #[test]
     fn an_app_that_never_answered_reads_as_never_rather_than_as_a_gap() {
         let metrics = HostMetrics::default();
-        let mut report = crate::domain::metrics::tests::report();
-        report.instances = vec![reported_instance(|_| {})];
-        let page = page(&report, &metrics, &HostSnapshot::default(), 0);
+        let snapshot = HostSnapshot {
+            records: [(app_id(), instance_record(|_| {}))].into_iter().collect(),
+            ..HostSnapshot::default()
+        };
+        let page = page(&crate::domain::metrics::tests::report(), &metrics, &snapshot, 0);
         assert!(page.contains("nibrunner_instance_last_healthy_timestamp_seconds{app=\"app-1\"} 0.000\n"));
     }
 

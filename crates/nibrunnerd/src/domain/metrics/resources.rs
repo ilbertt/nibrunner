@@ -249,7 +249,7 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
         "gauge",
     );
     for volume in &scrape.report.volumes {
-        if let Some(usage) = &volume.usage {
+        if let Some(usage) = scrape.snapshot.volume_usage.get(&volume.app_id) {
             page.value(
                 "nibrunner_volume_used_bytes",
                 &[
@@ -353,9 +353,10 @@ pub(super) fn render(page: &mut Page, metrics: &ResourceMetrics, scrape: &Scrape
             "nibrunner_instance_measured_timestamp_seconds",
             &[("app", instance.app_id.as_str())],
             as_seconds(
-                instance
-                    .compute
-                    .as_ref()
+                scrape
+                    .snapshot
+                    .compute_usage
+                    .get(&instance.app_id)
                     .map_or(0, |compute| compute.measured_at.epoch_ms().max(0) as u64),
             ),
         );
@@ -391,13 +392,7 @@ mod tests {
         metrics.resources.starts_refused(StartRefusal::NoRoom, 742);
 
         let mut report = crate::domain::metrics::tests::report();
-        report.volumes = vec![reported_volume(|volume| {
-            volume.usage = Some(FilesystemUsage {
-                total_bytes: 4_096,
-                used_bytes: 512,
-                measured_at: observed_at(),
-            });
-        })];
+        report.volumes = vec![reported_volume(|_| {})];
         report.checkpoints = vec![ReportedCheckpoint {
             checkpoint_id: checkpoint_id(),
             volume_id: volume_id(),
@@ -414,15 +409,31 @@ mod tests {
             ready_at: None,
             message: None,
         }];
-        report.instances = vec![reported_instance(|instance| {
-            instance.compute = Some(ComputeUsage {
-                memory_total_bytes: 1,
-                memory_used_bytes: 1,
-                cpu_share: None,
-                measured_at: Timestamp::from_epoch_ms(1_700_000_000_000),
-            });
-        })];
-        let snapshot = HostSnapshot::default();
+        report.instances = vec![reported_instance(|_| {})];
+        let snapshot = HostSnapshot {
+            volume_usage: [(
+                app_id(),
+                FilesystemUsage {
+                    total_bytes: 4_096,
+                    used_bytes: 512,
+                    measured_at: observed_at(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            compute_usage: [(
+                app_id(),
+                ComputeUsage {
+                    memory_total_bytes: 1,
+                    memory_used_bytes: 1,
+                    cpu_share: None,
+                    measured_at: Timestamp::from_epoch_ms(1_700_000_000_000),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..HostSnapshot::default()
+        };
         let page = render(
             &metrics,
             &Scrape {

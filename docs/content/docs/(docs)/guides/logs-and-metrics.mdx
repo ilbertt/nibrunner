@@ -8,7 +8,11 @@ description: reported.json, per-app logs, and the Prometheus endpoint.
 After every reconcile pass, the daemon writes `reported.json` to `paths.state_dir`
 (`/var/lib/nibrunner/reported.json` on a host set up by the installer). It holds the state of
 every volume, instance, checkpoint and export in `desired.json`, with a reason where one is
-needed: an instance that cannot start, a file the host rejected, an export that failed.
+needed: an instance that cannot start, a file the host rejected, an export that failed. It also
+holds what the host has and what is left of it, which is what decides whether another app fits.
+
+It holds no measurements. What an app is using and what it has used are on the metrics endpoint
+below.
 
 ```bash
 jq '.instances[] | {appId, state, message}' /var/lib/nibrunner/reported.json
@@ -60,7 +64,8 @@ belongs. Errors from both still reach the journal, and naming either in `NIBRUNN
 
 ## Metrics
 
-Add `[metrics]` to `config.toml` and the host serves Prometheus metrics at `/metrics`:
+A host set up by the installer serves Prometheus metrics at `/metrics` on loopback. The
+`[metrics]` section of `config.toml` sets where:
 
 ```toml
 [metrics]
@@ -68,16 +73,23 @@ listen_address = "127.0.0.1"
 port = 9100
 ```
 
-The metrics are built from the same state as `reported.json`, so the two never disagree. Every
-series is prefixed `nibrunner_`. They cover:
+This is the only place measurements are published. Every series is prefixed `nibrunner_`. They
+cover:
 
 - The state of each instance, volume, checkpoint and export, one-hot encoded.
 - How long a converge, a sleep and a wake took, by phase.
 - The proxy's requests by outcome. `served` is any answer the app gave, whatever its status.
   `unreachable` is the 502 the proxy writes when the app did not answer at all.
 - Each app's requests by status class, and the proxy's TLS handshakes.
-- Each app's CPU, memory, disk and network.
+- Each app's CPU, memory, disk and network, both what it is using now and what it has used.
 - The host's slots, memory and capacity.
+
+### Bill from the totals, not from a rate
+
+`nibrunner_instance_cpu_seconds_total`, `_network_bytes_total`, `_disk_mib_seconds_total` and
+`_time_seconds_total` only ever go up. What a period cost is the figure at its end less the
+figure at its start, so a scrape nobody took is resolution nobody has rather than usage nobody
+billed. A counter that goes backwards is a host that was reinstalled.
 
 ### Alert on conntrack
 

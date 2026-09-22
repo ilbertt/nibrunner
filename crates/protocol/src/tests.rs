@@ -182,11 +182,8 @@ fn a_report_omits_what_it_does_not_know() {
         restart_count: 0,
         last_restart: None,
         started_at: None,
-        last_healthy_at: None,
         converged_at: None,
         last_exit_code: Some(0),
-        compute: None,
-        meters: UsageMeters::default(),
         message: None,
     };
     let written = serde_json::to_value(&instance).unwrap();
@@ -196,13 +193,10 @@ fn a_report_omits_what_it_does_not_know() {
     assert!(written.get("message").is_none());
     assert!(written.get("lastRestart").is_none());
     assert_eq!(written["hostPort"], 21000);
-    // An app that has used nothing has used nothing, which is a figure and not an absence.
-    assert_eq!(written["meters"]["runningMs"], 0);
-    assert_eq!(written["meters"]["rxBytes"], 0);
 }
 
 #[test]
-fn a_report_written_before_anything_was_metered_still_reads_back() {
+fn a_report_written_before_a_tenant_had_ever_restarted_still_reads_back() {
     let older = serde_json::json!({
         "appId": "app-1",
         "deploymentId": "dep-1",
@@ -210,8 +204,8 @@ fn a_report_written_before_anything_was_metered_still_reads_back() {
         "restartCount": 0
     });
     let read: ReportedInstance = serde_json::from_value(older).unwrap();
-    assert_eq!(read.meters, UsageMeters::default());
     assert_eq!(read.last_restart, None);
+    assert_eq!(read.restart_count, 0);
 }
 
 #[test]
@@ -551,11 +545,6 @@ mod schema {
                 size_bytes: 4096,
                 storage_prefix: Some(ObjectKey::parse("volumes/vol-1").unwrap()),
                 device_path: Some("/dev/nbd0".into()),
-                usage: Some(FilesystemUsage {
-                    total_bytes: 4096,
-                    used_bytes: 1024,
-                    measured_at: now.clone(),
-                }),
                 message: Some(StateMessage::new("mounted")),
             }],
             instances: vec![ReportedInstance {
@@ -582,24 +571,8 @@ mod schema {
                     },
                 }),
                 started_at: Some(now.clone()),
-                last_healthy_at: Some(now.clone()),
                 converged_at: Some(now.clone()),
                 last_exit_code: Some(0),
-                compute: Some(ComputeUsage {
-                    memory_total_bytes: 268_435_456,
-                    memory_used_bytes: 1_048_576,
-                    cpu_share: Some(0.25),
-                    measured_at: now.clone(),
-                }),
-                meters: UsageMeters {
-                    running_ms: 60_000,
-                    idle_ms: 30_000,
-                    cpu_ms: 12_000,
-                    rx_bytes: 4096,
-                    tx_bytes: 8192,
-                    disk_provisioned_mib_seconds: 368_640,
-                    disk_used_mib_seconds: 90,
-                },
                 message: Some(StateMessage::new("healthy")),
             }],
             checkpoints: vec![ReportedCheckpoint {
@@ -873,11 +846,6 @@ mod schema {
                 serde_json::json!({ "status": 137 }),
             ),
             without(reported_json(), "/instances/0/lastRestart/reason"),
-            with(
-                reported_json(),
-                "/instances/0/meters/cpuMs",
-                serde_json::json!(-1),
-            ),
             with(reported_json(), "/volumes/0/state", serde_json::json!("lost")),
             without(reported_json(), "/capacity"),
         ];

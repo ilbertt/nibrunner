@@ -335,8 +335,6 @@ pub struct ReportedInstance {
     pub last_restart: Option<ReportedRestart>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Timestamp>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_healthy_at: Option<Timestamp>,
     /// When the instance first became what the document asks of it, for the `deploymentId` and
     /// `desiredState` it now carries. Absent while it is still on its way there, and for a
     /// deployment this host was not there to see arrive.
@@ -344,12 +342,6 @@ pub struct ReportedInstance {
     pub converged_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compute: Option<ComputeUsage>,
-    // Not optional the way `compute` is: a guest that never answered has no usage to report, but
-    // an app this host has only ever held a record of has used nothing, and nothing is a number.
-    #[serde(default)]
-    pub meters: UsageMeters,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<StateMessage>,
 }
@@ -366,8 +358,6 @@ pub struct ReportedVolume {
     pub storage_prefix: Option<ObjectKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<FilesystemUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<StateMessage>,
 }

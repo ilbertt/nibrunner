@@ -76,7 +76,6 @@ pub fn to_reported_volume(observed: &ObservedVolume, last_refusal: Option<&State
         size_bytes: observed.size_bytes,
         storage_prefix: Some(observed.storage_prefix.clone()),
         device_path: observed.device_path.clone(),
-        usage: None,
         message,
     }
 }
@@ -199,7 +198,6 @@ async fn provision_volume(
             size_bytes: attached.size_bytes,
             storage_prefix: Some(attached.storage_prefix),
             device_path: Some(attached.device_path),
-            usage: None,
             message: None,
         },
         Err(error) => {
@@ -216,7 +214,6 @@ async fn provision_volume(
                 size_bytes: desired.size_bytes,
                 storage_prefix: None,
                 device_path: None,
-                usage: None,
                 message: Some(refusal),
             }
         }
@@ -257,7 +254,6 @@ async fn tear_down_volume(host: &Host, desired: &protocol::DesiredVolume) {
                 size_bytes: 0,
                 storage_prefix: None,
                 device_path: None,
-                usage: None,
                 message: None,
             };
             host.state.remember_deleted_volume(report.clone()).await;

@@ -212,11 +212,8 @@ pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedIn
         restart_count: 0,
         last_restart: None,
         started_at: None,
-        last_healthy_at: None,
         converged_at: None,
         last_exit_code: None,
-        compute: None,
-        meters: Default::default(),
         message: None,
     };
     edit(&mut value);
@@ -255,7 +252,6 @@ pub fn reported_volume(edit: impl FnOnce(&mut ReportedVolume)) -> ReportedVolume
         size_bytes: VOLUME_SIZE_BYTES,
         storage_prefix: None,
         device_path: None,
-        usage: None,
         message: None,
     };
     edit(&mut value);
