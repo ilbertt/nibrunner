@@ -1,0 +1,13 @@
+---
+title: Metrics
+description: Every series the host's Prometheus endpoint publishes.
+---
+
+What the host serves at `/metrics`, from the `[metrics]` section of `config.toml`. Every series is
+prefixed `nibrunner_`, and what follows names what is being measured. Anything labelled `app` is
+about one app and nothing else, which is what a per-app dashboard filters on.
+
+A `histogram` publishes three series the table does not list one by one: `_bucket` with an extra
+`le` label, `_sum` and `_count`.
+
+<MetricsReference file="crates/nibrunnerd/metrics.json" />

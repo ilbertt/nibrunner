@@ -87,6 +87,7 @@ come from, regenerate and commit; CI's `just check-<recipe>` fails otherwise:
 - `deploy/config.example.toml` from `HostConfig::example` in `crates/nibrunnerd/src/config.rs` —
   `just config-example`
 - `deploy/config.schema.json` from `HostConfig::schema` in the same file — `just config-schema`
+- `crates/nibrunnerd/metrics.json` from `domain::metrics::declared` — `just metrics`
 - `.sqlx/` from every `sqlx::query!` — `cargo sqlx prepare` against a SQLite file with
   `crates/nibrunnerd/migrations` applied. The build reads the committed data and needs no
   database; a query it does not know fails to compile.
@@ -126,6 +127,8 @@ Pages are MDX under `docs/content/docs/`: `(docs)/index.mdx` is the introduction
 `(docs)/getting-started/` is read in order, `(docs)/guides/` is one feature per page, and the
 `reference/` pages are rendered from the JSON Schemas by `<SchemaReference file="..." />`, which
 `docs/src/lib/remark-schema-reference.ts` expands at build time — no generated MDX is checked in.
+`reference/metrics.mdx` is the same shape over `crates/nibrunnerd/metrics.json`, through
+`<MetricsReference file="..." />` and `remark-metrics-reference.ts`.
 A page that moves leaves its old path in the `moved` map in `docs/src/routes/docs/$.tsx`. Link the
 docs by their nibrunner.dev URL, from the daemon's messages and the README alike. Style: short,
 steps and tables first, the why in a callout. `just docs-build` produces `docs/dist/app`, one Linux

@@ -23,6 +23,10 @@ path = "src/bin/config-example.rs"
 name = "config-schema"
 path = "src/bin/config-schema.rs"
 
+[[bin]]
+name = "metrics"
+path = "src/bin/metrics.rs"
+
 [dependencies]
 protocol.workspace = true
 guest-contract.workspace = true
