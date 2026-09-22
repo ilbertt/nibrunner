@@ -21,6 +21,8 @@ mod idle;
 mod lifecycle;
 #[cfg(target_os = "linux")]
 mod sleep;
+#[cfg(target_os = "linux")]
+mod volumes;
 
 #[cfg(target_os = "linux")]
 pub use nibrunnerd::test_support::machine::RunningHost;
