@@ -93,6 +93,7 @@ docs-build:
 protocol_schemas := "crates/protocol/schema"
 config_example := "deploy/config.example.toml"
 config_schema := "deploy/config.schema.json"
+metrics := "crates/nibrunnerd/metrics.json"
 
 # The JSON Schemas in crates/protocol/schema, from the protocol crate's types.
 schema into=protocol_schemas:
@@ -111,6 +112,13 @@ config-schema into=config_schema:
     cargo run -q -p nibrunnerd --bin config-schema -- "{{into}}"
 
 check-config-schema: (check-generated "config-schema" config_schema)
+
+# crates/nibrunnerd/metrics.json — every series the scrape page publishes — from the declarations
+# the page renders. The docs site's reference page is rendered from this file.
+metrics into=metrics:
+    cargo run -q -p nibrunnerd --bin metrics -- "{{into}}"
+
+check-metrics: (check-generated "metrics" metrics)
 
 # Runs `recipe` into a scratch copy of `path` — a file, or a directory of them — and diffs the two.
 [private]

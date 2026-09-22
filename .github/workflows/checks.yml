@@ -70,6 +70,9 @@ jobs:
       - name: Check the configuration schema is current
         run: just check-config-schema
 
+      - name: Check the metrics are current
+        run: just check-metrics
+
   integration:
     runs-on: ubuntu-latest
     steps:

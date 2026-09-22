@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react';
 import { fumadocsMdx } from 'fumadocs-mdx/vite';
 import { nitro } from 'nitro/vite';
 import { defineConfig } from 'vite';
+import { remarkMetricsReference } from './src/lib/remark-metrics-reference.js';
 import { remarkSchemaReference } from './src/lib/remark-schema-reference.js';
 
 export default defineConfig({
@@ -14,7 +15,7 @@ export default defineConfig({
     fumadocsMdx({
       globalOptions: {
         mdxOptions: {
-          remarkPlugins: (defaults) => [remarkSchemaReference, ...defaults],
+          remarkPlugins: (defaults) => [remarkSchemaReference, remarkMetricsReference, ...defaults],
         },
       },
     }),
