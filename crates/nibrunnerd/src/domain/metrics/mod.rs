@@ -356,6 +356,27 @@ pub fn declared() -> Vec<&'static Metric> {
     .concat()
 }
 
+/// One sample of every series [`declared`], rendered by the page that renders the real ones.
+///
+/// What promtool rates a page by is its samples: a series that is only described is not one it can
+/// hold to the naming rules, and a page of descriptions alone passes its lint saying nothing. The
+/// labels are the declared ones because a label's name is what the rules are about; the values are
+/// not, and are placeholders.
+pub fn page_of_every_series() -> String {
+    let unobserved = Histogram::over(&[]);
+    let mut page = Page::new();
+    for metric in declared() {
+        let labels: Vec<(&str, &str)> = metric.labels.iter().map(|label| (*label, "x")).collect();
+        page.declare(metric);
+        match metric.kind {
+            Kind::Counter | Kind::Gauge => page.value(metric, &labels, 0),
+            Kind::Histogram => page.histogram(metric, &labels, &unobserved),
+            Kind::Summary => page.summary(metric, &labels, 0.0, 0),
+        }
+    }
+    page.0
+}
+
 pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     let (report, snapshot, now_ms) = (scrape.report, scrape.snapshot, scrape.now_ms);
     let mut page = Page::new();
