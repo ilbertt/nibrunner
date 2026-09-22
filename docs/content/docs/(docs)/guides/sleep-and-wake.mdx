@@ -45,6 +45,8 @@ Without `sleepWhen`, an `on-request` instance sleeps after five minutes idle. An
     rejected as a whole.
   - `idleTimeoutMs` is the old spelling of `sleepWhen: traffic-idle`. A file that sets both is
     rejected.
+  - A host that has not managed to read an app's traffic lately leaves it up rather than taking
+    the silence for quiet, and says so in its log. `max-lifetime` runs on the clock either way.
 </Callout>
 
 ## What wakes it

@@ -340,6 +340,19 @@ pub fn instance_record(edit: impl FnOnce(&mut InstanceRecord)) -> InstanceRecord
     value
 }
 
+/// What a reading of the counters that found the app last reached at `moment` leaves behind: the
+/// moment itself, and this host having just measured the app to arrive at it.
+pub async fn measured_quiet_since(state: &crate::state::SharedState, app_id: &AppId, moment: i64) {
+    state
+        .modify(|snapshot| {
+            snapshot.last_active_at_ms.insert(app_id.clone(), moment);
+            snapshot
+                .last_measured_at_ms
+                .insert(app_id.clone(), crate::clock::now_ms());
+        })
+        .await;
+}
+
 pub static ONE_HOST_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub struct TestHost {

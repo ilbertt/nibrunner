@@ -397,7 +397,7 @@ mod tests {
             .await
             .accept(desired_state(|state| state.instances = vec![on_request]));
         let quiet_since = crate::clock::now_ms() - protocol::DEFAULT_IDLE_TIMEOUT_MS as i64 - 1;
-        host.state.mark_active(&app_id(), quiet_since).await;
+        measured_quiet_since(&host.state, &app_id(), quiet_since).await;
 
         let sleeping = tokio::spawn({
             let host = host.arc().clone();
