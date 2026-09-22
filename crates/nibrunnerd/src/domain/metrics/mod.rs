@@ -123,6 +123,40 @@ pub(crate) fn as_seconds(ms: u64) -> String {
     format!("{}.{:03}", ms / 1_000, ms % 1_000)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Counter,
+    Gauge,
+    Histogram,
+    Summary,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Counter => "counter",
+            Kind::Gauge => "gauge",
+            Kind::Histogram => "histogram",
+            Kind::Summary => "summary",
+        }
+    }
+}
+
+/// A series as a scraper meets it: the name it is read by, the sentence it is published with, the
+/// kind it is rated as, and the labels every sample of it carries. Declared once, because a name
+/// written where it is described and again where it is emitted can differ by a character and the
+/// exposition format will carry both — `# HELP` and `# TYPE` are optional, so a page whose two
+/// halves disagree scrapes without complaint and answers nothing.
+///
+/// A histogram's `labels` are the ones its caller passes; `le` is this page's to add.
+#[derive(Debug)]
+pub struct Metric {
+    pub name: &'static str,
+    pub help: &'static str,
+    pub kind: Kind,
+    pub labels: &'static [&'static str],
+}
+
 pub(crate) struct Page(String);
 
 impl Page {
@@ -130,13 +164,27 @@ impl Page {
         Self(String::new())
     }
 
-    pub(crate) fn metric(&mut self, name: &str, help: &str, kind: &str) -> &mut Self {
+    pub(crate) fn declare(&mut self, metric: &Metric) {
+        let (name, help, kind) = (metric.name, metric.help, metric.kind.as_str());
         self.0
             .push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
-        self
     }
 
-    pub(crate) fn value(&mut self, name: &str, labels: &[(&str, &str)], value: impl std::fmt::Display) {
+    pub(crate) fn value(&mut self, metric: &Metric, labels: &[(&str, &str)], value: impl std::fmt::Display) {
+        debug_assert!(
+            labels
+                .iter()
+                .map(|(key, _)| *key)
+                .eq(metric.labels.iter().copied()),
+            "{} is declared with {:?} and was given {:?}",
+            metric.name,
+            metric.labels,
+            labels.iter().map(|(key, _)| *key).collect::<Vec<_>>()
+        );
+        self.sample(metric.name, labels, value);
+    }
+
+    fn sample(&mut self, name: &str, labels: &[(&str, &str)], value: impl std::fmt::Display) {
         if labels.is_empty() {
             self.0.push_str(&format!("{name} {value}\n"));
             return;
@@ -149,7 +197,33 @@ impl Page {
             .push_str(&format!("{name}{{{}}} {value}\n", rendered.join(",")));
     }
 
-    pub(crate) fn histogram(&mut self, name: &str, labels: &[(&str, &str)], histogram: &Histogram) {
+    pub(crate) fn summary(&mut self, metric: &Metric, labels: &[(&str, &str)], seconds: f64, count: u64) {
+        debug_assert!(
+            labels
+                .iter()
+                .map(|(key, _)| *key)
+                .eq(metric.labels.iter().copied()),
+            "{} is declared with {:?} and was given {:?}",
+            metric.name,
+            metric.labels,
+            labels.iter().map(|(key, _)| *key).collect::<Vec<_>>()
+        );
+        self.sample(&format!("{}_sum", metric.name), labels, seconds);
+        self.sample(&format!("{}_count", metric.name), labels, count);
+    }
+
+    pub(crate) fn histogram(&mut self, metric: &Metric, labels: &[(&str, &str)], histogram: &Histogram) {
+        debug_assert!(
+            labels
+                .iter()
+                .map(|(key, _)| *key)
+                .eq(metric.labels.iter().copied()),
+            "{} is declared with {:?} and was given {:?}",
+            metric.name,
+            metric.labels,
+            labels.iter().map(|(key, _)| *key).collect::<Vec<_>>()
+        );
+        let name = metric.name;
         let bucket = format!("{name}_bucket");
         let mut running = 0u64;
         for (index, bound) in histogram.bounds.iter().enumerate() {
@@ -157,13 +231,13 @@ impl Page {
             let mut with_bound = labels.to_vec();
             let bound = bound.to_string();
             with_bound.push(("le", &bound));
-            self.value(&bucket, &with_bound, running);
+            self.sample(&bucket, &with_bound, running);
         }
         let mut with_inf = labels.to_vec();
         with_inf.push(("le", "+Inf"));
-        self.value(&bucket, &with_inf, histogram.count());
-        self.value(&format!("{name}_sum"), labels, histogram.seconds());
-        self.value(&format!("{name}_count"), labels, histogram.count());
+        self.sample(&bucket, &with_inf, histogram.count());
+        self.sample(&format!("{name}_sum"), labels, histogram.seconds());
+        self.sample(&format!("{name}_count"), labels, histogram.count());
     }
 }
 
@@ -173,149 +247,214 @@ fn metered(snapshot: &HostSnapshot, app_id: &protocol::AppId) -> protocol::Usage
     snapshot.meters.get(app_id).copied().unwrap_or_default()
 }
 
+static UP: Metric = Metric {
+    name: "nibrunner_up",
+    help: "Whether this daemon answered the scrape.",
+    kind: Kind::Gauge,
+    labels: &[],
+};
+
+static HOST_CAPACITY: Metric = Metric {
+    name: "nibrunner_host_capacity",
+    help: "What the host has, by resource.",
+    kind: Kind::Gauge,
+    labels: &["resource"],
+};
+
+static HOST_ALLOCATABLE: Metric = Metric {
+    name: "nibrunner_host_allocatable",
+    help: "What the host has left to give a new app.",
+    kind: Kind::Gauge,
+    labels: &["resource"],
+};
+
+static APP_STATE: Metric = Metric {
+    name: "nibrunner_app_state",
+    help: "1 for the state an app is in, 0 for every state it is not.",
+    kind: Kind::Gauge,
+    labels: &["app", "state"],
+};
+
+static APP_RESTARTS_TOTAL: Metric = Metric {
+    name: "nibrunner_app_restarts_total",
+    help:
+        "Times an app's tenant has been restarted inside its guest since the host last booted the app afresh.",
+    kind: Kind::Counter,
+    labels: &["app"],
+};
+
+static APP_MEMORY_USED_BYTES: Metric = Metric {
+    name: "nibrunner_app_memory_used_bytes",
+    help: "What a guest reported using, when it was last measured.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+static APP_CPU_SHARE: Metric = Metric {
+    name: "nibrunner_app_cpu_share",
+    help: "The share of one vCPU a guest was using, when it was last measured.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+static APP_TIME_SECONDS_TOTAL: Metric = Metric {
+    name: "nibrunner_app_time_seconds_total",
+    help: "How long an app has been held, by what it was holding: memory while it runs, a snapshot on disk while it sleeps.",
+    kind: Kind::Counter,
+    labels: &["app", "holding"],
+};
+
+static APP_CPU_SECONDS_TOTAL: Metric = Metric {
+    name: "nibrunner_app_cpu_seconds_total",
+    help: "What an app's guest has reported spending, summed across the vCPUs it was given.",
+    kind: Kind::Counter,
+    labels: &["app"],
+};
+
+static APP_NETWORK_BYTES_TOTAL: Metric = Metric {
+    name: "nibrunner_app_network_bytes_total",
+    help: "What has crossed an app's tap, by which way it went. Only what was let out is counted as sent.",
+    kind: Kind::Counter,
+    labels: &["app", "direction"],
+};
+
+static APP_DISK_MIB_SECONDS_TOTAL: Metric = Metric {
+    name: "nibrunner_app_disk_mib_seconds_total",
+    help: "What an app has held on disk over time: what was set aside for it, and what its guest reported filling.",
+    kind: Kind::Counter,
+    labels: &["app", "disk"],
+};
+
+pub(super) static DECLARED: &[&Metric] = &[
+    &UP,
+    &HOST_CAPACITY,
+    &HOST_ALLOCATABLE,
+    &APP_STATE,
+    &APP_RESTARTS_TOTAL,
+    &APP_MEMORY_USED_BYTES,
+    &APP_CPU_SHARE,
+    &APP_TIME_SECONDS_TOTAL,
+    &APP_CPU_SECONDS_TOTAL,
+    &APP_NETWORK_BYTES_TOTAL,
+    &APP_DISK_MIB_SECONDS_TOTAL,
+];
+
+/// Every series this page publishes, in the order it renders them. What is declared here is what
+/// the reference the docs site renders is written from, and a test holds the page to emitting all
+/// of it.
+pub fn declared() -> Vec<&'static Metric> {
+    [
+        DECLARED,
+        proxy::DECLARED,
+        sleep_wake::DECLARED,
+        passes::DECLARED,
+        converge::DECLARED,
+        health::DECLARED,
+        resources::DECLARED,
+        conntrack::DECLARED,
+    ]
+    .concat()
+}
+
 pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     let (report, snapshot, now_ms) = (scrape.report, scrape.snapshot, scrape.now_ms);
     let mut page = Page::new();
 
-    page.metric(
-        "nibrunner_up",
-        "Whether this daemon answered the scrape.",
-        "gauge",
-    );
-    page.value("nibrunner_up", &[], 1);
+    page.declare(&UP);
+    page.value(&UP, &[], 1);
 
-    page.metric(
-        "nibrunner_host_capacity",
-        "What the host has, by resource.",
-        "gauge",
-    );
+    page.declare(&HOST_CAPACITY);
     for (resource, value) in [
         ("vcpu", u64::from(report.capacity.vcpu_count)),
         ("memory_mib", report.capacity.memory_mib),
         ("cache_bytes", report.capacity.cache_bytes),
     ] {
-        page.value("nibrunner_host_capacity", &[("resource", resource)], value);
+        page.value(&HOST_CAPACITY, &[("resource", resource)], value);
     }
 
-    page.metric(
-        "nibrunner_host_allocatable",
-        "What the host has left to give a new app.",
-        "gauge",
-    );
+    page.declare(&HOST_ALLOCATABLE);
     for (resource, value) in [
         ("vcpu", u64::from(report.allocatable.vcpu_count)),
         ("memory_mib", report.allocatable.memory_mib),
         ("cache_bytes", report.allocatable.cache_bytes),
     ] {
-        page.value("nibrunner_host_allocatable", &[("resource", resource)], value);
+        page.value(&HOST_ALLOCATABLE, &[("resource", resource)], value);
     }
 
     // One series per state rather than a number standing for one, so a query reads as the word the
     // report uses and a state nothing is in is a zero rather than a gap.
-    page.metric(
-        "nibrunner_app_state",
-        "1 for the state an app is in, 0 for every state it is not.",
-        "gauge",
-    );
+    page.declare(&APP_STATE);
     for instance in &report.instances {
         for state in INSTANCE_STATES {
             page.value(
-                "nibrunner_app_state",
+                &APP_STATE,
                 &[("app", instance.app_id.as_str()), ("state", state.as_str())],
                 u8::from(instance.state == state),
             );
         }
     }
 
-    page.metric(
-        "nibrunner_app_restarts_total",
-        "Times an app's tenant has been restarted inside its guest since the host last booted the app afresh.",
-        "counter",
-    );
+    page.declare(&APP_RESTARTS_TOTAL);
     for instance in &report.instances {
         page.value(
-            "nibrunner_app_restarts_total",
+            &APP_RESTARTS_TOTAL,
             &[("app", instance.app_id.as_str())],
             instance.restart_count,
         );
     }
 
-    page.metric(
-        "nibrunner_app_memory_used_bytes",
-        "What a guest reported using, when it was last measured.",
-        "gauge",
-    );
+    page.declare(&APP_MEMORY_USED_BYTES);
     for instance in &report.instances {
         if let Some(compute) = snapshot.compute_usage.get(&instance.app_id) {
             page.value(
-                "nibrunner_app_memory_used_bytes",
+                &APP_MEMORY_USED_BYTES,
                 &[("app", instance.app_id.as_str())],
                 compute.memory_used_bytes,
             );
         }
     }
 
-    page.metric(
-        "nibrunner_app_cpu_share",
-        "The share of one vCPU a guest was using, when it was last measured.",
-        "gauge",
-    );
+    page.declare(&APP_CPU_SHARE);
     for instance in &report.instances {
         if let Some(share) = snapshot
             .compute_usage
             .get(&instance.app_id)
             .and_then(|compute| compute.cpu_share)
         {
-            page.value(
-                "nibrunner_app_cpu_share",
-                &[("app", instance.app_id.as_str())],
-                share,
-            );
+            page.value(&APP_CPU_SHARE, &[("app", instance.app_id.as_str())], share);
         }
     }
 
     // The only place these are published. They are totals rather than rates on purpose: what a
     // period cost is the figure at its end less the figure at its start, so a scrape nobody took
     // is a resolution nobody has rather than usage nobody billed.
-    page.metric(
-        "nibrunner_app_time_seconds_total",
-        "How long an app has been held, by what it was holding: memory while it runs, a snapshot on disk while it sleeps.",
-        "counter",
-    );
+    page.declare(&APP_TIME_SECONDS_TOTAL);
     for instance in &report.instances {
         let meters = metered(snapshot, &instance.app_id);
         for (holding, ms) in [("running", meters.running_ms), ("idle", meters.idle_ms)] {
             page.value(
-                "nibrunner_app_time_seconds_total",
+                &APP_TIME_SECONDS_TOTAL,
                 &[("app", instance.app_id.as_str()), ("holding", holding)],
                 as_seconds(ms),
             );
         }
     }
 
-    page.metric(
-        "nibrunner_app_cpu_seconds_total",
-        "What an app's guest has reported spending, summed across the vCPUs it was given.",
-        "counter",
-    );
+    page.declare(&APP_CPU_SECONDS_TOTAL);
     for instance in &report.instances {
         page.value(
-            "nibrunner_app_cpu_seconds_total",
+            &APP_CPU_SECONDS_TOTAL,
             &[("app", instance.app_id.as_str())],
             as_seconds(metered(snapshot, &instance.app_id).cpu_ms),
         );
     }
 
-    page.metric(
-        "nibrunner_app_network_bytes_total",
-        "What has crossed an app's tap, by which way it went. Only what was let out is counted as sent.",
-        "counter",
-    );
+    page.declare(&APP_NETWORK_BYTES_TOTAL);
     for instance in &report.instances {
         let meters = metered(snapshot, &instance.app_id);
         for (direction, bytes) in [("rx", meters.rx_bytes), ("tx", meters.tx_bytes)] {
             page.value(
-                "nibrunner_app_network_bytes_total",
+                &APP_NETWORK_BYTES_TOTAL,
                 &[("app", instance.app_id.as_str()), ("direction", direction)],
                 bytes,
             );
@@ -325,11 +464,7 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     // Mebibyte-seconds rather than bytes, and named for it: what a volume holds is a level, so
     // what accumulates is that level multiplied by how long it was held, and the byte-milliseconds
     // that would be the base-unit form of it outrun a 64-bit counter on a large volume.
-    page.metric(
-        "nibrunner_app_disk_mib_seconds_total",
-        "What an app has held on disk over time: what was set aside for it, and what its guest reported filling.",
-        "counter",
-    );
+    page.declare(&APP_DISK_MIB_SECONDS_TOTAL);
     for instance in &report.instances {
         let meters = metered(snapshot, &instance.app_id);
         for (disk, held) in [
@@ -337,7 +472,7 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
             ("used", meters.disk_used_mib_seconds),
         ] {
             page.value(
-                "nibrunner_app_disk_mib_seconds_total",
+                &APP_DISK_MIB_SECONDS_TOTAL,
                 &[("app", instance.app_id.as_str()), ("disk", disk)],
                 held,
             );
@@ -414,6 +549,148 @@ pub(crate) mod tests {
 
     fn rendered(report: &HostReportedState, metrics: &HostMetrics) -> String {
         page(report, metrics, &HostSnapshot::default(), 0)
+    }
+
+    /// A scrape of a host holding one of everything, so that a series rendered only when there
+    /// is something to render it for is still rendered.
+    fn page_of_a_busy_host() -> String {
+        use crate::test_support::*;
+        let metrics = HostMetrics::new();
+        metrics
+            .proxy
+            .answered(Outcome::Served, Duration::from_millis(2), Some(&app_id()));
+        metrics.proxy.raw_bytes(&app_id(), proxy::Protocol::Tcp, 1, 2);
+        metrics
+            .proxy
+            .raw_session(&app_id(), proxy::Protocol::Tcp, proxy::RawOutcome::Served);
+        metrics.sleep_wake.woke(Duration::from_millis(10), false);
+        metrics.sleep_wake.woken(
+            &app_id(),
+            crate::ports::WakeOutcome::Restored,
+            Duration::from_millis(10),
+            Duration::from_millis(5),
+        );
+        metrics.sleep_wake.slept(
+            &app_id(),
+            crate::domain::activation::SleepReason::Quiet,
+            sleep_wake::SleepOutcome::Slept,
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+        );
+        metrics.health.probed(&app_id(), true, Duration::from_millis(1));
+        metrics.resources.layer_cached();
+
+        let mut report = report();
+        report.instances = vec![reported_instance(|_| {})];
+        report.volumes = vec![reported_volume(|_| {})];
+        report.checkpoints = vec![protocol::ReportedCheckpoint {
+            checkpoint_id: checkpoint_id(),
+            volume_id: volume_id(),
+            state: protocol::CheckpointState::Ready,
+            reference: None,
+            ready_at: None,
+            message: None,
+        }];
+        report.exports = vec![protocol::ReportedExport {
+            export_id: export_id(),
+            checkpoint_id: None,
+            state: protocol::ExportState::Ready,
+            size_bytes: Some(2048),
+            ready_at: None,
+            message: None,
+        }];
+        let snapshot = HostSnapshot {
+            records: [(
+                app_id(),
+                instance_record(|record| {
+                    record.on_request = true;
+                    record.ports = vec![crate::domain::report::instance_record::RecordPort {
+                        name: protocol::PortName::parse("ssh").unwrap(),
+                        host_port: protocol::HostPort::new(22_000).unwrap(),
+                        guest_port: protocol::GuestPort::new(22).unwrap(),
+                    }];
+                }),
+            )]
+            .into_iter()
+            .collect(),
+            meters: [(app_id(), protocol::UsageMeters::default())]
+                .into_iter()
+                .collect(),
+            compute_usage: [(
+                app_id(),
+                ComputeUsage {
+                    memory_total_bytes: 100,
+                    memory_used_bytes: 40,
+                    cpu_share: Some(0.25),
+                    measured_at: Timestamp::from_epoch_ms(0),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            deploys: [(
+                app_id(),
+                converge::Deploy {
+                    deployment_id: deployment_id(),
+                    desired_state: protocol::DesiredInstanceState::OnRequest,
+                    cause: converge::Cause::Change,
+                    detected_at_ms: 0,
+                    layers_ready_at_ms: Some(0),
+                    volume_ready_at_ms: Some(0),
+                    booted_at_ms: Some(0),
+                    converged_at_ms: Some(1),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            volume_usage: [(
+                app_id(),
+                protocol::FilesystemUsage {
+                    total_bytes: 4096,
+                    used_bytes: 512,
+                    measured_at: Timestamp::from_epoch_ms(0),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..HostSnapshot::default()
+        };
+        render(
+            &metrics,
+            &Scrape {
+                report: &report,
+                snapshot: &snapshot,
+                now_ms: 1,
+                slots_used: 1,
+                slots_total: 1000,
+                memory_available_bytes: Some(1_000_000),
+                conntrack: Some(Conntrack {
+                    used: 1,
+                    max: 262_144,
+                }),
+            },
+        )
+    }
+
+    // A name written where a series is described and again where it is emitted can differ by a
+    // character, and the exposition format carries both halves without complaint. Declared once
+    // and held to here, so a series that is described and never emitted fails rather than reads
+    // as a scraper finding nothing.
+    #[test]
+    fn every_series_this_page_declares_is_one_it_emits() {
+        let page = page_of_a_busy_host();
+        for metric in declared() {
+            let emitted = match metric.kind {
+                Kind::Histogram | Kind::Summary => format!("{}_count", metric.name),
+                Kind::Counter | Kind::Gauge => metric.name.to_string(),
+            };
+            assert!(
+                page.lines().any(|line| {
+                    line.starts_with(&format!("{emitted}{{")) || line.starts_with(&format!("{emitted} "))
+                }),
+                "{} is declared and never emitted",
+                metric.name
+            );
+        }
     }
 
     fn lines_for<'a>(page: &'a str, name: &str) -> Vec<&'a str> {
@@ -520,7 +797,7 @@ pub(crate) mod tests {
 
     #[test]
     fn every_series_is_introduced_before_it_is_given_a_value() {
-        let page = rendered(&report(), &HostMetrics::new());
+        let page = page_of_a_busy_host();
         for line in page
             .lines()
             .filter(|line| !line.starts_with('#') && !line.is_empty())

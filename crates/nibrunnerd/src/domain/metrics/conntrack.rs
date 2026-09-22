@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::domain::metrics::Page;
+use crate::domain::metrics::{Kind, Metric, Page};
 
 const COUNT: &str = "/proc/sys/net/netfilter/nf_conntrack_count";
 const MAX: &str = "/proc/sys/net/netfilter/nf_conntrack_max";
@@ -76,15 +76,20 @@ impl ConntrackWatch {
     }
 }
 
+static CONNTRACK_ENTRIES: Metric = Metric {
+    name: "nibrunner_conntrack_entries",
+    help: "The kernel's connection-tracking table, which every flow between the proxy and a guest and every flow a guest opens is an entry of, for its lifetime and 120 s after. Full, the kernel drops packets for every app on the host. max_apps in config.toml sizes the max. Absent where the kernel tracks nothing.",
+    kind: Kind::Gauge,
+    labels: &["of"],
+};
+
+pub(super) static DECLARED: &[&Metric] = &[&CONNTRACK_ENTRIES];
+
 pub(super) fn render(page: &mut Page, conntrack: Option<Conntrack>) {
-    page.metric(
-        "nibrunner_conntrack_entries",
-        "The kernel's connection-tracking table, which every flow between the proxy and a guest and every flow a guest opens is an entry of, for its lifetime and 120 s after. Full, the kernel drops packets for every app on the host. max_apps in config.toml sizes the max. Absent where the kernel tracks nothing.",
-        "gauge",
-    );
+    page.declare(&CONNTRACK_ENTRIES);
     if let Some(Conntrack { used, max }) = conntrack {
-        page.value("nibrunner_conntrack_entries", &[("of", "used")], used);
-        page.value("nibrunner_conntrack_entries", &[("of", "max")], max);
+        page.value(&CONNTRACK_ENTRIES, &[("of", "used")], used);
+        page.value(&CONNTRACK_ENTRIES, &[("of", "max")], max);
     }
 }
 

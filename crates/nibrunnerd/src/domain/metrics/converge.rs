@@ -5,7 +5,7 @@ use std::time::Duration;
 use protocol::{AppId, DeploymentId, DesiredInstanceState, HostReportedState, InstanceState, Timestamp};
 
 use crate::desired::Changes;
-use crate::domain::metrics::{as_seconds, Histogram, Page};
+use crate::domain::metrics::{as_seconds, Histogram, Kind, Metric, Page};
 use crate::host::Host;
 use crate::state::HostState;
 
@@ -284,6 +284,50 @@ pub async fn observe(host: &Host, now_ms: i64) {
         .await;
 }
 
+static CONVERGE_SECONDS: Metric = Metric {
+    name: "nibrunner_converge_seconds",
+    help: "How long giving an app what its document asked for took, from the change being noticed, by the stretch of the work: fetching its layers, readying its volume, booting it, and waiting for it to be ready. Total is the whole of it.",
+    kind: Kind::Histogram,
+    labels: &["phase", "desired_state", "cause"],
+};
+
+static CONVERGE_OUTCOMES_TOTAL: Metric = Metric {
+    name: "nibrunner_converge_outcomes_total",
+    help:
+        "Asks this host set out on, by how they ended: the app got there, or the next ask for it came first.",
+    kind: Kind::Counter,
+    labels: &["desired_state", "cause", "outcome"],
+};
+
+static APP_CONVERGED: Metric = Metric {
+    name: "nibrunner_app_converged",
+    help: "1 while an app is what its document asks for, 0 while it is not.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+static APP_CONVERGING_SECONDS: Metric = Metric {
+    name: "nibrunner_app_converging_seconds",
+    help: "How long an app has been on its way to what its document asks for. 0 once it got there.",
+    kind: Kind::Gauge,
+    labels: &["app"],
+};
+
+static APP_LAST_CONVERGE_SECONDS: Metric = Metric {
+    name: "nibrunner_app_last_converge_seconds",
+    help: "What the last ask for an app took, by the stretch of the work. Absent while one is under way.",
+    kind: Kind::Gauge,
+    labels: &["app", "phase"],
+};
+
+pub(super) static DECLARED: &[&Metric] = &[
+    &CONVERGE_SECONDS,
+    &CONVERGE_OUTCOMES_TOTAL,
+    &APP_CONVERGED,
+    &APP_CONVERGING_SECONDS,
+    &APP_LAST_CONVERGE_SECONDS,
+];
+
 pub(super) fn render(
     page: &mut Page,
     report: &HostReportedState,
@@ -291,16 +335,12 @@ pub(super) fn render(
     deploys: &BTreeMap<AppId, Deploy>,
     now_ms: i64,
 ) {
-    page.metric(
-        "nibrunner_converge_seconds",
-        "How long giving an app what its document asked for took, from the change being noticed, by the stretch of the work: fetching its layers, readying its volume, booting it, and waiting for it to be ready. Total is the whole of it.",
-        "histogram",
-    );
+    page.declare(&CONVERGE_SECONDS);
     for phase in PHASES {
         for desired_state in DESIRED_STATES {
             for cause in CAUSES {
                 page.histogram(
-                    "nibrunner_converge_seconds",
+                    &CONVERGE_SECONDS,
                     &[
                         ("phase", phase.as_str()),
                         ("desired_state", desired_state.as_str()),
@@ -312,16 +352,12 @@ pub(super) fn render(
         }
     }
 
-    page.metric(
-        "nibrunner_converge_outcomes_total",
-        "Asks this host set out on, by how they ended: the app got there, or the next ask for it came first.",
-        "counter",
-    );
+    page.declare(&CONVERGE_OUTCOMES_TOTAL);
     for desired_state in DESIRED_STATES {
         for cause in CAUSES {
             for outcome in OUTCOMES {
                 page.value(
-                    "nibrunner_converge_outcomes_total",
+                    &CONVERGE_OUTCOMES_TOTAL,
                     &[
                         ("desired_state", desired_state.as_str()),
                         ("cause", cause.as_str()),
@@ -340,14 +376,10 @@ pub(super) fn render(
         .iter()
         .map(|instance| (&instance.app_id, (&instance.deployment_id, instance.state)))
         .collect();
-    page.metric(
-        "nibrunner_app_converged",
-        "1 while an app is what its document asks for, 0 while it is not.",
-        "gauge",
-    );
+    page.declare(&APP_CONVERGED);
     for (app_id, deploy) in deploys {
         page.value(
-            "nibrunner_app_converged",
+            &APP_CONVERGED,
             &[("app", app_id.as_str())],
             u8::from(is_converged(
                 &deploy.deployment_id,
@@ -357,11 +389,7 @@ pub(super) fn render(
         );
     }
 
-    page.metric(
-        "nibrunner_app_converging_seconds",
-        "How long an app has been on its way to what its document asks for. 0 once it got there.",
-        "gauge",
-    );
+    page.declare(&APP_CONVERGING_SECONDS);
     for (app_id, deploy) in deploys {
         let waiting = if deploy.is_open() {
             (now_ms - deploy.detected_at_ms).max(0) as u64
@@ -369,21 +397,17 @@ pub(super) fn render(
             0
         };
         page.value(
-            "nibrunner_app_converging_seconds",
+            &APP_CONVERGING_SECONDS,
             &[("app", app_id.as_str())],
             as_seconds(waiting),
         );
     }
 
-    page.metric(
-        "nibrunner_app_last_converge_seconds",
-        "What the last ask for an app took, by the stretch of the work. Absent while one is under way.",
-        "gauge",
-    );
+    page.declare(&APP_LAST_CONVERGE_SECONDS);
     for (app_id, deploy) in deploys {
         for (phase, ms) in deploy.phases() {
             page.value(
-                "nibrunner_app_last_converge_seconds",
+                &APP_LAST_CONVERGE_SECONDS,
                 &[("app", app_id.as_str()), ("phase", phase.as_str())],
                 as_seconds(ms),
             );
