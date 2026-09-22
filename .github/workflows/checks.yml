@@ -98,10 +98,85 @@ jobs:
         # where rustup, cargo and mise live.
         run: sudo -E env "PATH=$PATH" just integration
 
+  # Beside `integration` rather than in it: both want the machine's nftables table and its taps,
+  # and a job of its own is also a guest image built while the other tests are already running.
+  # Beside `integration` rather than in it: both want the machine's nftables table and its taps.
+  #
+  # Sharded because one microVM at a time is the only way to run these, and shared three ways
+  # rather than one per family because a runner is not free: laying a shard out costs about as
+  # long as a family takes to run, and this repository gets about five jobs at once, so a sixth
+  # shard would wait for a runner longer than it would save. The three are balanced by measured
+  # time — `sleep` snapshots and restores three times, `idle` waits out a timeout the protocol
+  # will not let a document set under a minute, and everything else together is the third.
+  guest:
+    name: guest (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    # A guest that never answers is a test failure, not a job that runs until GitHub stops it.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: sleep
+            families: sleep
+          - shard: idle+isolation
+            families: idle isolation
+          - shard: lifecycle+volumes+tenant+raw
+            families: lifecycle volumes tenant raw
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/prepare
+        with:
+          cache: enabled
+          prepare-for-build: enabled
+          # Every shard builds the same test binary, so they share one cache rather than warming
+          # one each.
+          shared-cache-key: guest
+
+      - name: Check the machine can host
+        run: ls -l /dev/net/tun /dev/kvm
+
+      - name: Install nftables
+        run: sudo apt-get install -y nftables
+
+      # The image is not checked in and every shard needs the same one, so it is built once for
+      # whatever the pins and the guest's own code say and then restored. Keyed on the manifest as
+      # committed, which is the input; what the build writes over it is part of what is kept.
+      - name: Guest image cache
+        id: guest-image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            guest/rootfs.ext4
+            guest/manifest.json
+          key: ${{ runner.os }}-guest-image-${{ hashFiles('guest/build-image.sh', 'guest/manifest.json', 'crates/init/**', 'crates/guest-contract/**') }}
+
+      - name: Build the guest image
+        if: steps.guest-image.outputs.cache-hit != 'true'
+        run: just guest-image
+
+      - name: Check the guest image is the one its manifest describes
+        run: just verify-guest-image
+
+      - name: Build the tests
+        run: just guest-tests --no-run
+
+      - name: Run the tests
+        # sudo's secure_path drops the runner's PATH, so it is handed back; -E keeps HOME, which is
+        # where rustup, cargo and mise live.
+        env:
+          FAMILIES: ${{ matrix.families }}
+        run: |
+          for family in $FAMILIES; do
+            sudo -E env "PATH=$PATH" just guest-tests "$family"
+          done
+
   checks-passed:
     if: always()
     name: checks:required
-    needs: [codestyle, lint, tests, generated, integration]
+    needs: [codestyle, lint, tests, generated, integration, guest]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
