@@ -98,9 +98,14 @@ async fn apply_stops(host: &Host, plan: &ReconcilePlan) {
                 let _ = host.vms.discard(&desired.app_id).await;
                 host.state.drop_record(&desired.app_id).await;
             }
+            // The one plan an app the document no longer names reaches, so the only one its
+            // output goes with: a replacement or a recovery is the same app, and keeps what it
+            // wrote. The discard detaches the log receiver, so nothing is still writing to the
+            // files taken below.
             InstancePlan::Forget { app_id } => {
                 let _ = host.vms.discard(app_id).await;
                 host.state.drop_record(app_id).await;
+                host.logs.discard(app_id);
             }
             _ => {}
         }
@@ -1369,6 +1374,89 @@ mod tests {
 
         assert_eq!(host.vms.calls(), vec![VmCall::Discard]);
         assert!(host.state.record(&app_id()).await.is_none());
+    }
+
+    async fn output_kept_for(host: &TestHost) -> std::path::PathBuf {
+        use crate::ports::{LogSink, TenantLogBody, TenantLogEvent};
+        host.logs
+            .publish(vec![TenantLogEvent {
+                app_id: app_id(),
+                deployment_id: deployment_id(),
+                source_id: "source-1".into(),
+                sequence: 0,
+                observed_at: observed_at(),
+                body: TenantLogBody::Data {
+                    stream: protocol::TenantLogStream::Stdout,
+                    text: "listening".into(),
+                },
+            }])
+            .await;
+        let path = host.logs.path_for(&app_id());
+        assert!(path.exists());
+        path
+    }
+
+    async fn stops_applied(host: &TestHost, action: InstancePlan) {
+        apply_stops(
+            host,
+            &ReconcilePlan {
+                instances: vec![action],
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_app_the_document_no_longer_names_loses_the_output_this_host_kept_for_it() {
+        let host = test_host().await;
+        host.state.put_record(instance_record(|_| {})).await;
+        let kept = output_kept_for(&host).await;
+
+        stops_applied(&host, InstancePlan::Forget { app_id: app_id() }).await;
+
+        assert!(!kept.exists());
+    }
+
+    #[tokio::test]
+    async fn an_app_the_document_still_names_keeps_its_output_through_a_stop_a_replacement_and_a_recovery() {
+        for action in [
+            InstancePlan::Stop {
+                app_id: app_id(),
+                reason: InstanceStopReason::DesiredStopped,
+            },
+            InstancePlan::Replace {
+                desired: desired_instance(|_| {}),
+            },
+            InstancePlan::Recover {
+                desired: desired_instance(|_| {}),
+            },
+        ] {
+            let host = test_host().await;
+            host.state.put_record(instance_record(|_| {})).await;
+            let kept = output_kept_for(&host).await;
+
+            stops_applied(&host, action.clone()).await;
+
+            assert!(kept.exists(), "{action:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_app_asleep_on_this_host_keeps_the_output_it_wrote_before_it_went_to_sleep() {
+        let host = test_host().await;
+        let plan = ReconcilePlan {
+            instances: vec![InstancePlan::Sleep {
+                desired: desired_instance(|_| {}),
+            }],
+            ..Default::default()
+        };
+        let kept = output_kept_for(&host).await;
+
+        apply_stops(&host, &plan).await;
+        apply_sleeps(&host, &plan).await;
+
+        assert!(kept.exists());
     }
 
     #[tokio::test]
