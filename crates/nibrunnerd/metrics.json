@@ -1,0 +1,572 @@
+[
+  {
+    "help": "Whether this daemon answered the scrape.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_up"
+  },
+  {
+    "help": "What the host has, by resource.",
+    "kind": "gauge",
+    "labels": [
+      "resource"
+    ],
+    "name": "nibrunner_host_capacity"
+  },
+  {
+    "help": "What the host has left to give a new app.",
+    "kind": "gauge",
+    "labels": [
+      "resource"
+    ],
+    "name": "nibrunner_host_allocatable"
+  },
+  {
+    "help": "1 for the state an app is in, 0 for every state it is not.",
+    "kind": "gauge",
+    "labels": [
+      "app",
+      "state"
+    ],
+    "name": "nibrunner_app_state"
+  },
+  {
+    "help": "Times an app's tenant has been restarted inside its guest since the host last booted the app afresh.",
+    "kind": "counter",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_restarts_total"
+  },
+  {
+    "help": "What a guest reported using, when it was last measured.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_memory_used_bytes"
+  },
+  {
+    "help": "The share of one vCPU a guest was using, when it was last measured.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_cpu_share"
+  },
+  {
+    "help": "How long an app has been held, by what it was holding: memory while it runs, a snapshot on disk while it sleeps.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "holding"
+    ],
+    "name": "nibrunner_app_time_seconds_total"
+  },
+  {
+    "help": "What an app's guest has reported spending, summed across the vCPUs it was given.",
+    "kind": "counter",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_cpu_seconds_total"
+  },
+  {
+    "help": "What has crossed an app's tap, by which way it went. Only what was let out is counted as sent.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "direction"
+    ],
+    "name": "nibrunner_app_network_bytes_total"
+  },
+  {
+    "help": "What an app has held on disk over time: what was set aside for it, and what its guest reported filling.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "disk"
+    ],
+    "name": "nibrunner_app_disk_mib_seconds_total"
+  },
+  {
+    "help": "Requests this proxy answered, by what it answered with.",
+    "kind": "counter",
+    "labels": [
+      "outcome"
+    ],
+    "name": "nibrunner_proxy_requests_total"
+  },
+  {
+    "help": "Deciding a route and getting an answer back from the app. Ends when the response is handed on to be written, so it counts neither the handshake before it nor the write after.",
+    "kind": "histogram",
+    "labels": [],
+    "name": "nibrunner_proxy_request_duration_seconds"
+  },
+  {
+    "help": "Requests the proxy has taken and not yet answered.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_proxy_requests_in_flight"
+  },
+  {
+    "help": "TLS handshakes at the proxy, by how they ended.",
+    "kind": "counter",
+    "labels": [
+      "outcome"
+    ],
+    "name": "nibrunner_proxy_tls_handshakes_total"
+  },
+  {
+    "help": "What requests to one app cost this proxy. Divide the rate of the sum by the rate of the count for that app's mean.",
+    "kind": "summary",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_request_duration_seconds"
+  },
+  {
+    "help": "Requests routed to an app, by the class of the status that came back. A 502 for an app that could not be reached is the proxy's and counted apart below.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "class"
+    ],
+    "name": "nibrunner_app_requests_total"
+  },
+  {
+    "help": "Requests routed to an app that nothing answered, so the proxy answered 502 for it.",
+    "kind": "counter",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_requests_unreachable_total"
+  },
+  {
+    "help": "Requests routed to an app that are still being answered: from arrival until the last byte of the response body, or until a websocket closes. An app with one open is not quiet.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_requests_open"
+  },
+  {
+    "help": "Sessions on an app's raw ports — a TCP connection, or a UDP client address — by what came of them: relayed, the app was down, its wake was refused, or it would not take the session. Only for apps with a raw port.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "protocol",
+      "outcome"
+    ],
+    "name": "nibrunner_raw_port_sessions_total"
+  },
+  {
+    "help": "What the relay carried on an app's raw ports, by which way it went: in is towards the app. A TCP session's bytes are counted when it ends.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "protocol",
+      "direction"
+    ],
+    "name": "nibrunner_raw_port_bytes_total"
+  },
+  {
+    "help": "Bringing a sleeping app back for the request that asked for it, from the request reaching the waker to the app being ready to be forwarded one, whether it set the wake going or joined one under way. On an on-request host this is the population that makes the tail of nibrunner_proxy_request_duration_seconds.",
+    "kind": "histogram",
+    "labels": [],
+    "name": "nibrunner_wake_duration_seconds"
+  },
+  {
+    "help": "Pausing a guest that has gone quiet and writing its memory out. Scales with the memory the app was given, so it is the cost of the sleep rather than of the app.",
+    "kind": "histogram",
+    "labels": [],
+    "name": "nibrunner_vm_snapshot_duration_seconds"
+  },
+  {
+    "help": "Bringing a guest back from the snapshot it slept in. The other half of the sleep, and cheaper than it by orders of magnitude.",
+    "kind": "histogram",
+    "labels": [],
+    "name": "nibrunner_vm_restore_duration_seconds"
+  },
+  {
+    "help": "One wake, by how it was done and the stretch of it: waiting for what readyWhen names once the microVM was back, and the whole. Total less ready is bringing the microVM back; the VMM's own part of that is nibrunner_vm_restore_duration_seconds.",
+    "kind": "histogram",
+    "labels": [
+      "phase",
+      "outcome"
+    ],
+    "name": "nibrunner_wake_phase_seconds"
+  },
+  {
+    "help": "Requests that found a wake of their app already under way and waited on it.",
+    "kind": "counter",
+    "labels": [],
+    "name": "nibrunner_wake_requests_coalesced_total"
+  },
+  {
+    "help": "The request that woke an app, from being handed to the app to the app answering it. What being ready was worth.",
+    "kind": "histogram",
+    "labels": [],
+    "name": "nibrunner_wake_first_response_seconds"
+  },
+  {
+    "help": "Wakes this host refused, by why.",
+    "kind": "counter",
+    "labels": [
+      "reason"
+    ],
+    "name": "nibrunner_wake_refusals_total"
+  },
+  {
+    "help": "What the HTTP activator answered requests for on-request apps with. The proxy counts every one of these as served, because serving it is what it did.",
+    "kind": "counter",
+    "labels": [
+      "answer"
+    ],
+    "name": "nibrunner_activator_responses_total"
+  },
+  {
+    "help": "Putting an app to sleep, by why and the stretch of it: how late the policy was acted on past what it allowed, asking the guest to flush, and the whole of the flush and the snapshot. The snapshot alone is nibrunner_vm_snapshot_duration_seconds.",
+    "kind": "histogram",
+    "labels": [
+      "phase",
+      "reason"
+    ],
+    "name": "nibrunner_sleep_phase_seconds"
+  },
+  {
+    "help": "Times a policy said an app may sleep, by what came of it: it slept, its microVM refused to be snapshotted, or the snapshot failed.",
+    "kind": "counter",
+    "labels": [
+      "reason",
+      "outcome"
+    ],
+    "name": "nibrunner_sleep_outcomes_total"
+  },
+  {
+    "help": "Times an on-request app was woken by a request, by how.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "outcome"
+    ],
+    "name": "nibrunner_app_wakes_total"
+  },
+  {
+    "help": "What the last wake of an on-request app took. Absent until it has been woken.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_last_wake_seconds"
+  },
+  {
+    "help": "Times a policy said an on-request app may sleep, by what came of it.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "outcome"
+    ],
+    "name": "nibrunner_app_sleeps_total"
+  },
+  {
+    "help": "What the last sleep of an on-request app took, flush and snapshot. Absent until it has slept.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_last_sleep_seconds"
+  },
+  {
+    "help": "What this host runs, as labels on a 1.",
+    "kind": "gauge",
+    "labels": [
+      "agent",
+      "guest_image",
+      "firecracker",
+      "zerofs"
+    ],
+    "name": "nibrunner_build_info"
+  },
+  {
+    "help": "When this daemon started, as seconds since the epoch.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_process_start_time_seconds"
+  },
+  {
+    "help": "1 for the state the host reports itself in, 0 for every state it is not.",
+    "kind": "gauge",
+    "labels": [
+      "state"
+    ],
+    "name": "nibrunner_host_state"
+  },
+  {
+    "help": "1 once a pass over the document has run to the end since this daemon started.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_host_reconciled"
+  },
+  {
+    "help": "1 while every app is what its document asks for.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_host_converged"
+  },
+  {
+    "help": "1 while the last pass left work it could not do yet, such as a volume still held by an app on its way down.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_host_deferred_work"
+  },
+  {
+    "help": "1 while the isolation ruleset is applied. Nothing is started or woken while it is not.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_host_isolated"
+  },
+  {
+    "help": "A pass from the document to the host, by what set it going.",
+    "kind": "histogram",
+    "labels": [
+      "trigger"
+    ],
+    "name": "nibrunner_reconcile_seconds"
+  },
+  {
+    "help": "When the last pass over the document finished, as seconds since the epoch. 0 until one has.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_reconcile_last_pass_timestamp_seconds"
+  },
+  {
+    "help": "A pass from the host to the record: probing what is up, settling each state, applying the ruleset and the routes, writing down what it found.",
+    "kind": "histogram",
+    "labels": [],
+    "name": "nibrunner_refresh_seconds"
+  },
+  {
+    "help": "Times the desired state file was there and could not be read as a document.",
+    "kind": "counter",
+    "labels": [],
+    "name": "nibrunner_desired_state_unreadable_total"
+  },
+  {
+    "help": "When reported.json was last written, as seconds since the epoch. 0 until it has been.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_report_written_timestamp_seconds"
+  },
+  {
+    "help": "How long giving an app what its document asked for took, from the change being noticed, by the stretch of the work: fetching its layers, readying its volume, booting it, and waiting for it to be ready. Total is the whole of it.",
+    "kind": "histogram",
+    "labels": [
+      "phase",
+      "desired_state",
+      "cause"
+    ],
+    "name": "nibrunner_converge_seconds"
+  },
+  {
+    "help": "Asks this host set out on, by how they ended: the app got there, or the next ask for it came first.",
+    "kind": "counter",
+    "labels": [
+      "desired_state",
+      "cause",
+      "outcome"
+    ],
+    "name": "nibrunner_converge_outcomes_total"
+  },
+  {
+    "help": "1 while an app is what its document asks for, 0 while it is not.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_converged"
+  },
+  {
+    "help": "How long an app has been on its way to what its document asks for. 0 once it got there.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_converging_seconds"
+  },
+  {
+    "help": "What the last ask for an app took, by the stretch of the work. Absent while one is under way.",
+    "kind": "gauge",
+    "labels": [
+      "app",
+      "phase"
+    ],
+    "name": "nibrunner_app_last_converge_seconds"
+  },
+  {
+    "help": "A health probe, by what it found. One that found nothing ran out the check's timeout.",
+    "kind": "histogram",
+    "labels": [
+      "result"
+    ],
+    "name": "nibrunner_health_probe_seconds"
+  },
+  {
+    "help": "Probes of an app, by the kind of check and what it found. For a boot-completed check, a probe is the microVM being up.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "kind",
+      "result"
+    ],
+    "name": "nibrunner_app_health_probes_total"
+  },
+  {
+    "help": "Times an app failed, by where on the way up it did: refused by the document, no slot, its layers, its volume, the boot, the microVM stopping without being asked, nothing answering inside it, or its restarts running out.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "reason"
+    ],
+    "name": "nibrunner_app_failures_total"
+  },
+  {
+    "help": "Times an app that had been answering stopped, for long enough to be called unhealthy, by the kind of check that said so.",
+    "kind": "counter",
+    "labels": [
+      "app",
+      "kind"
+    ],
+    "name": "nibrunner_app_unhealthy_total"
+  },
+  {
+    "help": "When an app last answered a probe, as seconds since the epoch. 0 for one that never has.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_last_healthy_timestamp_seconds"
+  },
+  {
+    "help": "Starts attempted against an app's restart budget in its current window. Resets when a start has held for the policy's resetAfterMs.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_start_attempts"
+  },
+  {
+    "help": "Something done to storage or the artifact store on an app's behalf, by what and how it ended.",
+    "kind": "histogram",
+    "labels": [
+      "operation",
+      "outcome"
+    ],
+    "name": "nibrunner_storage_operation_seconds"
+  },
+  {
+    "help": "Layers a pass asked for that were already in the cache, so nothing was fetched.",
+    "kind": "counter",
+    "labels": [],
+    "name": "nibrunner_layers_cached_total"
+  },
+  {
+    "help": "What has been pulled from the artifact store, as the store sized it.",
+    "kind": "counter",
+    "labels": [],
+    "name": "nibrunner_layer_fetch_bytes_total"
+  },
+  {
+    "help": "1 for the state a volume is in, 0 for every state it is not.",
+    "kind": "gauge",
+    "labels": [
+      "volume",
+      "app",
+      "state"
+    ],
+    "name": "nibrunner_volume_state"
+  },
+  {
+    "help": "What a volume was set aside as.",
+    "kind": "gauge",
+    "labels": [
+      "volume",
+      "app"
+    ],
+    "name": "nibrunner_volume_size_bytes"
+  },
+  {
+    "help": "What a guest reported filling of its volume, when it was last measured. Absent until it has been.",
+    "kind": "gauge",
+    "labels": [
+      "volume",
+      "app"
+    ],
+    "name": "nibrunner_volume_used_bytes"
+  },
+  {
+    "help": "1 for the state a checkpoint is in, 0 for every state it is not.",
+    "kind": "gauge",
+    "labels": [
+      "checkpoint",
+      "volume",
+      "state"
+    ],
+    "name": "nibrunner_checkpoint_state"
+  },
+  {
+    "help": "1 for the state an export is in, 0 for every state it is not.",
+    "kind": "gauge",
+    "labels": [
+      "export",
+      "state"
+    ],
+    "name": "nibrunner_export_state"
+  },
+  {
+    "help": "What an export came to, once written. Absent until it has been.",
+    "kind": "gauge",
+    "labels": [
+      "export"
+    ],
+    "name": "nibrunner_export_size_bytes"
+  },
+  {
+    "help": "Slots on this host: each holds an app's ports, tap and guest address, and an app with none is refused. The total is max_apps in config.toml.",
+    "kind": "gauge",
+    "labels": [
+      "of"
+    ],
+    "name": "nibrunner_slots"
+  },
+  {
+    "help": "What the kernel says it could give out without swapping, as against the promises nibrunner_host_allocatable adds up. Absent where the kernel does not say.",
+    "kind": "gauge",
+    "labels": [],
+    "name": "nibrunner_host_memory_available_bytes"
+  },
+  {
+    "help": "Starts a pass refused, by why: no room in memory beside what is already up, or the isolation ruleset not applied. One refused for room waits, pending, and is planned again the next pass.",
+    "kind": "counter",
+    "labels": [
+      "reason"
+    ],
+    "name": "nibrunner_start_refusals_total"
+  },
+  {
+    "help": "When a guest last reported what it was using, as seconds since the epoch. 0 for one that never has; one that stopped is one this host can no longer hear.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_measured_timestamp_seconds"
+  },
+  {
+    "help": "The kernel's connection-tracking table, which every flow between the proxy and a guest and every flow a guest opens is an entry of, for its lifetime and 120 s after. Full, the kernel drops packets for every app on the host. max_apps in config.toml sizes the max. Absent where the kernel tracks nothing.",
+    "kind": "gauge",
+    "labels": [
+      "of"
+    ],
+    "name": "nibrunner_conntrack_entries"
+  }
+]

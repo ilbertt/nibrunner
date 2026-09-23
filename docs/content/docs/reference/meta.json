@@ -2,5 +2,5 @@
   "title": "Reference",
   "icon": "Braces",
   "root": true,
-  "pages": ["config", "desired", "reported"]
+  "pages": ["config", "desired", "reported", "metrics"]
 }
