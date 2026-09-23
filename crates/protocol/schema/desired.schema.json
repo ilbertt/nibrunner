@@ -26,6 +26,10 @@
         "$ref": "#/$defs/DesiredInstance"
       }
     },
+    "revision": {
+      "description": "What whoever wrote this document calls this version of it, carried back in the report as\n`acceptedRevision`. Nothing on the host reads it: it is not ordered and not checked\nagainst the one before it, so a document may name any version it likes. Required, so that\na control plane can always ask which of its own versions a host is on — and so a host\nanswering with one nobody wrote is impossible.",
+      "$ref": "#/$defs/Revision"
+    },
     "volumes": {
       "type": "array",
       "items": {
@@ -35,6 +39,7 @@
   },
   "required": [
     "hostId",
+    "revision",
     "volumes",
     "instances",
     "checkpoints",
@@ -687,6 +692,11 @@
         "backoffFactor",
         "resetAfterMs"
       ]
+    },
+    "Revision": {
+      "description": "between 1 and 128 printable characters, without spaces",
+      "type": "string",
+      "pattern": "^[\\x21-\\x7e]{1,128}$"
     },
     "Sha256Digest": {
       "description": "a lowercase hex sha-256",

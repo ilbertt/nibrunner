@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use nft_render::AppTraffic;
 use protocol::{
-    AppId, ComputeUsage, FilesystemUsage, ReportedVolume, Sha256Digest, StateMessage, UsageMeters, VolumeId,
+    AppId, ComputeUsage, FilesystemUsage, ReportedVolume, Revision, Sha256Digest, StateMessage, UsageMeters,
+    VolumeId,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, RwLock};
 
@@ -43,6 +44,7 @@ pub struct HostSnapshot {
     // control plane reading only that file sees which of its writes this host is on and why a
     // later one did not land.
     pub accepted_digest: Option<Sha256Digest>,
+    pub accepted_revision: Option<Revision>,
     pub desired_refusal: Option<StateMessage>,
 }
 

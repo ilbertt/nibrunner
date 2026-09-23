@@ -107,12 +107,24 @@ impl DesiredStateCache {
     }
 
     pub fn accept(&mut self, state: HostDesiredState) -> bool {
-        if self.latest.as_ref() == Some(&state) {
-            return false;
-        }
+        let moved = !self
+            .latest
+            .as_ref()
+            .is_some_and(|held| asks_the_same(held, &state));
         self.latest = Some(state);
-        true
+        moved
     }
+}
+
+/// Whether two documents ask for the same thing. `revision` is the control plane's own name for
+/// its document and means nothing to this host, so one that renamed itself and changed nothing
+/// else is not worth a pass — the report carries the new name either way.
+fn asks_the_same(held: &HostDesiredState, next: &HostDesiredState) -> bool {
+    *held
+        == HostDesiredState {
+            revision: held.revision.clone(),
+            ..next.clone()
+        }
 }
 
 pub struct DesiredStateWatch {
@@ -358,6 +370,29 @@ mod tests {
         assert!(cache.accept(one));
         assert!(cache.accept(empty.clone()));
         assert_eq!(cache.latest(), Some(&empty));
+    }
+
+    #[test]
+    fn a_document_that_only_renamed_itself_is_not_one_to_converge_on() {
+        let mut cache = DesiredStateCache::new();
+        let named = |revision: &str| {
+            desired_state(|state| {
+                state.revision = protocol::Revision::parse(revision).unwrap();
+                state.instances = vec![desired_instance(|_| {})];
+            })
+        };
+        assert!(cache.accept(named("deploy-1")));
+        assert!(!cache.accept(named("deploy-2")));
+        assert_eq!(
+            cache.latest().map(|held| held.revision.clone()),
+            Some(protocol::Revision::parse("deploy-2").unwrap()),
+            "the name it goes by moved even though what it asks for did not"
+        );
+
+        let moved = desired_state(|state| {
+            state.revision = protocol::Revision::parse("deploy-2").unwrap();
+        });
+        assert!(cache.accept(moved));
     }
 
     #[test]

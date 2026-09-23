@@ -16,6 +16,17 @@
         }
       ]
     },
+    "acceptedRevision": {
+      "description": "The `revision` that document named, if it named one — the control plane's own word for\nwhat this host is converging on, beside the digest that is this host's.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Revision"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "allocatable": {
       "description": "What is left once every booted app is taken off.",
       "$ref": "#/$defs/HostCapacity"
@@ -509,6 +520,11 @@
         "state",
         "sizeBytes"
       ]
+    },
+    "Revision": {
+      "description": "between 1 and 128 printable characters, without spaces",
+      "type": "string",
+      "pattern": "^[\\x21-\\x7e]{1,128}$"
     },
     "Sha256Digest": {
       "description": "a lowercase hex sha-256",

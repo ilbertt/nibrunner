@@ -331,6 +331,24 @@ validated_string!(
     { "minLength": 1, "maxLength": MAX_OBJECT_KEY_LENGTH }
 );
 
+const MAX_REVISION_LENGTH: usize = 128;
+const REVISION_PATTERN: &str = r"^[\x21-\x7e]{1,128}$";
+
+fn is_revision(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_REVISION_LENGTH && value.chars().all(|c| c.is_ascii_graphic())
+}
+
+validated_string!(
+    /// What a control plane calls a version of its document. Nothing here reads it — it is
+    /// carried from the desired document to the reported one untouched, so that whatever wrote
+    /// the document finds its own name for it rather than a digest it has to work out.
+    Revision,
+    "revision",
+    "between 1 and 128 printable characters, without spaces",
+    is_revision,
+    { "pattern": REVISION_PATTERN }
+);
+
 pub const MAX_STATE_MESSAGE_LENGTH: usize = 512;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
