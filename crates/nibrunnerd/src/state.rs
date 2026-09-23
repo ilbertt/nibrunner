@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use nft_render::AppTraffic;
-use protocol::{AppId, ComputeUsage, FilesystemUsage, ReportedVolume, StateMessage, UsageMeters, VolumeId};
+use protocol::{
+    AppId, ComputeUsage, FilesystemUsage, ReportedVolume, Sha256Digest, StateMessage, UsageMeters, VolumeId,
+};
 use tokio::sync::{Notify, OwnedMutexGuard, RwLock};
 
 use crate::domain::metrics::converge::Deploy;
@@ -36,9 +38,11 @@ pub struct HostSnapshot {
     pub converged: bool,
     pub deferred_work: bool,
     pub isolated: bool,
-    // The last document handed to this host was refused, and why; cleared when a readable one is
-    // taken up. Surfaced at the top of `reported.json` so a control plane reading only that file
-    // sees that its last write did not land.
+    // The document this host took up, by the digest of the bytes it was read from, and the
+    // refusal the last one was met with. Both are surfaced at the top of `reported.json`, so a
+    // control plane reading only that file sees which of its writes this host is on and why a
+    // later one did not land.
+    pub accepted_digest: Option<Sha256Digest>,
     pub desired_refusal: Option<StateMessage>,
 }
 

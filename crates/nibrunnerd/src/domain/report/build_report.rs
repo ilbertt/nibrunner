@@ -1,6 +1,6 @@
 use protocol::{
     HostCapacity, HostId, HostReportedState, HostState, HostVersions, ReportedCheckpoint, ReportedExport,
-    ReportedInstance, ReportedVolume, StateMessage, Timestamp,
+    ReportedInstance, ReportedVolume, Sha256Digest, StateMessage, Timestamp,
 };
 
 use crate::domain::report::InstanceRecord;
@@ -33,6 +33,7 @@ pub struct ReportInputs<'a> {
     pub volumes: Vec<ReportedVolume>,
     pub checkpoints: Vec<ReportedCheckpoint>,
     pub exports: Vec<ReportedExport>,
+    pub accepted_digest: Option<Sha256Digest>,
     pub message: Option<StateMessage>,
 }
 
@@ -48,6 +49,7 @@ pub fn build_reported_state(inputs: ReportInputs<'_>) -> HostReportedState {
         instances: inputs.records.iter().map(to_reported_instance).collect(),
         checkpoints: inputs.checkpoints,
         exports: inputs.exports,
+        accepted_digest: inputs.accepted_digest,
         message: inputs.message,
     }
 }
@@ -84,6 +86,7 @@ mod tests {
             volumes: vec![],
             checkpoints,
             exports,
+            accepted_digest: None,
             message: None,
         })
     }

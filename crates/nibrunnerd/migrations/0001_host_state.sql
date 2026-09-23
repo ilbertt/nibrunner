@@ -17,9 +17,13 @@ create table host_identity (
 -- is refused while the daemon runs — with the last good document left running rather than
 -- nothing. The one note here about what the host is *told* to be, and it is the daemon's rather
 -- than the operator's: the file is theirs to edit, this is not.
+-- `digest` is of the file's bytes rather than of `document`, which is this host's own rendering:
+-- it is what `reported.json` carries back for a control plane to check its write against, so it
+-- has to survive the restart the row is here for.
 create table accepted_document (
     only_row integer primary key check (only_row = 0),
-    document text    not null
+    document text    not null,
+    digest   text    not null
 ) strict;
 
 -- One integer per app, and every per-app resource derives from it: the loopback port, the tap, the

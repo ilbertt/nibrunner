@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into accepted_document (only_row, document, digest) values (0, ?, ?)\n             on conflict (only_row) do update set document = excluded.document, digest = excluded.digest",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f8a3a645e3e070919f7e86e36c569fec6ef2e8f314687a35eeef170c6c2a622d"
+}

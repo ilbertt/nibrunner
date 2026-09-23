@@ -26,9 +26,9 @@ impl StoreError {
     }
 }
 
-pub fn read_text(path: &Path) -> Result<Option<String>, StoreError> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text.trim().to_string())),
+pub fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(StoreError::Unreadable {
             path: path.to_path_buf(),
@@ -37,19 +37,38 @@ pub fn read_text(path: &Path) -> Result<Option<String>, StoreError> {
     }
 }
 
-pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StoreError> {
-    let Some(text) = read_text(path)? else {
+pub fn read_text(path: &Path) -> Result<Option<String>, StoreError> {
+    let Some(bytes) = read_bytes(path)? else {
         return Ok(None);
     };
-    if text.is_empty() {
+    String::from_utf8(bytes)
+        .map(|text| Some(text.trim().to_string()))
+        .map_err(|error| StoreError::Unreadable {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        })
+}
+
+/// Apart from [`read_json`] so that a caller who needs the bytes a document came from — to say
+/// which one it took up, in the digest the report carries back — parses the very bytes it hashed
+/// rather than reading the file a second time.
+pub fn parse_json<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<Option<T>, StoreError> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
     }
-    serde_json::from_str(&text)
+    serde_json::from_slice(bytes)
         .map(Some)
         .map_err(|source| StoreError::Malformed {
             path: path.to_path_buf(),
             source,
         })
+}
+
+pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StoreError> {
+    let Some(bytes) = read_bytes(path)? else {
+        return Ok(None);
+    };
+    parse_json(path, &bytes)
 }
 
 /// A parent that is not there is made private, since what this writes is this host's own. One

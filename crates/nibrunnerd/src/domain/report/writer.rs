@@ -41,6 +41,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
         volumes: snapshot.volume_reports.clone(),
         checkpoints: snapshot.checkpoint_reports.clone(),
         exports: snapshot.export_reports.clone(),
+        accepted_digest: snapshot.accepted_digest.clone(),
         message: snapshot.desired_refusal.clone(),
     })
 }
@@ -103,6 +104,23 @@ mod tests {
             .message
             .expect("the refusal reaches the report");
         assert!(message.as_str().contains("missing field `instances`"));
+    }
+
+    #[tokio::test]
+    async fn a_report_says_which_document_this_host_took_up() {
+        let host = test_host().await;
+        assert_eq!(
+            build(&host, versions()).await.accepted_digest,
+            None,
+            "a host that has been handed nothing is on no document"
+        );
+
+        let document = accepted_document(desired_state(|_| {}));
+        host.remember_accepted_document(&document).await;
+        assert_eq!(
+            build(&host, versions()).await.accepted_digest,
+            Some(document.digest)
+        );
     }
 
     #[tokio::test]

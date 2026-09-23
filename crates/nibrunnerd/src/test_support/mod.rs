@@ -275,6 +275,15 @@ pub fn write_desired_state(path: &std::path::Path, state: &HostDesiredState) {
     crate::json_store::write_json(path, state).expect("a fixture writes where the test can");
 }
 
+/// A document as a host that had read it would hold it, digest and all.
+pub fn accepted_document(desired: HostDesiredState) -> crate::desired::AcceptedDocument {
+    let rendered = serde_json::to_vec(&desired).expect("a fixture renders");
+    crate::desired::AcceptedDocument {
+        digest: crate::desired::digest_of(&rendered),
+        desired,
+    }
+}
+
 pub fn observed_instance(edit: impl FnOnce(&mut ObservedInstance)) -> ObservedInstance {
     let mut value = ObservedInstance {
         app_id: app_id(),
