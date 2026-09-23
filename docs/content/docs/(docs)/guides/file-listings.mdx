@@ -1,30 +1,26 @@
 ---
 title: File listings
-description: Ask the host what an app's filesystem holds, over a local socket.
+description: A local socket that lists directories inside a running app.
 ---
 
-A control plane that shows an app's files needs to read them from inside a running microVM. The
-host will list a directory for you over a unix socket on the machine. It is off unless
-`config.toml` names a socket:
+The host lists directories inside a guest over a unix socket. It is off unless `config.toml`
+names one:
 
 ```toml
 [filesystem]
 socket = "/run/nibrunner/filesystem.sock"
 ```
 
-Run `nibrunnerd start` after the edit. The daemon creates the socket on the way up, owned by the
-account it runs as and readable by nobody else.
+Run `nibrunnerd start` after the edit.
 
 ## Asking
-
-One route, read with `GET`:
 
 ```bash
 curl --unix-socket /run/nibrunner/filesystem.sock \
   'http://localhost/apps/app-7/files?path=%2Fdata'
 ```
 
-`path` is a directory inside the guest, percent-encoded. The answer is JSON:
+`path` is percent-encoded.
 
 ```json
 {
@@ -37,28 +33,23 @@ curl --unix-socket /run/nibrunner/filesystem.sock \
 }
 ```
 
-`kind` is `file`, `directory` or `other`. One answer carries at most 1000 entries; past that the
-list is cut and `truncated` is `true`.
+`kind` is `file`, `directory` or `other`. An answer carries at most 1000 entries; past that it is
+cut and `truncated` is `true`.
 
-## What it does not do
-
-It lists directories. It does not read a file's contents, write anything, or accept any
-instruction about what the host should run — that stays `desired.json`'s to say, the same way the
-metrics endpoint only ever reports.
+Listings are all it serves. It does not read file contents, and it takes no input: what the host
+runs stays `desired.json`'s to say.
 
 ## Sleeping apps
 
-Asking about an app that is asleep wakes it, exactly as an HTTP request to it would, and the
-listing is answered once it is up. The request also counts as activity, so the app is not put back
-to sleep while the answer is being assembled, and its idle timer starts again from the moment you
-asked.
+Asking about a sleeping app wakes it, as an HTTP request would, and the listing is answered once
+it is up. The request counts as activity, so the idle timer restarts from the moment you ask.
 
 <Callout type="warn">
-  A file browser left open does not keep an app awake, but every click wakes it. On a host where
-  most apps are asleep, listing them all is a lot of microVMs booted at once.
+  Every click in a file browser wakes the app it points at. Browsing a host where most apps are
+  asleep boots them.
 </Callout>
 
-## When it refuses
+## Refusals
 
 | Status | Means |
 | --- | --- |
@@ -66,17 +57,18 @@ asked.
 | `403` | The guest would not list that directory |
 | `404` | No such route, or this host runs no such app |
 | `409` | The app is stopped, so there is no guest to ask |
-| `503` | The app could not be woken — often because the host has no memory left |
+| `502` | The guest answered with bytes the host could not read |
+| `503` | The app could not be woken, usually for want of memory |
 | `504` | The guest took the request and never answered |
 
-Every refusal carries a sentence saying which:
+The body says which:
 
 ```json
 { "message": "this host has no room to wake app-7: it is 512 MiB short" }
 ```
 
-## Who may ask
+## Access
 
-Anything that can read the socket can list any app's files on the host. Put it somewhere only the
-daemon's own account reaches — `/run/nibrunner` on a host the installer set up — and give the
-account you want asking from membership rather than widening the socket.
+The daemon creates the socket on the way up, mode `0600`, owned by the account it runs as — root
+on a host the installer set up. Anything asking must run as that account, and anything that can
+read the socket can list any app's files.
