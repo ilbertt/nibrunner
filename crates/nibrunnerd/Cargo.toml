@@ -27,6 +27,10 @@ path = "src/bin/config-schema.rs"
 name = "metrics"
 path = "src/bin/metrics.rs"
 
+[[bin]]
+name = "metrics-page"
+path = "src/bin/metrics-page.rs"
+
 [dependencies]
 protocol.workspace = true
 guest-contract.workspace = true

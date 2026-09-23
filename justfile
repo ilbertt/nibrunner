@@ -73,10 +73,16 @@ fmt *args:
     cargo fmt --all {{args}}
     cd docs && bun run {{ if args =~ "--check" { "check:format" } else { "fix:format" } }}
 
+# The last of these is the scrape page, held to the naming rules Prometheus reads an exposition
+# page by. promtool rates a page by the samples on it, so what it is handed is a sample of every
+# series rather than the catalogue `just metrics` writes — and through a file, because promtool
+# finds nothing wrong with a page it was handed none of.
 lint:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cd docs && bun run check:types
     cd docs && bun run check:lint
+    cargo run -q -p nibrunnerd --bin metrics-page -- target/metrics-page.prom
+    promtool check metrics < target/metrics-page.prom
 
 # The docs site under docs/ is a Fumadocs app on Bun, which mise.toml pins; `bun install` in there first.
 docs-dev:
