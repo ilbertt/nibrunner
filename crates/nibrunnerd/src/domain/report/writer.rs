@@ -46,6 +46,23 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     })
 }
 
+/// Whether a report says what the one before it said.
+///
+/// `reportedAt` moves every time a report is built, and the capacity figures are readings of a
+/// disk that moves under every write — this host's own report and logs included — so neither is
+/// a change worth waking a watcher for. Everything else counts, so a field added to the report
+/// is compared without being remembered here. What this excuses is carried by the heartbeat the
+/// reporter writes on anyway, which is why free space can be up to that far behind.
+pub fn says_the_same(held: &HostReportedState, built: &HostReportedState) -> bool {
+    *held
+        == HostReportedState {
+            reported_at: held.reported_at.clone(),
+            capacity: held.capacity,
+            allocatable: held.allocatable,
+            ..built.clone()
+        }
+}
+
 pub fn write(path: &Path, report: &HostReportedState) -> bool {
     match crate::json_store::write_json(path, report) {
         Ok(()) => true,

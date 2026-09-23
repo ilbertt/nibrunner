@@ -105,7 +105,8 @@ Point `app-1.example.com` at the machine and the same request works from anywher
   in `desired.json`, with a reason when something failed. An instance that cannot start is
   explained here, not in a log. Its `acceptedDigest` is the `sha256sum` of the `desired.json` the
   daemon took up, so `sha256sum /var/lib/nibrunner/desired.json` tells you whether your last edit
-  landed; `message` says why if it did not.
+  landed; `message` says why if it did not. The file is rewritten when something changes, and
+  every 15 seconds whether or not anything did, so `reportedAt` shows the daemon is alive.
 - `/var/lib/nibrunner/logs/<appId>.log`: the app's stdout and stderr.
 - `journalctl -u nibrunnerd`: the daemon's own log.
 

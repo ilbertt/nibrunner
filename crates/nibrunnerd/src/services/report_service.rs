@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use protocol::{HostReportedState, HostVersions};
+use tokio::sync::Mutex;
 
 use crate::domain::report::writer;
 use crate::host::Host;
@@ -14,16 +16,35 @@ pub trait ReportService: Send + Sync {
     async fn publish(&self);
 }
 
+/// How long a host that has nothing new to say goes before saying it anyway, so that
+/// `reportedAt` is a sign of life rather than only of change. The status loop builds a report
+/// every second; writing each one renames the file sixty times a minute, and anything watching
+/// it — a control plane, an operator's `tail` — is woken by every one of them.
+const HEARTBEAT: Duration = Duration::from_secs(15);
+
+const HEARTBEAT_MS: i64 = HEARTBEAT.as_millis() as i64;
+
+struct Written {
+    report: HostReportedState,
+    at_ms: i64,
+}
+
 pub struct HostReporter {
     host: Arc<Host>,
     versions: HostVersions,
     path: PathBuf,
+    last: Mutex<Option<Written>>,
 }
 
 impl HostReporter {
     pub fn new(host: Arc<Host>, versions: HostVersions) -> Arc<Self> {
         let path = writer::reported_state_file(&host);
-        Arc::new(Self { host, versions, path })
+        Arc::new(Self {
+            host,
+            versions,
+            path,
+            last: Mutex::new(None),
+        })
     }
 }
 
@@ -35,11 +56,22 @@ impl ReportService for HostReporter {
 
     async fn publish(&self) {
         let report = self.build().await;
+        let now_ms = crate::clock::now_ms();
+        let mut last = self.last.lock().await;
+        if let Some(held) = last.as_ref() {
+            if writer::says_the_same(&held.report, &report) && now_ms - held.at_ms < HEARTBEAT_MS {
+                return;
+            }
+        }
         if writer::write(&self.path, &report) {
             self.host
                 .metrics
                 .passes
                 .report_written(report.reported_at.epoch_ms());
+            *last = Some(Written {
+                report,
+                at_ms: now_ms,
+            });
         }
     }
 }
@@ -51,7 +83,7 @@ mod tests {
     fn versions() -> HostVersions {
         crate::domain::report::versions::compiled_versions("v1.16.1", "6.1.180-test")
     }
-    use protocol::{HostState, InstanceState};
+    use protocol::{HostCapacity, HostState, InstanceState};
 
     #[tokio::test]
     async fn a_reporter_says_what_the_host_holds_and_under_which_versions() {
@@ -109,6 +141,74 @@ mod tests {
 
         let written: HostReportedState = crate::json_store::read_json(&path).unwrap().unwrap();
         assert!(written.instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_report_that_says_what_the_last_one_said_is_not_written_again() {
+        let host = test_host().await;
+        let reporter = HostReporter::new(host.arc().clone(), versions());
+        let path = writer::reported_state_file(&host);
+
+        host.state.put_record(instance_record(|_| {})).await;
+        reporter.publish().await;
+
+        std::fs::write(&path, b"what the heartbeat would replace").unwrap();
+        reporter.publish().await;
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "what the heartbeat would replace",
+            "nothing moved, so nothing was written"
+        );
+
+        host.state.drop_record(&app_id()).await;
+        reporter.publish().await;
+        let written: HostReportedState = crate::json_store::read_json(&path).unwrap().unwrap();
+        assert!(written.instances.is_empty(), "what moved is written at once");
+    }
+
+    #[tokio::test]
+    async fn a_host_with_nothing_new_to_say_still_says_it_once_a_heartbeat() {
+        let host = test_host().await;
+        let reporter = HostReporter::new(host.arc().clone(), versions());
+        let path = writer::reported_state_file(&host);
+        reporter.publish().await;
+
+        std::fs::write(&path, b"what the heartbeat would replace").unwrap();
+        reporter
+            .last
+            .lock()
+            .await
+            .as_mut()
+            .expect("one was written")
+            .at_ms -= HEARTBEAT_MS;
+        reporter.publish().await;
+
+        assert!(
+            crate::json_store::read_json::<HostReportedState>(&path)
+                .unwrap()
+                .is_some(),
+            "a report is a sign of life even when it says what the last one said"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disk_that_filled_under_this_host_is_not_by_itself_a_report_to_write() {
+        let host = test_host().await;
+        let report = HostReporter::new(host.arc().clone(), versions()).build().await;
+        let roomier = HostReportedState {
+            allocatable: HostCapacity {
+                cache_bytes: report.allocatable.cache_bytes / 2,
+                ..report.allocatable
+            },
+            ..report.clone()
+        };
+        assert!(writer::says_the_same(&report, &roomier));
+
+        let converged = HostReportedState {
+            state: HostState::Ready,
+            ..report.clone()
+        };
+        assert!(!writer::says_the_same(&report, &converged));
     }
 
     #[tokio::test]
