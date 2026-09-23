@@ -9,6 +9,7 @@
     "https",
     "raw-ports",
     "logs-and-metrics",
+    "file-listings",
     "host-capacity"
   ]
 }

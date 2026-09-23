@@ -195,6 +195,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         router: Router::new(metrics.clone()),
         tls,
         metrics,
+        waker: deferred(),
         activator,
         stream_activator,
         datagram_activator,
@@ -263,6 +264,14 @@ pub fn serve_proxy(host: &Arc<Host>) {
             tracing::error!(%error, secure = http.tls.is_some(), "the proxy could not listen");
         }
     });
+}
+
+/// Absent from the configuration is a host nothing can ask what a guest holds.
+pub fn serve_filesystem(host: &Arc<Host>) {
+    let Some(filesystem) = &host.config.filesystem else {
+        return;
+    };
+    crate::adapters::filesystem::serve(host, filesystem.socket.clone());
 }
 
 // The scrape surface. It is a second way to read what `reported.json` already says rather than a

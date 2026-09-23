@@ -53,6 +53,7 @@ tracing-subscriber.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true
+percent-encoding.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true

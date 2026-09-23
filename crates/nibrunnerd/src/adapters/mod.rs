@@ -1,5 +1,6 @@
 pub mod artifact_store;
 pub mod exec;
+pub mod filesystem;
 pub mod guest_measurements;
 pub mod logs;
 pub mod net;

@@ -143,6 +143,16 @@ pub struct MetricsConfig {
     pub listen_address: IpAddr,
 }
 
+/// Where something on this host asks what a guest holds.
+///
+/// A unix socket rather than a port, because the answer is a tenant's own files and the only
+/// callers are on this machine. It answers reads and takes no input: what this host runs is still
+/// the document's to say and nothing else's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesystemConfig {
+    pub socket: PathBuf,
+}
+
 /// How much of each app's output stays on disk. The newest `keep_bytes_per_app`, in two files:
 /// what the sink writes to, and the one before it. Nothing in this daemon reads them back; they
 /// are there for whoever tails them, and the cap is there because the disk they are on is the one
@@ -188,6 +198,7 @@ pub struct HostConfig {
     pub denied_egress_addresses_v6: Vec<String>,
     pub proxy: ProxyConfig,
     pub metrics: Option<MetricsConfig>,
+    pub filesystem: Option<FilesystemConfig>,
     pub logs: LogsConfig,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
@@ -288,6 +299,9 @@ mod file {
         /// Absent is a host that scrapes nothing.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) metrics: Option<Metrics>,
+        /// Absent is a host nothing can ask about a guest's files.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) filesystem: Option<Filesystem>,
         /// Absent keeps the newest 256 MiB of each app's output.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) logs: Option<Logs>,
@@ -513,6 +527,18 @@ mod file {
         pub(super) listen_address: Option<String>,
     }
 
+    /// What a guest holds, listed on request over a socket on this machine. Nothing here is an
+    /// input: it answers reads, and what this host runs stays the document's to say.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[schemars(rename = "filesystem")]
+    pub(super) struct Filesystem {
+        /// Where the socket is put. Whoever may read it may list any app's files, so it belongs
+        /// somewhere only this host's own account can reach.
+        #[schemars(pattern(ABSOLUTE_PATH))]
+        pub(super) socket: Option<String>,
+    }
+
     /// How much of each app's output stays on disk, under `paths.state_dir/logs`. Nothing on the
     /// host reads it back: it is there to be tailed.
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -640,6 +666,7 @@ impl HostConfig {
 
         let proxy = proxy(document.proxy.as_ref(), max_apps)?;
         let metrics = metrics(document.metrics.as_ref(), &proxy, &backend, max_apps)?;
+        let filesystem = filesystem(document.filesystem.as_ref())?;
         let logs = logs(document.logs.as_ref())?;
 
         Ok(Self {
@@ -676,6 +703,7 @@ impl HostConfig {
             )?,
             proxy,
             metrics,
+            filesystem,
             logs,
             export_store_url: object_store_url(
                 "exports.store_url",
@@ -735,6 +763,7 @@ impl HostConfig {
             denied_egress_addresses_v6: vec![],
             proxy: ProxyConfig::default(),
             metrics: None,
+            filesystem: None,
             logs: LogsConfig::default(),
             export_store_url: state_dir.join("export-store").display().to_string(),
             export_staging_dir: state_dir.join("exports"),
@@ -745,7 +774,8 @@ impl HostConfig {
 
     /// A host with every section in it: volumes in an object store reached from the guest over
     /// NBD, artifacts and exports in S3, TLS behind an edge that presents a client certificate,
-    /// raw ports for a relay, a metrics page, what is kept of each app's output.
+    /// raw ports for a relay, a metrics page, a socket to ask what a guest holds, what is kept of
+    /// each app's output.
     /// `deploy/config.example.toml` is this, rendered.
     ///
     /// Written out field by field rather than as changes to [`Self::starter`], so that a section
@@ -798,6 +828,9 @@ impl HostConfig {
             metrics: Some(MetricsConfig {
                 port: 9100,
                 listen_address: IpAddr::from([127, 0, 0, 1]),
+            }),
+            filesystem: Some(FilesystemConfig {
+                socket: PathBuf::from("/run/nibrunner/filesystem.sock"),
             }),
             logs: LogsConfig::default(),
             export_store_url: "s3://nibrunner-exports-eu-west-2-123456789012/exports".to_string(),
@@ -893,6 +926,9 @@ impl HostConfig {
             metrics: self.metrics.as_ref().map(|metrics| file::Metrics {
                 port: Some(metrics.port),
                 listen_address: Some(metrics.listen_address.to_string()),
+            }),
+            filesystem: self.filesystem.as_ref().map(|filesystem| file::Filesystem {
+                socket: text(&filesystem.socket),
             }),
             logs: Some(file::Logs {
                 keep_mib_per_app: Some(self.logs.keep_bytes_per_app / BYTES_PER_MEBIBYTE),
@@ -1057,6 +1093,15 @@ fn metrics(
     Ok(Some(MetricsConfig {
         port,
         listen_address: bind_address("metrics.listen_address", &document.listen_address)?,
+    }))
+}
+
+fn filesystem(document: Option<&file::Filesystem>) -> Result<Option<FilesystemConfig>, ConfigError> {
+    let Some(document) = document else {
+        return Ok(None);
+    };
+    Ok(Some(FilesystemConfig {
+        socket: path_key("filesystem.socket", &document.socket)?,
     }))
 }
 
@@ -1913,6 +1958,27 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
             .is_some());
         assert!(config.proxy.raw.is_some());
         assert!(config.metrics.is_some());
+        assert!(config.filesystem.is_some());
+    }
+
+    #[test]
+    fn a_host_nothing_asks_about_a_guests_files_serves_no_socket_to_ask_on() {
+        assert_eq!(parsed(&whole()).filesystem, None);
+        assert_eq!(
+            with("[filesystem]\nsocket = \"/run/nibrunner/filesystem.sock\"\n").filesystem,
+            Some(FilesystemConfig {
+                socket: PathBuf::from("/run/nibrunner/filesystem.sock"),
+            })
+        );
+    }
+
+    #[test]
+    fn a_socket_that_is_not_somewhere_this_host_can_put_one_is_refused_by_name() {
+        for named in ["filesystem.sock", ""] {
+            let message = refused(&document(&[], &format!("[filesystem]\nsocket = \"{named}\"\n")));
+            assert!(message.contains("filesystem.socket"), "{named}: {message}");
+        }
+        assert!(refused(&document(&[], "[filesystem]\n")).contains("filesystem.socket"));
     }
 
     #[test]

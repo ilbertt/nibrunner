@@ -1,0 +1,74 @@
+---
+title: File listings
+description: A local socket that lists directories inside a running app.
+---
+
+The host lists directories inside a guest over a unix socket. It is off unless `config.toml`
+names one:
+
+```toml
+[filesystem]
+socket = "/run/nibrunner/filesystem.sock"
+```
+
+Run `nibrunnerd start` after the edit.
+
+## Asking
+
+```bash
+curl --unix-socket /run/nibrunner/filesystem.sock \
+  'http://localhost/apps/app-7/files?path=%2Fdata'
+```
+
+`path` is percent-encoded.
+
+```json
+{
+  "path": "/data",
+  "entries": [
+    { "name": "uploads", "kind": "directory", "sizeBytes": 4096, "modifiedAt": "2026-09-22T09:14:02.000Z" },
+    { "name": "app.db", "kind": "file", "sizeBytes": 2179072, "modifiedAt": "2026-09-22T11:02:41.317Z" }
+  ],
+  "truncated": false
+}
+```
+
+`kind` is `file`, `directory` or `other`. An answer carries at most 1000 entries; past that it is
+cut and `truncated` is `true`.
+
+Listings are all it serves. It does not read file contents, and it takes no input: what the host
+runs stays `desired.json`'s to say.
+
+## Sleeping apps
+
+Asking about a sleeping app wakes it, as an HTTP request would, and the listing is answered once
+it is up. The request counts as activity, so the idle timer restarts from the moment you ask.
+
+<Callout type="warn">
+  Every click in a file browser wakes the app it points at. Browsing a host where most apps are
+  asleep boots them.
+</Callout>
+
+## Refusals
+
+| Status | Means |
+| --- | --- |
+| `400` | The app id or the path could not be read, or no `path` was given |
+| `403` | The guest would not list that directory |
+| `404` | No such route, or this host runs no such app |
+| `409` | The app is stopped, so there is no guest to ask |
+| `502` | The guest answered with bytes the host could not read |
+| `503` | The app could not be woken, usually for want of memory |
+| `504` | The guest took the request and never answered |
+
+The body says which:
+
+```json
+{ "message": "this host has no room to wake app-7: it is 512 MiB short" }
+```
+
+## Access
+
+The daemon creates the socket on the way up, mode `0600`, owned by the account it runs as — root
+on a host the installer set up. Anything asking must run as that account, and anything that can
+read the socket can list any app's files.

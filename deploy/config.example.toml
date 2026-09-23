@@ -4,7 +4,8 @@
 #
 # A host with every section: volumes in an object store, reached from the guest over NBD;
 # artifacts and exports in S3; TLS behind an edge, which presents a client certificate; raw ports
-# for a relay; a metrics page; what is kept of each app's output. What each key means is
+# for a relay; a metrics page; a socket to ask what a guest holds; what is kept of each app's
+# output. What each key means is
 # https://nibrunner.dev/docs/reference/config.
 # A host with no configuration is given the smallest one instead, by `nibrunnerd install`.
 #
@@ -69,6 +70,9 @@ max_ports_per_guest = 1
 [metrics]
 port = 9100
 listen_address = "127.0.0.1"
+
+[filesystem]
+socket = "/run/nibrunner/filesystem.sock"
 
 [logs]
 keep_mib_per_app = 256

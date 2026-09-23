@@ -13,6 +13,10 @@
       "description": "Where a checkpoint goes when the document asks for it as a bundle.",
       "$ref": "#/$defs/exports"
     },
+    "filesystem": {
+      "description": "Absent is a host nothing can ask about a guest's files.",
+      "$ref": "#/$defs/filesystem"
+    },
     "logs": {
       "description": "Absent keeps the newest 256 MiB of each app's output.",
       "$ref": "#/$defs/logs"
@@ -89,6 +93,21 @@
       "required": [
         "store_url",
         "staging_dir"
+      ]
+    },
+    "filesystem": {
+      "description": "What a guest holds, listed on request over a socket on this machine. Nothing here is an\ninput: it answers reads, and what this host runs stays the document's to say.",
+      "type": "object",
+      "properties": {
+        "socket": {
+          "description": "Where the socket is put. Whoever may read it may list any app's files, so it belongs\nsomewhere only this host's own account can reach.",
+          "type": "string",
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "socket"
       ]
     },
     "logs": {
