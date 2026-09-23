@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "select document, digest from accepted_document where only_row = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "document",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "digest",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "398737e4ce84f879b65276848127b65109e6fef3015bb68ae99c5e7965b9ff05"
+}

@@ -591,6 +591,7 @@ mod schema {
                 ready_at: Some(now),
                 message: None,
             }],
+            accepted_digest: Some(Sha256Digest::parse("c".repeat(64)).unwrap()),
             message: Some(StateMessage::new(
                 "the last document named a volume this host does not hold",
             )),

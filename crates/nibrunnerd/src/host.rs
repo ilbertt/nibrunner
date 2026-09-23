@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use protocol::{AppId, HostDesiredState};
+use protocol::AppId;
 use tokio::sync::Mutex;
 
 use crate::adapters::logs::FileLogSink;
@@ -13,7 +13,7 @@ use crate::adapters::proxy::Router;
 use crate::adapters::volumes::nbd::NbdDevices;
 use crate::adapters::volumes::VolumeBackend;
 use crate::config::HostConfig;
-use crate::desired::DesiredStateCache;
+use crate::desired::{AcceptedDocument, DesiredStateCache};
 use crate::domain::exports::reader::CheckpointServers;
 use crate::domain::exports::store::ExportStore;
 use crate::domain::metrics::HostMetrics;
@@ -117,6 +117,12 @@ impl Host {
         let deleted = self.repositories.deleted_volumes.all().await.unwrap_or_default();
         let assignments = self.repositories.slots.all().await.unwrap_or_default();
         let cursor = self.repositories.slots.cursor().await.unwrap_or_default();
+        let accepted = self
+            .repositories
+            .accepted_document
+            .read()
+            .await
+            .unwrap_or_default();
 
         let held = records.len();
         self.allocator.lock().await.restore(assignments, cursor);
@@ -129,6 +135,7 @@ impl Host {
                 snapshot.last_active_at_ms = last_active;
                 snapshot.meters = meters;
                 snapshot.deleted_volumes = deleted;
+                snapshot.accepted_digest = accepted.map(|document| document.digest);
             })
             .await;
         tracing::info!(
@@ -138,7 +145,7 @@ impl Host {
         );
     }
 
-    pub async fn accepted_document(&self) -> Option<HostDesiredState> {
+    pub async fn accepted_document(&self) -> Option<AcceptedDocument> {
         match self.repositories.accepted_document.read().await {
             Ok(held) => held,
             Err(error) => {
@@ -148,7 +155,20 @@ impl Host {
         }
     }
 
-    pub async fn remember_accepted_document(&self, document: &HostDesiredState) {
+    /// The row is written only when the bytes moved: a document read again unchanged — which the
+    /// watch's backstop brings round every half minute — is the one already there.
+    pub async fn remember_accepted_document(&self, document: &AcceptedDocument) {
+        let moved = self
+            .state
+            .modify(|snapshot| {
+                let moved = snapshot.accepted_digest.as_ref() != Some(&document.digest);
+                snapshot.accepted_digest = Some(document.digest.clone());
+                moved
+            })
+            .await;
+        if !moved {
+            return;
+        }
         if let Err(error) = self.repositories.accepted_document.remember(document).await {
             tracing::warn!(error = %error.message(), "this host could not write down the document it took up");
         }
@@ -219,6 +239,34 @@ mod tests {
             identity: Arc::new(identity),
             accepted_document: Arc::new(quiet_accepted_document()),
         }
+    }
+
+    #[tokio::test]
+    async fn a_document_read_again_unchanged_is_not_written_down_a_second_time() {
+        let (instances, slots, activity, deleted, identity) = mocked();
+        let written = Arc::new(AtomicUsize::new(0));
+        let counted = written.clone();
+        let mut accepted = MockAcceptedDocumentRepository::new();
+        accepted.expect_remember().returning(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let mut repositories = bundle(instances, slots, activity, deleted, identity);
+        repositories.accepted_document = Arc::new(accepted);
+        let host = test_host_with(repositories).await;
+
+        let document = accepted_document(desired_state(|_| {}));
+        host.remember_accepted_document(&document).await;
+        host.remember_accepted_document(&document).await;
+        assert_eq!(written.load(Ordering::SeqCst), 1);
+        assert_eq!(host.state.snapshot().await.accepted_digest, Some(document.digest));
+
+        let later = accepted_document(desired_state(|state| {
+            state.instances = vec![desired_instance(|_| {})]
+        }));
+        host.remember_accepted_document(&later).await;
+        assert_eq!(written.load(Ordering::SeqCst), 2);
+        assert_eq!(host.state.snapshot().await.accepted_digest, Some(later.digest));
     }
 
     #[tokio::test]

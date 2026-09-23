@@ -33,23 +33,26 @@ impl ConvergeController {
         let Some(accepted) = self.host.accepted_document().await else {
             return false;
         };
-        let Some(changes) = self.accept(&accepted).await else {
+        let Some(changes) = self.accept(&accepted.desired).await else {
             return false;
         };
         converge::detected(&self.host, &changes, Cause::Restart, crate::clock::now_ms()).await;
-        self.reconcile(&accepted, Trigger::Restart).await;
+        self.reconcile(&accepted.desired, Trigger::Restart).await;
         true
     }
 
     pub async fn converge_once(&self) -> bool {
         match crate::desired::read_desired_state(&self.host.config.desired_state_file) {
-            Ok(Some(desired)) => {
+            Ok(Some(document)) => {
                 // A readable document clears any refusal the report was still carrying.
                 self.forget_refusal().await;
+                // Taken up before anything is converged on, and whether or not the ask moved: a
+                // document rewritten to the same ask is still the one the report answers for.
+                self.host.remember_accepted_document(&document).await;
+                let desired = document.desired;
                 let trigger = match self.accept(&desired).await {
                     Some(changes) => {
                         converge::detected(&self.host, &changes, Cause::Change, crate::clock::now_ms()).await;
-                        self.host.remember_accepted_document(&desired).await;
                         Trigger::Change
                     }
                     None if !self.host.state.snapshot().await.deferred_work => return false,
@@ -231,7 +234,7 @@ mod tests {
         let desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
         host.repositories
             .accepted_document
-            .remember(&desired)
+            .remember(&accepted_document(desired.clone()))
             .await
             .unwrap();
         let mut reconciler = MockReconcileService::new();
@@ -345,7 +348,7 @@ mod tests {
         let host = test_host().await;
         host.repositories
             .accepted_document
-            .remember(&desired_state(|_| {}))
+            .remember(&accepted_document(desired_state(|_| {})))
             .await
             .unwrap();
 

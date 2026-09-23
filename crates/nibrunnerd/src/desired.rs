@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use protocol::{AppId, DesiredInstance, HostDesiredState};
+use protocol::{AppId, DesiredInstance, HostDesiredState, Sha256Digest};
 
-use crate::json_store::{read_json, StoreError};
+use crate::json_store::{parse_json, read_bytes, StoreError};
 
 pub const WATCH_BACKSTOP: Duration = Duration::from_secs(30);
 
@@ -21,16 +21,38 @@ impl DesiredStateError {
     }
 }
 
-pub fn read_desired_state(path: &Path) -> Result<Option<HostDesiredState>, DesiredStateError> {
-    let Some(value) = read_json::<serde_json::Value>(path)? else {
+/// A document as this host read it: what it asks for, and the digest of the bytes it came from.
+///
+/// The digest is the file's own — what `sha256sum` says of it, not of anything this host renders
+/// — so a control plane checks the report against the write it made rather than against a
+/// rendering of it that whitespace or key order could move.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptedDocument {
+    pub desired: HostDesiredState,
+    pub digest: Sha256Digest,
+}
+
+pub fn read_desired_state(path: &Path) -> Result<Option<AcceptedDocument>, DesiredStateError> {
+    let Some(bytes) = read_bytes(path)? else {
         return Ok(None);
     };
-    serde_json::from_value(value)
-        .map(Some)
-        .map_err(|error| DesiredStateError::Malformed {
-            path: path.display().to_string(),
-            reason: error.to_string(),
-        })
+    let Some(value) = parse_json::<serde_json::Value>(path, &bytes)? else {
+        return Ok(None);
+    };
+    let desired = serde_json::from_value(value).map_err(|error| DesiredStateError::Malformed {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    })?;
+    Ok(Some(AcceptedDocument {
+        desired,
+        digest: digest_of(&bytes),
+    }))
+}
+
+/// What a document is known by, taken over the bytes it was read from.
+pub fn digest_of(bytes: &[u8]) -> Sha256Digest {
+    Sha256Digest::parse(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes)))
+        .expect("a sha-256 renders as the lowercase hex a digest is")
 }
 
 /// What a document asks for that the one before it did not: the apps whose deployment or
@@ -215,7 +237,10 @@ mod tests {
         let path = directory.path().join("desired.json");
         let state = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
         write_desired_state(&path, &state);
-        assert_eq!(read_desired_state(&path).unwrap(), Some(state));
+        assert_eq!(
+            read_desired_state(&path).unwrap().map(|read| read.desired),
+            Some(state)
+        );
         std::fs::write(&path, r#"{"hostId":"host-1"}"#).unwrap();
         assert!(read_desired_state(&path)
             .unwrap_err()
@@ -279,6 +304,27 @@ mod tests {
             |state| state.instances = vec![desired_instance(|_| {})]
         )));
         assert_eq!(cache.latest().map(|state| state.instances.len()), Some(1));
+    }
+
+    #[test]
+    fn a_document_is_known_by_the_digest_of_the_file_it_was_read_from() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("desired.json");
+        write_desired_state(&path, &desired_state(|_| {}));
+
+        let read = read_desired_state(&path)
+            .unwrap()
+            .expect("a document was written");
+        assert_eq!(read.digest, digest_of(&std::fs::read(&path).unwrap()));
+
+        // Whitespace the document does not carry still moves the file, and so the digest.
+        let spaced = format!("  {}  ", std::fs::read_to_string(&path).unwrap());
+        std::fs::write(&path, &spaced).unwrap();
+        let spaced = read_desired_state(&path)
+            .unwrap()
+            .expect("a document was written");
+        assert_eq!(spaced.desired, read.desired);
+        assert_ne!(spaced.digest, read.digest);
     }
 
     #[test]

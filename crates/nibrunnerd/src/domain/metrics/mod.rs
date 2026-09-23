@@ -543,6 +543,7 @@ pub(crate) mod tests {
             instances: vec![],
             checkpoints: vec![],
             exports: vec![],
+            accepted_digest: None,
             message: None,
         }
     }

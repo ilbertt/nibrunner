@@ -380,7 +380,13 @@ mod tests {
 
         assert!(host.state.record(&app_id()).await.is_some());
         assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Boot]);
-        assert_eq!(host.accepted_document().await.as_ref(), Some(&desired));
+        let accepted = host.accepted_document().await.expect("the document was taken up");
+        assert_eq!(accepted.desired, desired);
+        assert_eq!(
+            accepted.digest,
+            crate::desired::digest_of(&std::fs::read(&host.config.desired_state_file).unwrap()),
+            "the digest a control plane reads back is the one sha256sum gives of the file it wrote"
+        );
     }
 
     #[tokio::test]

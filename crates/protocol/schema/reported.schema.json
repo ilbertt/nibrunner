@@ -5,6 +5,17 @@
   "description": "What one host is running, as the daemon last wrote it to `reported.json` in its\n`paths.state_dir`.",
   "type": "object",
   "properties": {
+    "acceptedDigest": {
+      "description": "The document this host is converging on, as `sha256sum` reads the file it came from.\nAbsent until one has been taken up. A control plane checks it against the write it made\nto learn that this host is on that document rather than on the one before it — which is\nwhat `instances` alone cannot say about a document that changed nothing about an app.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "allocatable": {
       "description": "What is left once every booted app is taken off.",
       "$ref": "#/$defs/HostCapacity"
