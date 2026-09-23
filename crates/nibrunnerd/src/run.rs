@@ -266,9 +266,8 @@ pub fn serve_proxy(host: &Arc<Host>) {
     });
 }
 
-/// What a guest holds, for whatever on this machine is asked to show it. Absent from the
-/// configuration is a host nothing can ask.
-pub fn serve_guest_listings(host: &Arc<Host>) {
+/// Absent from the configuration is a host nothing can ask what a guest holds.
+pub fn serve_filesystem(host: &Arc<Host>) {
     let Some(filesystem) = &host.config.filesystem else {
         return;
     };
