@@ -544,6 +544,7 @@ pub(crate) mod tests {
             checkpoints: vec![],
             exports: vec![],
             accepted_digest: None,
+            accepted_revision: None,
             message: None,
         }
     }

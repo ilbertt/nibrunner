@@ -37,6 +37,7 @@ the key and the digest from the previous step:
 ```json title="/var/lib/nibrunner/desired.json"
 {
   "hostId": "host-1",
+  "revision": "deploy-1",
   "volumes": [
     { "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present" }
   ],
@@ -71,6 +72,7 @@ the key and the digest from the previous step:
 
 | Field | Meaning |
 | --- | --- |
+| `revision` | Your own name for this version of the file — a deploy id, a commit, a counter. The host never reads it; it hands it back in `reported.json` as `acceptedRevision` so you can tell which version it is on. |
 | [`volumes`](/docs/guides/volumes) | One volume per app. It is formatted empty the first time it appears in the file. All of the app's writes go to it, and it is the only thing that gets backed up. |
 | [`layers`](/docs/guides/layers) | What the root filesystem is built from. An `executable` layer is one program, packed into an image at `destinationPath`. |
 | [`config.command`](/docs/guides/layers#what-runs) | The program to run, as uid 65534. |
@@ -79,6 +81,14 @@ the key and the digest from the previous step:
 | [`hostnames`](/docs/guides/https) | Hostnames the proxy routes to `httpPort`. |
 
 The [reference](/docs/reference/desired) lists every field.
+
+<Callout title="Changing revision on its own changes nothing">
+  `revision` is yours to name and the host never interprets it: it is not a version number, it is
+  not compared with the one before it, and a file that changed only its `revision` starts, stops
+  and replaces nothing. It is there so that `acceptedRevision` in `reported.json` answers *which
+  of your versions is this host on* in the words you already use, rather than as a digest you
+  have to work out.
+</Callout>
 
 </Step>
 <Step>

@@ -258,9 +258,14 @@ pub fn reported_volume(edit: impl FnOnce(&mut ReportedVolume)) -> ReportedVolume
     value
 }
 
+pub fn revision() -> protocol::Revision {
+    protocol::Revision::parse("deploy-1").expect("a constant revision")
+}
+
 pub fn desired_state(edit: impl FnOnce(&mut HostDesiredState)) -> HostDesiredState {
     let mut value = HostDesiredState {
         host_id: host_id(),
+        revision: revision(),
         volumes: vec![],
         instances: vec![],
         checkpoints: vec![],

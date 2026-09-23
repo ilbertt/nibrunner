@@ -297,6 +297,12 @@ pub struct DesiredExport {
 #[serde(rename_all = "camelCase")]
 pub struct HostDesiredState {
     pub host_id: HostId,
+    /// What whoever wrote this document calls this version of it, carried back in the report as
+    /// `acceptedRevision`. Nothing on the host reads it: it is not ordered and not checked
+    /// against the one before it, so a document may name any version it likes. Required, so that
+    /// a control plane can always ask which of its own versions a host is on — and so a host
+    /// answering with one nobody wrote is impossible.
+    pub revision: Revision,
     pub volumes: Vec<DesiredVolume>,
     pub instances: Vec<DesiredInstance>,
     pub checkpoints: Vec<DesiredCheckpoint>,
@@ -417,6 +423,10 @@ pub struct HostReportedState {
     /// what `instances` alone cannot say about a document that changed nothing about an app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_digest: Option<Sha256Digest>,
+    /// The `revision` that document named, if it named one — the control plane's own word for
+    /// what this host is converging on, beside the digest that is this host's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_revision: Option<Revision>,
     /// Set when the last document this host was handed was refused — malformed, or not the
     /// document this host reads — and cleared when a readable one is taken up. A control plane
     /// that only reads this file learns from it that its last write did not land, and why.

@@ -41,6 +41,7 @@ fn instance_json() -> serde_json::Value {
 fn desired_json() -> serde_json::Value {
     serde_json::json!({
         "hostId": "host-1",
+        "revision": "deploy-4821",
         "volumes": [{
             "volumeId": "vol-1",
             "appId": "app-1",
@@ -165,6 +166,11 @@ fn identifiers_timestamps_and_addresses_are_checked() {
     assert!(HttpPort::try_from(0u32).is_err());
     assert!(HttpPort::try_from(70000u32).is_err());
     assert!(GuestPath::parse("/a/b").is_ok());
+    assert!(Revision::parse("deploy-4821").is_ok());
+    assert!(Revision::parse("2026-09-23T10:00:00Z/7").is_ok());
+    assert!(Revision::parse("").is_err());
+    assert!(Revision::parse("has a space").is_err());
+    assert!(Revision::parse("x".repeat(129)).is_err());
     assert!(GuestPath::parse("/a/../b").is_err());
     assert!(GuestPath::parse("/it's").is_err());
     assert!(GuestPath::parse("/a/").is_err());
@@ -592,6 +598,7 @@ mod schema {
                 message: None,
             }],
             accepted_digest: Some(Sha256Digest::parse("c".repeat(64)).unwrap()),
+            accepted_revision: Some(Revision::parse("deploy-4821").unwrap()),
             message: Some(StateMessage::new(
                 "the last document named a volume this host does not hold",
             )),
@@ -638,6 +645,9 @@ mod schema {
             serde_json::Value::Array(vec![instance_json()["layers"][0].clone(); MAX_LAYERS + 1]);
         let broken = [
             with(desired_json(), "/hostId", serde_json::json!("has.a.dot")),
+            without(desired_json(), "/revision"),
+            with(desired_json(), "/revision", serde_json::json!("has a space")),
+            with(desired_json(), "/revision", serde_json::json!("")),
             with(
                 desired_json(),
                 "/instances/0/appId",

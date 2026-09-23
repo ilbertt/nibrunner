@@ -42,6 +42,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
         checkpoints: snapshot.checkpoint_reports.clone(),
         exports: snapshot.export_reports.clone(),
         accepted_digest: snapshot.accepted_digest.clone(),
+        accepted_revision: snapshot.accepted_revision.clone(),
         message: snapshot.desired_refusal.clone(),
     })
 }
@@ -132,11 +133,16 @@ mod tests {
             "a host that has been handed nothing is on no document"
         );
 
-        let document = accepted_document(desired_state(|_| {}));
+        let document = accepted_document(desired_state(|state| {
+            state.revision = protocol::Revision::parse("deploy-4821").unwrap();
+        }));
         host.remember_accepted_document(&document).await;
+        let report = build(&host, versions()).await;
+        assert_eq!(report.accepted_digest, Some(document.digest));
         assert_eq!(
-            build(&host, versions()).await.accepted_digest,
-            Some(document.digest)
+            report.accepted_revision,
+            Some(protocol::Revision::parse("deploy-4821").unwrap()),
+            "what whoever wrote the document called it is handed back to them"
         );
     }
 

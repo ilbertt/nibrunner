@@ -135,7 +135,10 @@ impl Host {
                 snapshot.last_active_at_ms = last_active;
                 snapshot.meters = meters;
                 snapshot.deleted_volumes = deleted;
-                snapshot.accepted_digest = accepted.map(|document| document.digest);
+                if let Some(document) = accepted {
+                    snapshot.accepted_revision = Some(document.desired.revision.clone());
+                    snapshot.accepted_digest = Some(document.digest);
+                }
             })
             .await;
         tracing::info!(
@@ -163,6 +166,7 @@ impl Host {
             .modify(|snapshot| {
                 let moved = snapshot.accepted_digest.as_ref() != Some(&document.digest);
                 snapshot.accepted_digest = Some(document.digest.clone());
+                snapshot.accepted_revision = Some(document.desired.revision.clone());
                 moved
             })
             .await;
