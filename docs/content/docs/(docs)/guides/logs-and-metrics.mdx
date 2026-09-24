@@ -50,7 +50,8 @@ a log you want to read after the app is gone.
 
 The HTTP proxy also writes one JSON line per routed request to
 `<paths.state_dir>/logs/<appId>.access.jsonl`. Each line has `at`, `method`, `path`, `status`, and
-`durationMicros`. The path excludes its query string; headers and request bodies are not kept.
+`durationMicros`, and `deploymentId`. The path excludes its query string; headers and request
+bodies are not kept.
 The proxy keeps at most 1 MiB in this file and 1 MiB in `.access.jsonl.1` for each app. When
 proxy traffic outruns the bounded writer queue, it drops access records and warns in the daemon
 journal. An app's access files go when `desired.json` stops naming it.
