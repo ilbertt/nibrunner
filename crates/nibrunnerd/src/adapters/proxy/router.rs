@@ -10,7 +10,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
-use protocol::{AppId, HostPort};
+use protocol::{AppId, DeploymentId, HostPort};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::domain::metrics::{HostMetrics, Outcome};
@@ -38,6 +38,7 @@ const GREETING_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub app_id: AppId,
+    pub deployment_id: DeploymentId,
     pub host_port: HostPort,
 }
 
@@ -57,6 +58,7 @@ impl RouteTable {
                             entry.hostname.as_str().to_ascii_lowercase(),
                             Route {
                                 app_id: target.app_id.clone(),
+                                deployment_id: target.deployment_id.clone(),
                                 host_port: target.host_port,
                             },
                         )
@@ -152,18 +154,21 @@ impl Router {
         let started = std::time::Instant::now();
         let metrics = self.metrics.clone();
         metrics.proxy.began();
-        let (mut response, outcome, app_id) = self.route(request, arrival).await;
+        let (mut response, outcome, route) = self.route(request, arrival).await;
         let elapsed = started.elapsed();
-        metrics.proxy.answered(outcome, elapsed, app_id.as_ref());
+        metrics
+            .proxy
+            .answered(outcome, elapsed, route.as_ref().map(|route| &route.app_id));
         metrics.proxy.ended();
-        if let (Some((sink, method, uri)), Some(app_id)) = (access, app_id) {
+        if let (Some((sink, method, uri)), Some(route)) = (access, route) {
             sink.record(
-                app_id,
+                route.app_id,
                 AccessRecord::new(
                     &method,
                     &uri,
                     response.status().as_u16(),
                     u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+                    route.deployment_id,
                 ),
             );
         }
@@ -178,7 +183,7 @@ impl Router {
         self: Arc<Self>,
         mut request: Request<Incoming>,
         arrival: Arrival,
-    ) -> (Response<ProxyBody>, Outcome, Option<AppId>) {
+    ) -> (Response<ProxyBody>, Outcome, Option<Route>) {
         let Some(hostname) = hostname_of(&request) else {
             return (
                 say(StatusCode::BAD_REQUEST, "This request names no host.\n"),
@@ -225,7 +230,7 @@ impl Router {
         } else {
             Outcome::Unreachable
         };
-        (response, outcome, Some(route.app_id))
+        (response, outcome, Some(route))
     }
 }
 
@@ -591,6 +596,7 @@ mod tests {
         .expect("the access writer flushes the routed request");
         assert!(record.contains("\"path\":\"/catalog\""), "{record}");
         assert!(record.contains("\"status\":502"), "{record}");
+        assert!(record.contains("\"deploymentId\":\"dep-1\""), "{record}");
         assert!(!record.contains("private"), "{record}");
     }
 

@@ -7,7 +7,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendE
 use std::thread::JoinHandle;
 
 use hyper::Uri;
-use protocol::{AppId, Timestamp};
+use protocol::{AppId, DeploymentId, Timestamp};
 use serde::Serialize;
 
 use crate::json_store::make_directory;
@@ -24,16 +24,24 @@ pub struct AccessRecord {
     path: String,
     status: u16,
     duration_micros: u64,
+    deployment_id: DeploymentId,
 }
 
 impl AccessRecord {
-    pub fn new(method: &str, uri: &Uri, status: u16, duration_micros: u64) -> Self {
+    pub fn new(
+        method: &str,
+        uri: &Uri,
+        status: u16,
+        duration_micros: u64,
+        deployment_id: DeploymentId,
+    ) -> Self {
         Self {
             at: Timestamp::now(),
             method: method.chars().take(16).collect(),
             path: uri.path().chars().take(256).collect(),
             status,
             duration_micros,
+            deployment_id,
         }
     }
 }
@@ -214,7 +222,10 @@ mod tests {
         let app = AppId::parse("fleet-shop").expect("an app ID");
         let uri: Uri = "/shop/item?token=private".parse().expect("a request URI");
         for _ in 0..5000 {
-            logs.record(app.clone(), AccessRecord::new("GET", &uri, 200, 123));
+            logs.record(
+                app.clone(),
+                AccessRecord::new("GET", &uri, 200, 123, crate::test_support::deployment_id()),
+            );
         }
         drop(logs);
         let current = std::fs::read_to_string(directory.path().join("fleet-shop.access.jsonl"))
@@ -238,7 +249,10 @@ mod tests {
         let uri: Uri = "/shop/item".parse().expect("a request URI");
         for _ in 0..20_000 {
             writer
-                .write(app.clone(), AccessRecord::new("GET", &uri, 200, 123))
+                .write(
+                    app.clone(),
+                    AccessRecord::new("GET", &uri, 200, 123, crate::test_support::deployment_id()),
+                )
                 .expect("write an access record");
         }
         writer.flush();
@@ -257,7 +271,10 @@ mod tests {
         let logs = AccessLog::new(directory.path().to_path_buf()).expect("access logs");
         let app = AppId::parse("fleet-shop").expect("an app ID");
         let uri: Uri = "/shop/item".parse().expect("a request URI");
-        logs.record(app.clone(), AccessRecord::new("GET", &uri, 200, 123));
+        logs.record(
+            app.clone(),
+            AccessRecord::new("GET", &uri, 200, 123, crate::test_support::deployment_id()),
+        );
         logs.discard(&app);
         drop(logs);
         assert!(!directory.path().join("fleet-shop.access.jsonl").exists());
