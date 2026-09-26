@@ -197,6 +197,7 @@ pub struct CronConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
+    pub max_concurrent_vm_starts: Option<std::num::NonZeroU16>,
     /// How many apps this host is laid out for. Everything that counts slots follows from it —
     /// the ring the allocator walks, the loopback ports reserved, the nbd minors the module is
     /// loaded with, the conntrack table's size, what the metrics page calls the total — and
@@ -295,6 +296,9 @@ mod file {
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "HostConfig")]
     pub(super) struct ConfigFile {
+        /// Optional host-wide bound on simultaneous VM boots and snapshot restores.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) max_concurrent_vm_starts: Option<std::num::NonZeroU16>,
         /// How many apps this host is laid out for. Everything that counts slots follows from it:
         /// the slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,
         /// the kernel's conntrack table at 1024 entries an app, what the metrics page calls the
@@ -713,6 +717,7 @@ impl HostConfig {
         let logs = logs(document.logs.as_ref())?;
 
         Ok(Self {
+            max_concurrent_vm_starts: document.max_concurrent_vm_starts,
             max_apps,
             cron,
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
@@ -813,6 +818,7 @@ impl HostConfig {
             proxy: ProxyConfig::default(),
             metrics: None,
             filesystem: None,
+            max_concurrent_vm_starts: None,
             logs: LogsConfig::default(),
             export_store_url: state_dir.join("export-store").display().to_string(),
             export_staging_dir: state_dir.join("exports"),
@@ -889,6 +895,7 @@ impl HostConfig {
             filesystem: Some(FilesystemConfig {
                 socket: PathBuf::from("/run/nibrunner/filesystem.sock"),
             }),
+            max_concurrent_vm_starts: std::num::NonZeroU16::new(2),
             logs: LogsConfig::default(),
             export_store_url: "s3://nibrunner-exports-eu-west-2-123456789012/exports".to_string(),
             export_staging_dir: PathBuf::from("/var/lib/nibrunner/exports"),
@@ -992,6 +999,7 @@ impl HostConfig {
             filesystem: self.filesystem.as_ref().map(|filesystem| file::Filesystem {
                 socket: text(&filesystem.socket),
             }),
+            max_concurrent_vm_starts: self.max_concurrent_vm_starts,
             logs: Some(file::Logs {
                 keep_mib_per_app: Some(self.logs.keep_bytes_per_app / BYTES_PER_MEBIBYTE),
             }),
