@@ -29,6 +29,7 @@ const VM_DIR_MODE: u32 = 0o700;
 const FIRST_GUEST_CID: u32 = 3;
 
 pub struct VmManager {
+    pub start_permits: Option<tokio::sync::Semaphore>,
     pub vm_dir: PathBuf,
     pub snapshot_dir: PathBuf,
     pub guest_image_dir: PathBuf,
@@ -45,6 +46,13 @@ pub struct VmManager {
 }
 
 impl VmManager {
+    fn admit_start(&self) -> Result<Option<tokio::sync::SemaphorePermit<'_>>, VmError> {
+        self.start_permits
+            .as_ref()
+            .map(|permits| permits.try_acquire().map_err(|_| VmError::StartBusy))
+            .transpose()
+    }
+
     pub fn working_dir_for(&self, app_id: &AppId) -> PathBuf {
         self.vm_dir.join(app_id.as_str())
     }
@@ -186,6 +194,7 @@ impl VmManager {
 #[async_trait]
 impl Vmm for VmManager {
     async fn boot(&self, request: BootRequest) -> Result<(), VmError> {
+        let _starting = self.admit_start()?;
         let app_id = request.desired.app_id.clone();
         self.discard_snapshot(&app_id);
         let staged = std::time::Instant::now();
@@ -253,6 +262,7 @@ impl Vmm for VmManager {
     }
 
     async fn wake(&self, request: SuspendRequest) -> Result<(), VmError> {
+        let _starting = self.admit_start()?;
         let paths = snapshot_paths(&self.snapshot_dir, &request.app_id);
         let expected = self.current_stamp(&request);
         if let Err(error) = ensure_loadable(&paths.stamp_path, &expected) {
@@ -446,6 +456,17 @@ mod tests {
     use crate::test_support::*;
     use protocol::ObjectKey;
 
+    #[test]
+    fn a_full_start_budget_refuses_immediately_and_recovers_when_a_start_finishes() {
+        let mut host = fixture();
+        assert!(host.manager.admit_start().unwrap().is_none());
+        host.manager.start_permits = Some(tokio::sync::Semaphore::new(1));
+        let first = host.manager.admit_start().unwrap();
+        assert!(host.manager.admit_start().is_err());
+        drop(first);
+        assert!(host.manager.admit_start().is_ok());
+    }
+
     struct Fixture {
         _directory: tempfile::TempDir,
         manager: VmManager,
@@ -459,6 +480,7 @@ mod tests {
         let (network, network_spy) = mocks::network();
         let state = HostState::shared();
         let manager = VmManager {
+            start_permits: None,
             metrics: Arc::new(crate::domain::metrics::HostMetrics::new()),
             vm_dir: root.join("vm"),
             snapshot_dir: root.join("snapshots"),
