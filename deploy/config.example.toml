@@ -18,6 +18,10 @@ max_apps = 1000
 max_jobs_per_app = 10
 time_zone = "UTC"
 
+[http_admission]
+host_concurrent = 128
+app_concurrent = 16
+
 [paths]
 state_dir = "/var/lib/nibrunner"
 runtime_dir = "/run/nibrunner"
