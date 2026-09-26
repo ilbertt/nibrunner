@@ -98,7 +98,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     ));
     let sink = Arc::new(RestartRecorder::new(state.clone(), files.clone()));
 
-    let processes = VmProcesses::new(config.runtime_dir.clone());
+    let processes = VmProcesses::with_budgets(config.runtime_dir.clone(), config.vm_budgets.clone());
     let reaped = reap_stale_snapshots(&config.snapshot_dir, processes.boot_id());
     if reaped.snapshots > 0 {
         tracing::info!(
