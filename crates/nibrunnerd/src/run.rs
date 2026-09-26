@@ -118,7 +118,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             StartupError::Config(format!("HTTP request logs could not be opened: {error}"))
         })?);
 
-    let processes = VmProcesses::new(config.runtime_dir.clone());
+    let processes = VmProcesses::with_budgets(config.runtime_dir.clone(), config.vm_budgets.clone());
     let reaped = reap_stale_snapshots(&config.snapshot_dir, processes.boot_id());
     if reaped.snapshots > 0 {
         tracing::info!(
