@@ -21,7 +21,7 @@ pub(crate) fn serve() -> ! {
         }
     };
     loop {
-        match vsock::accept_one(&listener) {
+        match vsock::accept_from_host(&listener) {
             Ok(connection) => answer(connection),
             Err(_) => std::thread::sleep(POLL_INTERVAL),
         }
