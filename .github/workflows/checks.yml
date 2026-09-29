@@ -73,6 +73,9 @@ jobs:
       - name: Check the metrics are current
         run: just check-metrics
 
+      - name: Check the filesystem socket's document is current
+        run: just check-openapi
+
   integration:
     runs-on: ubuntu-latest
     steps:

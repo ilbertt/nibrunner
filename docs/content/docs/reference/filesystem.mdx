@@ -1,0 +1,13 @@
+---
+title: Filesystem socket
+description: Every route the guest filesystem socket answers, and every shape it answers with.
+---
+
+What the host serves on the unix socket `[filesystem] socket` names in `config.toml`. It is off
+unless that section is there. [File listings](/docs/guides/file-listings) is the guide; this is
+every route and every shape, rendered from `crates/nibrunnerd/filesystem.openapi.json`.
+
+The socket answers reads and takes no input. Listing an app that is asleep wakes it, the way a
+request reaching it would.
+
+<FilesystemApi />
