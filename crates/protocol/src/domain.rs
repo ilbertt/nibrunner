@@ -1,6 +1,7 @@
 #[cfg(feature = "schema")]
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 #[cfg(feature = "schema")]
 use schemars::{JsonSchema, Schema, SchemaGenerator};
@@ -26,46 +27,22 @@ fn is_name_character(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-fn runtime_references(value: &str) -> Vec<(String, bool)> {
-    let mut found = Vec::new();
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'$' {
-            index += 1;
-            continue;
+pub fn runtime_references(value: &str) -> impl Iterator<Item = (Range<usize>, &str)> {
+    value.match_indices("${").filter_map(|(start, opening)| {
+        let rest = &value[start + opening.len()..];
+        if !rest.starts_with(RUNTIME_VALUE_PREFIX) {
+            return None;
         }
-        let mut cursor = index + 1;
-        let braced = bytes.get(cursor) == Some(&b'{');
-        if braced {
-            cursor += 1;
+        let end = rest.find(|c| !is_name_character(c))?;
+        if rest.as_bytes()[end] != b'}' {
+            return None;
         }
-        if !value[cursor..].starts_with(RUNTIME_VALUE_PREFIX) {
-            index += 1;
-            continue;
-        }
-        let start = cursor;
-        while cursor < bytes.len() && is_name_character(bytes[cursor] as char) {
-            cursor += 1;
-        }
-        let name = &value[start..cursor];
-        let closed = if braced {
-            let closed = bytes.get(cursor) == Some(&b'}');
-            if closed {
-                cursor += 1;
-            }
-            closed
-        } else {
-            true
-        };
-        found.push((name.to_string(), closed && RUNTIME_VALUE_NAMES.contains(&name)));
-        index = cursor.max(index + 1);
-    }
-    found
+        Some((start..start + opening.len() + end + 1, &rest[..end]))
+    })
 }
 
 pub fn names_offered_runtime_values(value: &str) -> bool {
-    runtime_references(value).iter().all(|(_, allowed)| *allowed)
+    runtime_references(value).all(|(_, name)| RUNTIME_VALUE_NAMES.contains(&name))
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,8 +99,9 @@ impl JsonSchema for TenantValue {
         schema.insert(
             "description".into(),
             format!(
-                "Handed to the app as is, except that `${{NAME}}` and `$NAME` are filled in for NAME \
-                 in {}; any other `$NIBRUN_` reference is refused.",
+                "Only complete `${{NAME}}` references are filled in for NAME in {}. \
+                 Bare names, incomplete references and other dollar signs remain literal; \
+                 complete references to unknown `NIBRUN_` names are refused.",
                 RUNTIME_VALUE_NAMES.join(", ")
             )
             .into(),

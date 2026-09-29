@@ -774,7 +774,7 @@
       }
     },
     "TenantValue": {
-      "description": "Handed to the app as is, except that `${NAME}` and `$NAME` are filled in for NAME in NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT; any other `$NIBRUN_` reference is refused.",
+      "description": "Only complete `${NAME}` references are filled in for NAME in NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT. Bare names, incomplete references and other dollar signs remain literal; complete references to unknown `NIBRUN_` names are refused.",
       "type": "string",
       "maxLength": 32768
     },

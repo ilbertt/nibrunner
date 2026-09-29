@@ -127,10 +127,38 @@ fn a_secret_never_prints_itself() {
 fn a_tenant_value_may_name_only_offered_runtime_values() {
     assert!(TenantValue::parse("$HOME and $$ and a bcrypt $2b$10$abc").is_ok());
     assert!(TenantValue::parse("http://x:${NIBRUN_HTTP_PORT}/").is_ok());
-    assert!(TenantValue::parse("$NIBRUN_HTTP_PORT").is_ok());
-    assert!(TenantValue::parse("$NIBRUN_HTTP_PORTS").is_err());
+    assert!(TenantValue::parse("${NIBRUN_HTTP_PORTS}").is_err());
     assert!(TenantValue::parse("${NIBRUN_NOPE}").is_err());
-    assert!(TenantValue::parse("${NIBRUN_HTTP_PORT").is_err());
+    assert!(TenantValue::parse("${NIBRUN_}").is_err());
+    assert!(TenantValue::parse("${NIBRUN_BROKEN:${NIBRUN_NOPE}").is_err());
+}
+
+#[test]
+fn a_tenant_value_preserves_everything_except_complete_runtime_references() {
+    for literal in [
+        "$",
+        "{",
+        "}",
+        "${",
+        "${}",
+        "$NIBRUN_HTTP_PORT",
+        "$NIBRUN_NOPE",
+        "${NIBRUN_HTTP_PORT",
+        "${NIBRUN_NOPE",
+        "{NIBRUN_HTTP_PORT}",
+        "${NIBRUN_HTTP_PORT!}",
+        "${NIBRUN_HTTP_PORT with spaces}",
+        "secret$NIBRUN_HTTP_PORT}suffix",
+        "🔑${NIBRUN_HTTP_PORTé}尾",
+    ] {
+        assert_eq!(TenantValue::parse(literal).unwrap().expose(), literal);
+        let decoded: TenantValue = serde_json::from_value(serde_json::json!(literal)).unwrap();
+        assert_eq!(decoded.expose(), literal);
+    }
+    assert!(TenantValue::parse(
+        "$${NIBRUN_HTTP_PORT}|{${NIBRUN_HOSTNAME}}|${NIBRUN_BROKEN:${NIBRUN_HTTP_PORT}|$"
+    )
+    .is_ok());
 }
 
 #[test]

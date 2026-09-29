@@ -1,6 +1,6 @@
 use protocol::{
-    AppHostname, AppHostnameKind, GuestPath, Hostname, HttpPort, RestartPolicy, TenantArguments,
-    TenantEnvironment,
+    runtime_references, AppHostname, AppHostnameKind, GuestPath, Hostname, HttpPort, RestartPolicy,
+    TenantArguments, TenantEnvironment, RUNTIME_VALUE_NAMES,
 };
 
 pub const INSTANCE_ENV_FILENAME: &str = "instance.env";
@@ -132,50 +132,23 @@ pub struct InstanceConfig {
 }
 
 fn expand(key: &str, value: &str, runtime: &[(String, String)]) -> Result<String, InstanceEnvError> {
-    if !value.contains(&format!("${RUNTIME_PREFIX}")) && !value.contains(&format!("${{{RUNTIME_PREFIX}")) {
-        return Ok(value.to_string());
-    }
     let mut expanded = String::with_capacity(value.len());
-    let bytes = value.as_bytes();
     let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] != b'$' {
-            expanded.push(value[at..].chars().next().unwrap_or('$'));
-            at += value[at..].chars().next().map_or(1, char::len_utf8);
-            continue;
-        }
-        let braced = value[at + 1..].starts_with('{');
-        let names_at = at + 1 + usize::from(braced);
-        let rest = &value[names_at..];
-        if !rest.starts_with(RUNTIME_PREFIX) {
-            expanded.push('$');
-            at += 1;
-            continue;
-        }
-        let end = if braced {
-            match rest.find('}') {
-                Some(end) => end,
-                None => {
-                    return Err(InstanceEnvError::Malformed {
-                        key: key.to_string(),
-                        rule: "a closed reference",
-                    })
-                }
-            }
-        } else {
-            rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .unwrap_or(rest.len())
-        };
-        let reference = &rest[..end];
-        let Some((_, found)) = runtime.iter().find(|(name, _)| name == reference) else {
+    for (range, reference) in runtime_references(value) {
+        let found = runtime
+            .iter()
+            .find(|(name, _)| name == reference && RUNTIME_VALUE_NAMES.contains(&reference));
+        let Some((_, found)) = found else {
             return Err(InstanceEnvError::UnknownReference {
                 key: key.to_string(),
                 reference: reference.to_string(),
             });
         };
+        expanded.push_str(&value[at..range.start]);
         expanded.push_str(found);
-        at = names_at + end + usize::from(braced);
+        at = range.end;
     }
+    expanded.push_str(&value[at..]);
     Ok(expanded)
 }
 
@@ -559,13 +532,14 @@ mod both_ends {
     }
 
     #[test]
-    fn only_a_reference_to_a_runtime_value_expands() {
+    fn only_a_complete_reference_to_a_runtime_value_expands() {
         let config = parse_instance_env(&written(
             &[
                 ("BARE", "port $NIBRUN_HTTP_PORT here"),
                 ("BRACED", "port ${NIBRUN_HTTP_PORT} here"),
                 ("SHELL_LIKE", "$HOME and $$ and a bare $"),
-                ("BOTH", "$NIBRUN_HOSTNAME:$NIBRUN_HTTP_PORT"),
+                ("BOTH", "${NIBRUN_HOSTNAME}:${NIBRUN_HTTP_PORT}"),
+                ("TWICE", "${NIBRUN_HTTP_PORT}${NIBRUN_HTTP_PORT}0"),
             ],
             &[],
         ))
@@ -579,26 +553,97 @@ mod both_ends {
                 .unwrap()
         };
         let port = DEFAULT_HTTP_PORT.to_string();
-        assert_eq!(value("BARE"), format!("port {port} here"));
+        assert_eq!(value("BARE"), "port $NIBRUN_HTTP_PORT here");
         assert_eq!(value("BRACED"), format!("port {port} here"));
         assert_eq!(value("SHELL_LIKE"), "$HOME and $$ and a bare $");
         assert_eq!(value("BOTH"), format!("my-app.nibrun.app:{port}"));
+        assert_eq!(value("TWICE"), format!("{port}{port}0"));
+    }
+
+    #[test]
+    fn secrets_with_bare_names_and_incomplete_references_reach_the_app_unchanged() {
+        for literal in [
+            "$",
+            "{",
+            "}",
+            "${",
+            "${}",
+            "$NIBRUN_HTTP_PORT",
+            "$NIBRUN_NOPE",
+            "$NIBRUN_PUBLIC_IPV4",
+            "$NIBRUN_EXTRA_PUBLIC_PORT",
+            "${NIBRUN_HTTP_PORT",
+            "${NIBRUN_NOPE",
+            "{NIBRUN_HTTP_PORT}",
+            "${NIBRUN_HTTP_PORT!}",
+            "${NIBRUN_HTTP_PORT with spaces}",
+            "secret$NIBRUN_HTTP_PORT}suffix",
+            "$2y$10$K3JqBQ8Rt7uVwXyZaBcDeF",
+            "🔑${NIBRUN_HTTP_PORTé}尾",
+        ] {
+            let config = parse_instance_env(&written(&[("SECRET", literal)], &[])).unwrap();
+            assert!(config
+                .tenant_environment()
+                .contains(&("SECRET".to_string(), literal.to_string())));
+        }
+    }
+
+    #[test]
+    fn complete_references_expand_among_literal_characters() {
+        let config = parse_instance_env(&written(
+            &[(
+                "MIXED",
+                "🔑$${NIBRUN_HTTP_PORT}|{${NIBRUN_HOSTNAME}}|${NIBRUN_BROKEN:${NIBRUN_HTTP_PORT}|$尾",
+            )],
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(
+            config.environment,
+            vec![(
+                "MIXED".to_string(),
+                format!(
+                    "🔑${DEFAULT_HTTP_PORT}|{{my-app.nibrun.app}}|${{NIBRUN_BROKEN:{DEFAULT_HTTP_PORT}|$尾"
+                ),
+            )]
+        );
     }
 
     #[test]
     fn a_reference_this_runtime_does_not_offer_fails_the_boot_at_both_ends() {
-        assert!(
-            TenantValue::parse("$NIBRUN_NO_SUCH_THING").is_err(),
-            "the host would have written it"
-        );
+        for (value, name) in [
+            ("${NIBRUN_NO_SUCH_THING}", "NIBRUN_NO_SUCH_THING"),
+            ("${NIBRUN_HTTP_PORT0}", "NIBRUN_HTTP_PORT0"),
+            ("${NIBRUN_MAX_RESTARTS}", "NIBRUN_MAX_RESTARTS"),
+            ("${NIBRUN_}", "NIBRUN_"),
+            ("${NIBRUN_BROKEN:${NIBRUN_NO_SUCH_THING}", "NIBRUN_NO_SUCH_THING"),
+        ] {
+            assert!(
+                TenantValue::parse(value).is_err(),
+                "the host would have written it"
+            );
 
-        let handed = format!("{}ENV_BAD=$NIBRUN_NO_SUCH_THING\n", written(&[], &[]));
-        let error = parse_instance_env(&handed).unwrap_err();
-        assert!(
-            matches!(&error, InstanceEnvError::UnknownReference { reference, .. } if reference == "NIBRUN_NO_SUCH_THING"),
-            "{error}"
-        );
-        assert!(error.to_string().contains("BAD"), "{error}");
+            let handed = format!("{}ENV_BAD={value}\n", written(&[], &[]));
+            let error = parse_instance_env(&handed).unwrap_err();
+            assert!(
+                matches!(&error, InstanceEnvError::UnknownReference { reference, .. } if reference == name),
+                "{error}"
+            );
+            assert!(error.to_string().contains("BAD"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_complete_reference_to_a_missing_hostname_fails_the_boot() {
+        let handed = written(&[("URL", "https://${NIBRUN_HOSTNAME}")], &[])
+            .lines()
+            .filter(|line| !line.starts_with("NIBRUN_HOSTNAME="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            parse_instance_env(&handed),
+            Err(InstanceEnvError::UnknownReference { reference, .. }) if reference == "NIBRUN_HOSTNAME"
+        ));
     }
 
     #[test]
