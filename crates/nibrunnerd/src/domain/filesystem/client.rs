@@ -7,8 +7,10 @@ use guest_contract::filesystem::{
     MeasuredBytes, MeasuredCompute, FRAME_HEADER_BYTES, GUEST_FILESYSTEM_CHUNK_BYTES,
 };
 use protocol::{AppId, DirectoryListing, GuestPath};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+use crate::domain::guest_line;
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -189,11 +191,9 @@ impl GuestFilesystem {
     }
 
     async fn receive_line(&mut self) -> Result<String, GuestFilesystemError> {
-        let mut line = String::new();
-        match tokio::time::timeout(REPLY_TIMEOUT, self.wire.read_line(&mut line)).await {
-            Ok(Ok(read)) if read > 0 => Ok(line.trim_end().to_string()),
-            _ => Err(self.silent()),
-        }
+        guest_line::read(&mut self.wire, REPLY_TIMEOUT)
+            .await
+            .ok_or_else(|| self.silent())
     }
 }
 
@@ -203,6 +203,7 @@ mod tests {
     use crate::test_support::app_id;
     use guest_contract::filesystem::FRAME_MAGIC;
     use protocol::FilesystemEntryKind;
+    use tokio::io::AsyncBufReadExt;
     use tokio::net::UnixListener;
 
     type Asked = std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>;

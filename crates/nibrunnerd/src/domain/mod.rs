@@ -2,6 +2,7 @@ pub mod activation;
 pub mod backoff;
 pub mod exports;
 pub mod filesystem;
+pub mod guest_line;
 pub mod health;
 pub mod meters;
 pub mod metrics;
