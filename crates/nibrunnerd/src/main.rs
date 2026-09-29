@@ -228,6 +228,13 @@ fn configuration(command: &Command) -> Result<(HostConfig, Origin), std::process
 }
 
 async fn serve(config: HostConfig) -> std::process::ExitCode {
+    let inputs = match nibrunnerd::reload::Inputs::read(&config) {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            tracing::error!(%error, "host startup inputs could not be read");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     let host = match run::build_host(config).await {
         Ok(host) => host,
         Err(error) => {
@@ -254,8 +261,18 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
         })
         .collect();
 
+    let reloading = match nibrunnerd::reload::serve(&host, inputs).await {
+        Ok(task) => task,
+        Err(error) => {
+            tracing::error!(%error, "host configuration could not be served");
+            lifecycle.stop().await;
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
     ready();
     shutdown().await;
+    reloading.abort();
     tracing::info!("nibrunnerd stopping; every microVM on this host keeps running");
     for task in running {
         task.abort();
@@ -414,21 +431,15 @@ mod tests {
         assert!(said.contains("nibrunnerd start"), "{said}");
     }
 
-    /// The lines below share their callsites across these tests, and interest in a callsite is
-    /// cached for the whole process by whichever thread reaches it first — only one of them may
-    /// be answering the question at a time.
-    static QUIETED_CALLSITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn through_the_filter(requested: Option<&str>) -> Vec<String> {
         use tracing_subscriber::prelude::*;
 
         let said = nibrunnerd::test_support::Said::default();
-        let guard = tracing::subscriber::set_default(
+        let guard = nibrunnerd::test_support::listen(
             tracing_subscriber::registry()
                 .with(log_filter(requested))
                 .with(said.clone()),
         );
-        tracing::callsite::rebuild_interest_cache();
 
         tracing::info!(target: "backhand::v4::filesystem::writer", "Writing Data");
         tracing::error!(target: "backhand::v4::filesystem::writer", "the layer could not be packed");
@@ -442,7 +453,6 @@ mod tests {
 
     #[test]
     fn the_squashfs_packer_and_rustls_are_quiet_while_this_host_is_not() {
-        let _callsites = QUIETED_CALLSITES.lock();
         let said = through_the_filter(None);
         assert!(!said.iter().any(|line| line.contains("Writing Data")), "{said:?}");
         assert!(
@@ -457,7 +467,6 @@ mod tests {
 
     #[test]
     fn a_quieted_crate_that_actually_fails_still_reaches_the_journal() {
-        let _callsites = QUIETED_CALLSITES.lock();
         let said = through_the_filter(None);
         assert!(
             said.iter()
@@ -473,7 +482,6 @@ mod tests {
 
     #[test]
     fn the_filter_a_host_asks_for_wins_over_the_levels_these_crates_are_pinned_to() {
-        let _callsites = QUIETED_CALLSITES.lock();
         let said = through_the_filter(Some("info,rustls=trace"));
         assert!(
             said.iter().any(|line| line.contains("Illegal SNI extension")),
@@ -483,7 +491,6 @@ mod tests {
 
     #[test]
     fn a_filter_that_does_not_parse_falls_back_to_info_with_both_crates_still_quiet() {
-        let _callsites = QUIETED_CALLSITES.lock();
         let said = through_the_filter(Some("nibrunnerd=loud"));
         assert!(
             said.iter().any(|line| line.contains("layer image ready")),

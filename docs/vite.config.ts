@@ -27,6 +27,7 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
     alias: {
+      'fumadocs-core/highlight/shiki/full': './src/lib/shiki-full-stub.ts',
       tslib: 'tslib/tslib.es6.js',
     },
   },

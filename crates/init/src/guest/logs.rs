@@ -6,7 +6,7 @@ use guest_contract::logs::{encode_frame, encode_gap, encode_restart, kind_of, FR
 use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
 use protocol::{TenantLogStream, TenantRestart};
 
-const CID_HOST: u32 = 2;
+use crate::guest::vsock;
 
 /// What the first failed dial waits before the next, and what each failure after it doubles
 /// that to at most. A host daemon restarts in under half a second; one that is not listening at
@@ -131,7 +131,7 @@ fn dial() -> Option<OwnedFd> {
     .ok()?;
     connect(
         socket.as_raw_fd(),
-        &VsockAddr::new(CID_HOST, guest_contract::vsock::TENANT_LOG_VSOCK_PORT),
+        &VsockAddr::new(vsock::CID_HOST, guest_contract::vsock::TENANT_LOG_VSOCK_PORT),
     )
     .ok()?;
     Some(socket)
