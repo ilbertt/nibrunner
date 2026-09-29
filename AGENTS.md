@@ -55,6 +55,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - A proper noun in a doc comment that clippy takes for an identifier goes in `clippy.toml`'s
   `doc-valid-idents`, not in backticks.
 - Errors are `thiserror` enums whose messages read as the sentence an operator will find in a log.
+- The daemon's CLI uses clap derives in `crates/nibrunnerd/src/cli.rs`. Declare commands, flags
+  and their help there; clap handles parsing, help and argument errors.
 - A metric is a `Metric` static beside the pass that emits it — name, help, kind and labels in one
   place, because `# HELP` and `# TYPE` are optional and a page whose two halves name a series
   differently scrapes without complaint. Its prefix says what is measured: `nibrunner_app_` for one
