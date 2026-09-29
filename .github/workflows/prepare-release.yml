@@ -56,13 +56,7 @@ jobs:
           cat > "$RUNNER_TEMP/release-pr.md" <<EOF
           Bumps the workspace version to **$TAG** and updates the changelog.
 
-          Approve the PR's workflow runs if GitHub requests it. After merging, tag the release commit and push it:
-
-          \`\`\`sh
-          git fetch origin main
-          git tag $TAG <merge-commit-sha>
-          git push origin $TAG
-          \`\`\`
+          Approve the PR's workflow runs if GitHub requests it, then merge once checks pass.
           EOF
           gh pr create \
             --base main \

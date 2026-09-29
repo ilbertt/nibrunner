@@ -1,30 +1,24 @@
-name: release
+name: tmp-release
 
-on:
-  push:
-    tags:
-      - "v*"
+on: workflow_dispatch
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: tmp-release
   cancel-in-progress: false
 
 jobs:
-  release:
+  tmp-release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: true
 
       - uses: ./.github/actions/build-release
-
-      - name: Verify the tag and extract release notes
-        env:
-          TAG: ${{ github.ref_name }}
-        run: just release-notes "$TAG" > "$RUNNER_TEMP/release-notes.md"
 
       - name: Build the guest image
         run: just guest-image
@@ -32,17 +26,21 @@ jobs:
       - name: Verify the guest image
         run: just verify-guest-image
 
+      - name: Name the release
+        id: version
+        run: echo "tag=$(just tmp-version)" >> "$GITHUB_OUTPUT"
+
       - name: Stage the assets
         run: just stage-release "$RUNNER_TEMP/dist"
 
-      - name: Publish the release
+      - name: Create the prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           gh release create "$TAG" \
-            --verify-tag \
             --title "$TAG" \
-            --notes-file "$RUNNER_TEMP/release-notes.md" \
-            --latest \
+            --notes "" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
             "$RUNNER_TEMP/dist"/*

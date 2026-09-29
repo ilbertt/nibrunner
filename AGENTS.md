@@ -118,10 +118,8 @@ e2fsprogs.
 Run `prepare-release` on GitHub to open a release PR from `main`. `git-cliff`, pinned to a minor version in
 `mise.toml` and configured by `cliff.toml`, writes `CHANGELOG.md` from Conventional Commits. Tags
 use CalVer `vYYYY.M.D-N` in UTC, with a counter starting at 1 each day; the PR updates the workspace
-version in `Cargo.toml` and `Cargo.lock`. After merging, push the prepared tag on the merge commit.
-The `release` workflow verifies the tag against the workspace version and publishes the binaries,
-guest image and checksums with the notes committed in the changelog. These are regular GitHub
-releases, even though Cargo treats the counter as a prerelease suffix.
+version in `Cargo.toml` and `Cargo.lock`. `just release-notes <tag>` validates the prepared version
+and reads its notes from the changelog. Publication still uses the manual `tmp-release` workflow.
 
 ## Run scripts
 

@@ -50,8 +50,8 @@ packages() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q $PACKAGES
 }
 
-# The list includes the temporary prereleases, so installation also works before the first
-# regular release has been published.
+# Releases are cut as prereleases, which /releases/latest does not answer with — so the newest is
+# read off the list rather than asked for by that name.
 newest_release() {
     curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" |
         sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
