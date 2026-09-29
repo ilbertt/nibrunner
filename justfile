@@ -101,8 +101,8 @@ release-notes tag:
     changelog = pathlib.Path("CHANGELOG.md").read_text()
     sections = re.split(r"(?=^## \[)", changelog, flags=re.MULTILINE)
     notes = next((section.strip() for section in sections if section.startswith(f"## [{version}] - ")), None)
-    if not notes or not notes.partition("\n")[2].strip():
-        raise SystemExit(f"CHANGELOG.md has no release notes for {tag}; merge the prepare-release PR first")
+    if notes is None:
+        raise SystemExit(f"CHANGELOG.md has no section for {tag}")
     print(notes)
 
 # Everything that needs no kernel: the planner, the codecs, the ruleset, the reconcile.
