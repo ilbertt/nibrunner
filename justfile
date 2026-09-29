@@ -101,7 +101,7 @@ release-notes tag:
     changelog = pathlib.Path("CHANGELOG.md").read_text()
     sections = re.split(r"(?=^## \[)", changelog, flags=re.MULTILINE)
     notes = next((section.strip() for section in sections if section.startswith(f"## [{version}] - ")), None)
-    if not notes or "\n- " not in notes:
+    if not notes or not notes.partition("\n")[2].strip():
         raise SystemExit(f"CHANGELOG.md has no release notes for {tag}; merge the prepare-release PR first")
     print(notes)
 
