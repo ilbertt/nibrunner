@@ -45,8 +45,10 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
   instead. Delete comments that no longer earn their place. This holds in the justfile and the
   workflows too: a step's `name:` is its label, and a comment on it is only for a why the command
   hides.
-- The workspace lints are in `Cargo.toml`, and `just lint` runs clippy with `-D warnings`, so every
-  warning fails. `unwrap_used` and `panic` are among them: production code returns an error, or
+- The workspace lints are in `Cargo.toml`, and `just lint` runs clippy with `-D warnings` for
+  default-feature libraries and binaries, then all targets with all features. Keep both passes:
+  test dependencies enable `schema` and `testing`, which can hide warnings in production builds.
+  `unwrap_used` and `panic` are among the lints: production code returns an error, or
   `expect`s with the reason it cannot fail. Tests and the `testing` feature are exempt, in `lib.rs`.
 - `unsafe_code` warns too. An `unsafe` block sits in the smallest item that can hold it, under
   `#[allow(unsafe_code)]`, with a `reason` when it is not obvious.

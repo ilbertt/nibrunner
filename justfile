@@ -126,6 +126,7 @@ fmt *args:
 # series rather than the catalogue `just metrics` writes — and through a file, because promtool
 # finds nothing wrong with a page it was handed none of.
 lint:
+    cargo clippy --workspace --lib --bins -- -D warnings
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cd docs && bun run check:types
     cd docs && bun run check:lint
