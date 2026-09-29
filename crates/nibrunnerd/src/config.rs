@@ -85,6 +85,24 @@ pub struct ZerofsSettings {
     pub checkpoint_cache_dir: PathBuf,
 }
 
+/// Optional host-enforced budgets for each Firecracker process, including its guest memory.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VmBudget {
+    /// 100 is one host CPU. This does not change the guest's vCPU count.
+    pub cpu_percent: std::num::NonZeroU16,
+    /// Includes guest RAM and Firecracker overhead. Exceeding it can kill the VM.
+    pub memory_mib: std::num::NonZeroU32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VmBudgets {
+    pub default: VmBudget,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub apps: std::collections::BTreeMap<protocol::AppId, VmBudget>,
+}
+
 /// Where the world reaches an app on this host.
 ///
 /// Every way in is a section under here, and each is absent or complete: there is no
@@ -179,6 +197,7 @@ pub const STARTER_STATE_DIR: &str = "/var/lib/nibrunner";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
+    pub vm_budgets: Option<VmBudgets>,
     /// How many apps this host is laid out for. Everything that counts slots follows from it —
     /// the ring the allocator walks, the loopback ports reserved, the nbd minors the module is
     /// loaded with, the conntrack table's size, what the metrics page calls the total — and
@@ -276,6 +295,9 @@ mod file {
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "HostConfig")]
     pub(super) struct ConfigFile {
+        /// Absent preserves VM processes without additional cgroup limits.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) vm_budgets: Option<super::VmBudgets>,
         /// How many apps this host is laid out for. Everything that counts slots follows from it:
         /// the slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,
         /// the kernel's conntrack table at 1024 entries an app, what the metrics page calls the
@@ -670,6 +692,7 @@ impl HostConfig {
         let logs = logs(document.logs.as_ref())?;
 
         Ok(Self {
+            vm_budgets: document.vm_budgets.clone(),
             max_apps,
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
             guest_image_dir: path_key("paths.guest_image_dir", &paths.guest_image_dir)?,
@@ -764,6 +787,7 @@ impl HostConfig {
             proxy: ProxyConfig::default(),
             metrics: None,
             filesystem: None,
+            vm_budgets: None,
             logs: LogsConfig::default(),
             export_store_url: state_dir.join("export-store").display().to_string(),
             export_staging_dir: state_dir.join("exports"),
@@ -831,6 +855,13 @@ impl HostConfig {
             }),
             filesystem: Some(FilesystemConfig {
                 socket: PathBuf::from("/run/nibrunner/filesystem.sock"),
+            }),
+            vm_budgets: Some(VmBudgets {
+                default: VmBudget {
+                    cpu_percent: std::num::NonZeroU16::new(100).expect("positive budget"),
+                    memory_mib: std::num::NonZeroU32::new(2304).expect("positive budget"),
+                },
+                apps: Default::default(),
             }),
             logs: LogsConfig::default(),
             export_store_url: "s3://nibrunner-exports-eu-west-2-123456789012/exports".to_string(),
@@ -930,6 +961,7 @@ impl HostConfig {
             filesystem: self.filesystem.as_ref().map(|filesystem| file::Filesystem {
                 socket: text(&filesystem.socket),
             }),
+            vm_budgets: self.vm_budgets.clone(),
             logs: Some(file::Logs {
                 keep_mib_per_app: Some(self.logs.keep_bytes_per_app / BYTES_PER_MEBIBYTE),
             }),
