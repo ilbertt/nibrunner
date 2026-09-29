@@ -47,6 +47,9 @@ Without `sleepWhen`, an `on-request` instance sleeps after five minutes idle. An
     rejected.
   - A host that has not managed to read an app's traffic lately leaves it up rather than taking
     the silence for quiet, and says so in its log. `max-lifetime` runs on the clock either way.
+  - A sleep that does not happen leaves the app up. The host tries again after 30 s, then waits
+    twice as long after each further failure, up to 10 minutes. Traffic in between resets the
+    wait.
 </Callout>
 
 ## What wakes it

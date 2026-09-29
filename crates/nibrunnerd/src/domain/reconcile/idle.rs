@@ -19,6 +19,16 @@ pub const SLEEP_CONCURRENCY: usize = 4;
 // pass short; what it leaves it counts back, so the caller comes straight back for it.
 pub const SLEEPS_PER_PASS: usize = SLEEP_CONCURRENCY * 2;
 
+// A sleep that did not happen is not tried again on the next pass. The port handed to the
+// activator, the proxy's connections into the app closed and the volumes flushed are all paid
+// before the VMM has its say, so a guest that goes on refusing would have the host pay for them
+// on every pass.
+const SLEEP_RETRY: BackoffPolicy = BackoffPolicy {
+    initial_backoff_ms: 30_000,
+    max_backoff_ms: 600_000,
+    backoff_factor: 2.0,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use futures::StreamExt;
@@ -26,6 +36,7 @@ use nft_render::AppTraffic;
 use protocol::{ActivationPolicy, AppId, Timestamp};
 
 use crate::domain::activation::{should_sleep, ActivitySignals, SleepReason, MAX_ACTIVITY_AGE_MS};
+use crate::domain::backoff::{backoff_delay_ms, is_ready_to_retry, AttemptWindow, BackoffPolicy};
 use crate::domain::metrics::sleep_wake::SleepOutcome;
 use crate::domain::report::InstanceRecord;
 use crate::host::Host;
@@ -293,8 +304,47 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bo
     // the guest back: a request that reaches an app mid-snapshot waits for the snapshot and then
     // restores what it wrote, rather than finding a guest that is paused or half written out.
     let _transition = host.state.transition(app_id).await;
-    crate::domain::reconcile::instances::suspend_instance(host, app_id, due.reason).await
-        == Some(SleepOutcome::Slept)
+    let outcome = crate::domain::reconcile::instances::suspend_instance(host, app_id, due.reason).await;
+    note_attempt(host, app_id, outcome).await;
+    outcome == Some(SleepOutcome::Slept)
+}
+
+/// Starts or lengthens the wait before this app's next sleep when this one did not happen, and
+/// ends it when it did.
+async fn note_attempt(host: &Host, app_id: &AppId, outcome: Option<SleepOutcome>) {
+    let now = crate::clock::now_ms();
+    let attempts = host
+        .state
+        .modify(|snapshot| match outcome {
+            Some(SleepOutcome::Refused | SleepOutcome::Failed) => {
+                let failed = snapshot.failed_sleeps.entry(app_id.clone()).or_default();
+                *failed = AttemptWindow {
+                    attempts: failed.attempts + 1,
+                    last_attempt_at_ms: Some(now),
+                };
+                Some(failed.attempts)
+            }
+            Some(SleepOutcome::Slept) | None => {
+                snapshot.failed_sleeps.remove(app_id);
+                None
+            }
+        })
+        .await;
+    if let Some(attempts) = attempts {
+        tracing::info!(
+            %app_id,
+            attempts,
+            retry_in_ms = backoff_delay_ms(attempts, &SLEEP_RETRY),
+            "this app's sleep is tried again once its backoff runs out"
+        );
+    }
+}
+
+fn waited_out(snapshot: &HostSnapshot, app_id: &AppId, now: i64) -> bool {
+    snapshot
+        .failed_sleeps
+        .get(app_id)
+        .is_none_or(|failed| is_ready_to_retry(failed, now, &SLEEP_RETRY))
 }
 
 /// Puts the due apps to sleep, the most overdue first and `SLEEPS_PER_PASS` of them at most, and
@@ -330,6 +380,17 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) -> usize {
             due(policy, record, &signals, now).map(|due| (due, record.app_id.clone(), *policy))
         })
         .collect();
+    // A backoff lasts only while the app stays due: one asked for since its sleep did not happen
+    // is tried the next time it is quiet.
+    let still_due: BTreeSet<AppId> = letting_go.iter().map(|(_, app_id, _)| app_id.clone()).collect();
+    host.state
+        .modify(|snapshot| {
+            snapshot
+                .failed_sleeps
+                .retain(|app_id, _| still_due.contains(app_id))
+        })
+        .await;
+    letting_go.retain(|(_, app_id, _)| waited_out(&snapshot, app_id, now));
     if letting_go.is_empty() {
         return 0;
     }
@@ -1109,5 +1170,70 @@ mod sleep_tests {
             let record = host.state.record(&nth(n)).await.unwrap();
             assert_eq!(record.state, InstanceState::Running, "{}", nth(n));
         }
+    }
+
+    async fn backoff_waited(host: &TestHost, for_ms: u64) {
+        host.state
+            .modify(|snapshot| {
+                for failed in snapshot.failed_sleeps.values_mut() {
+                    failed.last_attempt_at_ms = failed.last_attempt_at_ms.map(|at| at - for_ms as i64);
+                }
+            })
+            .await;
+    }
+
+    async fn one_whose_sleep_does_not_happen() -> TestHost {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;
+        host.vms.refuse_sleep(crate::ports::VmError::Host(
+            "the snapshot could not be written".into(),
+        ));
+        host
+    }
+
+    #[tokio::test]
+    async fn a_sleep_that_did_not_happen_is_not_tried_again_until_its_backoff_runs_out() {
+        let host = one_whose_sleep_does_not_happen().await;
+
+        apply_sleep(host.arc()).await;
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
+
+        backoff_waited(&host, SLEEP_RETRY.initial_backoff_ms).await;
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; 2]);
+    }
+
+    #[tokio::test]
+    async fn each_sleep_that_does_not_happen_is_waited_out_longer_than_the_one_before() {
+        let host = one_whose_sleep_does_not_happen().await;
+        apply_sleep(host.arc()).await;
+        backoff_waited(&host, SLEEP_RETRY.initial_backoff_ms).await;
+        apply_sleep(host.arc()).await;
+
+        backoff_waited(&host, SLEEP_RETRY.initial_backoff_ms).await;
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; 2]);
+
+        backoff_waited(&host, SLEEP_RETRY.initial_backoff_ms).await;
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; 3]);
+    }
+
+    #[tokio::test]
+    async fn an_app_asked_for_after_its_sleep_did_not_happen_is_tried_as_soon_as_it_is_quiet_again() {
+        let host = one_whose_sleep_does_not_happen().await;
+        apply_sleep(host.arc()).await;
+
+        host.state.mark_active(&app_id(), crate::clock::now_ms()).await;
+        apply_sleep(host.arc()).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 * 10).await;
+        apply_sleep(host.arc()).await;
+
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep; 2]);
     }
 }

@@ -8,6 +8,7 @@ use protocol::{
 };
 use tokio::sync::{Notify, OwnedMutexGuard, RwLock};
 
+use crate::domain::backoff::AttemptWindow;
 use crate::domain::metrics::converge::Deploy;
 use crate::domain::report::InstanceRecord;
 
@@ -23,6 +24,9 @@ pub struct HostSnapshot {
     pub export_reports: Vec<protocol::ReportedExport>,
     pub next_probe_at_ms: BTreeMap<AppId, i64>,
     pub snapshotting: BTreeSet<AppId>,
+    // Each app whose last sleep did not happen and that has been due ever since. Only ever this
+    // daemon's own note, so a restart tries every app afresh.
+    pub failed_sleeps: BTreeMap<AppId, AttemptWindow>,
     pub app_traffic: BTreeMap<AppId, AppTraffic>,
     pub last_active_at_ms: BTreeMap<AppId, i64>,
     // When each app's traffic counters were last read. Only ever this daemon's own note of what
