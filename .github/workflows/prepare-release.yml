@@ -1,0 +1,71 @@
+name: prepare-release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: ./.github/actions/prepare
+        with:
+          cache: disabled
+          prepare-for-build: disabled
+
+      - name: Compute next version
+        id: version
+        run: |
+          tag=$(just release-version)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare the version and changelog
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: just prepare-release "$TAG"
+
+      - name: Commit and push the release branch
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "release/$TAG"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): $TAG"
+          git push --set-upstream origin "release/$TAG"
+
+      - name: Create the release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          cat > "$RUNNER_TEMP/release-pr.md" <<EOF
+          Bumps the workspace version to **$TAG** and updates the changelog.
+
+          Approve the PR's workflow runs if GitHub requests it. After merging, tag the release commit and push it:
+
+          \`\`\`sh
+          git fetch origin main
+          git tag $TAG <merge-commit-sha>
+          git push origin $TAG
+          \`\`\`
+          EOF
+          gh pr create \
+            --base main \
+            --head "release/$TAG" \
+            --title "chore(release): $TAG" \
+            --body-file "$RUNNER_TEMP/release-pr.md"

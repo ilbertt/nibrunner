@@ -9,7 +9,7 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 ## Stack
 
 - **Language:** Rust; the host binary is one static x86_64 musl binary
-- **Tasks:** `just`; `mise` installs `just` and `bun`
+- **Tasks:** `just`; `mise` installs the tools pinned in `mise.toml`
 - **Linter/Formatter:** rustfmt and clippy for the Rust, Biome (`docs/biome.json`) for the docs
   site; editors format on save
 - **State:** SQLite through sqlx, with the offline query data committed under `.sqlx/`
@@ -112,6 +112,16 @@ anything else crosses through `zig` and `cargo-zigbuild`. The daemon's `build.rs
 Firecracker release it pins and embeds it; `NIBRUNNER_FIRECRACKER_BINARY` points it at one to build
 without fetching. `just guest-image` builds `guest/rootfs.ext4` and needs Linux, root, docker and
 e2fsprogs.
+
+## Releases
+
+Run `prepare-release` on GitHub to open a release PR from `main`. `git-cliff`, pinned in
+`mise.toml` and configured by `cliff.toml`, writes `CHANGELOG.md` from Conventional Commits. Tags
+use CalVer `vYYYY.M.D-N` in UTC, with a counter starting at 1 each day; the PR updates the workspace
+version in `Cargo.toml` and `Cargo.lock`. After merging, push the prepared tag on the merge commit.
+The `release` workflow verifies the tag against the workspace version and publishes the binaries,
+guest image and checksums with the notes committed in the changelog. These are regular GitHub
+releases, even though Cargo treats the counter as a prerelease suffix.
 
 ## Run scripts
 
