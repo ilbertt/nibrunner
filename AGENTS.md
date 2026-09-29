@@ -124,7 +124,8 @@ use `vYEAR.MONTH.PATCH` in UTC, without zero padding. The patch starts at 0 each
 from the highest stable tag; historical date-counter prereleases do not advance it. The PR updates
 the workspace version in `Cargo.toml` and `Cargo.lock`. After merging, push the prepared tag on the merge commit.
 The `release` workflow verifies the tag against the workspace version and publishes the binaries,
-guest image and checksums with the notes committed in the changelog.
+guest image and checksums. `just release-notes` runs `git-cliff --current` on the checked-out tag to
+generate the release description from Git history; empty notes are allowed.
 
 ## Run scripts
 

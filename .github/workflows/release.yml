@@ -18,13 +18,20 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/build-release
 
-      - name: Verify the tag and extract release notes
+      - name: Verify the release version
         env:
           TAG: ${{ github.ref_name }}
-        run: just release-notes "$TAG" > "$RUNNER_TEMP/release-notes.md"
+        run: |
+          cargo metadata --no-deps --format-version 1 |
+            jq -e --arg tag "$TAG" '.packages[] | select(.name == "nibrunnerd") | "v" + .version == $tag'
+
+      - name: Generate release notes
+        run: just release-notes > "$RUNNER_TEMP/release-notes.md"
 
       - name: Build the guest image
         run: just guest-image

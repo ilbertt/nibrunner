@@ -71,7 +71,6 @@ prepare-release tag:
     cargo update --workspace
     touch CHANGELOG.md
     git cliff --unreleased --tag "$tag" --prepend CHANGELOG.md
-    {{just_executable()}} release-notes "$tag" > /dev/null
 
 [private]
 [positional-arguments]
@@ -86,24 +85,8 @@ set-release-version version:
     current = tomllib.loads(content)["workspace"]["package"]["version"]
     manifest.write_text(content.replace(f'version = "{current}"', f'version = "{sys.argv[1]}"', 1))
 
-[positional-arguments]
-release-notes tag:
-    #!/usr/bin/env python3
-    import pathlib
-    import re
-    import sys
-    import tomllib
-
-    tag = sys.argv[1]
-    version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
-    if not re.fullmatch(r"v[1-9][0-9]{3}\.(1[0-2]|[1-9])\.(0|[1-9][0-9]*)", tag) or tag != f"v{version}":
-        raise SystemExit(f"release tag {tag} does not match the YEAR.MONTH.PATCH workspace version v{version}")
-    changelog = pathlib.Path("CHANGELOG.md").read_text()
-    sections = re.split(r"(?=^## \[)", changelog, flags=re.MULTILINE)
-    notes = next((section.strip() for section in sections if section.startswith(f"## [{version}] - ")), None)
-    if notes is None:
-        raise SystemExit(f"CHANGELOG.md has no section for {tag}")
-    print(notes)
+release-notes:
+    git cliff --current --strip all
 
 # Everything that needs no kernel: the planner, the codecs, the ruleset, the reconcile.
 test:
