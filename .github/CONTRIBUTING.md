@@ -31,8 +31,10 @@ format — `check-pr-title` refuses one that is not.
    GitHub Actions must be allowed to create pull requests in the repository's Actions settings.
 2. Review the PR, approve its workflow runs if GitHub requests it, and merge once checks pass.
 
-The date is UTC, and the counter starts at 1 each day, following the highest existing tag for that
-date. `git-cliff` generates the changelog from Conventional Commits since the previous tag.
+Tags use `vYEAR.MONTH.PATCH`, with the year and month in UTC and no zero padding: `v2026.9.0`,
+`v2026.9.1`, then `v2026.10.0` in October. The patch starts at 0 each month and follows the highest
+stable tag. Historical date-counter prereleases do not advance it or delimit the changelog.
+`git-cliff` generates the changelog from Conventional Commits since the previous stable tag.
 Publication still uses the manual `tmp-release` workflow.
 
 Everything else — the layout, the code style, the test lanes, what CI checks and the files that

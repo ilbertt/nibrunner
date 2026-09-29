@@ -45,23 +45,22 @@ stage-release dist:
     # on a listed file that is not there.
     cd "{{dist}}" && sha256sum nibrunnerd-linux-x64 vmlinux rootfs.ext4 manifest.json > checksums.txt
 
-# The next release tag, as CalVer `YYYY.M.D-N`, with the counter read off today's tags.
+# The next release tag, as `YEAR.MONTH.PATCH`, with the patch counter starting at 0 each month.
 release-version:
     #!/usr/bin/env bash
     set -euo pipefail
-    today="$(date -u +%Y.%-m.%-d)"
-    # Cargo orders a version with a suffix below the same version without one, so every release
-    # carries a counter, including the first. Use the highest surviving tag in case one was deleted.
-    last="$(git tag --list "v$today-*" | sed -n "s/^v$today-\([0-9][0-9]*\)$/\1/p" | sort -n | tail -1)"
-    echo "v$today-$(( ${last:-0} + 1 ))"
+    month="$(date -u +%Y.%-m)"
+    # Use the highest surviving patch in case a tag was deleted. Prereleases do not advance it.
+    last="$(git tag --list "v$month.*" | sed -nE 's/^v[0-9]{4}\.[0-9]{1,2}\.(0|[1-9][0-9]*)$/\1/p' | sort -n | tail -1)"
+    echo "v$month.$(( ${last:--1} + 1 ))"
 
 [positional-arguments]
 prepare-release tag:
     #!/usr/bin/env bash
     set -euo pipefail
     tag=$1
-    if [[ ! "$tag" =~ ^v[0-9]{4}\.[1-9][0-9]?\.[1-9][0-9]?-[1-9][0-9]*$ ]]; then
-        echo "release tags must use CalVer, such as v2026.9.29-1" >&2
+    if [[ ! "$tag" =~ ^v[1-9][0-9]{3}\.(1[0-2]|[1-9])\.(0|[1-9][0-9]*)$ ]]; then
+        echo "release tags must use YEAR.MONTH.PATCH, such as v2026.9.0" >&2
         exit 1
     fi
     if git show-ref --verify --quiet "refs/tags/$tag"; then
@@ -97,8 +96,8 @@ release-notes tag:
 
     tag = sys.argv[1]
     version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
-    if not re.fullmatch(r"v[0-9]{4}\.[1-9][0-9]?\.[1-9][0-9]?-[1-9][0-9]*", tag) or tag != f"v{version}":
-        raise SystemExit(f"release tag {tag} does not match the CalVer workspace version v{version}")
+    if not re.fullmatch(r"v[1-9][0-9]{3}\.(1[0-2]|[1-9])\.(0|[1-9][0-9]*)", tag) or tag != f"v{version}":
+        raise SystemExit(f"release tag {tag} does not match the YEAR.MONTH.PATCH workspace version v{version}")
     changelog = pathlib.Path("CHANGELOG.md").read_text()
     sections = re.split(r"(?=^## \[)", changelog, flags=re.MULTILINE)
     notes = next((section.strip() for section in sections if section.startswith(f"## [{version}] - ")), None)

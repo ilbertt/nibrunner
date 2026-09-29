@@ -23,7 +23,7 @@ trim = true
 [git]
 conventional_commits = true
 filter_unconventional = true
-tag_pattern = '^v[0-9]{4}\.[1-9][0-9]?\.[1-9][0-9]?-[1-9][0-9]*$'
+tag_pattern = '^v[1-9][0-9]{3}\.(1[0-2]|[1-9])\.(0|[1-9][0-9]*)$'
 use_branch_tags = true
 sort_commits = "newest"
 commit_parsers = [

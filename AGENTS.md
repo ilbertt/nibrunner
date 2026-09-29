@@ -117,9 +117,11 @@ e2fsprogs.
 
 Run `prepare-release` on GitHub to open a release PR from `main`. `git-cliff`, pinned to a minor version in
 `mise.toml` and configured by `cliff.toml`, writes `CHANGELOG.md` from Conventional Commits. Tags
-use CalVer `vYYYY.M.D-N` in UTC, with a counter starting at 1 each day; the PR updates the workspace
-version in `Cargo.toml` and `Cargo.lock`. `just release-notes <tag>` validates the prepared version
-and reads its notes from the changelog. Publication still uses the manual `tmp-release` workflow.
+use `vYEAR.MONTH.PATCH` in UTC, without zero padding. The patch starts at 0 each month and increments
+from the highest stable tag; historical date-counter prereleases do not advance it. The PR updates
+the workspace version in `Cargo.toml` and `Cargo.lock`. `just release-notes <tag>` validates the
+prepared version and reads its notes from the changelog. Publication still uses the manual
+`tmp-release` workflow.
 
 ## Run scripts
 
