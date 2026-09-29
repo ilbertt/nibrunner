@@ -1,0 +1,231 @@
+{
+  "components": {
+    "schemas": {
+      "AppId": {
+        "description": "an identifier",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$",
+        "type": "string"
+      },
+      "DirectoryListing": {
+        "description": "What one directory inside a guest holds.",
+        "properties": {
+          "entries": {
+            "description": "Sorted by `name`. `lost+found` is left out of the guest's root, because the filesystem\nthe volume was made with put it there and no app did.",
+            "items": {
+              "$ref": "#/components/schemas/FilesystemEntry"
+            },
+            "type": "array"
+          },
+          "path": {
+            "$ref": "#/components/schemas/GuestPath",
+            "description": "The directory listed, as it was asked for."
+          },
+          "truncated": {
+            "description": "The directory held more entries than one answer carries, and `entries` is cut.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "entries",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "FilesystemEntry": {
+        "description": "One entry of a directory, as the guest measured it.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/FilesystemEntryKind"
+          },
+          "modifiedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "name": {
+            "description": "The entry alone, not the path it was reached by.",
+            "type": "string"
+          },
+          "sizeBytes": {
+            "description": "What the entry takes, as the guest's own filesystem reports it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "sizeBytes",
+          "modifiedAt"
+        ],
+        "type": "object"
+      },
+      "FilesystemEntryKind": {
+        "description": "What one entry in a directory is. Anything that is neither a file nor a directory — a socket,\na device node, a symbolic link — is `other`.",
+        "enum": [
+          "file",
+          "directory",
+          "other"
+        ],
+        "type": "string"
+      },
+      "GuestPath": {
+        "description": "a guest path",
+        "maxLength": 4096,
+        "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$",
+        "type": "string"
+      },
+      "Refused": {
+        "description": "The body every refusal is answered with.",
+        "properties": {
+          "message": {
+            "description": "Why the listing was refused, as the sentence an operator will find in a log.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "type": "object"
+      },
+      "Timestamp": {
+        "description": "an ISO 8601 instant with an offset",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+        "type": "string"
+      }
+    }
+  },
+  "info": {
+    "description": "What a guest holds, over the unix socket `[filesystem] socket` names.",
+    "title": "nibrunner guest filesystem",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/apps/{appId}/files": {
+      "get": {
+        "description": "A sleeping app is woken first, as a request reaching it would, and asking counts as activity.",
+        "parameters": [
+          {
+            "description": "The app to ask, as `desired.json` names it.",
+            "in": "path",
+            "name": "appId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/AppId"
+            }
+          },
+          {
+            "description": "The directory to list, percent-encoded.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/GuestPath"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectoryListing"
+                }
+              }
+            },
+            "description": "What the directory holds."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refused"
+                }
+              }
+            },
+            "description": "The app id or the path could not be read, or no path was given, or more was asked of the guest than one request carries."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refused"
+                }
+              }
+            },
+            "description": "The guest would not list that directory."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refused"
+                }
+              }
+            },
+            "description": "The route is not one this socket answers, or this host runs no app by that id."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refused"
+                }
+              }
+            },
+            "description": "The request was not a GET."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refused"
+                }
+              }
+            },
+            "description": "The app is stopped, so there is no guest to ask."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refused"
+                }
+              }
+            },
+            "description": "The guest answered with bytes the host could not read."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refused"
+                }
+              }
+            },
+            "description": "The app could not be woken, or the host has no memory left to wake the app, or no microVM is running for the app."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refused"
+                }
+              }
+            },
+            "description": "The guest took the request and never answered."
+          }
+        },
+        "summary": "List a directory inside an app's guest.",
+        "x-codeSamples": [
+          {
+            "label": "curl",
+            "lang": "bash",
+            "source": "curl --unix-socket /run/nibrunner/filesystem.sock \\\n  'http://localhost/apps/app-7/files?path=%2Fdata'"
+          }
+        ]
+      }
+    }
+  }
+}

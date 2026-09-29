@@ -100,6 +100,7 @@ protocol_schemas := "crates/protocol/schema"
 config_example := "deploy/config.example.toml"
 config_schema := "deploy/config.schema.json"
 metrics := "crates/nibrunnerd/metrics.json"
+openapi := "crates/nibrunnerd/filesystem.openapi.json"
 
 # The JSON Schemas in crates/protocol/schema, from the protocol crate's types.
 schema into=protocol_schemas:
@@ -125,6 +126,13 @@ metrics into=metrics:
     cargo run -q -p nibrunnerd --bin metrics -- "{{into}}"
 
 check-metrics: (check-generated "metrics" metrics)
+
+# crates/nibrunnerd/filesystem.openapi.json — the socket that lists what a guest holds, from the
+# route it serves and the refusals it declares. The docs site's reference page is rendered from it.
+openapi into=openapi:
+    cargo run -q -p nibrunnerd --features schema --bin openapi -- "{{into}}"
+
+check-openapi: (check-generated "openapi" openapi)
 
 # Runs `recipe` into a scratch copy of `path` — a file, or a directory of them — and diffs the two.
 [private]

@@ -29,7 +29,7 @@ pub(crate) fn serve() -> ! {
         }
     };
     loop {
-        match vsock::accept_one(&listener) {
+        match vsock::accept_from_host(&listener) {
             Ok(connection) => answer_all(connection),
             Err(_) => std::thread::sleep(Duration::from_millis(100)),
         }

@@ -88,6 +88,7 @@ come from, regenerate and commit; CI's `just check-<recipe>` fails otherwise:
   `just config-example`
 - `deploy/config.schema.json` from `HostConfig::schema` in the same file — `just config-schema`
 - `crates/nibrunnerd/metrics.json` from `domain::metrics::declared` — `just metrics`
+- `crates/nibrunnerd/filesystem.openapi.json` from `adapters::filesystem::openapi` — `just openapi`
 - `.sqlx/` from every `sqlx::query!` — `cargo sqlx prepare` against a SQLite file with
   `crates/nibrunnerd/migrations` applied. The build reads the committed data and needs no
   database; a query it does not know fails to compile.
@@ -128,7 +129,12 @@ Pages are MDX under `docs/content/docs/`: `(docs)/index.mdx` is the introduction
 `reference/` pages are rendered from the JSON Schemas by `<SchemaReference file="..." />`, which
 `docs/src/lib/remark-schema-reference.ts` expands at build time — no generated MDX is checked in.
 `reference/metrics.mdx` is the same shape over `crates/nibrunnerd/metrics.json`, through
-`<MetricsReference file="..." />` and `remark-metrics-reference.ts`.
+`<MetricsReference file="..." />` and `remark-metrics-reference.ts`. `reference/filesystem.mdx` is
+`fumadocs-openapi` instead, over `crates/nibrunnerd/filesystem.openapi.json`, wired up in
+`src/components/filesystem-api.tsx`: it highlights through a Shiki of two grammars rather than the
+full bundle, which `src/lib/shiki-full-stub.ts` and the alias beside it in `vite.config.ts` are
+there to keep out. Its playground and its generated code samples are both off — a unix socket has
+no URL to build a call from, so the document carries the one that works as `x-codeSamples`.
 A page that moves leaves its old path in the `moved` map in `docs/src/routes/docs/$.tsx`. Link the
 docs by their nibrunner.dev URL, from the daemon's messages and the README alike. Style: short,
 steps and tables first, the why in a callout. `just docs-build` produces `docs/dist/app`, one Linux
