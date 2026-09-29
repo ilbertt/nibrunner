@@ -56,6 +56,7 @@ it is up. The request counts as activity, so the idle timer restarts from the mo
 | `400` | The app id or the path could not be read, or no `path` was given |
 | `403` | The guest would not list that directory |
 | `404` | No such route, or this host runs no such app |
+| `405` | The request was not a `GET` |
 | `409` | The app is stopped, so there is no guest to ask |
 | `502` | The guest answered with bytes the host could not read |
 | `503` | The app could not be woken, usually for want of memory |
