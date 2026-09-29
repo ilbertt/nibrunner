@@ -122,9 +122,9 @@ Run `prepare-release` on GitHub to open a release PR from `main`. `git-cliff`, p
 `mise.toml` and configured by `cliff.toml`, writes `CHANGELOG.md` from Conventional Commits. Tags
 use `vYEAR.MONTH.PATCH` in UTC, without zero padding. The patch starts at 0 each month and increments
 from the highest stable tag; historical date-counter prereleases do not advance it. The PR updates
-the workspace version in `Cargo.toml` and `Cargo.lock`. `just release-notes <tag>` validates the
-prepared version and reads its notes from the changelog. Publication still uses the manual
-`tmp-release` workflow.
+the workspace version in `Cargo.toml` and `Cargo.lock`. After merging, push the prepared tag on the merge commit.
+The `release` workflow verifies the tag against the workspace version and publishes the binaries,
+guest image and checksums with the notes committed in the changelog.
 
 ## Run scripts
 

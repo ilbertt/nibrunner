@@ -30,12 +30,13 @@ format — `check-pr-title` refuses one that is not.
 1. Run the `prepare-release` workflow. It opens a PR with the next date-based version and changelog.
    GitHub Actions must be allowed to create pull requests in the repository's Actions settings.
 2. Review the PR, approve its workflow runs if GitHub requests it, and merge once checks pass.
+3. Fetch `main`, tag the PR's merge commit as `vYEAR.MONTH.PATCH`, and push the tag. The `release` workflow
+   builds and publishes the binaries, guest image and checksums using the committed release notes.
 
 Tags use `vYEAR.MONTH.PATCH`, with the year and month in UTC and no zero padding: `v2026.9.0`,
 `v2026.9.1`, then `v2026.10.0` in October. The patch starts at 0 each month and follows the highest
 stable tag. Historical date-counter prereleases do not advance it or delimit the changelog.
 `git-cliff` generates the changelog from Conventional Commits since the previous stable tag.
-Publication still uses the manual `tmp-release` workflow.
 
 Everything else — the layout, the code style, the test lanes, what CI checks and the files that
 are generated rather than written — is in [`AGENTS.md`](../AGENTS.md).
