@@ -3,6 +3,7 @@
   "defaultOpen": true,
   "pages": [
     "layers",
+    "dockerfile",
     "volumes",
     "sleep-and-wake",
     "health-checks",

@@ -11,7 +11,7 @@ This page deploys one binary. A static Linux x86_64 binary (Go, Rust, Zig, a com
 executable) needs nothing else. A dynamically linked one gets glibc, libstdc++ and CA
 certificates from Debian's slim image. An app that needs a runtime (PHP, Python, Node), or that
 comes from a Dockerfile, is a `filesystem` layer:
-[from a Docker image](/docs/guides/layers#from-a-docker-image).
+[deploy from a Dockerfile](/docs/guides/dockerfile).
 
 <Steps>
 <Step>
