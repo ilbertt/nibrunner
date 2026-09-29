@@ -2,4 +2,263 @@
 
 ## [2026.9.0] - 2026-09-29
 
+### Features
+
+- Add nibrunnerd version flags (#171)
+- Let the host reclaim unused guest pages (#158)
+- The filesystem socket publishes an OpenAPI document, and the docs render its reference from it (#168)
+- Every document names the version its writer knows it by, and the report hands it back (#156)
+- A report says which document this host took up, by the digest of the file it came from (#153)
+- A socket on the host lists what a guest holds, waking it the way a request does (#152)
+- What an app has used is read from the metrics page, not from reported.json (#139)
+- The internet calls on a sleeping app every so often (#114)
+- The docs home animation starts with context-use, not blog (#113)
+- The homepage asks for a star where it offered the docs (#112)
+- Keep the newest 256 MiB of each app's output on the host, not all of it (#109)
+- Size the conntrack table from max_apps and say when it fills (#108)
+- Meta tags on every page, and a card for links to unfurl (#104)
+- A logo, the robot from the homepage, and nibrun's faces in its colours (#100)
+- A wider robot, so its name reads (#101)
+- The homepage's apps are ones you would self-host, and the robot wears its name (#98)
+- The docs homepage is a host drawn as a warehouse floor, run by a robot (#95)
+- A reference section in the docs, rendered from the JSON Schemas (#92)
+- Publish config.toml as a JSON Schema (#93)
+- Install writes the max_apps this machine holds, and start says whether it still does (#90)
+- The configuration says how many apps a host is laid out for (#89)
+- Report the guest's tenant restarts to the host (#69)
+- Pass over what the laptop's archiver added to a volume's initial contents (#56)
+- Name what healthy means, and refuse a document that does not (#54)
+- Start a volume with an archive from the store, unpacked where the document says (#50)
+- Give the tenant a memory ceiling, and kill it when it thrashes at it (#53)
+- Open install.sh with what it is about to do, and put a blank line between the steps (#47)
+- Put what the host holds beyond its guests on /metrics, and time what storage and the store cost (#42)
+- Count what the proxy carried per app and by the status that came back, and meter the raw ports at all (#40)
+- Count every probe, every failure by where on the way up it happened, and every lapse from healthy (#39)
+- Measure a sleeping app being woken and a running one being put to sleep, stretch by stretch (#38)
+- Say on /metrics whether the loops that run this host have been round, and how long each pass took (#37)
+- Measure every stretch of the way from a change in the document to the app being what it asks for (#36)
+- Measure the sleep, the wake and what each app cost (#35)
+- Add `nibrunnerd start` and leave `install` to the files (#29)
+- Render config.toml from the types that read it (#28)
+- Show a progress bar for each release asset install.sh downloads (#24)
+- Boot an instance from layers, with the volume as its writable root (#23)
+- Publish the desired and reported state documents as JSON Schemas (#18)
+- Meter what each app has used (#15)
+- Let an instance name what puts it to sleep and what wakes it ready (#13)
+- Carry a raw port whatever arrives on it (#16)
+- Give an app a second port and a way in that is not HTTP (#14)
+- Lay a host out with `nibrunnerd install` (#11)
+- Let a scraper read what the report already says
+- Tell a tenant what its visitor's connection actually was
+- Serve HTTP/2, carry websockets, and bound an unfinished greeting
+- Let a host require the edge to prove it is the edge
+- Wire the usage and control-plane loops
+- Keep this host's own notes in one SQLite database
+- Write the guest runtime in Rust, sharing the contract with the host
+- Put the guest's half of instance.env beside the host's
+- Put the guest's half of the filesystem wire beside the host's
+- Browse a tenant's files by asking the guest that has them mounted
+- Hand a tenant their data back as an export
+- Cut and release checkpoints from the reconcile pass
+- Keep a volume's blocks in an object store, over ZeroFS and NBD
+- Configure a host from one validated TOML file
+
+### Fixes
+
+- Generate release notes with git-cliff (#177)
+- Catch default-feature warnings in lint (#178)
+- A sleep that did not happen is tried again after a backoff, not on the next pass (#167)
+- A line read from a guest port stops at 256 bytes (#166)
+- The guest's control and file ports answer only the host (#165)
+- Keep proxy connections open when host capacity grows (#162)
+- An app whose traffic this host could not read is left up rather than slept on the silence (#134)
+- A device proves which volume it carries before an app is booted onto it or it is formatted (#136)
+- Close the connections the proxy holds into an app it is putting to sleep, so the next request wakes it (#135)
+- An app the document no longer names takes its log file with it (#133)
+- The document a host last took up is a row in state.db rather than desired-state.json beside desired.json (#127)
+- **docs:** A crate being resized keeps the cells it grows into from the moment the resize is planned (#125)
+- An app with a request open at the proxy is not quiet, and is left to finish it when its lifetime is up (#124)
+- Ask again whether an app is quiet before snapshotting it, and take a pass in small bites (#117)
+- Boot only the apps this host has memory for, and the rest as room appears (#119)
+- Let a state.db writer wait its turn, and stop fsyncing what a restart rebuilds (#118)
+- Hand an app's port to the activator before its guest is paused, not after the batch (#116)
+- Read app activity on its own clock, not after every sleep of a pass (#115)
+- Speak HTTP/1.1 to the guest whatever the visitor spoke (#107)
+- Count a 502 the proxy wrote itself as unreachable, not served (#106)
+- The Add app button sits flush with the cards (#103)
+- Answer for a stopped app that never ran (#88)
+- Report a checkpoint the document dropped as deleted, not ready (#87)
+- Hold a running app's requests through the boot of its next guest (#86)
+- Cut a guest's open flows to an address the moment it is denied (#85)
+- Refuse a certificate file that holds fewer certificates than it marks (#84)
+- Start an on-request app the pass its refused volume is put right (#82)
+- Detach a volume the document no longer names and give its slot back (#81)
+- Report a volume whose device stopped answering as failed until it is re-attached (#80)
+- Hold a boot-completed app starting until its port accepts once (#79)
+- Back a failed log redial off from 200 ms and deliver a pending gap without waiting for the tenant (#78)
+- Start a running app again when its microVM exits, under its restart policy (#76)
+- Keep a volume whose seed was refused failed, and its app down, until the document is put right (#71)
+- Drop the tokio dev-dependency main ended up with twice (#77)
+- Re-attach dead NBD devices robustly and refuse a wake onto one (#73)
+- Pass over a standing document every five seconds so a lost volume is noticed (#70)
+- Reap snapshots left by an earlier boot (#72)
+- Drain tenant output as it comes and resend what a stale log connection lost (#68)
+- Write tenant logs one record per line rather than per frame (#67)
+- Say on start that a changed host.env does not reach zerofs (#66)
+- Say why an instance is unhealthy (#65)
+- Report a failed first start and a refused document in reported.json (#63)
+- Report a failed first start and a refused document in reported.json (#63)
+- Keep an abandoned wake from wedging the next request (#61)
+- Serve an up-but-unhealthy on-request app instead of 503ing it (#59)
+- Cold-restart a guest whose disk a ZeroFS restart pulled out from under it (#62)
+- Keep tenant logging alive under load and across daemon adoption (#58)
+- Leave a volume unformatted when its format fails so it is never reported ready (#60)
+- Unblock signals in guest channel children so shutdown reboots (#57)
+- Drop an upstream connection the proxy is not using before the guest starts probing it (#45)
+- Say which release install.sh fetches next to the downloads, not before apt scrolls it away (#34)
+- Make the first `nibrunnerd start` on a zerofs host succeed, and say so only when it did (#33)
+- Say each step of `start` as it happens, and never wait on systemd for ever (#32)
+- Announce each apt-get step of the install and let apt show its progress (#31)
+- Lay a release's guest image down over an older one that verifies (#26)
+- Give every directory install makes on the way a mode of its own (#27)
+- Give a checkpoint server as long to open as it is given to answer (#7)
+- Read checkpoint names out of the table the cli prints (#6)
+- Keep reading the checkpoint server so it is not killed by being ignored (#5)
+- Say when an instance will not be started again (#2)
+- Flush the store inside the freeze, before the checkpoint is cut (#3)
+- Wait for the checkpoint server by asking it, not by looking at its socket
+- Let a checkpoint server say why it would not open
+- Let a retried export cut the checkpoint it already named
+- Wait for this checkpoint server, not the last one's socket
+- Send a multipart part the store will accept
+- Take back the taps an older daemon stranded
+- Take a tap back when the app that held it leaves
+- Stop a visitor waiting 40ms on an ACK nobody was going to send
+- Let a tenant reference the directory its volume is mounted on
+- Verify the guest image instead of labelling a fake one
+- Put an HTTP/2 request back into the shape a tenant speaks
+- Stop a restart of the daemon from taking every tenant with it
+- Bound slots by the port layout rather than the nbd minor count
+- Keep the kernel from choosing the daemon over the tenants it manages
+- Give the daemon the descriptors its microVMs need
+- Install the crypto provider where an object store is opened
+- Mount the way the reference does, which is what let the guest boot
+- Keep a finished bundle out of the tree the export reap removes
+- Count the requests that waited on a wake, not the ones that preceded it
+- Settle the desired-state watch only on the document itself
+
+### Performance
+
+- A report is written when it says something new, and once a heartbeat when it does not (#154)
+- Write an app's last activity once it has moved half a minute, not every five seconds (#121)
+- Write the rows a pass changed, not every table it holds (#120)
+- Re-attach the volumes of a pass eight at a time (#83)
+- Put quiet apps to sleep four at a time (#74)
+- Pack layer images with zstd rather than gzip (#48)
+- Let an app sleep near the timeout it asked for
+
+### Refactoring
+
+- Manage nibrunnerd commands with clap (#172)
+- A metric is declared once, and named for what it measures (#140)
+- Stop asking a layer for its size, which its digest already answers for (#51)
+- Rename network.control_plane_cidrs_* to denied_egress_addresses_* (#25)
+- Put the payload a microVM boots behind a port (#17)
+- Take the extra public port out of the codebase
+- Make every key the configuration has a key it states
+- Replace the filesystem service with the measurement port it really was
+- Take the control plane out of the daemon
+- Give the filesystem service the controller that uses it
+- The waker is a port the proxy calls out through, not a service
+- Give each layer its own folder and one file shape
+- Put each service behind a trait and test the loops against mocks
+- Put each repository behind a trait and mock it
+- Strip every comment from the Rust sources
+- Arrange the crate in layers rather than twenty-one flat modules
+
+### Documentation
+
+- Add a Dockerfile deployment guide (#169)
+- The file listings guide names the status a request that is not a GET gets (#164)
+- Every series the scrape page publishes has a reference page, written from the page (#145)
+- Say what an app is, and how to make a layer from a Docker image (#131)
+- The reference pages and the schemas are named after the files, desired and reported (#128)
+- Rewrite the public docs in plain language (#123)
+- An AGENTS.md for how this repository is worked on (#122)
+- Bring back the Docs and Reference tabs under the header (#99)
+- Drop the Next steps cards, the footer already has them (#97)
+- Reorganize the site into getting started, guides and reference (#96)
+- Reframe the README around the quick start, and move the rest into the docs (#91)
+- The browse verbs have been driven now
+- Record what a real ZeroFS did and did not do
+- Record what the split loop actually bought
+- Say that the taps are reclaimed now
+- Record where the forty milliseconds were going
+- Record what six real apps behind Cloudflare proved
+- Record the websocket and forwarded-header proof
+- Say what TLS has done and stop calling it untried
+- Record how the doubles are built and what the repository split costs
+- Record what booting our own guest proved
+- Note the data mount's exec bit as a change I would make to the contract
+- Say what the guest crate is and that nothing has booted it
+- Record what the host lane proved and what it left unknown
+
+### Maintenance
+
+- Publish prepared releases on tag push (#173)
+- Prepare CalVer releases through pull requests (#170)
+- Keep thread-local log captures reliable in parallel (#163)
+- The scrape page is held to the naming rules Prometheus reads it by (#151)
+- The served app ids go with the agent envelope that asked for them (#142)
+- Remove what is left from when this daemon was nibrun's agent (#137)
+- Keep the squashfs packer's chatter and rustls's SNI warning out of the journal (#132)
+- Release under the Unlicense (#129)
+- One cargo cache for every job that runs build-release (#110)
+- Name the custom actions' inputs in kebab-case (#111)
+- Key the cargo cache on the lockfile again, so it is saved more than once (#105)
+- Ship the docs binary with every release (#102)
+- Scaffold the docs site (#64)
+- Run the kernel-backed integration lane on every pull request (#55)
+- Move the toolchain to Rust 1.98.1 (#49)
+- Name the guest image by one digest of what its build read (#44)
+- Take the benchmarks out, harness and results both, to be run again from nothing (#46)
+- Start the app half way through its lifetime rather than a millisecond short of it (#30)
+- Run every workflow step through just (#20)
+- Pin just in mise.toml and install it in prepare (#19)
+- Delete DECISIONS.md (#12)
+- Drop the tmp prefix from the release tags (#10)
+- Cut prereleases of nibrunnerd by hand (#9)
+- Stop hashing the image's stable toolchain into the cargo cache key (#4)
+- Add GitHub Actions checks, build and PR title workflows (#1)
+- Root the browse paths where the guest resolves them
+- Ask the guest every browse verb it answers
+- Refuse a snapshot disk that no user could make, root included
+- Run sharkord without the port this host no longer offers
+- Drive the deploy-link presets against a host
+- Drop the dev recipe that could not run anywhere
+- Exercise the vsock paths and ask a local-file host for an export
+- Exercise the sleep and wake path across four hundred apps
+- Measure what microVMs cost each other
+- Record how many apps a host actually holds
+- Make the guest image a clone can boot a tenant on
+- Verify the salvaged adapter tests
+- Cover the adapters and the host's own state
+- Cover the adapters and the host's own state
+- Cover the report, export and control-plane services
+- Cover the report, export and control-plane services
+- Cover the reconcile services
+- Cover the reconcile services
+- Strip the comments from the manifests and the deploy files
+- Mock every port with mockall and share the fixtures
+- Drop four dependencies nothing referenced
+- Drop the config comments that only restate what the tool does
+- State the superblock refusal once, on the error both backends raise
+- Keep one copy of each comment the two ends both carried
+- Cut the comments the guest runtime restates from the code
+- Cut the comments that only restate the code
+- Pin the toolchain and set workspace lint and format rules
+- The reconcile pass, the probes, and the sleep decision
+
+## [2026.9.0] - 2026-09-29
+
 Initial release.
