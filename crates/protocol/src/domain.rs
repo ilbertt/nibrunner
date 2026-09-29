@@ -736,7 +736,10 @@ pub struct UsageMeters {
     pub disk_used_mib_seconds: u64,
 }
 
+/// What one entry in a directory is. Anything that is neither a file nor a directory — a socket,
+/// a device node, a symbolic link — is `other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum FilesystemEntryKind {
     File,
@@ -777,22 +780,32 @@ impl GuestPath {
     }
 }
 
+/// One entry of a directory, as the guest measured it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FilesystemEntry {
+    /// The entry alone, not the path it was reached by.
     pub name: String,
     pub kind: FilesystemEntryKind,
+    /// What the entry takes, as the guest's own filesystem reports it.
     pub size_bytes: u64,
     pub modified_at: Timestamp,
 }
 
 pub const DIRECTORY_ENTRY_LIMIT: usize = 1000;
 
+/// What one directory inside a guest holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryListing {
+    /// The directory listed, as it was asked for.
     pub path: GuestPath,
+    /// Sorted by `name`. `lost+found` is left out of the guest's root, because the filesystem
+    /// the volume was made with put it there and no app did.
     pub entries: Vec<FilesystemEntry>,
+    /// The directory held more entries than one answer carries, and `entries` is cut.
     pub truncated: bool,
 }
 
