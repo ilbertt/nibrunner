@@ -2,8 +2,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use protocol::AppId;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+use crate::domain::guest_line;
 
 const FREEZE_REQUEST: &str = "FREEZE\n";
 const FREEZE_HELD: &str = "OK";
@@ -68,7 +70,9 @@ pub async fn frozen(app_id: &AppId, vsock_path: &Path) -> Result<FreezeLease, Fr
     write_all(&mut wire, connect.as_bytes())
         .await
         .map_err(|()| silent())?;
-    let reply = read_line(&mut wire).await.ok_or_else(silent)?;
+    let reply = guest_line::read(&mut wire, REPLY_TIMEOUT)
+        .await
+        .ok_or_else(silent)?;
     guest_contract::vsock::read_connect_reply(&reply, guest_contract::vsock::GUEST_CONTROL_VSOCK_PORT)
         .map_err(|error| FreezeError::Refused {
             app_id: app_id.clone(),
@@ -78,7 +82,9 @@ pub async fn frozen(app_id: &AppId, vsock_path: &Path) -> Result<FreezeLease, Fr
     write_all(&mut wire, FREEZE_REQUEST.as_bytes())
         .await
         .map_err(|()| silent())?;
-    let reply = read_line(&mut wire).await.ok_or_else(silent)?;
+    let reply = guest_line::read(&mut wire, REPLY_TIMEOUT)
+        .await
+        .ok_or_else(silent)?;
     if reply != FREEZE_HELD {
         return Err(FreezeError::Refused {
             app_id: app_id.clone(),
@@ -96,18 +102,11 @@ async fn write_all(wire: &mut BufReader<UnixStream>, bytes: &[u8]) -> Result<(),
     wire.get_mut().write_all(bytes).await.map_err(|_| ())
 }
 
-async fn read_line(wire: &mut BufReader<UnixStream>) -> Option<String> {
-    let mut line = String::new();
-    match tokio::time::timeout(REPLY_TIMEOUT, wire.read_line(&mut line)).await {
-        Ok(Ok(read)) if read > 0 => Some(line.trim_end().to_string()),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::app_id;
+    use tokio::io::AsyncBufReadExt;
     use tokio::net::UnixListener;
 
     async fn guest_that(
