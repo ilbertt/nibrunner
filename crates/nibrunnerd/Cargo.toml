@@ -28,6 +28,11 @@ name = "metrics"
 path = "src/bin/metrics.rs"
 
 [[bin]]
+name = "openapi"
+path = "src/bin/openapi.rs"
+required-features = ["schema"]
+
+[[bin]]
 name = "metrics-page"
 path = "src/bin/metrics-page.rs"
 
@@ -75,6 +80,7 @@ netlink-packet-route.workspace = true
 
 [features]
 testing = ["dep:mockall", "dep:tempfile"]
+schema = ["protocol/schema"]
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -82,7 +88,7 @@ tokio = { workspace = true, features = ["test-util"] }
 mockall.workspace = true
 jsonschema.workspace = true
 nft-render.workspace = true
-nibrunnerd = { path = ".", features = ["testing"] }
+nibrunnerd = { path = ".", features = ["testing", "schema"] }
 
 [build-dependencies]
 sha2.workspace = true

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import type { MDXComponents } from 'mdx/types';
 import type { ComponentProps, CSSProperties, ReactNode } from 'react';
+import { FilesystemApi } from './filesystem-api';
 
 const PANEL = 'panel-face rounded-md border-2 border-ink';
 
@@ -117,6 +118,7 @@ export function getMDXComponents(components?: MDXComponents) {
     ...defaultMdxComponents,
     Card: PanelCard,
     Callout,
+    FilesystemApi,
     MetricKind,
     Steps,
     Step,
