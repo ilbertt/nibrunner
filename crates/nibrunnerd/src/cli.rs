@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(about)]
+#[command(version, about)]
 #[command(
     after_help = "Without a command, serve this host using /etc/nibrunner/config.toml.\n\nNIBRUNNER_CONFIG names another configuration file. NIBRUNNER_LOG is a tracing filter."
 )]
@@ -137,6 +137,20 @@ mod tests {
             assert_eq!(help.kind(), ErrorKind::DisplayHelp);
             assert_eq!(help.exit_code(), 0);
             assert!(!help.use_stderr());
+        }
+    }
+
+    #[test]
+    fn both_version_flags_report_the_compiled_version_successfully() {
+        for flag in ["-V", "--version"] {
+            let version = parse(&[flag]).unwrap_err();
+            assert_eq!(version.kind(), ErrorKind::DisplayVersion);
+            assert_eq!(version.exit_code(), 0);
+            assert!(!version.use_stderr());
+            assert_eq!(
+                version.to_string(),
+                format!("nibrunnerd {}\n", env!("CARGO_PKG_VERSION"))
+            );
         }
     }
 }
