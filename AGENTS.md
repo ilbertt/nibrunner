@@ -81,10 +81,10 @@ After finishing an implementation, always run:
 2. `just lint` — clippy with `-D warnings`, then the docs site's types and lint
 3. `just test` — everything that needs no kernel
 4. `just integration --no-run` — the kernel tests at least compile
-5. `just guest-tests --no-run` — the microVM tests at least compile
+5. `just integration-guest --no-run` — the microVM tests at least compile
 
 `just integration` itself needs root, Linux, `nft`, `mke2fs` and `/dev/net/tun`, and is the only
-place a ruleset load, a real `mke2fs` or a tap is considered proven. `just guest-tests` needs all
+place a ruleset load, a real `mke2fs` or a tap is considered proven. `just integration-guest` needs all
 of that plus `/dev/kvm` and a guest image from `just guest-image`, and is the only place a boot, a
 sleep, a wake or a route into a guest is considered proven. CI runs both on every pull request;
 run them yourself on a Linux box when the change touches an adapter or the guest.

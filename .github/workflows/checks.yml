@@ -103,7 +103,6 @@ jobs:
 
   # Beside `integration` rather than in it: both want the machine's nftables table and its taps,
   # and a job of its own is also a guest image built while the other tests are already running.
-  # Beside `integration` rather than in it: both want the machine's nftables table and its taps.
   #
   # Sharded because one microVM at a time is the only way to run these, and shared three ways
   # rather than one per family because a runner is not free: laying a shard out costs about as
@@ -111,8 +110,8 @@ jobs:
   # shard would wait for a runner longer than it would save. The three are balanced by measured
   # time — `sleep` snapshots and restores three times, `idle` waits out a timeout the protocol
   # will not let a document set under a minute, and everything else together is the third.
-  guest:
-    name: guest (${{ matrix.shard }})
+  integration-guest:
+    name: integration-guest (${{ matrix.shard }})
     runs-on: ubuntu-latest
     # A guest that never answers is a test failure, not a job that runs until GitHub stops it.
     timeout-minutes: 15
@@ -136,7 +135,7 @@ jobs:
           prepare-for-build: enabled
           # Every shard builds the same test binary, so they share one cache rather than warming
           # one each.
-          shared-cache-key: guest
+          shared-cache-key: integration-guest
 
       - name: Check the machine can host
         run: ls -l /dev/net/tun /dev/kvm
@@ -164,7 +163,7 @@ jobs:
         run: just verify-guest-image
 
       - name: Build the tests
-        run: just guest-tests --no-run
+        run: just integration-guest --no-run
 
       - name: Run the tests
         # sudo's secure_path drops the runner's PATH, so it is handed back; -E keeps HOME, which is
@@ -173,13 +172,13 @@ jobs:
           FAMILIES: ${{ matrix.families }}
         run: |
           for family in $FAMILIES; do
-            sudo -E env "PATH=$PATH" just guest-tests "$family"
+            sudo -E env "PATH=$PATH" just integration-guest "$family"
           done
 
   checks-passed:
     if: always()
     name: checks:required
-    needs: [codestyle, lint, tests, generated, integration, guest]
+    needs: [codestyle, lint, tests, generated, integration, integration-guest]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed

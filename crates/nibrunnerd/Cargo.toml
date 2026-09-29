@@ -36,6 +36,10 @@ required-features = ["schema"]
 name = "metrics-page"
 path = "src/bin/metrics-page.rs"
 
+[[test]]
+name = "integration-guest"
+path = "tests/guest/main.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 protocol.workspace = true

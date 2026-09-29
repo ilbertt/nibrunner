@@ -10,8 +10,8 @@
 //! put the work on.
 //!
 //! They need Linux, root, `/dev/kvm`, `nft`, `mke2fs`, a guest image from `just guest-image` and
-//! the tenant from `just guest-tests`, and they say which of those is missing rather than failing
-//! on a machine that was never going to run them. `just guest-tests` is the way in.
+//! the tenant from `just integration-guest`, and they say which of those is missing rather than failing
+//! on a machine that was never going to run them. `just integration-guest` is the way in.
 
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
@@ -33,7 +33,7 @@ pub async fn host() -> Option<RunningHost> {
     }
     let started = nibrunnerd::test_support::machine::started().await;
     if started.is_none() {
-        eprintln!("no guest image or no tenant: run `just guest-image`, then `just guest-tests`");
+        eprintln!("no guest image or no tenant: run `just guest-image`, then `just integration-guest`");
     }
     started
 }

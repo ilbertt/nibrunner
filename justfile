@@ -100,9 +100,9 @@ integration *args:
 # The tests that boot a real microVM, one at a time: they take the machine's nftables table and its
 # tap names, which no two hosts can hold at once. Needs everything `integration` needs, plus
 # `just guest-image` first — and the tenant they boot, which this builds.
-guest-tests *args:
+integration-guest *args:
     cargo build -p nibrunner-test-tenant --target x86_64-unknown-linux-musl --release
-    NIBRUNNER_INTEGRATION=1 NIBRUNNER_TEST_TENANT="${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/test-tenant" cargo test -p nibrunnerd --test guest {{args}} -- --test-threads 1 --nocapture
+    NIBRUNNER_INTEGRATION=1 NIBRUNNER_TEST_TENANT="${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/test-tenant" cargo test -p nibrunnerd --test integration-guest {{args}} -- --test-threads 1 --nocapture
 
 # Rust and the docs site both; `just fmt --check` refuses instead of rewriting. Biome runs from the
 # package.json scripts, which name their config: docs/biome.json is `root: false` so that an editor
