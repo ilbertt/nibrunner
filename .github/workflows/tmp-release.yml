@@ -28,7 +28,7 @@ jobs:
 
       - name: Name the release
         id: version
-        run: echo "tag=$(just tmp-version)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(just release-version)" >> "$GITHUB_OUTPUT"
 
       - name: Stage the assets
         run: just stage-release "$RUNNER_TEMP/dist"

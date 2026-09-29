@@ -55,8 +55,6 @@ release-version:
     last="$(git tag --list "v$today-*" | sed -n "s/^v$today-\([0-9][0-9]*\)$/\1/p" | sort -n | tail -1)"
     echo "v$today-$(( ${last:-0} + 1 ))"
 
-tmp-version: release-version
-
 [positional-arguments]
 prepare-release tag:
     #!/usr/bin/env bash
