@@ -94,7 +94,7 @@ jobs:
         run: sudo apt-get install -y nftables
 
       - name: Build the integration tests
-        run: just integration --no-run
+        run: just integration --build-only
 
       - name: Run the integration tests
         # sudo's secure_path drops the runner's PATH, so it is handed back; -E keeps HOME, which is
@@ -163,7 +163,7 @@ jobs:
         run: just verify-guest-image
 
       - name: Build the tests
-        run: just integration-guest --no-run
+        run: just integration-guest --build-only
 
       - name: Run the tests
         # sudo's secure_path drops the runner's PATH, so it is handed back; -E keeps HOME, which is

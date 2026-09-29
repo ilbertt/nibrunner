@@ -80,8 +80,8 @@ After finishing an implementation, always run:
 1. `just fmt` — rustfmt and Biome, rewriting in place
 2. `just lint` — clippy with `-D warnings`, then the docs site's types and lint
 3. `just test` — everything that needs no kernel
-4. `just integration --no-run` — the kernel tests at least compile
-5. `just integration-guest --no-run` — the microVM tests at least compile
+4. `just integration --build-only` — the kernel tests at least compile
+5. `just integration-guest --build-only` — the microVM tests at least compile
 
 `just integration` itself needs root, Linux, `nft`, `mke2fs` and `/dev/net/tun`, and is the only
 place a ruleset load, a real `mke2fs` or a tap is considered proven. `just integration-guest` needs all
