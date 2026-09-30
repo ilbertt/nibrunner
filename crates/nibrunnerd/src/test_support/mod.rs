@@ -1,8 +1,8 @@
 #[cfg(target_os = "linux")]
+pub mod egress;
+#[cfg(target_os = "linux")]
 pub mod machine;
 pub mod mocks;
-#[cfg(target_os = "linux")]
-pub mod network;
 
 use std::ops::Deref;
 use std::sync::Arc;

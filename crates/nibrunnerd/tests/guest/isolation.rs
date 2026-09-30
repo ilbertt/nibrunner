@@ -4,8 +4,8 @@
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 
+use nibrunnerd::test_support::egress::EgressEndpoint;
 use nibrunnerd::test_support::machine::{RunningHost, Tenant};
-use nibrunnerd::test_support::network::EgressEndpoint;
 use protocol::InstanceState;
 
 /// The tenant gives up after two seconds, so anything under this came back because a rule said
