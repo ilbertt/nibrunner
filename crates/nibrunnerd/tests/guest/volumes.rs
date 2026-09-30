@@ -6,6 +6,109 @@ use protocol::{DesiredInstanceState, InstanceState};
 
 const KEPT: &str = "kept";
 
+fn release(host: &RunningHost, app: &Tenant, version: &str) -> Tenant {
+    use sha2::Digest;
+    let bytes = format!("#!/bin/sh\nexport RELEASE={version}\nexec /app/tenant\n").into_bytes();
+    let key = format!("release-{version}");
+    std::fs::write(
+        std::path::Path::new(&host.host.config.artifact_store_url).join(&key),
+        &bytes,
+    )
+    .expect("the release artifact");
+    let layer = protocol::DesiredLayer::Executable {
+        object: protocol::StoredObject {
+            digest: protocol::Sha256Digest::parse(hex::encode(sha2::Sha256::digest(&bytes)))
+                .expect("a digest"),
+            object_key: protocol::ObjectKey::parse(key).expect("a key"),
+        },
+        destination_path: protocol::ExecutablePath::parse("/app/release").expect("a path"),
+    };
+    app.clone().redeployed(version).edited(|instance| {
+        instance.layers.truncate(1);
+        instance.layers.push(layer);
+        instance.config.command.program = protocol::GuestPath::parse("/app/release").expect("a program");
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replacing_a_sleeping_release_runs_its_new_artifact_and_preserves_only_the_volume() {
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = release(&host, &host.tenant(1).on_request(60_000), "one");
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(&app, "/env?name=RELEASE")
+            .await
+            .expect("the first release")
+            .body,
+        "one"
+    );
+    assert_eq!(
+        host.get(&app, "/write?path=kept&body=persistent")
+            .await
+            .expect("a write")
+            .status,
+        200
+    );
+    assert_eq!(host.get(&app, "/remember").await.expect("an answer").body, "1");
+    assert_eq!(host.get(&app, "/remember").await.expect("an answer").body, "2");
+    host.let_sleep(&app).await;
+
+    let replacement = release(&host, &app, "two");
+    assert_ne!(replacement.instance.layers, app.instance.layers);
+    host.deploy(std::slice::from_ref(&replacement)).await;
+    host.until("the replacement deployment to be running", |report| {
+        report.instances.iter().any(|instance| {
+            instance.app_id == replacement.app_id
+                && instance.deployment_id == replacement.instance.deployment_id
+                && instance.state == InstanceState::Running
+        })
+    })
+    .await;
+    assert_eq!(
+        host.get(&replacement, "/env?name=RELEASE")
+            .await
+            .expect("the replacement release")
+            .body,
+        "two"
+    );
+    assert_eq!(
+        host.get(&replacement, "/remember")
+            .await
+            .expect("fresh process memory")
+            .body,
+        "1"
+    );
+    assert_eq!(kept(&host, &replacement).await, "persistent");
+    let reported = host.instance(&replacement.app_id).await.expect("a record");
+    assert!(reported
+        .layer_digests
+        .contains(&replacement.instance.layers[1].object().digest));
+    assert!(!reported
+        .layer_digests
+        .contains(&app.instance.layers[1].object().digest));
+
+    host.let_sleep(&replacement).await;
+    assert_eq!(
+        host.get(&replacement, "/env?name=RELEASE")
+            .await
+            .expect("the replacement wakes")
+            .body,
+        "two"
+    );
+    assert_eq!(
+        host.get(&replacement, "/remember")
+            .await
+            .expect("replacement memory survives")
+            .body,
+        "2"
+    );
+    assert_eq!(kept(&host, &replacement).await, "persistent");
+    host.stop().await;
+}
+
 /// Waits until the app is answering again. A release that replaces another is reachable a moment
 /// after the document says so, and what is being asked here is about the volume rather than about
 /// that window.
