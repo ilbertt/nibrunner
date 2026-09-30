@@ -9,6 +9,63 @@ use protocol::{HealthCheck, InstanceState, Probe};
 
 const KEEP_BYTES: u64 = 256 * 1024;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_loop_spends_its_budget_and_stays_failed_until_a_new_deployment() {
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host
+        .tenant(1)
+        .arguments(&["--exit-after-ms", "1000"])
+        .edited(|instance| {
+            instance.config.restart_policy = protocol::RestartPolicy {
+                max_restarts: 2,
+                initial_backoff_ms: 200,
+                max_backoff_ms: 800,
+                backoff_factor: 2.0,
+                reset_after_ms: 60_000,
+            };
+        });
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until("the crash loop to exhaust its host restart budget", |report| {
+        report.instances.iter().any(|instance| {
+            instance.app_id == app.app_id
+                && instance.state == InstanceState::Failed
+                && instance
+                    .message
+                    .as_ref()
+                    .is_some_and(|message| message.as_str().contains("out of restarts"))
+        })
+    })
+    .await;
+
+    let exhausted = host.host.state.record(&app.app_id).await.expect("a record");
+    let output = std::fs::read_to_string(log_path(&host, &app.app_id)).expect("the tenant restart log");
+    assert!(
+        output.contains("restart 1 of 2 in 200ms"),
+        "the first tenant backoff was not reported: {output}"
+    );
+    assert!(
+        output.contains("restart 2 of 2 in 400ms"),
+        "the growing tenant backoff was not reported: {output}"
+    );
+    for _ in 0..3 {
+        let answer = host.get(&app, "/").await.expect("a bounded refusal");
+        assert_eq!(answer.status, 503, "{answer:?}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let record = host.host.state.record(&app.app_id).await.expect("a record");
+        assert_eq!(record.state, InstanceState::Failed);
+        assert_eq!(record.start_attempts, exhausted.start_attempts);
+        assert_eq!(record.restart_count, exhausted.restart_count);
+    }
+    let fresh = app.redeployed("fresh").arguments(&[]);
+    host.deploy(std::slice::from_ref(&fresh)).await;
+    host.until_state(&fresh.app_id, InstanceState::Running).await;
+    let answer = host.get(&fresh, "/").await.expect("the fresh deployment answers");
+    assert_eq!(answer.status, 200, "{answer:?}");
+    host.stop().await;
+}
+
 /// Short enough that a test about an unhealthy app is not a test about waiting.
 const IMPATIENT: HealthCheck = HealthCheck::Tcp {
     probe: Probe {

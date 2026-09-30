@@ -26,6 +26,7 @@ struct Settings {
     never_listen: bool,
     raw_tcp: Option<u16>,
     raw_udp: Option<u16>,
+    exit_after: Option<Duration>,
 }
 
 fn settings() -> Settings {
@@ -37,6 +38,7 @@ fn settings() -> Settings {
         never_listen: false,
         raw_tcp: None,
         raw_udp: None,
+        exit_after: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -47,6 +49,7 @@ fn settings() -> Settings {
             "--never-listen" => held.never_listen = true,
             "--raw-tcp" => held.raw_tcp = value().parse().ok(),
             "--raw-udp" => held.raw_udp = value().parse().ok(),
+            "--exit-after-ms" => held.exit_after = value().parse().ok().map(Duration::from_millis),
             _ => {}
         }
     }
@@ -55,6 +58,12 @@ fn settings() -> Settings {
 
 fn main() {
     let settings = settings();
+    if let Some(delay) = settings.exit_after {
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            std::process::exit(3);
+        });
+    }
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|port| port.parse().ok())
