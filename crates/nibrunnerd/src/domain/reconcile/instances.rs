@@ -425,6 +425,8 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                     return;
                 }
             };
+            host.router.close_connections_to(&desired.app_id).await;
+            host.activator.close_connections_to(&desired.app_id).await;
             host.vms
                 .boot(BootRequest {
                     desired: desired.clone(),
