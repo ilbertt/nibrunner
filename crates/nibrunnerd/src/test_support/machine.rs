@@ -426,7 +426,17 @@ impl RunningHost {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("{} never went to sleep", tenant.app_id);
+        let snapshot = self.host.state.snapshot().await;
+        panic!(
+            "{} never went to sleep: state={:?}, open_requests={}, failed_sleeps={:?}, activity={:?}, measured={:?}, outcomes={:?}",
+            tenant.app_id,
+            snapshot.records.get(&tenant.app_id).map(|record| record.state),
+            self.host.metrics.proxy.open_requests_for(&tenant.app_id),
+            snapshot.failed_sleeps.get(&tenant.app_id),
+            snapshot.last_active_at_ms.get(&tenant.app_id),
+            snapshot.last_measured_at_ms.get(&tenant.app_id),
+            self.host.metrics.sleep_wake.of(&tenant.app_id),
+        );
     }
 
     /// Every microVM down, every tap back, and the document this host was holding written out.
