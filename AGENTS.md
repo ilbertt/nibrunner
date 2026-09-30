@@ -179,6 +179,9 @@ file to reflect it.
 
 ## Pull requests
 
+PR workflows cancel superseded runs of the same workflow for the same pull request to save Actions
+minutes. Runs on `main` remain independent.
+
 Work goes on a branch and lands on `main` through a pull request, squash-merged with the pull
 request's title as the commit subject — so the title is a Conventional Commit (`feat:`, `fix:`,
 `docs:`, `chore:`, …), and so is every commit on the branch. Never push to `main` directly.
