@@ -81,6 +81,8 @@ pub async fn stop_instance(host: &Host, app_id: &AppId, reason: &str) {
             record.stop_requested = true;
         })
         .await;
+    host.router.close_connections_to(app_id).await;
+    host.activator.close_connections_to(app_id).await;
     settled(host, app_id, reason).await;
     match host.vms.stop(app_id).await {
         Ok(()) => tracing::info!(%app_id, reason, "instance stopped"),
@@ -115,6 +117,7 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) -> 
     // That handover reaches only the connections still to be opened, so what the proxy already
     // holds into this guest goes down with it.
     host.router.close_connections_to(app_id).await;
+    host.activator.close_connections_to(app_id).await;
     let started = std::time::Instant::now();
     settled(host, app_id, reason).await;
     let flushed = started.elapsed();

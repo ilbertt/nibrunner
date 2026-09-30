@@ -6,14 +6,12 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
 use protocol::{AppId, HostPort};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use crate::adapters::proxy::forward::{forward, say, ProxyBody};
+use crate::adapters::proxy::forward::{forward, say, ProxyBody, Upstreams};
 use crate::domain::metrics::sleep_wake::Answer;
 use crate::domain::metrics::HostMetrics;
 use crate::ports::{WakeFailure, WakeRefusal, Waker};
@@ -57,7 +55,7 @@ pub struct AppActivator {
     state: SharedState,
     waker: Arc<dyn Waker>,
     metrics: Arc<HostMetrics>,
-    client: Client<HttpConnector, Incoming>,
+    upstreams: Upstreams,
     listeners: Mutex<BTreeMap<AppId, Listener>>,
 }
 
@@ -67,7 +65,7 @@ impl AppActivator {
             state,
             waker,
             metrics,
-            client: crate::adapters::proxy::forward::upstream_client(),
+            upstreams: Upstreams::default(),
             listeners: Mutex::new(BTreeMap::new()),
         })
     }
@@ -102,6 +100,10 @@ impl AppActivator {
 
     pub async fn listening_for(&self) -> Vec<AppId> {
         self.listeners.lock().await.keys().cloned().collect()
+    }
+
+    pub async fn close_connections_to(&self, app_id: &AppId) {
+        self.upstreams.close_connections_to(app_id).await;
     }
 
     async fn handle(self: Arc<Self>, app_id: AppId, request: Request<Incoming>) -> Response<ProxyBody> {
@@ -165,8 +167,9 @@ impl AppActivator {
             return (come_back(), Answer::ComeBack);
         }
         let served = std::time::Instant::now();
+        let upstream = self.upstreams.to(&app_id).await;
         let response = forward(
-            &self.client,
+            &upstream,
             request,
             woken.guest_ipv4.as_str(),
             woken.http_port.get(),
