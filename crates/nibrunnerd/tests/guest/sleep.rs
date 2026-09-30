@@ -15,6 +15,56 @@ const ANSWERED_WITHIN: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT_MS: u64 = 60_000;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn concurrent_requests_restore_one_guest_and_every_caller_is_answered() {
+    const CALLERS: u64 = 32;
+
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1).on_request(IDLE_TIMEOUT_MS);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(host.get(&app, "/remember").await.expect("an answer").body, "1");
+    host.let_sleep(&app).await;
+
+    let [restores_before, _, cold_boots_before] = host.host.metrics.sleep_wake.of(&app.app_id).wakes;
+    let barrier = tokio::sync::Barrier::new(CALLERS as usize);
+    let requests = (0..CALLERS).map(|_| async {
+        barrier.wait().await;
+        host.get(&app, "/remember")
+            .await
+            .expect("each waiting caller is answered")
+    });
+    let answers = tokio::time::timeout(ANSWERED_WITHIN, futures::future::join_all(requests))
+        .await
+        .expect("the concurrent wake answers every caller in time");
+    let mut remembered: Vec<u64> = answers
+        .into_iter()
+        .map(|answer| {
+            assert_eq!(answer.status, 200, "{answer:?}");
+            answer.body.parse().expect("the guest's counter")
+        })
+        .collect();
+    remembered.sort_unstable();
+    assert_eq!(
+        remembered,
+        (2..=CALLERS + 1).collect::<Vec<_>>(),
+        "the restored guest lost or duplicated state"
+    );
+    let [restores_after, _, cold_boots_after] = host.host.metrics.sleep_wake.of(&app.app_id).wakes;
+    assert_eq!(
+        restores_after - restores_before,
+        1,
+        "more than one restore served the callers"
+    );
+    assert_eq!(
+        cold_boots_after, cold_boots_before,
+        "the wake cold-booted instead of restoring"
+    );
+    host.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_request_that_finds_an_app_asleep_is_answered_rather_than_refused() {
     let Some(host) = crate::host().await else {
         return;
