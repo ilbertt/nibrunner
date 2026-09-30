@@ -141,7 +141,7 @@ jobs:
         run: ls -l /dev/net/tun /dev/kvm
 
       - name: Install guest networking tools
-        run: sudo apt-get install -y nftables iproute2
+        run: sudo apt-get install -y nftables iproute2 iptables
 
       # The image is not checked in and every shard needs the same one, so it is built once for
       # whatever the pins and the guest's own code say and then restored. Keyed on the manifest as

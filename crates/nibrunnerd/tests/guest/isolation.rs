@@ -116,6 +116,7 @@ async fn an_address_the_configuration_denies_cannot_be_reached() {
     let app = open.tenant(1);
     open.deploy(std::slice::from_ref(&app)).await;
     open.until_state(&app.app_id, InstanceState::Running).await;
+    open.until_routed(&app).await;
     let allowed = reaching(&open, &app, &target).await;
     assert!(
         allowed.starts_with("reached"),
