@@ -9,6 +9,63 @@ use protocol::InstanceState;
 /// The shortest a document may name.
 const IDLE_TIMEOUT_MS: u64 = 60_000;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lifetime_expiry_drains_an_open_request_only_until_its_allowance_is_spent() {
+    use nibrunnerd::domain::activation::MAX_LIFETIME_DRAIN_MS;
+    use protocol::{ActivationPolicy, MaxLifetimeMs, SleepPolicy, Timestamp};
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1).edited(|instance| {
+        instance.desired_state = protocol::DesiredInstanceState::OnRequest;
+        instance.activation = Some(ActivationPolicy {
+            sleep_when: SleepPolicy::MaxLifetime {
+                ttl_ms: MaxLifetimeMs::try_from(IDLE_TIMEOUT_MS).expect("a lifetime"),
+            },
+        });
+    });
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    {
+        let checking = async {
+            while host.host.metrics.proxy.open_requests_for(&app.app_id) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let recently_expired =
+                Timestamp::from_epoch_ms(nibrunnerd::clock::now_ms() - IDLE_TIMEOUT_MS as i64 - 1_000);
+            host.host
+                .state
+                .update_record(&app.app_id, |record| record.started_at = Some(recently_expired))
+                .await;
+            nibrunnerd::domain::reconcile::idle::apply_sleep(&host.host).await;
+            assert_eq!(
+                host.instance(&app.app_id).await.expect("a draining app").state,
+                InstanceState::Running
+            );
+            assert_eq!(host.host.metrics.proxy.open_requests_for(&app.app_id), 1);
+            let allowance_spent = Timestamp::from_epoch_ms(
+                nibrunnerd::clock::now_ms() - IDLE_TIMEOUT_MS as i64 - MAX_LIFETIME_DRAIN_MS - 1_000,
+            );
+            host.host
+                .state
+                .update_record(&app.app_id, |record| record.started_at = Some(allowance_spent))
+                .await;
+            nibrunnerd::domain::reconcile::idle::apply_sleep(&host.host).await;
+            assert_eq!(
+                host.instance(&app.app_id).await.expect("a sleeping app").state,
+                InstanceState::Idle
+            );
+        };
+        tokio::select! {
+            answer = host.get(&app, "/hang?ms=120000") => panic!("the request ended before its drain was tested: {answer:?}"),
+            checked = tokio::time::timeout(Duration::from_secs(15), checking) => checked.expect("the lifetime drain is bounded"),
+        }
+    }
+    let answer = host.get(&app, "/").await.expect("the next request wakes the app");
+    assert_eq!(answer.status, 200, "{answer:?}");
+    host.stop().await;
+}
+
 // The 2026-09-18 and 2026-09-21 runs both found loaded apps snapshotted under traffic, because
 // the activity reading was minutes behind. Two apps, one timeout, one wait: the busy one must
 // still be up and the quiet one must be asleep.
