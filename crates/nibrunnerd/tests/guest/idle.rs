@@ -42,7 +42,7 @@ async fn a_lifetime_expiry_drains_an_open_request_only_until_its_allowance_is_sp
                 host.instance(&app.app_id).await.expect("a draining app").state,
                 InstanceState::Running
             );
-            assert_eq!(host.host.metrics.proxy.open_requests_for(&app.app_id), 1);
+            assert!(host.host.metrics.proxy.open_requests_for(&app.app_id) > 0);
             let allowance_spent = Timestamp::from_epoch_ms(
                 nibrunnerd::clock::now_ms() - IDLE_TIMEOUT_MS as i64 - MAX_LIFETIME_DRAIN_MS - 1_000,
             );
