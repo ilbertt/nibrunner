@@ -80,7 +80,7 @@ async fn every_line_a_tenant_wrote_reaches_this_host_in_the_order_it_wrote_them(
 async fn a_tenants_output_stops_growing_where_this_host_says_it_keeps_it() {
     const LINES: u64 = 60_000;
 
-    let Some(host) = nibrunnerd::test_support::machine::started_with(|config| {
+    let Some(host) = crate::host_with(|config| {
         config.logs.keep_bytes_per_app = KEEP_BYTES;
     })
     .await
