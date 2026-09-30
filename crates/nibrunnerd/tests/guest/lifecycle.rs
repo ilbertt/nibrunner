@@ -7,6 +7,96 @@ use std::time::Duration;
 use protocol::{DesiredInstanceState, DesiredPresence, InstanceState, VolumeState};
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_killed_microvm_is_replaced_without_losing_its_disk_or_interrupting_its_neighbour() {
+    use nibrunnerd::adapters::vm::process::VmProcesses;
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1);
+    let neighbour = host.tenant(2);
+    host.deploy(&[app.clone(), neighbour.clone()]).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    host.until_state(&neighbour.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(&app, "/write?path=kept&body=durable")
+            .await
+            .expect("a durable write")
+            .status,
+        200
+    );
+    assert_eq!(host.get(&app, "/remember").await.expect("an answer").body, "1");
+    assert_eq!(host.get(&app, "/remember").await.expect("an answer").body, "2");
+    assert_eq!(
+        host.get(&neighbour, "/remember")
+            .await
+            .expect("the neighbour answers")
+            .body,
+        "1"
+    );
+    let processes = VmProcesses::new(host.host.config.runtime_dir.clone());
+    let previous = processes
+        .read_record(&app.app_id)
+        .expect("the live microVM's process record");
+    let slot = host.host.slot_of(&app.app_id).await.expect("a slot");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(previous.pid),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("the test kills only its own microVM");
+
+    {
+        let recovery = host.until("the killed VM to be replaced and healthy", |report| {
+            processes
+                .read_record(&app.app_id)
+                .is_some_and(|record| record.pid != previous.pid)
+                && report
+                    .instances
+                    .iter()
+                    .any(|instance| instance.app_id == app.app_id && instance.state == InstanceState::Running)
+        });
+        tokio::pin!(recovery);
+        loop {
+            tokio::select! {
+                _ = &mut recovery => break,
+                answer = host.get(&neighbour, "/") => {
+                    let answer = answer.expect("the neighbour stays reachable during recovery");
+                    assert_eq!(answer.status, 200, "{answer:?}");
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    let replacement = processes
+        .read_record(&app.app_id)
+        .expect("the replacement process");
+    assert_ne!(replacement.pid, previous.pid);
+    assert_eq!(host.get(&app, "/remember").await.expect("a cold boot").body, "1");
+    assert_eq!(
+        host.get(&app, "/read?path=kept")
+            .await
+            .expect("a durable read")
+            .body,
+        "durable"
+    );
+    assert_eq!(
+        host.get(&neighbour, "/remember")
+            .await
+            .expect("the neighbour kept its memory")
+            .body,
+        "2"
+    );
+    assert_eq!(
+        host.host
+            .slot_of(&app.app_id)
+            .await
+            .expect("the same slot")
+            .host_port,
+        slot.host_port
+    );
+    host.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_app_the_document_names_answers_on_its_hostname() {
     let Some(host) = crate::host().await else {
         return;
