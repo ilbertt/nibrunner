@@ -72,6 +72,7 @@ impl AppActivator {
 
     pub async fn serve(self: &Arc<Self>, slots: &[(AppId, HostPort)]) {
         let wanted: BTreeMap<AppId, HostPort> = slots.iter().cloned().collect();
+        self.upstreams.keep_only(&wanted.keys().cloned().collect()).await;
         let mut listeners = self.listeners.lock().await;
         listeners.retain(|app_id, listener| {
             let keep = wanted.get(app_id) == Some(&listener.host_port);
