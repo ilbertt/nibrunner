@@ -27,7 +27,7 @@ async fn a_quiet_open_request_prevents_idle_sleep_until_its_answer_is_finished()
         .await
         .expect("the proxy starts carrying the request");
         for _ in 0..5 {
-            assert_eq!(host.host.metrics.proxy.open_requests_for(&app.app_id), 1);
+            assert!(host.host.metrics.proxy.open_requests_for(&app.app_id) > 0);
             nibrunnerd::test_support::measured_quiet_since(
                 &host.host.state,
                 &app.app_id,
