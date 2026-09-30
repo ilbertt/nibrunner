@@ -110,10 +110,11 @@ async fn a_raw_datagram_port_reaches_the_guest_and_the_first_datagram_wakes_it()
     let back = echoed_over_datagram(port, b"a datagram").await.expect("an echo");
     assert_eq!(back, b"a datagram", "the raw port did not reach the guest");
 
-    // A datagram has nothing to hold open, so what is asked of the one that finds the app asleep
-    // is that it wakes it; what it carried may or may not survive.
     host.let_sleep(&app).await;
-    let _ = echoed_over_datagram(port, b"wake up").await;
+    let back = echoed_over_datagram(port, b"wake up")
+        .await
+        .expect("the first datagram's reply");
+    assert_eq!(back, b"wake up", "the datagram that woke the app was lost");
     host.until_state(&app.app_id, InstanceState::Running).await;
     let back = echoed_over_datagram(port, b"and again").await.expect("an echo");
     assert_eq!(back, b"and again");
