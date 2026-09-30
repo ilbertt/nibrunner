@@ -85,7 +85,7 @@ After finishing an implementation, always run:
 
 `just integration` itself needs root, Linux, `nft`, `mke2fs` and `/dev/net/tun`, and is the only
 place a ruleset load, a real `mke2fs` or a tap is considered proven. `just integration-guest` needs all
-of that plus `/dev/kvm` and a guest image from `just guest-image`, and is the only place a boot, a
+of that plus `/dev/kvm`, `ip` from iproute2, `iptables` and a guest image from `just guest-image`, and is the only place a boot, a
 sleep, a wake or a route into a guest is considered proven. CI runs both on every pull request;
 run them yourself on a Linux box when the change touches an adapter or the guest.
 

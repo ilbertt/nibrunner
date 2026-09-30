@@ -10,17 +10,23 @@
 //! put the work on.
 //!
 //! They need Linux, root, `/dev/kvm`, `nft`, `mke2fs`, a guest image from `just guest-image` and
-//! the tenant from `just integration-guest`, and they say which of those is missing rather than failing
-//! on a machine that was never going to run them. `just integration-guest` is the way in.
+//! the tenant from `just integration-guest`. An enabled run fails if its fixtures are missing;
+//! ordinary `just test` skips this suite. `just integration-guest` is the way in.
 
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 #[cfg(target_os = "linux")]
 mod idle;
 #[cfg(target_os = "linux")]
+mod isolation;
+#[cfg(target_os = "linux")]
 mod lifecycle;
 #[cfg(target_os = "linux")]
+mod raw;
+#[cfg(target_os = "linux")]
 mod sleep;
+#[cfg(target_os = "linux")]
+mod tenant;
 #[cfg(target_os = "linux")]
 mod volumes;
 
@@ -30,6 +36,11 @@ pub use nibrunnerd::test_support::machine::RunningHost;
 /// A host to test against, or nothing when this machine cannot hold one.
 #[cfg(target_os = "linux")]
 pub async fn host() -> Option<RunningHost> {
+    host_with(|_| {}).await
+}
+
+#[cfg(target_os = "linux")]
+pub async fn host_with(edit: impl FnOnce(&mut nibrunnerd::config::HostConfig)) -> Option<RunningHost> {
     if !std::env::var("NIBRUNNER_INTEGRATION").is_ok_and(|value| value == "1") {
         return None;
     }
@@ -37,9 +48,7 @@ pub async fn host() -> Option<RunningHost> {
     if unsafe { libc::geteuid() } != 0 {
         panic!("NIBRUNNER_INTEGRATION=1 was set but this is not running as root");
     }
-    let started = nibrunnerd::test_support::machine::started().await;
-    if started.is_none() {
-        eprintln!("no guest image or no tenant: run `just guest-image`, then `just integration-guest`");
-    }
-    started
+    Some(nibrunnerd::test_support::machine::started_with(edit).await.expect(
+        "NIBRUNNER_INTEGRATION=1 requires a guest image and tenant: run `just guest-image`, then `just integration-guest`",
+    ))
 }
