@@ -66,6 +66,48 @@ async fn a_lifetime_expiry_drains_an_open_request_only_until_its_allowance_is_sp
     host.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quiet_open_request_prevents_idle_sleep_until_its_answer_is_finished() {
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1).on_request(IDLE_TIMEOUT_MS);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+
+    let watching = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.host.metrics.proxy.open_requests_for(&app.app_id) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the proxy starts carrying the request");
+        for _ in 0..5 {
+            assert!(host.host.metrics.proxy.open_requests_for(&app.app_id) > 0);
+            nibrunnerd::test_support::measured_quiet_since(
+                &host.host.state,
+                &app.app_id,
+                nibrunnerd::clock::now_ms() - IDLE_TIMEOUT_MS as i64 - 1,
+            )
+            .await;
+            nibrunnerd::domain::reconcile::idle::apply_sleep(&host.host).await;
+            assert_eq!(
+                host.instance(&app.app_id).await.expect("a record").state,
+                InstanceState::Running
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    let (answer, ()) = tokio::join!(host.get(&app, "/hang?ms=8000"), watching);
+    let answer = answer.expect("the quiet request completes");
+    assert_eq!(answer.status, 200, "{answer:?}");
+    assert_eq!(answer.body, "waited");
+    assert_eq!(host.host.metrics.proxy.open_requests_for(&app.app_id), 0);
+    host.let_sleep(&app).await;
+    host.stop().await;
+}
+
 // The 2026-09-18 and 2026-09-21 runs both found loaded apps snapshotted under traffic, because
 // the activity reading was minutes behind. Two apps, one timeout, one wait: the busy one must
 // still be up and the quiet one must be asleep.
