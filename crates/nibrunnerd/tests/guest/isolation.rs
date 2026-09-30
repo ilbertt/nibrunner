@@ -3,9 +3,9 @@
 //! refusal that would have happened anyway.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::time::Duration;
 
 use nibrunnerd::test_support::machine::{RunningHost, Tenant};
+use nibrunnerd::test_support::network::EgressEndpoint;
 use protocol::InstanceState;
 
 /// The tenant gives up after two seconds, so anything under this came back because a rule said
@@ -106,28 +106,26 @@ async fn an_app_cannot_reach_the_instance_metadata_endpoint() {
     host.stop().await;
 }
 
-// The one test here that needs the machine to have egress of its own. Without it there is nothing
-// a guest is allowed to reach, and so nothing to prove a deny against.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_address_the_configuration_denies_cannot_be_reached() {
-    const TARGET: &str = "1.1.1.1:53";
-
     let Some(open) = crate::host().await else {
         return;
     };
+    let endpoint = EgressEndpoint::start();
+    let target = endpoint.address().to_string();
     let app = open.tenant(1);
     open.deploy(std::slice::from_ref(&app)).await;
     open.until_state(&app.app_id, InstanceState::Running).await;
-    let allowed = reaching(&open, &app, TARGET).await;
+    let allowed = reaching(&open, &app, &target).await;
+    assert!(
+        allowed.starts_with("reached"),
+        "the positive control failed: {allowed}"
+    );
     open.stop().await;
-    if !allowed.starts_with("reached") {
-        eprintln!("this machine has no egress a guest could use, so a deny proves nothing: {allowed}");
-        return;
-    }
 
     // A second host, the same in every way but the range it refuses.
-    let Some(closed) = nibrunnerd::test_support::machine::started_with(|config| {
-        config.denied_egress_addresses_v4 = vec!["1.1.1.1/32".to_string()];
+    let Some(closed) = crate::host_with(|config| {
+        config.denied_egress_addresses_v4 = vec![endpoint.denied_cidr()];
     })
     .await
     else {
@@ -136,12 +134,16 @@ async fn an_address_the_configuration_denies_cannot_be_reached() {
     let app = closed.tenant(1);
     closed.deploy(std::slice::from_ref(&app)).await;
     closed.until_state(&app.app_id, InstanceState::Running).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    closed.until_routed(&app).await;
 
-    let said = reaching(&closed, &app, TARGET).await;
+    let said = reaching(&closed, &app, &target).await;
     assert!(
         said.starts_with("blocked"),
         "a denied address was reached: {said}"
+    );
+    assert!(
+        said_milliseconds(&said) < REJECTED_WITHIN_MS,
+        "the deny timed out: {said}"
     );
 
     closed.stop().await;
