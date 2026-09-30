@@ -20,13 +20,17 @@ pub struct EgressEndpoint {
 }
 
 fn ip(args: &[&str]) {
-    let output = Command::new("ip")
+    command("ip", args);
+}
+
+fn command(program: &str, args: &[&str]) {
+    let output = Command::new(program)
         .args(args)
         .output()
-        .expect("iproute2 is installed");
+        .expect("the guest networking tools are installed");
     assert!(
         output.status.success(),
-        "ip {args:?} failed: {}",
+        "{program} {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -52,6 +56,11 @@ impl EgressEndpoint {
         ip(&["-n", namespace, "address", "add", "198.18.0.2/30", "dev", "peer"]);
         ip(&["-n", namespace, "link", "set", "peer", "up"]);
         ip(&["-n", namespace, "link", "set", "lo", "up"]);
+
+        // Docker sets the runner's FORWARD policy to DROP. Allow only this fixture's link
+        // through that chain; the daemon's separate nftables chain still enforces its denies.
+        command("iptables", &["-I", "FORWARD", "-o", interface, "-j", "ACCEPT"]);
+        command("iptables", &["-I", "FORWARD", "-i", interface, "-j", "ACCEPT"]);
 
         let namespace = File::open(format!("/var/run/netns/{namespace}")).expect("the test namespace");
         let stop = endpoint.stop.clone();
@@ -101,6 +110,11 @@ impl Drop for EgressEndpoint {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
+        }
+        for direction in ["-i", "-o"] {
+            let _ = Command::new("iptables")
+                .args(["-D", "FORWARD", direction, &self.interface, "-j", "ACCEPT"])
+                .output();
         }
         let _ = Command::new("ip")
             .args(["link", "delete", &self.interface])
