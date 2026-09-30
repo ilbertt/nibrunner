@@ -26,17 +26,22 @@ async fn a_reused_slot_serves_only_its_new_app_and_carries_none_of_the_old_apps_
     host.let_sleep(&old).await;
 
     let mut removed = host.document(&[]);
-    removed.volumes = vec![old.volume.clone()];
+    removed.volumes = vec![protocol::DesiredVolume {
+        desired_state: protocol::DesiredPresence::Absent,
+        ..old.volume.clone()
+    }];
     host.write(&removed).await;
-    host.until("the old app to release its slot", |report| {
+    host.until("the old volume to release its slot", |report| {
         report.instances.is_empty()
+            && report.volumes.iter().any(|volume| {
+                volume.volume_id == old.volume_id && volume.state == protocol::VolumeState::Deleted
+            })
     })
     .await;
     assert!(host.host.slot_of(&old.app_id).await.is_none());
 
     let new = host.tenant(2);
-    let mut replacement = host.document(std::slice::from_ref(&new));
-    replacement.volumes.push(old.volume.clone());
+    let replacement = host.document(std::slice::from_ref(&new));
     host.write(&replacement).await;
     host.until_state(&new.app_id, InstanceState::Running).await;
     host.until_routed(&new).await;
