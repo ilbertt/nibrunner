@@ -63,6 +63,17 @@
         "command": {
           "$ref": "#/$defs/Command"
         },
+        "cron": {
+          "description": "Configure cron registration and scheduling for this app. Omit to leave cron unconfigured.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CronPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "healthCheck": {
           "$ref": "#/$defs/HealthCheck"
         },
@@ -146,6 +157,26 @@
         "args",
         "workingDirectory",
         "environment"
+      ]
+    },
+    "CronPolicy": {
+      "type": "object",
+      "properties": {
+        "maxJobs": {
+          "description": "Maximum registered jobs for this app. Zero disallows jobs while still allowing the table\nto be cleared.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "timeZone": {
+          "description": "The IANA time zone schedules are interpreted in, such as UTC or Europe/Zurich.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "maxJobs",
+        "timeZone"
       ]
     },
     "DeploymentId": {

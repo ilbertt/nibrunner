@@ -68,6 +68,9 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
   the listener, `vm_` for an operation on a microVM. `metrics::declared()` is the catalogue, and a
   test holds the page to emitting every series in it.
 - Tests are named as the sentence they prove: `a_booted_vm_is_not_a_running_app`, not `test_boot`.
+- Cron policy belongs to `AppConfig.cron`: the app's job limit and IANA time zone, parsed with
+  `chrono-tz`. Both settings must be explicit; omitting the policy leaves cron unconfigured. Jobs
+  are registered through `crontab`; payload bounds are independent of the app's job limit.
 - Docs site: Biome is strict — one parameter per function (`useMaxParams: 1`; wrap several in an
   object), no magic numbers, braces on every block, components declared with `function`, no barrel
   files, sorted Tailwind classes. `bun run fix:lint` and `bun run fix:format` in `docs/` apply

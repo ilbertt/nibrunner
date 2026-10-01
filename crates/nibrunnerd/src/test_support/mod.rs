@@ -137,6 +137,7 @@ pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
         resources: DEFAULT_INSTANCE_RESOURCES,
         health_check: TCP_HEALTH_CHECK,
         restart_policy: DEFAULT_RESTART_POLICY,
+        cron: None,
     };
     edit(&mut value);
     value

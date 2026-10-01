@@ -2,12 +2,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AppId, DeploymentId, InvalidValue, SecretString, TenantEnvironment, REDACTED};
 
-pub const MAX_CRON_JOBS_PER_APP: usize = 10;
-pub const CRON_TIME_ZONE: &str = "UTC";
 pub const MAX_CRONTAB_BYTES: usize = 65_536;
 pub const MAX_CRON_ENVIRONMENT_VARIABLES: usize = 256;
 pub const MAX_CRON_SCHEDULE_LENGTH: usize = 256;
 pub const MAX_CRON_COMMAND_LENGTH: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CronPolicy {
+    /// Maximum registered jobs for this app. Zero disallows jobs while still allowing the table
+    /// to be cleared.
+    pub max_jobs: usize,
+    /// The IANA time zone schedules are interpreted in, such as UTC or Europe/Zurich.
+    #[cfg_attr(feature = "schema", schemars(with = "String", length(min = 1)))]
+    pub time_zone: chrono_tz::Tz,
+}
+
+impl CronPolicy {
+    pub fn validate_jobs(&self, jobs: &CronJobDefinitions) -> Result<(), InvalidValue> {
+        if jobs.0.len() > self.max_jobs {
+            return Err(InvalidValue::new_public("an app names too many cron jobs"));
+        }
+        Ok(())
+    }
+}
 
 fn is_nonempty_line(value: &str, limit: usize) -> bool {
     value.chars().count() <= limit
@@ -176,7 +195,7 @@ impl From<CronJobDefinition> for CronJobFields {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Vec<CronJobDefinition>", into = "Vec<CronJobDefinition>")]
+#[serde(transparent)]
 pub struct CronJobDefinitions(Vec<CronJobDefinition>);
 
 impl CronJobDefinitions {
@@ -189,14 +208,9 @@ impl CronJobDefinitions {
     }
 }
 
-impl TryFrom<Vec<CronJobDefinition>> for CronJobDefinitions {
-    type Error = InvalidValue;
-
-    fn try_from(value: Vec<CronJobDefinition>) -> Result<Self, Self::Error> {
-        if value.len() > MAX_CRON_JOBS_PER_APP {
-            return Err(InvalidValue::new_public("an app names too many cron jobs"));
-        }
-        Ok(Self(value))
+impl From<Vec<CronJobDefinition>> for CronJobDefinitions {
+    fn from(value: Vec<CronJobDefinition>) -> Self {
+        Self(value)
     }
 }
 

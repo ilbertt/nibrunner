@@ -94,16 +94,21 @@ fn cron_jobs_refuse_empty_multiline_and_oversized_fields() {
 }
 
 #[test]
-fn an_app_may_register_ten_cron_jobs_and_no_more() {
-    for (count, accepted) in [
-        (0, true),
-        (MAX_CRON_JOBS_PER_APP, true),
-        (MAX_CRON_JOBS_PER_APP + 1, false),
-    ] {
-        let mut table = cron_table_json();
-        table["jobs"] = serde_json::json!(vec![table["jobs"][0].clone(); count]);
-        assert_eq!(serde_json::from_value::<CronTable>(table).is_ok(), accepted);
-    }
+fn reading_stored_cron_jobs_does_not_impose_the_apps_registration_limit() {
+    let mut table = cron_table_json();
+    table["jobs"] = serde_json::json!(vec![table["jobs"][0].clone(); 25]);
+    let table: CronTable = serde_json::from_value(table).unwrap();
+    assert_eq!(table.jobs.iter().count(), 25);
+    let mut policy = CronPolicy {
+        max_jobs: 25,
+        time_zone: chrono_tz::UTC,
+    };
+    assert!(policy.validate_jobs(&table.jobs).is_ok());
+    policy.max_jobs = 24;
+    assert!(policy.validate_jobs(&table.jobs).is_err());
+    policy.max_jobs = 0;
+    assert!(policy.validate_jobs(&table.jobs).is_err());
+    assert!(policy.validate_jobs(&CronJobDefinitions::default()).is_ok());
 }
 
 #[test]
@@ -193,6 +198,39 @@ fn desired_json() -> serde_json::Value {
         "checkpoints": [],
         "exports": []
     })
+}
+
+#[test]
+fn an_app_without_cron_policy_has_no_implicit_settings() {
+    let value = instance_json()["config"].clone();
+    let config: AppConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(config.cron, None);
+    assert!(serde_json::to_value(config).unwrap().get("cron").is_none());
+}
+
+#[test]
+fn cron_policy_round_trips_with_each_apps_settings() {
+    let mut first = instance_json()["config"].clone();
+    first["cron"] = serde_json::json!({"maxJobs": 25, "timeZone": "Europe/Zurich"});
+    let mut second = instance_json()["config"].clone();
+    second["cron"] = serde_json::json!({"maxJobs": 3, "timeZone": "America/New_York"});
+    let first_config: AppConfig = serde_json::from_value(first.clone()).unwrap();
+    let second_config: AppConfig = serde_json::from_value(second.clone()).unwrap();
+    assert_ne!(first_config.cron, second_config.cron);
+    assert_eq!(serde_json::to_value(first_config).unwrap()["cron"], first["cron"]);
+    assert_eq!(
+        serde_json::to_value(second_config).unwrap()["cron"],
+        second["cron"]
+    );
+}
+
+#[test]
+fn an_app_refuses_unknown_cron_time_zones() {
+    for zone in ["", "Europe/Not_A_Zone", "UTC+2"] {
+        let mut value = instance_json()["config"].clone();
+        value["cron"] = serde_json::json!({"maxJobs": 25, "timeZone": zone});
+        assert!(serde_json::from_value::<AppConfig>(value).is_err());
+    }
 }
 
 #[test]
@@ -776,6 +814,50 @@ mod schema {
             "/instances/0/activation",
             policy,
         )
+    }
+
+    #[test]
+    fn the_app_cron_policy_schema_requires_both_settings_and_refuses_invalid_types() {
+        let validator = validator(crate::schema::desired_state());
+        for (policy, accepted) in [
+            (serde_json::json!({}), false),
+            (serde_json::json!({"maxJobs": 25}), false),
+            (serde_json::json!({"timeZone": "Europe/Zurich"}), false),
+            (serde_json::json!({"maxJobs": 0, "timeZone": "UTC"}), true),
+            (
+                serde_json::json!({"maxJobs": 25, "timeZone": "Europe/Zurich"}),
+                true,
+            ),
+            (serde_json::json!({"maxJobs": -1, "timeZone": "UTC"}), false),
+            (serde_json::json!({"maxJobs": 1.5, "timeZone": "UTC"}), false),
+            (serde_json::json!({"maxJobs": 25, "timeZone": ""}), false),
+            (serde_json::json!({"maxJobs": 25, "timeZone": 1}), false),
+            (serde_json::json!(null), true),
+        ] {
+            let document = with(desired_json(), "/instances/0/config/cron", policy);
+            assert_eq!(
+                serde_json::from_value::<HostDesiredState>(document.clone()).is_ok(),
+                accepted,
+                "the parser took {document}"
+            );
+            assert_eq!(
+                validator.is_valid(&document),
+                accepted,
+                "the schema took {document}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_app_cron_policy_parser_checks_time_zone_names_beyond_the_schema() {
+        let validator = validator(crate::schema::desired_state());
+        let document = with(
+            desired_json(),
+            "/instances/0/config/cron",
+            serde_json::json!({"maxJobs": 25, "timeZone": "Europe/Not_A_Zone"}),
+        );
+        assert!(validator.is_valid(&document));
+        assert!(serde_json::from_value::<HostDesiredState>(document).is_err());
     }
 
     #[test]
