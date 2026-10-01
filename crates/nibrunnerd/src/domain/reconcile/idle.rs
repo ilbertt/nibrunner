@@ -275,12 +275,14 @@ fn left_up(
 
 /// Puts the app to sleep if it is still due, and says whether it went.
 async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bool {
-    // Decided again, against the state and the clock as they are now: an app picked for the
-    // batch may have been asked for while it waited its turn, and how late the policy is acted on
-    // is measured from when it is, not from when the batch was picked. Decided before the
-    // transition lock rather than under it, so the lock is held for the move and nothing else.
+    // Another sleep or wake may finish while this pass waits, invalidating the decision that
+    // selected the app for the batch. Eligibility and the snapshot therefore share the lock.
+    let _transition = host.state.transition(app_id).await;
     let now = crate::clock::now_ms();
     let snapshot = host.state.snapshot().await;
+    if !waited_out(&snapshot, app_id, now) {
+        return false;
+    }
     let Some(record) = snapshot.records.get(app_id) else {
         return false;
     };
@@ -300,10 +302,6 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bo
         late_ms = due.late_ms,
         "letting an app sleep"
     );
-    // Held across the flush and the snapshot, and taken by a wake for as long as it is bringing
-    // the guest back: a request that reaches an app mid-snapshot waits for the snapshot and then
-    // restores what it wrote, rather than finding a guest that is paused or half written out.
-    let _transition = host.state.transition(app_id).await;
     let outcome = crate::domain::reconcile::instances::suspend_instance(host, app_id, due.reason).await;
     note_attempt(host, app_id, outcome).await;
     outcome == Some(SleepOutcome::Slept)
@@ -768,6 +766,75 @@ mod sleep_tests {
     async fn last_reached(host: &TestHost, ms_ago: i64) {
         let moment = crate::clock::now_ms() - ms_ago;
         measured_quiet_since(&host.state, &app_id(), moment).await;
+    }
+
+    fn default_idle_policy() -> ActivationPolicy {
+        ActivationPolicy {
+            sleep_when: protocol::SleepPolicy::TrafficIdle {
+                timeout_ms: protocol::DEFAULT_IDLE_TIMEOUT,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn two_sleep_passes_waiting_for_the_same_guest_snapshot_it_once() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+        let id = app_id();
+        let policy = default_idle_policy();
+        let transition = host.state.transition(&id).await;
+        let first = let_sleep(&host, &id, &policy);
+        let second = let_sleep(&host, &id, &policy);
+        tokio::pin!(first, second);
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
+
+        drop(transition);
+        assert!(first.await);
+        assert!(!second.await);
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
+        assert!(host.state.snapshot().await.failed_sleeps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_sleep_waiting_for_the_transition_leaves_an_app_with_a_new_request_open_up() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+        let id = app_id();
+        let policy = default_idle_policy();
+        let transition = host.state.transition(&id).await;
+        let sleeping = let_sleep(&host, &id, &policy);
+        tokio::pin!(sleeping);
+        assert!(futures::poll!(sleeping.as_mut()).is_pending());
+        let answering = host.metrics.proxy.open(&id);
+
+        drop(transition);
+        assert!(!sleeping.await);
+        assert!(host.vms.calls().is_empty());
+        drop(answering);
+    }
+
+    #[tokio::test]
+    async fn a_queued_sleep_respects_the_backoff_started_by_the_pass_ahead_of_it() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+        host.vms.refuse_sleep(crate::ports::VmError::SleepRefused {
+            reason: "a snapshot was refused".into(),
+        });
+        let id = app_id();
+        let policy = default_idle_policy();
+        let transition = host.state.transition(&id).await;
+        let first = let_sleep(&host, &id, &policy);
+        let second = let_sleep(&host, &id, &policy);
+        tokio::pin!(first, second);
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
+
+        drop(transition);
+        assert!(!first.await);
+        assert!(!second.await);
+        assert_eq!(host.vms.calls(), vec![VmCall::Sleep]);
+        assert_eq!(host.state.snapshot().await.failed_sleeps[&id].attempts, 1);
     }
 
     #[tokio::test]
