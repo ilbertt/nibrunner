@@ -18,8 +18,7 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 
 ## Layout
 
-- `crates/protocol` — the control-plane protocol: the desired and reported state documents and
-  deployment-scoped cron tables.
+- `crates/protocol` — the control-plane protocol: the desired and reported state documents.
   `schema/*.json` is generated from its types
 - `crates/guest-contract` — what host and guest agree on: drive order, kernel args, vsock ports,
   the frame codecs
