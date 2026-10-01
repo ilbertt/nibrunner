@@ -297,7 +297,6 @@ pub struct AppConfig {
     pub resources: InstanceResources,
     pub health_check: HealthCheck,
     pub restart_policy: RestartPolicy,
-    pub cron: crate::CronPolicy,
 }
 
 /// How many ports an app may name is the host's to say — `proxy.raw.max_ports_per_app` — so what is

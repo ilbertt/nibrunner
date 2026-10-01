@@ -124,8 +124,7 @@ Add this entry to `instances`, replacing both digest placeholders with the value
     },
     "resources": { "vcpuCount": 1, "memoryMib": 256 },
     "healthCheck": { "kind": "http", "path": "/", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
-    "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 },
-    "cron": { "maxJobs": 0, "timeZone": "UTC" }
+    "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
   },
   "hostnames": [{ "hostname": "docker-demo.example.com", "kind": "platform" }]
 }

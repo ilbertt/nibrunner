@@ -42,6 +42,7 @@ A complete configuration that works as-is:
 | `[paths]` | Everything under `/var/lib/nibrunner`. |
 | `[artifacts]`, `[exports]` | Directories on the local disk. |
 | `[volumes]` | `backend = "local-file"`: sparse files on the local disk. |
+| `[app.cron]` | At most 10 jobs per app, scheduled in UTC. Both values are written explicitly. |
 | `[proxy.http]` | Plain HTTP on all addresses, port 80. |
 | `[logs]` | The newest 256 MiB of each app's output. |
 
@@ -74,6 +75,19 @@ must be outside the range `21000` to `21000 + 8 × max_apps − 1`. Port `0` is 
   the file.
 
 Which apps run on the host is defined in `desired.json`, not in `config.toml`.
+
+## Cron policy
+
+`[app.cron]` sets the policy for every app on the host:
+
+```toml
+[app.cron]
+max_jobs_per_app = 10
+time_zone = "UTC"
+```
+
+Both keys are required. Set `max_jobs_per_app = 0` to disallow jobs. `time_zone` must name an
+IANA time zone, such as `Europe/Zurich`. Apps register jobs through `crontab`.
 
 ## Editor support
 

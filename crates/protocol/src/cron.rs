@@ -7,27 +7,6 @@ pub const MAX_CRON_ENVIRONMENT_VARIABLES: usize = 256;
 pub const MAX_CRON_SCHEDULE_LENGTH: usize = 256;
 pub const MAX_CRON_COMMAND_LENGTH: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct CronPolicy {
-    /// Maximum registered jobs for this app. Zero disallows jobs while still allowing the table
-    /// to be cleared.
-    pub max_jobs: usize,
-    /// The IANA time zone schedules are interpreted in, such as UTC or Europe/Zurich.
-    #[cfg_attr(feature = "schema", schemars(with = "String", length(min = 1)))]
-    pub time_zone: chrono_tz::Tz,
-}
-
-impl CronPolicy {
-    pub fn validate_jobs(&self, jobs: &CronJobDefinitions) -> Result<(), InvalidValue> {
-        if jobs.0.len() > self.max_jobs {
-            return Err(InvalidValue::new_public("an app names too many cron jobs"));
-        }
-        Ok(())
-    }
-}
-
 fn is_nonempty_line(value: &str, limit: usize) -> bool {
     value.chars().count() <= limit
         && !value.trim_matches([' ', '\t']).is_empty()
@@ -199,6 +178,13 @@ impl From<CronJobDefinition> for CronJobFields {
 pub struct CronJobDefinitions(Vec<CronJobDefinition>);
 
 impl CronJobDefinitions {
+    pub fn validate_limit(&self, maximum: usize) -> Result<(), InvalidValue> {
+        if self.0.len() > maximum {
+            return Err(InvalidValue::new_public("an app names too many cron jobs"));
+        }
+        Ok(())
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &CronJobDefinition> {
         self.0.iter()
     }

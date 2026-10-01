@@ -5,6 +5,10 @@
   "description": "A host's `config.toml`. No key has a default: a key its section declares and the file\nomits is refused by name, and so is a key no section declares. What may be absent is a whole\nsection — `[proxy]`, `[metrics]`, `[volumes.zerofs]` — and one that is present is filled in\ncompletely.",
   "type": "object",
   "properties": {
+    "app": {
+      "description": "Host-wide policies applied to every app.",
+      "$ref": "#/$defs/app"
+    },
     "artifacts": {
       "description": "Where the layers a document names come from.",
       "$ref": "#/$defs/artifacts"
@@ -52,6 +56,7 @@
   "additionalProperties": false,
   "required": [
     "max_apps",
+    "app",
     "paths",
     "artifacts",
     "volumes",
@@ -59,6 +64,19 @@
     "network"
   ],
   "$defs": {
+    "app": {
+      "type": "object",
+      "properties": {
+        "cron": {
+          "description": "Cron registration and scheduling policy for every app on this host.",
+          "$ref": "#/$defs/cron"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cron"
+      ]
+    },
     "artifacts": {
       "description": "One store, in S3 or on this disk.",
       "type": "object",
@@ -72,6 +90,27 @@
       "additionalProperties": false,
       "required": [
         "store_url"
+      ]
+    },
+    "cron": {
+      "type": "object",
+      "properties": {
+        "max_jobs_per_app": {
+          "description": "Maximum jobs each app may register. Zero allows only an empty crontab.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "time_zone": {
+          "description": "IANA time zone for every cron schedule, such as UTC or Europe/Zurich.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "max_jobs_per_app",
+        "time_zone"
       ]
     },
     "exports": {

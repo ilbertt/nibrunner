@@ -63,9 +63,6 @@
         "command": {
           "$ref": "#/$defs/Command"
         },
-        "cron": {
-          "$ref": "#/$defs/CronPolicy"
-        },
         "healthCheck": {
           "$ref": "#/$defs/HealthCheck"
         },
@@ -92,8 +89,7 @@
         "command",
         "resources",
         "healthCheck",
-        "restartPolicy",
-        "cron"
+        "restartPolicy"
       ]
     },
     "AppHostname": {
@@ -150,26 +146,6 @@
         "args",
         "workingDirectory",
         "environment"
-      ]
-    },
-    "CronPolicy": {
-      "type": "object",
-      "properties": {
-        "maxJobs": {
-          "description": "Maximum registered jobs for this app. Zero disallows jobs while still allowing the table\nto be cleared.",
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0
-        },
-        "timeZone": {
-          "description": "The IANA time zone schedules are interpreted in, such as UTC or Europe/Zurich.",
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "required": [
-        "maxJobs",
-        "timeZone"
       ]
     },
     "DeploymentId": {

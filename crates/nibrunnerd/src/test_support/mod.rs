@@ -137,10 +137,6 @@ pub fn app_config(edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
         resources: DEFAULT_INSTANCE_RESOURCES,
         health_check: TCP_HEALTH_CHECK,
         restart_policy: DEFAULT_RESTART_POLICY,
-        cron: protocol::CronPolicy {
-            max_jobs: 0,
-            time_zone: "UTC".parse().expect("UTC is an IANA time zone"),
-        },
     };
     edit(&mut value);
     value

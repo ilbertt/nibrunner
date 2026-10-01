@@ -55,6 +55,7 @@ flate2.workspace = true
 zip.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 tokio.workspace = true
 futures.workspace = true
 bytes.workspace = true
