@@ -1,13 +1,18 @@
 use schemars::generate::SchemaSettings;
 use schemars::{JsonSchema, Schema};
 
-use crate::{HostDesiredState, HostReportedState};
+use crate::{CronTable, HostDesiredState, HostReportedState};
 
 pub const SCHEMA_ID_BASE: &str =
     "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/";
 
 pub const DESIRED_STATE_SCHEMA: &str = "desired.schema.json";
 pub const REPORTED_STATE_SCHEMA: &str = "reported.schema.json";
+pub const CRON_TABLE_SCHEMA: &str = "cron.schema.json";
+
+pub fn cron_table() -> Schema {
+    published::<CronTable>(CRON_TABLE_SCHEMA)
+}
 
 /// The document a host converges on, as the JSON Schema of [`HostDesiredState`].
 pub fn desired_state() -> Schema {
@@ -20,10 +25,11 @@ pub fn reported_state() -> Schema {
 }
 
 /// Every schema this crate publishes, each under the filename its `$id` ends in.
-pub fn all() -> [(&'static str, Schema); 2] {
+pub fn all() -> [(&'static str, Schema); 3] {
     [
         (DESIRED_STATE_SCHEMA, desired_state()),
         (REPORTED_STATE_SCHEMA, reported_state()),
+        (CRON_TABLE_SCHEMA, cron_table()),
     ]
 }
 

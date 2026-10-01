@@ -1,0 +1,113 @@
+{
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/cron.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CronTable",
+  "type": "object",
+  "properties": {
+    "appId": {
+      "$ref": "#/$defs/AppId"
+    },
+    "crontab": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Crontab"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deploymentId": {
+      "$ref": "#/$defs/DeploymentId"
+    },
+    "jobs": {
+      "$ref": "#/$defs/CronJobDefinitions"
+    }
+  },
+  "required": [
+    "appId",
+    "deploymentId",
+    "jobs"
+  ],
+  "$defs": {
+    "AppId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "CronCommand": {
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^(?![ \\t]*$)[^\\u0000\\r\\n]+$"
+    },
+    "CronJobDefinition": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/CronCommand"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TenantEnvironment"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "maxProperties": 256
+        },
+        "schedule": {
+          "$ref": "#/$defs/CronSchedule"
+        }
+      },
+      "required": [
+        "schedule",
+        "command"
+      ]
+    },
+    "CronJobDefinitions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CronJobDefinition"
+      },
+      "maxItems": 10
+    },
+    "CronSchedule": {
+      "description": "a nonempty schedule line within the length limit",
+      "type": "string",
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^(?![ \\t]*$)[^\\u0000\\r\\n]+$"
+    },
+    "Crontab": {
+      "description": "The original crontab text, limited to 65536 UTF-8 bytes by the host.",
+      "type": "string",
+      "maxLength": 65536,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "DeploymentId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "TenantEnvironment": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/TenantValue"
+      },
+      "propertyNames": {
+        "not": {
+          "const": "__proto__"
+        },
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      }
+    },
+    "TenantValue": {
+      "description": "Only complete `${NAME}` references are filled in for NAME in NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT. Bare names, incomplete references and other dollar signs remain literal; complete references to unknown `NIBRUN_` names are refused.",
+      "type": "string",
+      "maxLength": 32768
+    }
+  }
+}

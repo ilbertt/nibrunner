@@ -1,5 +1,73 @@
 use super::*;
 
+fn cron_table_json() -> serde_json::Value {
+    serde_json::json!({
+        "appId": "app-1",
+        "deploymentId": "dep-1",
+        "jobs": [{
+            "schedule": "@hourly",
+            "command": "/app/server cleanup --token=tenant-secret",
+            "environment": {"TOKEN": "tenant-secret"}
+        }],
+        "crontab": "TOKEN=tenant-secret\n@hourly /app/server cleanup --token=tenant-secret\n"
+    })
+}
+
+#[test]
+fn a_cron_table_round_trips_without_rewriting_tenant_input() {
+    let value = cron_table_json();
+    let table: CronTable = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(table.app_id.as_str(), "app-1");
+    assert_eq!(table.deployment_id.as_str(), "dep-1");
+    assert_eq!(serde_json::to_value(&table).unwrap(), value);
+    assert!(!format!("{table:?}").contains("tenant-secret"));
+}
+
+#[test]
+fn an_empty_cron_table_needs_no_original_text() {
+    let value = serde_json::json!({"appId": "app-1", "deploymentId": "dep-1", "jobs": []});
+    let table: CronTable = serde_json::from_value(value.clone()).unwrap();
+    assert!(table.jobs.is_empty());
+    assert_eq!(table.crontab, None);
+    assert_eq!(serde_json::to_value(table).unwrap(), value);
+}
+
+#[test]
+fn a_cron_job_may_omit_environment_overrides() {
+    let value = serde_json::json!({"schedule": "* * * * *", "command": "  echo hello  "});
+    let job: CronJobDefinition = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(job.environment, None);
+    assert_eq!(serde_json::to_value(job).unwrap(), value);
+}
+
+#[test]
+fn cron_wire_validation_leaves_expression_syntax_to_the_scheduler() {
+    assert!(CronSchedule::parse("@reboot").is_ok());
+    assert!(CronSchedule::parse("60 * * * *").is_ok());
+}
+
+#[test]
+fn a_crontab_is_bounded_by_utf8_bytes_and_not_characters() {
+    assert!(Crontab::parse("x".repeat(MAX_CRONTAB_BYTES)).is_ok());
+    assert!(Crontab::parse("é".repeat(MAX_CRONTAB_BYTES / 2)).is_ok());
+    assert!(Crontab::parse("x".repeat(MAX_CRONTAB_BYTES + 1)).is_err());
+    assert!(Crontab::parse("é".repeat(MAX_CRONTAB_BYTES / 2 + 1)).is_err());
+}
+
+#[test]
+fn cron_input_and_errors_do_not_expose_commands_or_crontabs() {
+    let command = CronCommand::parse("tenant-secret").unwrap();
+    let crontab = Crontab::parse("tenant-secret\n").unwrap();
+    assert_eq!(format!("{command:?}"), REDACTED);
+    assert_eq!(format!("{crontab:?}"), REDACTED);
+    assert!(Crontab::parse("").is_ok());
+    assert!(Crontab::parse("tenant-secret\0").is_err());
+    let invalid = serde_json::json!({"schedule": "@hourly", "command": "tenant-secret\0"});
+    let error = serde_json::from_value::<CronJobDefinition>(invalid).unwrap_err();
+    assert!(!error.to_string().contains("tenant-secret"));
+    assert!(!format!("{error:?}").contains("tenant-secret"));
+}
+
 fn instance_json() -> serde_json::Value {
     serde_json::json!({
         "appId": "app-1",
@@ -524,6 +592,95 @@ fn a_lifetime_outside_what_a_host_will_hold_is_refused() {
 
 mod schema {
     use super::*;
+
+    #[test]
+    fn the_cron_schema_and_wire_reader_agree_on_job_boundaries() {
+        let schema = validator(crate::schema::cron_table());
+        let mut variants = vec![cron_table_json()];
+        for count in [0, MAX_CRON_JOBS_PER_APP, MAX_CRON_JOBS_PER_APP + 1] {
+            let mut table = cron_table_json();
+            table["jobs"] = serde_json::json!(vec![table["jobs"][0].clone(); count]);
+            variants.push(table);
+        }
+        for (field, limit) in [
+            ("schedule", MAX_CRON_SCHEDULE_LENGTH),
+            ("command", MAX_CRON_COMMAND_LENGTH),
+        ] {
+            for value in [
+                "".to_string(),
+                " \t".to_string(),
+                "x\0".to_string(),
+                "x\r".to_string(),
+                "x\n".to_string(),
+                "x\nhello".to_string(),
+                "x".repeat(limit),
+                "x".repeat(limit + 1),
+                "é".repeat(limit),
+                "é".repeat(limit + 1),
+            ] {
+                let mut table = cron_table_json();
+                table["jobs"][0][field] = serde_json::json!(value);
+                variants.push(table);
+            }
+        }
+        for count in [MAX_CRON_ENVIRONMENT_VARIABLES, MAX_CRON_ENVIRONMENT_VARIABLES + 1] {
+            let mut table = cron_table_json();
+            let environment: serde_json::Map<String, serde_json::Value> = (0..count)
+                .map(|index| (format!("VAR_{index}"), serde_json::json!("value")))
+                .collect();
+            table["jobs"][0]["environment"] = serde_json::Value::Object(environment);
+            variants.push(table);
+        }
+        for value in ["", "# comment\n", "x\0", "x\0\n"] {
+            let mut table = cron_table_json();
+            table["crontab"] = serde_json::json!(value);
+            variants.push(table);
+        }
+        for length in [MAX_CRONTAB_BYTES, MAX_CRONTAB_BYTES + 1] {
+            let mut table = cron_table_json();
+            table["crontab"] = serde_json::json!("x".repeat(length));
+            variants.push(table);
+        }
+        for table in variants {
+            assert_eq!(
+                schema.is_valid(&table),
+                serde_json::from_value::<CronTable>(table.clone()).is_ok(),
+                "{table}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_crontab_schema_leaves_the_utf8_byte_limit_to_the_host() {
+        let schema = validator(crate::schema::cron_table());
+        let mut table = cron_table_json();
+        table["crontab"] = serde_json::json!("é".repeat(MAX_CRONTAB_BYTES / 2 + 1));
+        assert!(schema.is_valid(&table));
+        assert!(serde_json::from_value::<CronTable>(table).is_err());
+    }
+
+    #[test]
+    fn a_cron_table_requires_its_deployment_and_valid_environment_names() {
+        let schema = validator(crate::schema::cron_table());
+        let variants = [
+            without(cron_table_json(), "/deploymentId"),
+            with(cron_table_json(), "/deploymentId", serde_json::json!("")),
+            with(
+                cron_table_json(),
+                "/jobs/0/environment",
+                serde_json::json!({"BAD=NAME": "value"}),
+            ),
+            with(
+                cron_table_json(),
+                "/jobs/0/environment",
+                serde_json::json!({"__proto__": "value"}),
+            ),
+        ];
+        for table in variants {
+            assert!(!schema.is_valid(&table), "{table}");
+            assert!(serde_json::from_value::<CronTable>(table).is_err());
+        }
+    }
 
     fn validator(schema: schemars::Schema) -> jsonschema::Validator {
         let schema = schema.to_value();
