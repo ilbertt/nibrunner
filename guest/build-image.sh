@@ -59,6 +59,7 @@ done
 chmod 1777 "$work/rootfs/tmp"
 
 install -m 0755 "$init" "$work/rootfs/init"
+ln -s /init "$work/rootfs/usr/bin/crontab"
 find "$work/rootfs" -exec touch -h -d "@$epoch" {} +
 
 # -d populates from a directory, so this host never mounts the image it is writing. The UUID and

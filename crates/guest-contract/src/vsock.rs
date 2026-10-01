@@ -4,6 +4,8 @@ pub const GUEST_CONTROL_VSOCK_PORT: u32 = 51001;
 
 pub const GUEST_FILESYSTEM_VSOCK_PORT: u32 = 51002;
 
+pub const CRON_REGISTRATION_PORT: u32 = 51003;
+
 pub const GUEST_VSOCK_FILENAME: &str = "logs.vsock";
 
 pub fn tenant_log_socket_name() -> String {

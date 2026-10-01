@@ -12,10 +12,16 @@ mod ceiling;
 )]
 mod supervise;
 
+mod crontab;
+
 #[cfg(target_os = "linux")]
 mod guest;
 
 fn main() -> std::process::ExitCode {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    if let Some(arguments) = crontab::invoked(&arguments) {
+        return crontab::run(arguments);
+    }
     #[cfg(target_os = "linux")]
     {
         guest::run()
