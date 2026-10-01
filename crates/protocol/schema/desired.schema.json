@@ -64,15 +64,7 @@
           "$ref": "#/$defs/Command"
         },
         "cron": {
-          "description": "Configure cron registration and scheduling for this app. Omit to leave cron unconfigured.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CronPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/CronPolicy"
         },
         "healthCheck": {
           "$ref": "#/$defs/HealthCheck"
@@ -100,7 +92,8 @@
         "command",
         "resources",
         "healthCheck",
-        "restartPolicy"
+        "restartPolicy",
+        "cron"
       ]
     },
     "AppHostname": {

@@ -172,7 +172,8 @@ fn instance_json() -> serde_json::Value {
             },
             "resources": { "vcpuCount": 1, "memoryMib": 256 },
             "healthCheck": { "kind": "http", "path": "/healthz", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
-            "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
+            "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 },
+            "cron": { "maxJobs": 0, "timeZone": "UTC" }
         },
         "hostnames": [{ "hostname": "app-1.apps.example.com", "kind": "platform" }],
         "somethingNewer": true
@@ -201,11 +202,10 @@ fn desired_json() -> serde_json::Value {
 }
 
 #[test]
-fn an_app_without_cron_policy_has_no_implicit_settings() {
-    let value = instance_json()["config"].clone();
-    let config: AppConfig = serde_json::from_value(value).unwrap();
-    assert_eq!(config.cron, None);
-    assert!(serde_json::to_value(config).unwrap().get("cron").is_none());
+fn an_app_must_explicitly_configure_its_cron_policy() {
+    let mut value = instance_json()["config"].clone();
+    value.as_object_mut().unwrap().remove("cron");
+    assert!(serde_json::from_value::<AppConfig>(value).is_err());
 }
 
 #[test]
@@ -832,7 +832,7 @@ mod schema {
             (serde_json::json!({"maxJobs": 1.5, "timeZone": "UTC"}), false),
             (serde_json::json!({"maxJobs": 25, "timeZone": ""}), false),
             (serde_json::json!({"maxJobs": 25, "timeZone": 1}), false),
-            (serde_json::json!(null), true),
+            (serde_json::json!(null), false),
         ] {
             let document = with(desired_json(), "/instances/0/config/cron", policy);
             assert_eq!(
@@ -890,6 +890,7 @@ mod schema {
         let nine_layers =
             serde_json::Value::Array(vec![instance_json()["layers"][0].clone(); MAX_LAYERS + 1]);
         let broken = [
+            without(desired_json(), "/instances/0/config/cron"),
             with(desired_json(), "/hostId", serde_json::json!("has.a.dot")),
             without(desired_json(), "/revision"),
             with(desired_json(), "/revision", serde_json::json!("has a space")),

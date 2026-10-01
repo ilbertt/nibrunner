@@ -60,7 +60,8 @@ the key and the digest from the previous step:
         "command": { "program": "/app/server", "args": [], "workingDirectory": "/app", "environment": {} },
         "resources": { "vcpuCount": 1, "memoryMib": 256 },
         "healthCheck": { "kind": "http", "path": "/healthz", "intervalMs": 5000, "timeoutMs": 2000, "gracePeriodMs": 30000, "healthyThreshold": 1, "unhealthyThreshold": 3 },
-        "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
+        "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 },
+        "cron": { "maxJobs": 0, "timeZone": "UTC" }
       },
       "hostnames": [{ "hostname": "app-1.example.com", "kind": "platform" }]
     }

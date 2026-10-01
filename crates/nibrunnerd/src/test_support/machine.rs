@@ -233,7 +233,10 @@ impl RunningHost {
                     resources: DEFAULT_INSTANCE_RESOURCES,
                     health_check: super::TCP_HEALTH_CHECK,
                     restart_policy: DEFAULT_RESTART_POLICY,
-                    cron: None,
+                    cron: protocol::CronPolicy {
+                        max_jobs: 0,
+                        time_zone: "UTC".parse().expect("UTC is an IANA time zone"),
+                    },
                 },
                 hostnames: vec![AppHostname {
                     hostname: Hostname::parse(&hostname).expect("a hostname"),
