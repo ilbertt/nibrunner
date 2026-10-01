@@ -178,11 +178,6 @@ impl Default for LogsConfig {
 pub const STARTER_STATE_DIR: &str = "/var/lib/nibrunner";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppSettings {
-    pub cron: CronConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronConfig {
     pub max_jobs_per_app: usize,
     pub time_zone: chrono_tz::Tz,
@@ -195,7 +190,7 @@ pub struct HostConfig {
     /// loaded with, the conntrack table's size, what the metrics page calls the total — and
     /// nothing holds a copy of it.
     pub max_apps: u32,
-    pub app: AppSettings,
+    pub cron: CronConfig,
     pub state_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub snapshot_dir: PathBuf,
@@ -295,8 +290,8 @@ mod file {
         /// and ports; `start` says the three against what is set.
         #[schemars(range(min = 1, max = nft_render::most_apps_the_ports_fit()))]
         pub(super) max_apps: Option<u32>,
-        /// Host-wide policies applied to every app.
-        pub(super) app: Option<App>,
+        /// Cron registration and scheduling policy for every app on this host.
+        pub(super) cron: Option<Cron>,
         /// Where this host keeps what is its own.
         pub(super) paths: Option<Paths>,
         /// Where the layers a document names come from.
@@ -319,14 +314,6 @@ mod file {
         /// Absent keeps the newest 256 MiB of each app's output.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) logs: Option<Logs>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-    #[serde(deny_unknown_fields)]
-    #[schemars(rename = "app")]
-    pub(super) struct App {
-        /// Cron registration and scheduling policy for every app on this host.
-        pub(super) cron: Option<Cron>,
     }
 
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -626,15 +613,12 @@ impl HostConfig {
 
     fn from_document(document: &file::ConfigFile) -> Result<Self, ConfigError> {
         let max_apps = apps("max_apps", required("max_apps", document.max_apps)?)?;
-        let app = required("app", document.app.as_ref())?;
-        let cron = required("app.cron", app.cron.as_ref())?;
-        let app = AppSettings {
-            cron: CronConfig {
-                max_jobs_per_app: required("app.cron.max_jobs_per_app", cron.max_jobs_per_app)?,
-                time_zone: required_str("app.cron.time_zone", &cron.time_zone)?
-                    .parse()
-                    .map_err(|_| ConfigError::invalid("app.cron.time_zone", "an IANA time zone"))?,
-            },
+        let cron = required("cron", document.cron.as_ref())?;
+        let cron = CronConfig {
+            max_jobs_per_app: required("cron.max_jobs_per_app", cron.max_jobs_per_app)?,
+            time_zone: required_str("cron.time_zone", &cron.time_zone)?
+                .parse()
+                .map_err(|_| ConfigError::invalid("cron.time_zone", "an IANA time zone"))?,
         };
         let paths = required("paths", document.paths.as_ref())?;
         let state_dir = absolute(
@@ -715,7 +699,7 @@ impl HostConfig {
 
         Ok(Self {
             max_apps,
-            app,
+            cron,
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
             guest_image_dir: path_key("paths.guest_image_dir", &paths.guest_image_dir)?,
             firecracker_dir: runtime_dir.join("firecracker"),
@@ -796,11 +780,9 @@ impl HostConfig {
     fn laid_out(state_dir: PathBuf, runtime_dir: PathBuf, guest_image_dir: PathBuf) -> Self {
         Self {
             max_apps: 1000,
-            app: AppSettings {
-                cron: CronConfig {
-                    max_jobs_per_app: 10,
-                    time_zone: chrono_tz::UTC,
-                },
+            cron: CronConfig {
+                max_jobs_per_app: 10,
+                time_zone: chrono_tz::UTC,
             },
             snapshot_dir: state_dir.join("snapshots"),
             guest_image_dir,
@@ -835,11 +817,9 @@ impl HostConfig {
     pub fn example() -> Self {
         Self {
             max_apps: 1000,
-            app: AppSettings {
-                cron: CronConfig {
-                    max_jobs_per_app: 10,
-                    time_zone: chrono_tz::UTC,
-                },
+            cron: CronConfig {
+                max_jobs_per_app: 10,
+                time_zone: chrono_tz::UTC,
             },
             state_dir: PathBuf::from("/var/lib/nibrunner"),
             runtime_dir: PathBuf::from("/run/nibrunner"),
@@ -924,11 +904,9 @@ impl HostConfig {
         let text = |path: &std::path::Path| Some(path.display().to_string());
         file::ConfigFile {
             max_apps: Some(self.max_apps),
-            app: Some(file::App {
-                cron: Some(file::Cron {
-                    max_jobs_per_app: Some(self.app.cron.max_jobs_per_app),
-                    time_zone: Some(self.app.cron.time_zone.to_string()),
-                }),
+            cron: Some(file::Cron {
+                max_jobs_per_app: Some(self.cron.max_jobs_per_app),
+                time_zone: Some(self.cron.time_zone.to_string()),
             }),
             paths: Some(file::Paths {
                 state_dir: text(&self.state_dir),
@@ -1355,7 +1333,7 @@ mod tests {
     /// no key it will supply for itself, so a test about one key starts from the whole document.
     const WHOLE: &str = r#"max_apps = 1000
 
-[app.cron]
+[cron]
 max_jobs_per_app = 10
 time_zone = "UTC"
 
@@ -1472,8 +1450,8 @@ denied_egress_addresses_v6 = []
     fn a_key_the_document_leaves_out_is_refused_rather_than_filled_in() {
         for field in [
             "max_apps",
-            "app.cron.max_jobs_per_app",
-            "app.cron.time_zone",
+            "cron.max_jobs_per_app",
+            "cron.time_zone",
             "paths.state_dir",
             "paths.runtime_dir",
             "paths.snapshot_dir",
@@ -1496,7 +1474,7 @@ denied_egress_addresses_v6 = []
 
     #[test]
     fn a_section_this_daemon_reads_is_refused_when_the_document_has_none() {
-        for section in ["paths", "artifacts", "volumes", "exports", "network"] {
+        for section in ["cron", "paths", "artifacts", "volumes", "exports", "network"] {
             let stripped: String = WHOLE
                 .split("\n\n")
                 .filter(|block| !block.starts_with(&format!("[{section}]")))
@@ -1508,28 +1486,17 @@ denied_egress_addresses_v6 = []
     }
 
     #[test]
-    fn cron_policy_is_required_for_the_host_without_implicit_settings() {
-        let stripped = WHOLE
-            .split("\n\n")
-            .filter(|block| !block.starts_with("[app.cron]"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        assert!(refused(&stripped).contains("app"));
-        assert!(refused(&format!("{stripped}\n[app]\n")).contains("app.cron"));
-    }
-
-    #[test]
     fn the_host_can_set_the_job_limit_and_time_zone_for_every_app() {
         for (limit, zone) in [(0, "UTC"), (25, "Europe/Zurich")] {
             let config = parsed(&document(
                 &[
-                    ("app.cron.max_jobs_per_app", &limit.to_string()),
-                    ("app.cron.time_zone", &format!("\"{zone}\"")),
+                    ("cron.max_jobs_per_app", &limit.to_string()),
+                    ("cron.time_zone", &format!("\"{zone}\"")),
                 ],
                 "",
             ));
-            assert_eq!(config.app.cron.max_jobs_per_app, limit);
-            assert_eq!(config.app.cron.time_zone.to_string(), zone);
+            assert_eq!(config.cron.max_jobs_per_app, limit);
+            assert_eq!(config.cron.time_zone.to_string(), zone);
             assert_eq!(parsed(&config.to_toml()), config);
         }
     }
@@ -1537,8 +1504,8 @@ denied_egress_addresses_v6 = []
     #[test]
     fn an_unknown_cron_time_zone_is_refused_by_name() {
         for zone in ["", "Europe/Not_A_Zone", "UTC+2"] {
-            let message = refused(&document(&[("app.cron.time_zone", &format!("\"{zone}\""))], ""));
-            assert!(message.contains("app.cron.time_zone"), "{message}");
+            let message = refused(&document(&[("cron.time_zone", &format!("\"{zone}\""))], ""));
+            assert!(message.contains("cron.time_zone"), "{message}");
             assert!(message.contains("IANA time zone"), "{message}");
         }
     }
@@ -2233,7 +2200,7 @@ keep_mib_per_app = 64
             let accepted = [
                 whole(),
                 document(
-                    &[("app.cron.max_jobs_per_app", "0"), ("app.cron.time_zone", "\"Europe/Zurich\"")],
+                    &[("cron.max_jobs_per_app", "0"), ("cron.time_zone", "\"Europe/Zurich\"")],
                     "",
                 ),
                 zerofs(ZEROFS),
@@ -2266,8 +2233,8 @@ keep_mib_per_app = 64
             let validator = validator();
             let mut broken: Vec<String> = [
                 "max_apps",
-                "app.cron.max_jobs_per_app",
-                "app.cron.time_zone",
+                "cron.max_jobs_per_app",
+                "cron.time_zone",
                 "paths.state_dir",
                 "paths.versions_file",
                 "artifacts.store_url",
@@ -2283,10 +2250,10 @@ keep_mib_per_app = 64
                 [
                     ("max_apps", "0"),
                     ("max_apps", "5568"),
-                    ("app.cron.max_jobs_per_app", "-1"),
-                    ("app.cron.max_jobs_per_app", "1.5"),
-                    ("app.cron.time_zone", "\"\""),
-                    ("app.cron.time_zone", "1"),
+                    ("cron.max_jobs_per_app", "-1"),
+                    ("cron.max_jobs_per_app", "1.5"),
+                    ("cron.time_zone", "\"\""),
+                    ("cron.time_zone", "1"),
                     ("paths.state_dir", "\"var/lib/nibrunner\""),
                     ("artifacts.store_url", "\"gs://bucket\""),
                     ("artifacts.store_url", "\"s3://\""),

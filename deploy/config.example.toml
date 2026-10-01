@@ -14,7 +14,7 @@
 
 max_apps = 1000
 
-[app.cron]
+[cron]
 max_jobs_per_app = 10
 time_zone = "UTC"
 
