@@ -116,7 +116,9 @@ driven against mocked collaborators.
 
 Hosts may already be in use. Keep existing files in `crates/nibrunnerd/migrations` unchanged:
 sqlx verifies their checksums when a host opens its database. Add a new numbered migration for
-each schema change, and test upgrading an existing database without losing its state.
+each schema change, and test upgrading an existing database without losing its state. Schema
+migrations contain DDL only: no inserts, updates, deletes, backfills, or table-copy operations.
+Existing row upgrades belong in Rust, in a separate transaction that can safely retry after failure.
 
 ## Building
 
