@@ -1,4 +1,5 @@
 pub mod import;
+mod upgrade;
 
 use std::path::Path;
 use std::time::Duration;
@@ -75,6 +76,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool, StoreError> {
             path: path.display().to_string(),
             reason: error.to_string(),
         })?;
+    upgrade::finish_foreign_key_upgrade(&pool).await?;
     Ok(pool)
 }
 
@@ -100,6 +102,9 @@ pub async fn in_memory() -> SqlitePool {
         .run(&pool)
         .await
         .expect("the schema applies");
+    upgrade::finish_foreign_key_upgrade(&pool)
+        .await
+        .expect("existing host state is upgraded");
     pool
 }
 
