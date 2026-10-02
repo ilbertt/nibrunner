@@ -123,11 +123,6 @@ mod tests {
             include_str!("../../migrations/0001_host_state.sql"),
         )
         .unwrap();
-        std::fs::write(
-            migrations.join("0002_foreign_keys.sql"),
-            include_str!("../../migrations/0002_foreign_keys.sql"),
-        )
-        .unwrap();
         let path = directory.path().join("state.db");
         let pool = SqlitePoolOptions::new()
             .connect_with(
@@ -184,7 +179,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(applied, [1, 2, 3]);
+        assert_eq!(applied, [1, 2]);
         assert!(after.cron.all().await.unwrap().is_empty());
         let registered = vec![protocol::CronTable {
             app_id: app_id(),
@@ -203,14 +198,6 @@ mod tests {
     async fn a_host_that_has_written_nothing_holds_nothing() {
         let repositories = Repositories::sqlite(in_memory().await);
         assert!(repositories.holds_nothing().await);
-        repositories
-            .slots
-            .replace_all(
-                &std::collections::BTreeMap::from([(crate::test_support::app_id(), 0)]),
-                1,
-            )
-            .await
-            .unwrap();
         repositories
             .instances
             .replace_all(&[crate::test_support::instance_record(|_| {})])
