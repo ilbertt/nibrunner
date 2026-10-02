@@ -5,7 +5,6 @@ use protocol::{AppId, MIN_IDLE_TIMEOUT_MS};
 use sqlx::SqlitePool;
 
 use crate::domain::store::StoreError;
-use crate::repositories::app_identity::ensure_app;
 use crate::repositories::last_written::LastWritten;
 
 /// How far a reading moves from the row on disk before it is worth a write. The row is a hint:
@@ -75,7 +74,6 @@ impl ActivityRepository for SqliteActivity {
         if !delta.is_empty() {
             let mut tx = self.pool.begin().await.map_err(StoreError::write)?;
             for (app_id, at_ms) in delta.changed() {
-                ensure_app(&mut tx, app_id).await?;
                 sqlx::query!(
                     "insert into activity (app_id, last_active_at_ms) values (?, ?)
                      on conflict (app_id) do update set last_active_at_ms = excluded.last_active_at_ms",
@@ -166,10 +164,6 @@ mod tests {
     #[tokio::test]
     async fn a_row_no_app_id_names_is_left_out_rather_than_refusing_the_load() {
         let pool = in_memory().await;
-        sqlx::query("insert into apps (app_id) values ('not an app id')")
-            .execute(&pool)
-            .await
-            .unwrap();
         sqlx::query("insert into activity (app_id, last_active_at_ms) values ('not an app id', 1)")
             .execute(&pool)
             .await
