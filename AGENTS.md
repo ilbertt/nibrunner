@@ -12,7 +12,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - **Tasks:** `just`; `mise` installs the tools pinned in `mise.toml`
 - **Linter/Formatter:** rustfmt and clippy for the Rust, Biome (`docs/biome.json`) for the docs
   site; editors format on save
-- **State:** SQLite through sqlx, with the offline query data committed under `.sqlx/`
+- **State:** SQLite through sqlx, with the offline query data committed under `.sqlx/`. New
+  tables store fields in columns and related rows, without JSON records.
 - **Docs:** Fumadocs on Bun under `docs/`, served at [nibrunner.dev](https://nibrunner.dev)
 - **Commits:** Conventional Commits, checked on pull request titles by `check-pr-title`
 
