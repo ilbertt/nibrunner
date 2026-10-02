@@ -71,6 +71,9 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - Cron policy belongs to the host's `[cron]`: the job limit for each app and the IANA time
   zone, parsed with `chrono-tz`. Both settings are required, without defaults. Jobs are registered
   through `crontab`; desired state does not carry cron configuration.
+- Cron runs may overlap. Editing a crontab reschedules future runs; stopping or replacing its
+  deployment cancels and drains active runs before the guest stops. Registry notifications and
+  the next due time drive scheduling, without polling or catching up missed runs.
 - Docs site: Biome is strict — one parameter per function (`useMaxParams: 1`; wrap several in an
   object), no magic numbers, braces on every block, components declared with `function`, no barrel
   files, sorted Tailwind classes. `bun run fix:lint` and `bun run fix:format` in `docs/` apply

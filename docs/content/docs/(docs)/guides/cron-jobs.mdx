@@ -1,0 +1,59 @@
+---
+title: Cron jobs
+description: Register scheduled commands from an app with crontab.
+---
+
+An app registers its scheduled commands with `crontab`. The host keeps the table for that
+deployment and runs each command inside the app's guest.
+
+## Host configuration
+
+Set both fields in `config.toml`:
+
+```toml
+[cron]
+max_jobs_per_app = 10
+time_zone = "Europe/Zurich"
+```
+
+`time_zone` is an IANA time zone. These fields are required; the daemon supplies no defaults.
+The limit applies when an app installs a table.
+
+## Registering commands
+
+From the app, install a file or pipe a table to standard input:
+
+```sh
+printf '0 * * * * /app/bin/cleanup\n' | crontab -
+crontab -l
+crontab -r
+```
+
+Installing a table replaces the whole previous table. An invalid table leaves the previous
+registration intact. `crontab -l` prints the original text; `crontab -r` removes its jobs.
+
+Use five fields: minute, hour, day of month, month, and day of week. Lists, ranges, steps, month
+and weekday names, and `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly` are supported.
+`@reboot` is rejected. Environment assignments apply to the jobs that follow them:
+
+```text
+MODE=maintenance
+30 2 * * * /app/bin/cleanup
+```
+
+The host's time zone applies to every app. At a daylight saving change, a missing local time
+moves forward by the clock change; a repeated local time runs once.
+
+## Execution
+
+A due command wakes a sleeping app. It runs through `/bin/sh` (or the supplied `SHELL`) with
+the app's user, working directory, and environment, plus the assignments in its table.
+
+An active command keeps the guest awake. Its output appears in the app's
+[logs](/docs/guides/logs-and-metrics), labelled with a stable job ID and a separate run ID.
+Runs of the same job may overlap. Missed occurrences while the daemon was stopped are not replayed.
+Editing or removing a registration changes future scheduling; active commands finish their runs.
+
+A deployment replacement or removal cancels and drains active runs before stopping the guest,
+then discards the old registration.
+The new deployment registers its own table. Stopping an app cancels its runs and pauses scheduling.
