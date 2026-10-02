@@ -75,6 +75,7 @@ async fn settled(host: &Host, app_id: &AppId, reason: &str) {
 }
 
 pub async fn stop_instance(host: &Host, app_id: &AppId, reason: &str) {
+    host.cron_runs.stop(app_id).await;
     host.state
         .update_record(app_id, |record| {
             record.state = InstanceState::Stopping;

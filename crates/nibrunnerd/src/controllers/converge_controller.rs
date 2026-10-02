@@ -124,13 +124,20 @@ impl ConvergeController {
         &self,
         desired: &HostDesiredState,
     ) -> Result<Option<Changes>, crate::domain::cron::registry::CronRegistryError> {
-        let mut cache = self.host.cache.lock().await;
         let deployments = desired
             .instances
             .iter()
             .map(|instance| (instance.app_id.clone(), instance.deployment_id.clone()))
             .collect::<Vec<_>>();
         self.host.cron.synchronize(&deployments).await?;
+        let enabled = desired
+            .instances
+            .iter()
+            .filter(|instance| instance.desired_state != protocol::DesiredInstanceState::Stopped)
+            .map(|instance| (instance.app_id.clone(), instance.deployment_id.clone()))
+            .collect::<Vec<_>>();
+        self.host.cron_runs.synchronize(&enabled).await;
+        let mut cache = self.host.cache.lock().await;
         let changes = cache.changes_in(desired);
         Ok(cache.accept(desired.clone()).then_some(changes))
     }

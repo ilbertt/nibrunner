@@ -483,6 +483,7 @@ async fn test_host_over(
     ));
     let host = Arc::new(Host {
         cron,
+        cron_runs: Arc::new(crate::domain::cron::runs::CronRuns::default()),
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         guest_image_version: "6.1.180-test".to_string(),
         state: state.clone(),
