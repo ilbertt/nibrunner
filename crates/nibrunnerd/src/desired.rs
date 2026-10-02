@@ -64,12 +64,26 @@ pub struct Changes {
     pub gone: Vec<AppId>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DesiredStateCache {
     latest: Option<HostDesiredState>,
+    changed: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for DesiredStateCache {
+    fn default() -> Self {
+        Self {
+            latest: None,
+            changed: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 impl DesiredStateCache {
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -112,6 +126,9 @@ impl DesiredStateCache {
             .as_ref()
             .is_some_and(|held| asks_the_same(held, &state));
         self.latest = Some(state);
+        if moved {
+            self.changed.send_modify(|revision| *revision += 1);
+        }
         moved
     }
 }
@@ -316,6 +333,27 @@ mod tests {
             |state| state.instances = vec![desired_instance(|_| {})]
         )));
         assert_eq!(cache.latest().map(|state| state.instances.len()), Some(1));
+    }
+
+    #[test]
+    fn only_a_changed_ask_notifies_the_scheduler() {
+        let mut cache = DesiredStateCache::new();
+        let mut changes = cache.watch();
+        let first = desired_state(|_| {});
+        cache.accept(first.clone());
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        cache.accept(first.clone());
+        assert!(!changes.has_changed().unwrap());
+        cache.accept(HostDesiredState {
+            revision: protocol::Revision::parse("renamed").unwrap(),
+            ..first
+        });
+        assert!(!changes.has_changed().unwrap());
+        cache.accept(desired_state(|state| {
+            state.instances = vec![desired_instance(|_| {})]
+        }));
+        assert!(changes.has_changed().unwrap());
     }
 
     #[test]

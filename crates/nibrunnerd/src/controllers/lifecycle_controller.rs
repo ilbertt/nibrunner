@@ -33,7 +33,7 @@ impl LifecycleController {
             tracing::info!(adopted = adopted.len(), "microVMs from an earlier daemon adopted");
             for app_id in &adopted {
                 if let Err(error) = self.host.vms.readopt(app_id).await {
-                    tracing::warn!(%app_id, %error, "an adopted microVM's log forwarding could not be re-established");
+                    tracing::warn!(%app_id, %error, "an adopted microVM's guest channels could not be re-established");
                 }
             }
         }
@@ -51,6 +51,10 @@ impl LifecycleController {
         let idle = HostIdle::new(self.host.clone());
 
         let held: Vec<Arc<dyn Controller>> = vec![
+            crate::controllers::cron_controller::CronController::new(
+                self.host.clone(),
+                self.host.cron.clone(),
+            ),
             ConvergeController::new(self.host.clone(), reconciler.clone()),
             StatusController::new(self.host.clone(), reconciler, reports),
             ActivityController::new(idle.clone()),
