@@ -1,5 +1,6 @@
 pub mod accepted_document_repository;
 pub mod activity_repository;
+mod app_identity;
 pub mod cron_repository;
 pub mod deleted_volumes_repository;
 pub mod host_identity_repository;
@@ -100,6 +101,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.db");
         let first = open(&path).await.unwrap();
+        sqlx::query("insert into apps (app_id) values ('app-1')")
+            .execute(&first)
+            .await
+            .unwrap();
         sqlx::query("insert into slots (app_id, slot) values ('app-1', 0)")
             .execute(&first)
             .await
@@ -121,6 +126,11 @@ mod tests {
         std::fs::write(
             migrations.join("0001_host_state.sql"),
             include_str!("../../migrations/0001_host_state.sql"),
+        )
+        .unwrap();
+        std::fs::write(
+            migrations.join("0002_foreign_keys.sql"),
+            include_str!("../../migrations/0002_foreign_keys.sql"),
         )
         .unwrap();
         let path = directory.path().join("state.db");
@@ -179,7 +189,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(applied, [1, 2]);
+        assert_eq!(applied, [1, 2, 3]);
         assert!(after.cron.all().await.unwrap().is_empty());
         let registered = vec![protocol::CronTable {
             app_id: app_id(),
