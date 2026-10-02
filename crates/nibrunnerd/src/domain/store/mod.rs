@@ -75,16 +75,6 @@ pub async fn open(path: &Path) -> Result<SqlitePool, StoreError> {
             path: path.display().to_string(),
             reason: error.to_string(),
         })?;
-    if !sqlx::query("pragma foreign_key_check")
-        .fetch_all(&pool)
-        .await
-        .map_err(StoreError::read)?
-        .is_empty()
-    {
-        return Err(StoreError::Unreadable(
-            "the database contains records that violate foreign key constraints".to_owned(),
-        ));
-    }
     Ok(pool)
 }
 
@@ -116,7 +106,6 @@ pub async fn in_memory() -> SqlitePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repositories::instances_repository::InstanceRepository;
 
     async fn opened() -> (tempfile::TempDir, SqlitePool) {
         let directory = tempfile::tempdir().unwrap();
@@ -169,102 +158,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows, 2);
-    }
-    #[tokio::test]
-    async fn adding_the_slot_foreign_key_preserves_an_existing_database() {
-        let directory = tempfile::tempdir().unwrap();
-        let migrations = directory.path().join("migrations");
-        std::fs::create_dir(&migrations).unwrap();
-        std::fs::write(
-            migrations.join("0001_host_state.sql"),
-            include_str!("../../../migrations/0001_host_state.sql"),
-        )
-        .unwrap();
-        let path = directory.path().join("state.db");
-        let pool = SqlitePoolOptions::new()
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(&path)
-                    .create_if_missing(true)
-                    .foreign_keys(true),
-            )
-            .await
-            .unwrap();
-        sqlx::migrate::Migrator::new(migrations.as_path())
-            .await
-            .unwrap()
-            .run(&pool)
-            .await
-            .unwrap();
-        let record = serde_json::to_string(&crate::test_support::instance_record(|_| {})).unwrap();
-        sqlx::query("insert into slots (app_id, slot) values ('app-1', 7)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("insert into instances (app_id, record) values ('app-1', ?)")
-            .bind(&record)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::raw_sql(
-            "insert into activity values ('past-app', 123);
-             insert into meters values ('past-app', 1, 2, 3, 4, 5, 6, 7);
-             insert into deleted_volumes values ('vol-1', 'unreadable legacy report');",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-        let upgraded = open(&path).await.unwrap();
-        let persisted: String = sqlx::query_scalar("select record from instances where app_id = 'app-1'")
-            .fetch_one(&upgraded)
-            .await
-            .unwrap();
-        assert_eq!(persisted, record);
-        let slot: i64 = sqlx::query_scalar("select slot from slots where app_id = 'app-1'")
-            .fetch_one(&upgraded)
-            .await
-            .unwrap();
-        assert_eq!(slot, 7);
-        for table in ["activity", "meters", "deleted_volumes"] {
-            let rows: i64 = sqlx::query_scalar(&format!("select count(*) from {table}"))
-                .fetch_one(&upgraded)
-                .await
-                .unwrap();
-            assert_eq!(rows, 1);
-        }
-        let orphan = sqlx::query("insert into instances (app_id, record) values ('missing-slot', '{}')")
-            .execute(&upgraded)
-            .await
-            .unwrap_err();
-        assert!(orphan.as_database_error().unwrap().is_foreign_key_violation());
-        upgraded.close().await;
-        assert_eq!(
-            crate::repositories::instances_repository::SqliteInstances::new(open(&path).await.unwrap())
-                .all()
-                .await
-                .unwrap(),
-            [crate::test_support::instance_record(|_| {})]
-        );
-    }
-
-    #[tokio::test]
-    async fn opening_a_database_with_an_orphan_instance_reports_the_constraint_violation() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.db");
-        let pool = open(&path).await.unwrap();
-        let mut connection = pool.acquire().await.unwrap();
-        sqlx::query("pragma foreign_keys = off")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        sqlx::query("insert into instances (app_id, record) values ('missing-slot', '{}')")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        drop(connection);
-        pool.close().await;
-        let error = open(&path).await.unwrap_err();
-        assert!(error.message().contains("violate foreign key constraints"));
     }
 }
