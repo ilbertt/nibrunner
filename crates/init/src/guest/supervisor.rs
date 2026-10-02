@@ -372,7 +372,7 @@ fn spawn(config: &InstanceConfig, ceiling: &Ceiling) -> Option<Tenant> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::cell::Cell;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
@@ -387,7 +387,7 @@ mod tests {
     /// other's.
     static ONE_TENANT_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-    fn one_tenant_at_a_time() -> MutexGuard<'static, ()> {
+    pub(in crate::guest) fn one_tenant_at_a_time() -> MutexGuard<'static, ()> {
         ONE_TENANT_AT_A_TIME
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

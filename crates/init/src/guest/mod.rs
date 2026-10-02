@@ -1,5 +1,6 @@
 mod channels;
 mod control;
+mod cron;
 mod filesystem;
 mod logs;
 mod memory;
@@ -32,7 +33,7 @@ pub(crate) fn run() -> ExitCode {
         }
     };
 
-    let channels = channels::start();
+    let channels = channels::start(&config, &ceiling);
 
     log(&format!(
         "starting {} as uid {} in {}, with {} MiB to spend",

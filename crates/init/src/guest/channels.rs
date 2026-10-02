@@ -1,21 +1,28 @@
 use nix::unistd::{ForkResult, Pid};
 
-use crate::guest::{control, filesystem, log};
+use guest_contract::instance_env::InstanceConfig;
+
+use crate::guest::{control, cron, filesystem, log, memory};
 
 pub(crate) struct Channels {
     control: Option<Pid>,
     files: Option<Pid>,
+    cron: Option<Pid>,
 }
 
-pub(crate) fn start() -> Channels {
+pub(crate) fn start(config: &InstanceConfig, ceiling: &memory::Ceiling) -> Channels {
     Channels {
         control: fork_channel("control", control::serve),
         files: fork_channel("filesystem", filesystem::serve),
+        cron: cron::start(config, ceiling),
     }
 }
 
 impl Channels {
     pub(crate) fn stop(&self) {
+        if let Some(pid) = self.cron {
+            cron::stop(pid);
+        }
         for pid in [self.control, self.files].into_iter().flatten() {
             let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
         }
