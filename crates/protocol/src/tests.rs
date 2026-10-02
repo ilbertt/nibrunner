@@ -80,17 +80,34 @@ fn cron_jobs_refuse_empty_multiline_and_oversized_fields() {
             assert!(serde_json::from_value::<CronTable>(table).is_err(), "{field}");
         }
         for (length, accepted) in [(limit, true), (limit + 1, false)] {
-            for character in ["x", "é"] {
-                let mut table = cron_table_json();
-                table["jobs"][0][field] = serde_json::json!(character.repeat(length));
-                assert_eq!(
-                    serde_json::from_value::<CronTable>(table).is_ok(),
-                    accepted,
-                    "{field}"
-                );
-            }
+            let mut table = cron_table_json();
+            table["jobs"][0][field] = serde_json::json!("x".repeat(length));
+            assert_eq!(
+                serde_json::from_value::<CronTable>(table).is_ok(),
+                accepted,
+                "{field}"
+            );
         }
     }
+}
+
+#[test]
+fn a_cron_command_fits_the_guests_byte_limit_even_with_unicode() {
+    for character in ["é", "🔑"] {
+        let boundary = character.repeat(MAX_CRON_COMMAND_LENGTH / character.len());
+        let command = CronCommand::parse(boundary.clone()).unwrap();
+        assert_eq!(command.expose().len(), MAX_CRON_COMMAND_LENGTH);
+        assert!(CronCommand::parse(format!("{boundary}x")).is_err());
+        let mut table = cron_table_json();
+        table["jobs"][0]["command"] = serde_json::json!(format!("{boundary}{character}"));
+        assert!(serde_json::from_value::<CronTable>(table).is_err());
+    }
+}
+
+#[test]
+fn cron_schedule_text_has_a_character_bound_before_syntax_validation() {
+    assert!(CronSchedule::parse("é".repeat(MAX_CRON_SCHEDULE_LENGTH)).is_ok());
+    assert!(CronSchedule::parse("é".repeat(MAX_CRON_SCHEDULE_LENGTH + 1)).is_err());
 }
 
 #[test]

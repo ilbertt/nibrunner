@@ -7,10 +7,8 @@ pub const MAX_CRON_ENVIRONMENT_VARIABLES: usize = 256;
 pub const MAX_CRON_SCHEDULE_LENGTH: usize = 256;
 pub const MAX_CRON_COMMAND_LENGTH: usize = 4096;
 
-fn is_nonempty_line(value: &str, limit: usize) -> bool {
-    value.chars().count() <= limit
-        && !value.trim_matches([' ', '\t']).is_empty()
-        && !value.contains(['\0', '\r', '\n'])
+fn is_nonempty_line(value: &str) -> bool {
+    !value.trim_matches([' ', '\t']).is_empty() && !value.contains(['\0', '\r', '\n'])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,7 +18,7 @@ pub struct CronSchedule(String);
 impl CronSchedule {
     pub fn parse(value: impl Into<String>) -> Result<Self, InvalidValue> {
         let value = value.into();
-        if !is_nonempty_line(&value, MAX_CRON_SCHEDULE_LENGTH) {
+        if value.chars().count() > MAX_CRON_SCHEDULE_LENGTH || !is_nonempty_line(&value) {
             return Err(InvalidValue::new_public(
                 "a cron schedule must be a nonempty line within the length limit",
             ));
@@ -65,7 +63,7 @@ impl TryFrom<SecretString> for CronCommand {
     type Error = InvalidValue;
 
     fn try_from(value: SecretString) -> Result<Self, Self::Error> {
-        if !is_nonempty_line(value.expose(), MAX_CRON_COMMAND_LENGTH) {
+        if value.expose().len() > MAX_CRON_COMMAND_LENGTH || !is_nonempty_line(value.expose()) {
             return Err(InvalidValue::new_public(
                 "a cron command must be a nonempty line within the length limit",
             ));
