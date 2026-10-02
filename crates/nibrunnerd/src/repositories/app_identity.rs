@@ -81,6 +81,25 @@ mod tests {
              insert into deleted_volumes values ('vol-malformed', 'not json');"
         ).execute(&pool).await.unwrap();
         let before = persisted_rows(&pool).await;
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        for table in ["slots", "instances", "activity", "meters", "deleted_volumes"] {
+            let legacy_count: i64 =
+                sqlx::query_scalar(&format!("select count(*) from {table}_before_foreign_keys"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(legacy_count, i64::try_from(before[table].len()).unwrap());
+            let current_count: i64 = sqlx::query_scalar(&format!("select count(*) from {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(current_count, 0);
+        }
+        let identities: i64 = sqlx::query_scalar("select count(*) from apps")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(identities, 0);
         pool.close().await;
 
         let upgraded = open(&path).await.unwrap();
