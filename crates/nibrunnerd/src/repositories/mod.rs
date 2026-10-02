@@ -1,5 +1,6 @@
 pub mod accepted_document_repository;
 pub mod activity_repository;
+pub mod cron_repository;
 pub mod deleted_volumes_repository;
 pub mod host_identity_repository;
 pub mod instances_repository;
@@ -19,7 +20,10 @@ use crate::repositories::instances_repository::{InstanceRepository, SqliteInstan
 use crate::repositories::meters_repository::{MeterRepository, SqliteMeters};
 use crate::repositories::slots_repository::{SlotRepository, SqliteSlots};
 
+use crate::repositories::cron_repository::{CronRepository, SqliteCron};
+
 pub struct Repositories {
+    pub cron: Arc<dyn CronRepository>,
     pub instances: Arc<dyn InstanceRepository>,
     pub slots: Arc<dyn SlotRepository>,
     pub activity: Arc<dyn ActivityRepository>,
@@ -32,6 +36,7 @@ pub struct Repositories {
 impl Repositories {
     pub fn sqlite(pool: SqlitePool) -> Self {
         Self {
+            cron: Arc::new(SqliteCron::new(pool.clone())),
             instances: Arc::new(SqliteInstances::new(pool.clone())),
             slots: Arc::new(SqliteSlots::new(pool.clone())),
             activity: Arc::new(SqliteActivity::new(pool.clone())),
@@ -74,6 +79,7 @@ mod tests {
                 .unwrap();
         for expected in [
             "accepted_document",
+            "cron_tables",
             "activity",
             "deleted_volumes",
             "host_identity",

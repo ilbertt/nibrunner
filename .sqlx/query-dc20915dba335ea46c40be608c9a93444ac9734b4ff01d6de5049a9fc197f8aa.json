@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "delete from cron_tables",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "dc20915dba335ea46c40be608c9a93444ac9734b4ff01d6de5049a9fc197f8aa"
+}

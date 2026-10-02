@@ -234,7 +234,11 @@ mod tests {
         deleted_volumes: MockDeletedVolumeRepository,
         identity: MockHostIdentityRepository,
     ) -> Repositories {
+        let mut cron = crate::repositories::cron_repository::MockCronRepository::new();
+        cron.expect_all().returning(|| Ok(Vec::new()));
+        cron.expect_replace_all().returning(|_| Ok(()));
         Repositories {
+            cron: Arc::new(cron),
             instances: Arc::new(instances),
             slots: Arc::new(slots),
             activity: Arc::new(activity),
