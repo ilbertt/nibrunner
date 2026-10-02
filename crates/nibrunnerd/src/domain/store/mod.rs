@@ -132,6 +132,10 @@ mod tests {
     #[tokio::test]
     async fn a_writer_that_finds_the_lock_held_waits_for_it_rather_than_failing() {
         let (_directory, pool) = opened().await;
+        sqlx::query("insert into apps (app_id) values ('app-1'), ('app-2')")
+            .execute(&pool)
+            .await
+            .unwrap();
         let mut held = pool.begin_with("begin immediate").await.unwrap();
         sqlx::query("insert into slots (app_id, slot) values ('app-1', 0)")
             .execute(&mut *held)

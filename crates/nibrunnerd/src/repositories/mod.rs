@@ -1,5 +1,6 @@
 pub mod accepted_document_repository;
 pub mod activity_repository;
+mod app_identity;
 pub mod cron_repository;
 pub mod deleted_volumes_repository;
 pub mod host_identity_repository;
@@ -100,6 +101,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.db");
         let first = open(&path).await.unwrap();
+        sqlx::query("insert into apps (app_id) values ('app-1')")
+            .execute(&first)
+            .await
+            .unwrap();
         sqlx::query("insert into slots (app_id, slot) values ('app-1', 0)")
             .execute(&first)
             .await
@@ -108,6 +113,95 @@ mod tests {
 
         let second = Repositories::sqlite(open(&path).await.unwrap());
         assert_eq!(second.slots.all().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_pre_cron_host_keeps_its_state_and_can_register_crons_after_upgrade() {
+        use crate::test_support::{accepted_document, app_id, deployment_id, desired_state, instance_record};
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let directory = tempfile::tempdir().unwrap();
+        let migrations = directory.path().join("migrations");
+        std::fs::create_dir(&migrations).unwrap();
+        std::fs::write(
+            migrations.join("0001_host_state.sql"),
+            include_str!("../../migrations/0001_host_state.sql"),
+        )
+        .unwrap();
+        std::fs::write(
+            migrations.join("0002_foreign_keys.sql"),
+            include_str!("../../migrations/0002_foreign_keys.sql"),
+        )
+        .unwrap();
+        let path = directory.path().join("state.db");
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(migrations.as_path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        let has_crons: i64 = sqlx::query_scalar(
+            "select count(*) from sqlite_master where type = 'table' and name = 'cron_tables'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(has_crons, 0);
+
+        let before = Repositories::sqlite(pool.clone());
+        let slots = std::collections::BTreeMap::from([(app_id(), 7)]);
+        let instances = vec![instance_record(|_| {})];
+        let document = accepted_document(desired_state(|_| {}));
+        before.identity.remember("host-1").await.unwrap();
+        before.slots.replace_all(&slots, 8).await.unwrap();
+        before.instances.replace_all(&instances).await.unwrap();
+        before.accepted_document.remember(&document).await.unwrap();
+        let checksum: Vec<u8> = sqlx::query_scalar("select checksum from _sqlx_migrations where version = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = open(&path).await.unwrap();
+        let after = Repositories::sqlite(pool.clone());
+        assert_eq!(after.identity.read().await.unwrap().as_deref(), Some("host-1"));
+        assert_eq!(after.slots.all().await.unwrap(), slots);
+        assert_eq!(after.slots.cursor().await.unwrap(), 8);
+        assert_eq!(after.instances.all().await.unwrap(), instances);
+        assert_eq!(after.accepted_document.read().await.unwrap(), Some(document));
+        assert_eq!(
+            sqlx::query_scalar::<_, Vec<u8>>("select checksum from _sqlx_migrations where version = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            checksum
+        );
+        let applied: Vec<i64> =
+            sqlx::query_scalar("select version from _sqlx_migrations where success = true order by version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(applied, [1, 2, 3]);
+        assert!(after.cron.all().await.unwrap().is_empty());
+        let registered = vec![protocol::CronTable {
+            app_id: app_id(),
+            deployment_id: deployment_id(),
+            jobs: protocol::CronJobDefinitions::default(),
+            crontab: Some(protocol::Crontab::parse("# registered after upgrade\n").unwrap()),
+        }];
+        after.cron.replace_all(&registered).await.unwrap();
+        pool.close().await;
+        let restarted = Repositories::sqlite(open(&path).await.unwrap());
+        assert_eq!(restarted.cron.all().await.unwrap(), registered);
+        assert_eq!(restarted.slots.all().await.unwrap(), slots);
     }
 
     #[tokio::test]

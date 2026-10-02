@@ -52,11 +52,6 @@ create table instances (
     state         text generated always as (json_extract(record, '$.state')) virtual
 ) strict;
 
-create table cron_tables (
-    app_id text not null primary key,
-    record text not null
-) strict;
-
 -- Only the moment, never the counts it was derived from: the kernel's counters do not outlive the
 -- daemon either, because the first apply after a restart rewrites the table.
 create table activity (
