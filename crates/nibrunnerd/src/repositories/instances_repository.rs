@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 
 use crate::domain::report::instance_record::InstanceRecord;
 use crate::domain::store::StoreError;
+use crate::repositories::app_identity::ensure_app;
 use crate::repositories::last_written::LastWritten;
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
@@ -64,6 +65,7 @@ impl InstanceRepository for SqliteInstances {
         if !delta.is_empty() {
             let mut tx = self.pool.begin().await.map_err(StoreError::write)?;
             for (app_id, record) in delta.changed() {
+                ensure_app(&mut tx, app_id).await?;
                 sqlx::query!(
                     "insert into instances (app_id, record) values (?, ?)
                      on conflict (app_id) do update set record = excluded.record",
@@ -160,6 +162,10 @@ mod tests {
     #[tokio::test]
     async fn a_record_this_daemon_cannot_read_is_left_out_rather_than_failing_the_load() {
         let pool = in_memory().await;
+        sqlx::query("insert into apps (app_id) values ('app-9')")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("insert into instances (app_id, record) values ('app-9', '{\"nonsense\":true}')")
             .execute(&pool)
             .await
