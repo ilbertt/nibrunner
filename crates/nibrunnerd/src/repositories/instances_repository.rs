@@ -6,7 +6,6 @@ use sqlx::SqlitePool;
 
 use crate::domain::report::instance_record::InstanceRecord;
 use crate::domain::store::StoreError;
-use crate::repositories::app_identity::ensure_app;
 use crate::repositories::last_written::LastWritten;
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
@@ -65,7 +64,6 @@ impl InstanceRepository for SqliteInstances {
         if !delta.is_empty() {
             let mut tx = self.pool.begin().await.map_err(StoreError::write)?;
             for (app_id, record) in delta.changed() {
-                ensure_app(&mut tx, app_id).await?;
                 sqlx::query!(
                     "insert into instances (app_id, record) values (?, ?)
                      on conflict (app_id) do update set record = excluded.record",
@@ -108,12 +106,23 @@ mod tests {
     use crate::test_support::instance_record;
     use protocol::InstanceState;
 
+    async fn with_slots() -> SqlitePool {
+        let pool = in_memory().await;
+        sqlx::query(
+            "insert into slots (app_id, slot) values ('app-1', 0), ('app-2', 1), ('app-3', 2), ('app-4', 3)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
     async fn repository() -> SqliteInstances {
-        SqliteInstances::new(in_memory().await)
+        SqliteInstances::new(with_slots().await)
     }
 
     async fn watched() -> (SqlitePool, SqliteInstances) {
-        let pool = in_memory().await;
+        let pool = with_slots().await;
         written::watch(&pool, "instances", "app_id").await;
         (pool.clone(), SqliteInstances::new(pool))
     }
@@ -162,7 +171,7 @@ mod tests {
     #[tokio::test]
     async fn a_record_this_daemon_cannot_read_is_left_out_rather_than_failing_the_load() {
         let pool = in_memory().await;
-        sqlx::query("insert into apps (app_id) values ('app-9')")
+        sqlx::query("insert into slots (app_id, slot) values ('app-9', 0)")
             .execute(&pool)
             .await
             .unwrap();
@@ -270,5 +279,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(written::writes(&pool).await, ["update app-1"]);
+    }
+    #[tokio::test]
+    async fn an_instance_requires_its_slot_and_is_removed_when_the_slot_is_released() {
+        let pool = in_memory().await;
+        let instances = SqliteInstances::new(pool.clone());
+        let record = instance_record(|_| {});
+        assert!(instances
+            .replace_all(std::slice::from_ref(&record))
+            .await
+            .is_err());
+        sqlx::query("insert into slots (app_id, slot) values ('app-1', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        instances
+            .replace_all(std::slice::from_ref(&record))
+            .await
+            .unwrap();
+        let moved = instance_record(|record| record.app_id = AppId::parse("app-2").unwrap());
+        assert!(instances.replace_all(&[moved]).await.is_err());
+        assert_eq!(instances.all().await.unwrap(), [record]);
+        sqlx::query("delete from slots where app_id = 'app-1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(instances.all().await.unwrap().is_empty());
+        instances.replace_all(&[]).await.unwrap();
+        sqlx::query("insert into slots (app_id, slot) values ('app-1', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        instances.replace_all(&[instance_record(|_| {})]).await.unwrap();
+        assert_eq!(instances.all().await.unwrap().len(), 1);
     }
 }
