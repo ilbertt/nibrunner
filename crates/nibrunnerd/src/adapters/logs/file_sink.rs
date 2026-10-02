@@ -125,6 +125,22 @@ impl FileLogSink {
                 event.sequence,
                 text
             ),
+            TenantLogBody::CronData {
+                stream,
+                text,
+                job_id,
+                run_id,
+            } => writeln!(
+                out,
+                "{} {} {}/{} cronJobId={} cronRunId={} {}",
+                event.observed_at,
+                stream.as_str(),
+                event.source_id,
+                event.sequence,
+                job_id,
+                run_id,
+                text,
+            ),
             TenantLogBody::Gap { dropped_bytes } => writeln!(
                 out,
                 "{} stderr {}/{} {GAP_MESSAGE}: {dropped_bytes} bytes",
@@ -223,6 +239,36 @@ mod tests {
     /// A sink with a cap no test here reaches.
     fn unbounded(logs: PathBuf) -> FileLogSink {
         FileLogSink::new(logs, u64::MAX)
+    }
+
+    #[tokio::test]
+    async fn cron_output_carries_both_identities_without_changing_ordinary_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let sink = unbounded(directory.path().join("logs"));
+        sink.publish(vec![
+            event(
+                TenantLogBody::CronData {
+                    stream: TenantLogStream::Stderr,
+                    text: "cron output".into(),
+                    job_id: "cron-job".into(),
+                    run_id: "run-1".into(),
+                },
+                0,
+            ),
+            event(
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stdout,
+                    text: "ordinary output".into(),
+                },
+                1,
+            ),
+        ])
+        .await;
+        let written = std::fs::read_to_string(sink.path_for(&app_id())).unwrap();
+        let lines: Vec<_> = written.lines().collect();
+        assert!(lines[0].ends_with("stderr source-1/0 cronJobId=cron-job cronRunId=run-1 cron output"));
+        assert!(lines[1].ends_with("stdout source-1/1 ordinary output"));
+        assert!(!lines[1].contains("cronJobId="));
     }
 
     #[tokio::test]

@@ -283,6 +283,12 @@ pub enum TenantLogBody {
         stream: protocol::TenantLogStream,
         text: String,
     },
+    CronData {
+        stream: protocol::TenantLogStream,
+        text: String,
+        job_id: String,
+        run_id: String,
+    },
     Gap {
         dropped_bytes: u64,
     },

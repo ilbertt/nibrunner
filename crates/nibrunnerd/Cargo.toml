@@ -41,6 +41,7 @@ name = "integration-guest"
 path = "tests/guest/main.rs"
 
 [dependencies]
+base64.workspace = true
 clap = { version = "4", features = ["derive"] }
 protocol.workspace = true
 guest-contract.workspace = true
