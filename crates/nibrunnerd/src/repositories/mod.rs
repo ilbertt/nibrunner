@@ -1,6 +1,5 @@
 pub mod accepted_document_repository;
 pub mod activity_repository;
-mod app_identity;
 pub mod cron_repository;
 pub mod deleted_volumes_repository;
 pub mod host_identity_repository;
@@ -101,10 +100,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.db");
         let first = open(&path).await.unwrap();
-        sqlx::query("insert into apps (app_id) values ('app-1')")
-            .execute(&first)
-            .await
-            .unwrap();
         sqlx::query("insert into slots (app_id, slot) values ('app-1', 0)")
             .execute(&first)
             .await
@@ -208,6 +203,14 @@ mod tests {
     async fn a_host_that_has_written_nothing_holds_nothing() {
         let repositories = Repositories::sqlite(in_memory().await);
         assert!(repositories.holds_nothing().await);
+        repositories
+            .slots
+            .replace_all(
+                &std::collections::BTreeMap::from([(crate::test_support::app_id(), 0)]),
+                1,
+            )
+            .await
+            .unwrap();
         repositories
             .instances
             .replace_all(&[crate::test_support::instance_record(|_| {})])

@@ -5,7 +5,6 @@ use protocol::AppId;
 use sqlx::SqlitePool;
 
 use crate::domain::store::StoreError;
-use crate::repositories::app_identity::ensure_app;
 use crate::repositories::last_written::LastWritten;
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
@@ -82,7 +81,6 @@ impl SlotRepository for SqliteSlots {
                     .map_err(StoreError::write)?;
             }
             for (app_id, slot) in slots.changed() {
-                ensure_app(&mut tx, app_id).await?;
                 sqlx::query!(
                     "insert into slots (app_id, slot) values (?, ?)
                      on conflict (app_id) do update set slot = excluded.slot",
@@ -181,10 +179,6 @@ mod tests {
     #[tokio::test]
     async fn a_slot_no_app_id_names_is_left_out_rather_than_refusing_the_load() {
         let pool = in_memory().await;
-        sqlx::query("insert into apps (app_id) values ('not an app id')")
-            .execute(&pool)
-            .await
-            .unwrap();
         sqlx::query("insert into slots (app_id, slot) values ('not an app id', 3)")
             .execute(&pool)
             .await
@@ -197,10 +191,6 @@ mod tests {
         let pool = in_memory().await;
         SqliteSlots::new(pool.clone())
             .replace_all(&BTreeMap::from([(app(1), 0)]), 1)
-            .await
-            .unwrap();
-        sqlx::query("insert into apps (app_id) values ('app-2')")
-            .execute(&pool)
             .await
             .unwrap();
         let clash = sqlx::query("insert into slots (app_id, slot) values ('app-2', 0)")
@@ -316,21 +306,12 @@ mod tests {
             .replace_all(&BTreeMap::from([(app(1), 0)]), 1)
             .await
             .unwrap();
-        sqlx::query("insert into apps (app_id) values ('app-9')")
-            .execute(&pool)
-            .await
-            .unwrap();
         sqlx::query("insert into slots (app_id, slot) values ('app-9', 3)")
             .execute(&pool)
             .await
             .unwrap();
         let wanted = BTreeMap::from([(app(1), 0), (app(2), 3)]);
         assert!(slots.replace_all(&wanted, 4).await.is_err());
-        let parents: i64 = sqlx::query_scalar("select count(*) from apps where app_id = 'app-2'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(parents, 0);
 
         sqlx::query("delete from slots where app_id = 'app-9'")
             .execute(&pool)

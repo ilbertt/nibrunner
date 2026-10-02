@@ -3,7 +3,6 @@ use protocol::CronTable;
 use sqlx::SqlitePool;
 
 use crate::domain::store::StoreError;
-use crate::repositories::app_identity::ensure_app;
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
@@ -60,7 +59,6 @@ impl CronRepository for SqliteCron {
             .await
             .map_err(StoreError::write)?;
         for (app_id, record) in records {
-            ensure_app(&mut transaction, app_id).await?;
             sqlx::query!(
                 "insert into cron_tables (app_id, record) values (?, ?)",
                 app_id,
@@ -102,7 +100,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_transaction_does_not_remove_the_previous_registration() {
         let pool = in_memory().await;
-        let repository = SqliteCron::new(pool.clone());
+        let repository = SqliteCron::new(pool);
         let held = table("app-1", "dep-1");
         repository.replace_all(std::slice::from_ref(&held)).await.unwrap();
         let duplicate = table("app-2", "dep-2");
@@ -111,11 +109,6 @@ mod tests {
             .await
             .is_err());
         assert_eq!(repository.all().await.unwrap(), vec![held]);
-        let parents: i64 = sqlx::query_scalar("select count(*) from apps where app_id = 'app-2'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(parents, 0);
     }
 
     #[tokio::test]
@@ -136,39 +129,11 @@ mod tests {
     #[tokio::test]
     async fn corrupt_records_are_reported_without_revealing_their_contents() {
         let pool = in_memory().await;
-        sqlx::query("insert into apps (app_id) values ('app-1')")
-            .execute(&pool)
-            .await
-            .unwrap();
         sqlx::query("insert into cron_tables(app_id,record) values ('app-1','tenant-secret')")
             .execute(&pool)
             .await
             .unwrap();
         let error = SqliteCron::new(pool).all().await.unwrap_err();
         assert!(!format!("{error:?} {error}").contains("tenant-secret"));
-    }
-    #[tokio::test]
-    async fn a_cron_registration_requires_and_retains_its_app_identity() {
-        let pool = in_memory().await;
-        let orphan = sqlx::query("insert into cron_tables (app_id, record) values ('app-1', '{}')")
-            .execute(&pool)
-            .await
-            .unwrap_err();
-        assert!(orphan.as_database_error().unwrap().is_foreign_key_violation());
-        let repository = SqliteCron::new(pool.clone());
-        repository.replace_all(&[table("app-1", "dep-1")]).await.unwrap();
-        let error = sqlx::query("delete from apps where app_id = 'app-1'")
-            .execute(&pool)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.as_database_error().unwrap().message(),
-            "FOREIGN KEY constraint failed"
-        );
-        repository.replace_all(&[]).await.unwrap();
-        sqlx::query("delete from apps where app_id = 'app-1'")
-            .execute(&pool)
-            .await
-            .unwrap();
     }
 }
