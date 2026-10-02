@@ -232,14 +232,22 @@ mod tests {
     async fn a_new_deployment_discards_old_jobs_and_old_guest_registrations() {
         let registry = registry().await;
         registry
-            .replace(&app(), &deployment("dep-1"), "@daily echo old", after())
+            .replace(
+                &app(),
+                &deployment("dep-1"),
+                "TOKEN=old\n@daily echo old",
+                after(),
+            )
             .await
             .unwrap();
         registry
             .synchronize(&[(app(), deployment("dep-2"))])
             .await
             .unwrap();
-        assert!(registry.tables().await.unwrap()[0].jobs.is_empty());
+        let table = registry.tables().await.unwrap().remove(0);
+        assert_eq!(table.deployment_id, deployment("dep-2"));
+        assert!(table.jobs.is_empty());
+        assert!(table.crontab.is_none());
         assert!(matches!(
             registry
                 .replace(&app(), &deployment("dep-1"), "@daily echo stale", after())
@@ -247,6 +255,22 @@ mod tests {
             Err(CronRegistryError::DeploymentMismatch)
         ));
         assert!(registry.list(&app(), &deployment("dep-1")).await.is_err());
+        assert!(registry
+            .list(&app(), &deployment("dep-2"))
+            .await
+            .unwrap()
+            .expose()
+            .is_empty());
+        registry
+            .replace(&app(), &deployment("dep-2"), "@hourly echo new", after())
+            .await
+            .unwrap();
+        let table = registry.tables().await.unwrap().remove(0);
+        let jobs = table.jobs.iter().collect::<Vec<_>>();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].command.expose(), "echo new");
+        assert!(jobs[0].environment.as_ref().unwrap().is_empty());
+        assert_eq!(table.crontab.unwrap().expose(), "@hourly echo new");
     }
 
     #[tokio::test]
