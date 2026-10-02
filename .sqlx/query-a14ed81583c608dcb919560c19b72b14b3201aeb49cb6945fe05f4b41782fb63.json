@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "select app_id, deployment_id, crontab from cron_tables order by app_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "app_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "deployment_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "crontab",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "a14ed81583c608dcb919560c19b72b14b3201aeb49cb6945fe05f4b41782fb63"
+}

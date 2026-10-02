@@ -80,6 +80,8 @@ mod tests {
         for expected in [
             "accepted_document",
             "cron_tables",
+            "cron_jobs",
+            "cron_job_environment",
             "activity",
             "deleted_volumes",
             "host_identity",

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "select app_id, job_index, schedule, command, has_environment from cron_jobs\n             order by app_id, job_index",
+  "describe": {
+    "columns": [
+      {
+        "name": "app_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "job_index",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "schedule",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "command",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "has_environment",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a0c60eeabdafd161a1fbc8392b1b435aa2e2cf518283f819e850f732a1a4d67a"
+}
