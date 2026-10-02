@@ -123,6 +123,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - shard: cron
+            families: cron
           - shard: sleep
             families: sleep
           - shard: idle+isolation
@@ -176,7 +178,7 @@ jobs:
           FAMILIES: ${{ matrix.families }}
         run: |
           for family in $FAMILIES; do
-            sudo -E env "PATH=$PATH" just integration-guest "$family"
+            sudo -E env "PATH=$PATH" just integration-guest "$family::"
           done
 
   checks-passed:
