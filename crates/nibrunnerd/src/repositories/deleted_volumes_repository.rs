@@ -5,7 +5,6 @@ use protocol::{ReportedVolume, VolumeId};
 use sqlx::SqlitePool;
 
 use crate::domain::store::StoreError;
-use crate::repositories::app_identity::ensure_app;
 use crate::repositories::last_written::LastWritten;
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
@@ -65,9 +64,6 @@ impl DeletedVolumeRepository for SqliteDeletedVolumes {
         let delta = self.last_written.towards(wanted, self.stored()).await?;
         if !delta.is_empty() {
             let mut tx = self.pool.begin().await.map_err(StoreError::write)?;
-            for report in deleted.values() {
-                ensure_app(&mut tx, report.app_id.as_str()).await?;
-            }
             for (volume_id, report) in delta.changed() {
                 sqlx::query!(
                     "insert into deleted_volumes (volume_id, report) values (?, ?)
