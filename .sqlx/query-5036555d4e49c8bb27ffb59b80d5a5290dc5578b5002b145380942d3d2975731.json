@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into cron_job_environment (app_id, job_index, name, value)\n                             values (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "5036555d4e49c8bb27ffb59b80d5a5290dc5578b5002b145380942d3d2975731"
+}
