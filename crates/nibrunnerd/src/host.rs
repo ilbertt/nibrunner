@@ -21,6 +21,7 @@ use crate::ports::{ArtifactStore, CommandRunner, PayloadBuilder, Vmm};
 use crate::state::SharedState;
 
 pub struct Host {
+    pub cron: Arc<crate::domain::cron::registry::CronRegistry>,
     pub config: HostConfig,
     pub guest_memory_mib: u64,
     pub guest_image_version: String,

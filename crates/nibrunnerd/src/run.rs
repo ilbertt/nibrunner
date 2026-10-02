@@ -91,6 +91,15 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     let payloads = LayerImages::new(artifacts.clone(), config.artifact_cache_dir());
     let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let network = open_network()?;
+    let cron = Arc::new(crate::domain::cron::registry::CronRegistry::new(
+        repositories.cron.clone(),
+        config.cron.max_jobs_per_app,
+        config.cron.time_zone,
+    ));
+    cron.validate_restored(chrono::Utc::now())
+        .await
+        .map_err(|error| StartupError::Unusable(error.to_string()))?;
+    let cron_registration = crate::adapters::cron_registration::CronRegistrationReceiver::new(cron.clone());
     let logs = TenantLogReceiver::new();
     let files = Arc::new(FileLogSink::new(
         config.logs_dir(),
@@ -118,6 +127,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         network,
         volumes: volumes.clone(),
         logs,
+        cron_registration,
         sink,
         state: state.clone(),
         metrics: metrics.clone(),
@@ -176,6 +186,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     });
 
     let host = Arc::new(Host {
+        cron,
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
         guest_image_version,
         state,

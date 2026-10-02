@@ -33,7 +33,7 @@ impl ConvergeController {
         let Some(accepted) = self.host.accepted_document().await else {
             return false;
         };
-        let Some(changes) = self.accept(&accepted.desired).await else {
+        let Ok(Some(changes)) = self.accept(&accepted.desired).await else {
             return false;
         };
         converge::detected(&self.host, &changes, Cause::Restart, crate::clock::now_ms()).await;
@@ -51,12 +51,16 @@ impl ConvergeController {
                 self.host.remember_accepted_document(&document).await;
                 let desired = document.desired;
                 let trigger = match self.accept(&desired).await {
-                    Some(changes) => {
+                    Ok(Some(changes)) => {
                         converge::detected(&self.host, &changes, Cause::Change, crate::clock::now_ms()).await;
                         Trigger::Change
                     }
-                    None if !self.host.state.snapshot().await.deferred_work => return false,
-                    None => Trigger::Deferred,
+                    Ok(None) if !self.host.state.snapshot().await.deferred_work => return false,
+                    Ok(None) => Trigger::Deferred,
+                    Err(error) => {
+                        tracing::warn!(%error, "cron registrations could not follow the desired deployments");
+                        return false;
+                    }
                 };
                 self.reconcile(&desired, trigger).await;
                 true
@@ -116,10 +120,19 @@ impl ConvergeController {
     }
 
     /// What moved, when the document did; nothing when it stood still.
-    async fn accept(&self, desired: &HostDesiredState) -> Option<Changes> {
+    async fn accept(
+        &self,
+        desired: &HostDesiredState,
+    ) -> Result<Option<Changes>, crate::domain::cron::registry::CronRegistryError> {
         let mut cache = self.host.cache.lock().await;
+        let deployments = desired
+            .instances
+            .iter()
+            .map(|instance| (instance.app_id.clone(), instance.deployment_id.clone()))
+            .collect::<Vec<_>>();
+        self.host.cron.synchronize(&deployments).await?;
         let changes = cache.changes_in(desired);
-        cache.accept(desired.clone()).then_some(changes)
+        Ok(cache.accept(desired.clone()).then_some(changes))
     }
 }
 
@@ -158,6 +171,60 @@ mod tests {
 
     fn controller(host: &TestHost, reconciler: MockReconcileService) -> Arc<ConvergeController> {
         ConvergeController::new(host.arc().clone(), Arc::new(reconciler))
+    }
+
+    #[tokio::test]
+    async fn accepting_a_deployment_discards_old_crontabs_before_reconciling_it() {
+        let host = test_host().await;
+        host.cron
+            .synchronize(&[(app_id(), deployment_id())])
+            .await
+            .unwrap();
+        host.cron
+            .replace(&app_id(), &deployment_id(), "@daily echo old", chrono::Utc::now())
+            .await
+            .unwrap();
+        let newer = protocol::DeploymentId::parse("dep-2").unwrap();
+        let desired = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.deployment_id = newer.clone()
+            })]
+        });
+        write_desired_state(&host.config.desired_state_file, &desired);
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().times(1).returning(|_, _| ());
+        assert!(controller(&host, reconciler).converge_once().await);
+        let tables = host.cron.tables().await.unwrap();
+        assert_eq!(tables[0].deployment_id, newer);
+        assert!(tables[0].jobs.is_empty());
+        assert!(host.cron.list(&app_id(), &deployment_id()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_cron_registry_failure_does_not_reconcile_an_unaccepted_document_even_with_deferred_work() {
+        let mut host = test_host().await;
+        let previous = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
+        host.cache.lock().await.accept(previous.clone());
+        host.state.modify(|state| state.deferred_work = true).await;
+        let desired = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.deployment_id = protocol::DeploymentId::parse("dep-2").unwrap()
+            })]
+        });
+        write_desired_state(&host.config.desired_state_file, &desired);
+        let mut repository = crate::repositories::cron_repository::MockCronRepository::new();
+        repository.expect_all().returning(|| {
+            Err(crate::domain::store::StoreError::Unreadable(
+                "disk failure".to_owned(),
+            ))
+        });
+        Arc::get_mut(&mut host.host).unwrap().cron = Arc::new(
+            crate::domain::cron::registry::CronRegistry::new(Arc::new(repository), 10, chrono_tz::UTC),
+        );
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().times(0);
+        assert!(!controller(&host, reconciler).converge_once().await);
+        assert_eq!(host.cache.lock().await.latest(), Some(&previous));
     }
 
     #[tokio::test]

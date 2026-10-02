@@ -190,6 +190,15 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
 /// timer runs one whether or not anything moved: that is how a volume whose device died under a
 /// standing document gets noticed.
 pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Trigger) {
+    let deployments = desired
+        .instances
+        .iter()
+        .map(|instance| (instance.app_id.clone(), instance.deployment_id.clone()))
+        .collect::<Vec<_>>();
+    if let Err(error) = host.cron.synchronize(&deployments).await {
+        tracing::warn!(%error, "cron registrations could not follow the desired deployments");
+        return;
+    }
     let observed = observe(host, desired).await;
     let plan = plan_reconcile(desired, &observed);
     host.state
@@ -234,6 +243,57 @@ mod tests {
     use crate::adapters::vm::{VmExit, VmStatus};
     use crate::ports::{VmCall, VmError};
     use crate::test_support::*;
+
+    #[tokio::test]
+    async fn reconciliation_clears_registrations_for_apps_the_document_no_longer_names() {
+        let host = test_host().await;
+        host.cron
+            .synchronize(&[(app_id(), deployment_id())])
+            .await
+            .unwrap();
+        host.cron
+            .replace(
+                &app_id(),
+                &deployment_id(),
+                "@daily echo removed",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        let desired = desired_state(|_| {});
+        reconcile(host.arc(), &desired, Trigger::Change).await;
+        assert!(host.cron.tables().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_preserves_a_stopped_apps_table_until_its_deployment_changes() {
+        let host = test_host().await;
+        host.cron
+            .synchronize(&[(app_id(), deployment_id())])
+            .await
+            .unwrap();
+        host.cron
+            .replace(
+                &app_id(),
+                &deployment_id(),
+                "@daily echo retained",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        let mut desired = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.desired_state = DesiredInstanceState::Stopped
+            })]
+        });
+        reconcile(host.arc(), &desired, Trigger::Change).await;
+        assert_eq!(host.cron.tables().await.unwrap()[0].jobs.iter().count(), 1);
+        desired.instances[0].deployment_id = protocol::DeploymentId::parse("dep-2").unwrap();
+        reconcile(host.arc(), &desired, Trigger::Change).await;
+        let tables = host.cron.tables().await.unwrap();
+        assert_eq!(tables[0].deployment_id, desired.instances[0].deployment_id);
+        assert!(tables[0].jobs.is_empty());
+    }
 
     fn running_vm() -> VmStatus {
         VmStatus {

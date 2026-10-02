@@ -476,7 +476,13 @@ async fn test_host_over(
     let (vms, vm_spy) = mocks::vmm();
     let (exports, export_spy) = mocks::exports_accepting();
     let artifacts: Arc<dyn crate::ports::ArtifactStore> = artifacts;
+    let cron = Arc::new(crate::domain::cron::registry::CronRegistry::new(
+        repositories.cron.clone(),
+        config.cron.max_jobs_per_app,
+        config.cron.time_zone,
+    ));
     let host = Arc::new(Host {
+        cron,
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         guest_image_version: "6.1.180-test".to_string(),
         state: state.clone(),

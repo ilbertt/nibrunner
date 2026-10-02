@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use protocol::AppId;
 
+use crate::adapters::cron_registration::cron_registration_socket_path;
 use crate::adapters::logs::receiver::{tenant_log_socket_path, TenantLogReceiver};
 use crate::adapters::net::tap::{HostNetwork, Neighbour, TapInterface};
 use crate::adapters::vm::firecracker_api::FirecrackerApi;
@@ -38,6 +39,7 @@ pub struct VmManager {
     pub network: Arc<dyn HostNetwork>,
     pub volumes: Arc<dyn VolumeBackend>,
     pub logs: Arc<TenantLogReceiver>,
+    pub cron_registration: Arc<crate::adapters::cron_registration::CronRegistrationReceiver>,
     pub sink: Arc<dyn LogSink>,
     pub state: SharedState,
     pub metrics: Arc<crate::domain::metrics::HostMetrics>,
@@ -151,6 +153,18 @@ impl VmManager {
             )
             .await
             .map_err(|error| VmError::Host(error.to_string()))?;
+        if let Err(error) = self
+            .cron_registration
+            .attach(
+                request.desired.app_id.clone(),
+                request.desired.deployment_id.clone(),
+                cron_registration_socket_path(&working_dir),
+            )
+            .await
+        {
+            self.logs.detach(&request.desired.app_id).await;
+            return Err(VmError::Host(error.to_string()));
+        }
         Ok(config_file)
     }
 
@@ -199,6 +213,7 @@ impl Vmm for VmManager {
             .spawn(&app_id, &self.firecracker, &working_dir, Some(&config_file))
             .await;
         if let Err(error) = started {
+            self.cron_registration.detach(&app_id).await;
             let _ = self.logs.detach(&app_id).await;
             return Err(VmError::Host(error.to_string()));
         }
@@ -315,6 +330,7 @@ impl Vmm for VmManager {
         self.discard_snapshot(app_id);
         self.processes.forget(app_id);
         self.logs.detach(app_id).await;
+        self.cron_registration.detach(app_id).await;
         let _ = std::fs::remove_dir_all(self.working_dir_for(app_id));
         Ok(())
     }
@@ -352,12 +368,25 @@ impl Vmm for VmManager {
         self.logs
             .attach(
                 app_id.clone(),
-                record.deployment_id,
+                record.deployment_id.clone(),
                 tenant_log_socket_path(&working_dir),
                 self.sink.clone(),
             )
             .await
-            .map_err(|error| VmError::Host(error.to_string()))
+            .map_err(|error| VmError::Host(error.to_string()))?;
+        if let Err(error) = self
+            .cron_registration
+            .attach(
+                app_id.clone(),
+                record.deployment_id,
+                cron_registration_socket_path(&working_dir),
+            )
+            .await
+        {
+            self.logs.detach(app_id).await;
+            return Err(VmError::Host(error.to_string()));
+        }
+        Ok(())
     }
 
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String> {
@@ -477,6 +506,13 @@ mod tests {
                 ),
             )),
             logs: TenantLogReceiver::new(),
+            cron_registration: crate::adapters::cron_registration::CronRegistrationReceiver::new(Arc::new(
+                crate::domain::cron::registry::CronRegistry::new(
+                    Arc::new(crate::repositories::cron_repository::MockCronRepository::new()),
+                    10,
+                    chrono_tz::UTC,
+                ),
+            )),
             sink: Arc::new(FileLogSink::new(
                 root.join("logs"),
                 crate::config::LogsConfig::default().keep_bytes_per_app,
@@ -644,6 +680,7 @@ mod tests {
         fixture.manager.discard(&app_id()).await.unwrap();
         assert!(!fixture.manager.working_dir_for(&app_id()).exists());
         assert!(fixture.manager.logs.attached().await.is_empty());
+        assert!(fixture.manager.cron_registration.attached().await.is_empty());
         assert_eq!(
             fixture.manager.statuses(&[app_id()]).await[&app_id()],
             VmStatus::default()
@@ -696,6 +733,7 @@ mod tests {
         assert!(error.message().contains("operation not permitted"), "{error}");
         assert!(fixture.manager.processes.read_record(&app_id()).is_none());
         assert!(fixture.manager.logs.attached().await.is_empty());
+        assert!(fixture.manager.cron_registration.attached().await.is_empty());
     }
 
     #[tokio::test]
@@ -711,6 +749,7 @@ mod tests {
             fixture.manager.logs.attached().await.is_empty(),
             "a socket nothing will write to is not left listening"
         );
+        assert!(fixture.manager.cron_registration.attached().await.is_empty());
     }
 
     #[tokio::test]
@@ -723,6 +762,11 @@ mod tests {
         fixture.manager.readopt(&app_id()).await.unwrap();
 
         assert_eq!(fixture.manager.logs.attached().await, vec![app_id()]);
+        assert_eq!(fixture.manager.cron_registration.attached().await, vec![app_id()]);
+        let cron_socket = crate::adapters::cron_registration::cron_registration_socket_path(
+            &fixture.manager.working_dir_for(&app_id()),
+        );
+        assert!(tokio::net::UnixStream::connect(&cron_socket).await.is_ok());
         let socket = crate::adapters::logs::receiver::tenant_log_socket_path(
             &fixture.manager.working_dir_for(&app_id()),
         );
@@ -737,6 +781,59 @@ mod tests {
         let fixture = fixture();
         fixture.manager.readopt(&app_id()).await.unwrap();
         assert!(fixture.manager.logs.attached().await.is_empty());
+        assert!(fixture.manager.cron_registration.attached().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn staging_binds_the_crontab_socket_before_the_guest_is_started() {
+        let fixture = fixture();
+        fixture
+            .manager
+            .stage(&boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap();
+        let socket = crate::adapters::cron_registration::cron_registration_socket_path(
+            &fixture.manager.working_dir_for(&app_id()),
+        );
+        assert!(tokio::net::UnixStream::connect(&socket).await.is_ok());
+        assert_eq!(fixture.manager.cron_registration.attached().await, vec![app_id()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(socket).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_crontab_socket_failure_leaves_no_partial_log_attachment() {
+        let fixture = fixture();
+        let socket = crate::adapters::cron_registration::cron_registration_socket_path(
+            &fixture.manager.working_dir_for(&app_id()),
+        );
+        std::fs::create_dir_all(&socket).unwrap();
+        assert!(fixture
+            .manager
+            .stage(&boot_request(desired_instance(|_| {})))
+            .await
+            .is_err());
+        assert!(fixture.manager.logs.attached().await.is_empty());
+        assert!(fixture.manager.cron_registration.attached().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn readoption_cleans_up_the_log_attachment_when_the_crontab_socket_cannot_bind() {
+        let fixture = fixture();
+        fixture.state.put_record(instance_record(|_| {})).await;
+        let socket = crate::adapters::cron_registration::cron_registration_socket_path(
+            &fixture.manager.working_dir_for(&app_id()),
+        );
+        std::fs::create_dir_all(&socket).unwrap();
+        assert!(fixture.manager.readopt(&app_id()).await.is_err());
+        assert!(fixture.manager.logs.attached().await.is_empty());
+        assert!(fixture.manager.cron_registration.attached().await.is_empty());
     }
 
     #[tokio::test]
