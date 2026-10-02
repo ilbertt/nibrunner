@@ -278,6 +278,9 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bo
     // Another sleep or wake may finish while this pass waits, invalidating the decision that
     // selected the app for the batch. Eligibility and the snapshot therefore share the lock.
     let _transition = host.state.transition(app_id).await;
+    if host.state.cron_running(app_id) {
+        return false;
+    }
     let now = crate::clock::now_ms();
     let snapshot = host.state.snapshot().await;
     if !waited_out(&snapshot, app_id, now) {
@@ -372,6 +375,9 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) -> usize {
         .records
         .values()
         .filter_map(|record| {
+            if host.state.cron_running(&record.app_id) {
+                return None;
+            }
             let policy = policies.get(&record.app_id)?;
             let open = requests_open.get(&record.app_id).copied().unwrap_or(0);
             let signals = signals(&snapshot, record, open);
@@ -774,6 +780,33 @@ mod sleep_tests {
                 timeout_ms: protocol::DEFAULT_IDLE_TIMEOUT,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn a_sleep_waiting_for_the_transition_leaves_an_app_with_a_cron_running_up() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+        let id = app_id();
+        let policy = default_idle_policy();
+        let transition = host.state.transition(&id).await;
+        let sleep = let_sleep(&host, &id, &policy);
+        tokio::pin!(sleep);
+        assert!(futures::poll!(sleep.as_mut()).is_pending());
+        let command = host.state.cron_activity(&id);
+        drop(transition);
+        assert!(!sleep.await);
+        assert!(host.vms.calls().is_empty());
+        drop(command);
+        assert!(let_sleep(&host, &id, &policy).await);
+    }
+
+    #[tokio::test]
+    async fn an_active_cron_is_left_out_of_the_idle_sleep_pass() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+        let _command = host.state.cron_activity(&app_id());
+        assert_eq!(apply_sleep(host.arc()).await, 0);
+        assert!(host.vms.calls().is_empty());
     }
 
     #[tokio::test]
