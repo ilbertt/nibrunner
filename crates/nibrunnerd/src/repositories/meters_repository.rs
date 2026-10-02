@@ -5,7 +5,6 @@ use protocol::{AppId, UsageMeters};
 use sqlx::SqlitePool;
 
 use crate::domain::store::StoreError;
-use crate::repositories::app_identity::ensure_app;
 use crate::repositories::last_written::LastWritten;
 
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
@@ -85,7 +84,6 @@ impl MeterRepository for SqliteMeters {
         if !delta.is_empty() {
             let mut tx = self.pool.begin().await.map_err(StoreError::write)?;
             for (app_id, meter) in delta.changed() {
-                ensure_app(&mut tx, app_id).await?;
                 let running_ms = as_stored(meter.running_ms);
                 let idle_ms = as_stored(meter.idle_ms);
                 let cpu_ms = as_stored(meter.cpu_ms);
