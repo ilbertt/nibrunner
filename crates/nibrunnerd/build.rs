@@ -5,22 +5,25 @@ const FIRECRACKER_VERSION: &str = "v1.16.1";
 const FIRECRACKER_URL: &str = "https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.1/firecracker-v1.16.1-x86_64.tgz";
 const FIRECRACKER_SHA256: &str = "382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6";
 const FIRECRACKER_MEMBER: &str = "release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64";
+const JAILER_MEMBER: &str = "release-v1.16.1-x86_64/jailer-v1.16.1-x86_64";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=NIBRUNNER_FIRECRACKER_BINARY");
+    println!("cargo:rerun-if-env-changed=NIBRUNNER_JAILER_BINARY");
     println!("cargo:rustc-env=NIBRUNNER_FIRECRACKER_VERSION={FIRECRACKER_VERSION}");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     let embedded = out_dir.join("firecracker");
+    let embedded_jailer = out_dir.join("jailer");
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let resolved = if target_arch == "x86_64" {
         // Loud here rather than quiet, because the daemon a VMM-less build produces starts, reads
         // its config, converges and serves — and only the first tenant to boot ever finds out. The
         // warnings above this say which of the three ways it failed.
-        Some(resolve(&out_dir).expect(
-            "firecracker could not be resolved, so this build would carry no VMM; point NIBRUNNER_FIRECRACKER_BINARY at one to build without fetching it"
+        Some(resolve().expect(
+            "firecracker and its matching jailer could not be resolved; set both NIBRUNNER_FIRECRACKER_BINARY and NIBRUNNER_JAILER_BINARY to build without fetching them"
         ))
     } else {
         println!(
@@ -30,29 +33,57 @@ fn main() {
     };
 
     match resolved {
-        Some(binary) => {
-            std::fs::write(&embedded, binary).expect("the build directory is writable");
+        Some(binaries) => {
+            std::fs::write(&embedded, binaries.firecracker).expect("the build directory is writable");
+            std::fs::write(&embedded_jailer, binaries.jailer).expect("the build directory is writable");
             println!("cargo:rustc-env=NIBRUNNER_FIRECRACKER_EMBEDDED=1");
         }
         // `include_bytes!` wants a file whichever way this went, and an empty one is why it could
         // never be what catches a build that fetched nothing.
-        None => std::fs::write(&embedded, []).expect("the build directory is writable"),
+        None => {
+            std::fs::write(&embedded, []).expect("the build directory is writable");
+            std::fs::write(&embedded_jailer, []).expect("the build directory is writable");
+        }
     }
     println!(
         "cargo:rustc-env=NIBRUNNER_FIRECRACKER_PATH={}",
         embedded.display()
     );
+    println!(
+        "cargo:rustc-env=NIBRUNNER_JAILER_PATH={}",
+        embedded_jailer.display()
+    );
 }
 
-fn resolve(out_dir: &Path) -> Option<Vec<u8>> {
-    if let Ok(path) = std::env::var("NIBRUNNER_FIRECRACKER_BINARY") {
-        return std::fs::read(path).ok();
+struct Binaries {
+    firecracker: Vec<u8>,
+    jailer: Vec<u8>,
+}
+
+fn resolve() -> Option<Binaries> {
+    match (
+        std::env::var("NIBRUNNER_FIRECRACKER_BINARY"),
+        std::env::var("NIBRUNNER_JAILER_BINARY"),
+    ) {
+        (Ok(firecracker), Ok(jailer)) => {
+            println!("cargo:rerun-if-changed={firecracker}");
+            println!("cargo:rerun-if-changed={jailer}");
+            return Some(Binaries {
+                firecracker: std::fs::read(firecracker).ok()?,
+                jailer: std::fs::read(jailer).ok()?,
+            });
+        }
+        (Err(_), Err(_)) => {}
+        _ => {
+            println!("cargo:warning=offline builds must set both NIBRUNNER_FIRECRACKER_BINARY and NIBRUNNER_JAILER_BINARY to matching binaries");
+            return None;
+        }
     }
     let cached = cache_path();
     if let Some(cached) = &cached {
         if let Ok(bytes) = std::fs::read(cached) {
             if digest_of(&bytes) == FIRECRACKER_SHA256 {
-                return extract(&bytes, out_dir);
+                return extract(&bytes);
             }
         }
     }
@@ -65,7 +96,7 @@ fn resolve(out_dir: &Path) -> Option<Vec<u8>> {
         let _ = std::fs::create_dir_all(cached.parent()?);
         let _ = std::fs::write(cached, &bytes);
     }
-    extract(&bytes, out_dir)
+    extract(&bytes)
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -94,16 +125,32 @@ fn digest_of(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
-fn extract(tarball: &[u8], _out_dir: &Path) -> Option<Vec<u8>> {
+fn extract(tarball: &[u8]) -> Option<Binaries> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
+    let mut firecracker = None;
+    let mut jailer = None;
     for entry in archive.entries().ok()? {
         let mut entry = entry.ok()?;
-        if entry.path().ok()?.to_string_lossy() == FIRECRACKER_MEMBER {
-            let mut binary = Vec::new();
-            entry.read_to_end(&mut binary).ok()?;
-            return Some(binary);
-        }
+        let path = entry.path().ok()?.into_owned();
+        let binary = if path == Path::new(FIRECRACKER_MEMBER) {
+            &mut firecracker
+        } else if path == Path::new(JAILER_MEMBER) {
+            &mut jailer
+        } else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).ok()?;
+        *binary = Some(bytes);
     }
-    println!("cargo:warning=the firecracker tarball does not hold {FIRECRACKER_MEMBER}");
-    None
+    Some(Binaries {
+        firecracker: firecracker.or_else(|| {
+            println!("cargo:warning=the firecracker tarball does not hold {FIRECRACKER_MEMBER}");
+            None
+        })?,
+        jailer: jailer.or_else(|| {
+            println!("cargo:warning=the firecracker tarball does not hold {JAILER_MEMBER}");
+            None
+        })?,
+    })
 }

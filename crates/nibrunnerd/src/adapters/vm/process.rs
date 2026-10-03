@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::adapters::vm::status::{VmExit, VmStatus};
 use crate::json_store::{make_directory, read_json, write_json};
 
+const JAILER: &[u8] = include_bytes!(env!("NIBRUNNER_JAILER_PATH"));
 const FIRECRACKER: &[u8] = include_bytes!(env!("NIBRUNNER_FIRECRACKER_PATH"));
 pub const FIRECRACKER_VERSION: &str = env!("NIBRUNNER_FIRECRACKER_VERSION");
 
@@ -18,20 +19,28 @@ pub fn carries_firecracker() -> bool {
 }
 
 pub fn extract_firecracker(directory: &Path) -> std::io::Result<PathBuf> {
+    extract_binary(directory, "firecracker", FIRECRACKER)
+}
+
+pub fn extract_jailer(directory: &Path) -> std::io::Result<PathBuf> {
+    extract_binary(directory, "jailer", JAILER)
+}
+
+fn extract_binary(directory: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     let versioned = directory.join(FIRECRACKER_VERSION);
-    let binary = versioned.join("firecracker");
+    let binary = versioned.join(name);
     if !carries_firecracker() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "this build carries no hypervisor, so it can boot nothing",
         ));
     }
-    if std::fs::metadata(&binary).is_ok_and(|info| info.len() == FIRECRACKER.len() as u64) {
+    if std::fs::metadata(&binary).is_ok_and(|info| info.len() == bytes.len() as u64) {
         return Ok(binary);
     }
     make_directory(&versioned, RUNTIME_DIR_MODE)?;
-    let staged = versioned.join(format!("firecracker.{}.tmp", std::process::id()));
-    std::fs::write(&staged, FIRECRACKER)?;
+    let staged = versioned.join(format!("{name}.{}.tmp", std::process::id()));
+    std::fs::write(&staged, bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -648,5 +657,29 @@ mod embedding {
         let before = std::fs::metadata(&binary).unwrap().modified().unwrap();
         assert_eq!(extract_firecracker(directory.path()).unwrap(), binary);
         assert_eq!(std::fs::metadata(&binary).unwrap().modified().unwrap(), before);
+    }
+    #[test]
+    fn the_jailer_is_extracted_beside_the_matching_firecracker_release() {
+        let directory = tempfile::tempdir().unwrap();
+        if !carries_firecracker() {
+            assert!(extract_jailer(directory.path()).is_err());
+            return;
+        }
+        let firecracker = extract_firecracker(directory.path()).unwrap();
+        let jailer = extract_jailer(directory.path()).unwrap();
+        assert_eq!(jailer.parent(), firecracker.parent());
+        assert_eq!(jailer.file_name().unwrap(), "jailer");
+        assert_eq!(std::fs::read(&jailer).unwrap(), JAILER);
+        std::fs::write(&jailer, b"truncated").unwrap();
+        extract_jailer(directory.path()).unwrap();
+        assert_eq!(std::fs::read(&jailer).unwrap(), JAILER);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&jailer).unwrap().permissions().mode() & 0o777,
+                EXECUTABLE_MODE
+            );
+        }
     }
 }

@@ -128,8 +128,8 @@ migrations contain DDL only: no inserts, updates, deletes, backfills, or table-c
 `just build` is the workspace for the machine you are on. `just build-release` is what a host runs:
 one static x86_64 Linux binary, linked against musl — an x86_64 Linux box needs `musl-tools`,
 anything else crosses through `zig` and `cargo-zigbuild`. The daemon's `build.rs` fetches the
-Firecracker release it pins and embeds it; `NIBRUNNER_FIRECRACKER_BINARY` points it at one to build
-without fetching. `just guest-image` builds `guest/rootfs.ext4` and needs Linux, root, docker and
+Firecracker release it pins and embeds Firecracker and its matching jailer; set both `NIBRUNNER_FIRECRACKER_BINARY` and
+`NIBRUNNER_JAILER_BINARY` to matching release binaries to build without fetching. `just guest-image` builds `guest/rootfs.ext4` and needs Linux, root, docker and
 e2fsprogs.
 
 ## Releases
