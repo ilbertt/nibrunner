@@ -12,6 +12,26 @@ pub const SNAPSHOT_MEMORY_FILENAME: &str = "memory";
 
 pub const SNAPSHOT_STAMP_FILENAME: &str = "stamp.json";
 
+pub(crate) const EXCHANGE_BOOT_ID_FILENAME: &str = "host-boot-id";
+
+pub(crate) fn exchange(snapshot_dir: &Path, app_id: &AppId) -> PathBuf {
+    snapshot_dir.join(".jailer").join(app_id.as_str())
+}
+
+pub(crate) fn publish_snapshot_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::rename(source, destination)?;
+    if !std::fs::symlink_metadata(destination)?.is_file() {
+        let _ = std::fs::remove_file(destination);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the VMM did not produce a regular snapshot file",
+        ));
+    }
+    std::os::unix::fs::chown(destination, Some(0), Some(0))?;
+    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o400))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotStamp {
@@ -216,6 +236,14 @@ pub fn reap_stale_snapshots(snapshot_dir: &Path, host_boot_id: &str) -> Reaped {
             continue;
         }
         let directory = entry.path();
+        if entry.file_name() == ".jailer"
+            && crate::json_store::read_text(&directory.join(EXCHANGE_BOOT_ID_FILENAME))
+                .ok()
+                .flatten()
+                .is_some_and(|stored| stored == host_boot_id)
+        {
+            continue;
+        }
         let stamp: Option<SnapshotStamp> = read_json(&directory.join(SNAPSHOT_STAMP_FILENAME)).ok().flatten();
         if stamp.is_some_and(|stamp| stamp.host_boot_id == host_boot_id) {
             continue;
@@ -702,5 +730,41 @@ mod tests {
         std::fs::write(nested.join("memory"), vec![b'x'; 100]).unwrap();
         std::fs::write(directory.path().join("stamp.json"), vec![b'x'; 10]).unwrap();
         assert_eq!(read_snapshot_bytes(directory.path()), 110);
+    }
+    #[test]
+    fn a_snapshot_output_symlink_is_rejected_without_changing_the_file_it_points_at() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let protected = directory.path().join("host-file");
+        std::fs::write(&protected, b"host state").unwrap();
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let before = std::fs::metadata(&protected).unwrap();
+        let output = directory.path().join("output");
+        let destination = directory.path().join("snapshot");
+        std::os::unix::fs::symlink(&protected, &output).unwrap();
+        assert!(publish_snapshot_file(&output, &destination).is_err());
+        let after = std::fs::metadata(&protected).unwrap();
+        assert_eq!(
+            (after.uid(), after.gid(), after.mode()),
+            (before.uid(), before.gid(), before.mode())
+        );
+        assert_eq!(std::fs::read(&protected).unwrap(), b"host state");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn live_jail_exchanges_survive_readoption_and_old_boot_exchanges_are_reclaimed() {
+        let directory = tempfile::tempdir().unwrap();
+        let exchange = directory.path().join(".jailer");
+        std::fs::create_dir_all(exchange.join("app-1")).unwrap();
+        std::fs::write(exchange.join("app-1/memory"), b"unpublished memory").unwrap();
+        std::fs::write(exchange.join(EXCHANGE_BOOT_ID_FILENAME), "boot-1").unwrap();
+        assert_eq!(
+            reap_stale_snapshots(directory.path(), "boot-1"),
+            Reaped::default()
+        );
+        assert!(exchange.join("app-1/memory").exists());
+        assert!(reap_stale_snapshots(directory.path(), "boot-2").bytes > 0);
+        assert!(!exchange.exists());
     }
 }
