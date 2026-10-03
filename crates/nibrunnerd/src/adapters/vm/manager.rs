@@ -11,7 +11,7 @@ use crate::adapters::vm::firecracker_api::FirecrackerApi;
 use crate::adapters::vm::process::VmProcesses;
 use crate::adapters::vm::snapshot::{
     ensure_loadable, measure_snapshot_disk, refusal_to_sleep, snapshot_bytes_for, snapshot_paths, Reserved,
-    SleepSubject, SnapshotStamp, SnapshotsInFlight,
+    SleepSubject, SnapshotStamp, SnapshotsInFlight, StagedSnapshot,
 };
 use crate::adapters::vm::status::VmStatus;
 use crate::adapters::volumes::VolumeBackend;
@@ -370,7 +370,7 @@ impl Vmm for VmManager {
         let api = self.api(&request.app_id);
 
         self.discard_snapshot(&request.app_id);
-        make_directory(&paths.directory, VM_DIR_MODE).map_err(|error| VmError::Host(error.to_string()))?;
+        let staged = StagedSnapshot::create(&self.snapshot_dir)?;
         if let Err(error) = self.volumes.flush().await {
             tracing::warn!(app_id = %request.app_id, error = %error.message(), "the volume backend would not flush");
         }
@@ -378,18 +378,32 @@ impl Vmm for VmManager {
         let paused = std::time::Instant::now();
         api.pause().await?;
         if let Err(error) = self
-            .create_snapshot(&request.app_id, &paths.state_path, &paths.memory_path)
+            .create_snapshot(
+                &request.app_id,
+                &staged.paths.state_path,
+                &staged.paths.memory_path,
+            )
             .await
         {
             let _ = api.resume().await;
             return Err(error);
         }
+        // Keep the paused guest until its snapshot is committed: a failed hash, sync or rename
+        // can then resume it without losing memory, at the cost of one extra read while paused.
+        let published = tokio::task::spawn_blocking(move || staged.publish(&paths, stamp))
+            .await
+            .map_err(|error| VmError::Host(error.to_string()))
+            .and_then(std::convert::identity);
+        let memory_bytes = match published {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.discard_snapshot(&request.app_id);
+                let _ = api.resume().await;
+                return Err(error);
+            }
+        };
         self.processes.stop(&request.app_id).await;
 
-        write_json(&paths.stamp_path, &stamp).map_err(|error| VmError::Host(error.message()))?;
-        let memory_bytes = std::fs::metadata(&paths.memory_path)
-            .map(|info| info.len())
-            .unwrap_or(0);
         self.metrics.sleep_wake.snapshotted(paused.elapsed());
         tracing::info!(
             app_id = %request.app_id,
@@ -404,7 +418,13 @@ impl Vmm for VmManager {
     async fn wake(&self, request: SuspendRequest) -> Result<(), VmError> {
         let paths = snapshot_paths(&self.snapshot_dir, &request.app_id);
         let expected = self.current_stamp(&request);
-        if let Err(error) = ensure_loadable(&paths.stamp_path, &expected) {
+        let restoring = std::time::Instant::now();
+        let checked_paths = paths.clone();
+        let verified = tokio::task::spawn_blocking(move || ensure_loadable(&checked_paths, &expected))
+            .await
+            .map_err(|error| VmError::Host(error.to_string()))
+            .and_then(std::convert::identity);
+        if let Err(error) = verified {
             self.discard_snapshot(&request.app_id);
             return Err(error);
         }
@@ -421,7 +441,6 @@ impl Vmm for VmManager {
         }
 
         let _ = std::fs::remove_file(&paths.stamp_path);
-        let restoring = std::time::Instant::now();
         let jail = self.prepare_jail(&request.app_id).await?;
         self.readopt(&request.app_id).await?;
         jail.grant_socket(&tenant_log_socket_path(&jail.root))
@@ -866,6 +885,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_snapshot_publication_resumes_the_paused_guest() {
+        use http_body_util::{BodyExt, Full};
+        use hyper_util::rt::TokioIo;
+
+        let fixture = fixture();
+        fixture
+            .state
+            .put_record(instance_record(|record| record.health.ever_healthy = true))
+            .await;
+        let socket = fixture.manager.processes.api_socket(&app_id());
+        make_directory(socket.parent().unwrap(), 0o700).unwrap();
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = seen.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let calls = calls.clone();
+                tokio::spawn(async move {
+                    let service =
+                        hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                            let calls = calls.clone();
+                            async move {
+                                let path = request.uri().path().to_string();
+                                let body = request.into_body().collect().await.unwrap().to_bytes();
+                                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                                if path == "/snapshot/create" {
+                                    std::fs::write(body["snapshot_path"].as_str().unwrap(), b"state")
+                                        .unwrap();
+                                    std::fs::write(body["mem_file_path"].as_str().unwrap(), b"").unwrap();
+                                }
+                                calls.lock().unwrap().push((path, body));
+                                Ok::<_, std::convert::Infallible>(
+                                    hyper::Response::builder()
+                                        .status(hyper::StatusCode::NO_CONTENT)
+                                        .body(Full::new(bytes::Bytes::new()))
+                                        .unwrap(),
+                                )
+                            }
+                        });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+
+        let error = fixture
+            .manager
+            .sleep(SuspendRequest {
+                app_id: app_id(),
+                deployment_id: deployment_id(),
+                slot: nft_render::describe_slot(0, app_id()),
+            })
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(matches!(error, VmError::Host(_)), "{error}");
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls[0].1["state"], "Paused");
+        assert_eq!(calls[1].0, "/snapshot/create");
+        assert_eq!(calls[2].1["state"], "Resumed");
+        assert!(!snapshot_paths(&fixture.manager.snapshot_dir, &app_id())
+            .directory
+            .exists());
+        assert!(std::fs::read_dir(&fixture.manager.snapshot_dir)
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pending-")));
+        let exchange = super::super::snapshot::exchange(&fixture.manager.snapshot_dir, &app_id());
+        assert!(!exchange.join("state").exists());
+        assert!(!exchange.join("memory").exists());
+        assert_eq!(fixture.manager.in_flight.bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_corrupted_snapshot_is_discarded_before_a_hypervisor_is_started() {
+        let fixture = fixture();
+        let request = SuspendRequest {
+            app_id: app_id(),
+            deployment_id: deployment_id(),
+            slot: nft_render::describe_slot(0, app_id()),
+        };
+        let paths = snapshot_paths(&fixture.manager.snapshot_dir, &app_id());
+        let staged = StagedSnapshot::create(&fixture.manager.snapshot_dir).unwrap();
+        std::fs::write(&staged.paths.state_path, b"state").unwrap();
+        std::fs::write(&staged.paths.memory_path, b"memory").unwrap();
+        staged
+            .publish(&paths, fixture.manager.current_stamp(&request))
+            .unwrap();
+        std::fs::write(&paths.memory_path, b"broken").unwrap();
+
+        let error = fixture.manager.wake(request).await.unwrap_err();
+        assert!(matches!(error, VmError::SnapshotUnusable { .. }), "{error}");
+        assert!(error.message().contains("SHA-256"), "{error}");
+        assert!(fixture.manager.processes.read_record(&app_id()).is_none());
+        assert!(!paths.directory.exists());
+    }
+
+    #[tokio::test]
     async fn discarding_takes_the_working_directory_the_record_and_the_log_attachment() {
         let fixture = fixture();
         fixture
@@ -1271,7 +1393,12 @@ mod tests {
             slot: nft_render::describe_slot(0, app_id()),
         };
         let paths = snapshot_paths(&fixture.manager.snapshot_dir, &app_id());
-        write_json(&paths.stamp_path, &fixture.manager.current_stamp(&request)).unwrap();
+        let staged = StagedSnapshot::create(&fixture.manager.snapshot_dir).unwrap();
+        std::fs::write(&staged.paths.state_path, b"state").unwrap();
+        std::fs::write(&staged.paths.memory_path, b"memory").unwrap();
+        staged
+            .publish(&paths, fixture.manager.current_stamp(&request))
+            .unwrap();
         fixture
             .manager
             .processes
