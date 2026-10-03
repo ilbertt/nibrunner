@@ -1,0 +1,23 @@
+[package]
+name = "nibrunner-oci-image"
+description = "Verify and assemble an OCI image archive into a root filesystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "oci_image"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+flate2.workspace = true
+zstd.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

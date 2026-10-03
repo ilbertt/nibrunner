@@ -1665,6 +1665,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nibrunner-oci-image"
+version = "2026.10.0"
+dependencies = [
+ "flate2",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "thiserror",
+ "zstd",
+]
+
+[[package]]
 name = "nibrunner-protocol"
 version = "2026.10.0"
 dependencies = [

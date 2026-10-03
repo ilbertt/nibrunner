@@ -21,6 +21,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 
 - `crates/protocol` — the control-plane protocol: the desired and reported state documents.
   `schema/*.json` is generated from its types
+- `crates/oci-image` — validates OCI image archives and assembles their filesystem layers without
+  requiring Docker or a registry client
 - `crates/guest-contract` — what host and guest agree on: drive order, kernel args, vsock ports,
   the frame codecs
 - `crates/nft-render` — slot arithmetic, the nftables ruleset rendered whole, the parsers for what
