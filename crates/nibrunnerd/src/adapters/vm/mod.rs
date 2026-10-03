@@ -1,4 +1,5 @@
 pub mod firecracker_api;
+pub(crate) mod jailer_inputs;
 pub mod layers;
 pub mod manager;
 pub mod process;
