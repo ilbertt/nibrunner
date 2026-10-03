@@ -275,6 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconciliation_preserves_a_stopped_apps_table_until_its_deployment_changes() {
+        let _serial = ONE_HOST_AT_A_TIME.lock().await;
         let host = test_host().await;
         host.cron
             .synchronize(&[(app_id(), deployment_id())])

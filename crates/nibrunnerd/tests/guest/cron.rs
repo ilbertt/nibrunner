@@ -222,8 +222,10 @@ async fn disconnecting_one_overlapping_run_cancels_its_group_and_preserves_the_o
     let mut second = GuestRun::start(&host, &app, long_command).await;
     let second_pid = second.pid().await;
     assert_ne!(first_pid, second_pid);
+    let inspect = format!("kill -0 -{first_pid} && kill -0 -{second_pid}");
+    assert_eq!(command(&host, &app, &inspect, &Output::default()).await.code, 0);
     drop(first);
-    let inspect = format!("if kill -0 -- -{first_pid} 2>/dev/null; then printf first-alive; else printf first-gone; fi; if kill -0 -- -{second_pid} 2>/dev/null; then printf second-alive; else printf second-gone; fi");
+    let inspect = format!("if kill -0 -{first_pid} 2>/dev/null; then printf first-alive; else printf first-gone; fi; if kill -0 -{second_pid} 2>/dev/null; then printf second-alive; else printf second-gone; fi");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let output = Output::default();
@@ -235,7 +237,7 @@ async fn disconnecting_one_overlapping_run_cancels_its_group_and_preserves_the_o
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     drop(second);
-    let inspect = format!("if kill -0 -- -{second_pid} 2>/dev/null; then printf alive; else printf gone; fi");
+    let inspect = format!("if kill -0 -{second_pid} 2>/dev/null; then printf alive; else printf gone; fi");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let output = Output::default();
