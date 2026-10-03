@@ -108,11 +108,7 @@ async fn write_inner(
     staging_dir: &std::path::Path,
 ) -> Result<u64, String> {
     let crontab = registered_crontab(host, &desired.app_id).await?;
-    let vsock_path = host
-        .config
-        .vm_dir()
-        .join(desired.app_id.as_str())
-        .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
+    let vsock_path = crate::domain::filesystem::reader::guest_vsock_path(host, &desired.app_id);
     let lease = frozen(&desired.app_id, &vsock_path)
         .await
         .map_err(|error| error.message())?;

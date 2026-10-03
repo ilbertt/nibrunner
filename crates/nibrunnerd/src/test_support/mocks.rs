@@ -157,6 +157,10 @@ impl VmmSpy {
 pub const NOWHERE_VM_DIR: &str = "/nowhere/vm";
 
 pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
+    vmm_under(PathBuf::from(NOWHERE_VM_DIR))
+}
+
+pub(crate) fn vmm_under(directory: PathBuf) -> (Arc<MockVmm>, VmmSpy) {
     let spy = VmmSpy::default();
     let mut vms = MockVmm::new();
 
@@ -211,7 +215,7 @@ pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
     let verdict = spy.verdict.clone();
     vms.expect_guest_verdict().returning(move |_| held(&verdict));
     vms.expect_working_dir()
-        .returning(|app_id: &AppId| PathBuf::from(NOWHERE_VM_DIR).join(app_id.as_str()));
+        .returning(move |app_id: &AppId| directory.join(app_id.as_str()));
 
     (Arc::new(vms), spy)
 }
