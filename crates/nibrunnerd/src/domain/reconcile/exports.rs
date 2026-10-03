@@ -1,6 +1,6 @@
 use protocol::{
-    CheckpointId, DesiredExport, ExportId, ExportState, HostDesiredState, ReportedExport, StateMessage,
-    Timestamp,
+    AppId, CheckpointId, Crontab, DesiredExport, ExportId, ExportState, HostDesiredState, ReportedExport,
+    StateMessage, Timestamp,
 };
 
 use crate::domain::exports::bundle::{dump_volume, write_bundle};
@@ -107,6 +107,7 @@ async fn write_inner(
     checkpoint_id: &CheckpointId,
     staging_dir: &std::path::Path,
 ) -> Result<u64, String> {
+    let crontab = registered_crontab(host, &desired.app_id).await?;
     let vsock_path = host
         .config
         .vm_dir()
@@ -147,12 +148,24 @@ async fn write_inner(
     }
     read?;
 
-    let bundle = write_bundle(desired.environment.as_ref(), staging_dir).map_err(|error| error.message())?;
+    let bundle = write_bundle(desired.environment.as_ref(), crontab.as_ref(), staging_dir)
+        .map_err(|error| error.message())?;
     host.exports
         .upload(&bundle.path, &desired.object_key)
         .await
         .map_err(|error| error.message())?;
     Ok(bundle.size_bytes)
+}
+
+async fn registered_crontab(host: &Host, app_id: &AppId) -> Result<Option<Crontab>, String> {
+    Ok(host
+        .cron
+        .tables()
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|table| &table.app_id == app_id && !table.jobs.is_empty())
+        .and_then(|table| table.crontab))
 }
 
 async fn read_into_staging(
@@ -270,6 +283,101 @@ mod tests {
         let desired = desired_state(|state| state.exports = exports);
         host.cache.lock().await.accept(desired.clone());
         plan_reconcile(&desired, &observed_state(|_| {}))
+    }
+
+    #[tokio::test]
+    async fn the_exported_crontab_comes_from_the_apps_durable_registration() {
+        let mut host = test_host().await;
+        let second_app = AppId::parse("app-2").unwrap();
+        host.cron
+            .synchronize(&[(app_id(), deployment_id()), (second_app.clone(), deployment_id())])
+            .await
+            .unwrap();
+        let after = "2026-10-01T00:00:00Z".parse().unwrap();
+        let text = "# cleanup\r\nTOKEN=\"a secret\"\r\n@hourly echo \"$TOKEN\"  ";
+        host.cron
+            .replace(&app_id(), &deployment_id(), text, after)
+            .await
+            .unwrap();
+        host.cron
+            .replace(&second_app, &deployment_id(), "@daily echo another app", after)
+            .await
+            .unwrap();
+
+        let restored = crate::domain::cron::registry::CronRegistry::new(
+            host.repositories.cron.clone(),
+            host.config.cron.max_jobs_per_app,
+            host.config.cron.time_zone,
+        );
+        std::sync::Arc::get_mut(&mut host.host).unwrap().cron = std::sync::Arc::new(restored);
+        assert_eq!(
+            registered_crontab(host.arc(), &app_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .expose(),
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn an_app_with_no_registered_jobs_exports_no_crontab() {
+        let host = test_host().await;
+        assert!(registered_crontab(host.arc(), &app_id()).await.unwrap().is_none());
+
+        host.cron
+            .synchronize(&[(app_id(), deployment_id())])
+            .await
+            .unwrap();
+        assert!(registered_crontab(host.arc(), &app_id()).await.unwrap().is_none());
+
+        for text in ["", "# no jobs\n", "TOKEN=unused\n"] {
+            host.cron
+                .replace(
+                    &app_id(),
+                    &deployment_id(),
+                    text,
+                    "2026-10-01T00:00:00Z".parse().unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(registered_crontab(host.arc(), &app_id()).await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_cron_registry_fails_the_export_before_cutting_a_checkpoint() {
+        let mut host = test_host().await;
+        let mut repository = crate::repositories::cron_repository::MockCronRepository::new();
+        repository.expect_all().returning(|| {
+            Err(crate::domain::store::StoreError::Unreadable(
+                "registry unavailable".into(),
+            ))
+        });
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        volumes.expect_observe_checkpoints().returning(Vec::new);
+        volumes.expect_flush().never();
+        volumes.expect_create_checkpoint().never();
+        let held = std::sync::Arc::get_mut(&mut host.host).unwrap();
+        held.cron = std::sync::Arc::new(crate::domain::cron::registry::CronRegistry::new(
+            std::sync::Arc::new(repository),
+            held.config.cron.max_jobs_per_app,
+            held.config.cron.time_zone,
+        ));
+        held.volumes = std::sync::Arc::new(volumes);
+        let plan = asked_for(host.arc(), vec![wanted(DesiredPresence::Present)]).await;
+
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
+
+        let reported = &host.state.snapshot().await.export_reports[0];
+        assert_eq!(reported.state, ExportState::Failed);
+        assert!(reported
+            .message
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("registry unavailable"));
+        assert!(host.exports_written().is_empty());
     }
 
     #[test]

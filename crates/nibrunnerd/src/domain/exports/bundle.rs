@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use protocol::TenantEnvironment;
+use protocol::{Crontab, TenantEnvironment};
 
 use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
 const STAGING_MODE: u32 = 0o700;
 const DATA_DIRECTORY: &str = "data";
 const ENV_FILENAME: &str = ".env";
-const ENV_MODE: u32 = 0o600;
+const CRONTAB_FILENAME: &str = "crontab";
+const PRIVATE_FILE_MODE: u32 = 0o600;
 const BUNDLE_NAME: &str = "bundle.tar.gz";
 
 const DUMP_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -102,18 +103,31 @@ pub struct WrittenBundle {
 
 pub fn write_bundle(
     environment: Option<&TenantEnvironment>,
+    crontab: Option<&Crontab>,
     staging_dir: &Path,
 ) -> Result<WrittenBundle, BundleError> {
     if let Some(environment) = environment {
         write_file(
             &staging_dir.join(ENV_FILENAME),
             render_dotenv(environment).as_bytes(),
-            ENV_MODE,
+            PRIVATE_FILE_MODE,
+        )?;
+    }
+    if let Some(crontab) = crontab {
+        write_file(
+            &staging_dir.join(CRONTAB_FILENAME),
+            crontab.expose().as_bytes(),
+            PRIVATE_FILE_MODE,
         )?;
     }
 
     let bundle_path = staging_dir.join(BUNDLE_NAME);
-    archive(&bundle_path, staging_dir, environment.is_some())?;
+    archive(
+        &bundle_path,
+        staging_dir,
+        environment.is_some(),
+        crontab.is_some(),
+    )?;
     let size_bytes = std::fs::metadata(&bundle_path)
         .map_err(|error| BundleError::Unwritable(error.to_string()))?
         .len();
@@ -123,7 +137,12 @@ pub fn write_bundle(
     })
 }
 
-fn archive(bundle_path: &Path, staging_dir: &Path, with_environment: bool) -> Result<(), BundleError> {
+fn archive(
+    bundle_path: &Path,
+    staging_dir: &Path,
+    with_environment: bool,
+    with_crontab: bool,
+) -> Result<(), BundleError> {
     let unwritable = |error: std::io::Error| BundleError::Unwritable(error.to_string());
     let file = std::fs::File::create(bundle_path).map_err(unwritable)?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
@@ -134,6 +153,11 @@ fn archive(bundle_path: &Path, staging_dir: &Path, with_environment: bool) -> Re
     if with_environment {
         builder
             .append_path_with_name(staging_dir.join(ENV_FILENAME), ENV_FILENAME)
+            .map_err(unwritable)?;
+    }
+    if with_crontab {
+        builder
+            .append_path_with_name(staging_dir.join(CRONTAB_FILENAME), CRONTAB_FILENAME)
             .map_err(unwritable)?;
     }
     builder
@@ -216,7 +240,7 @@ mod tests {
         std::fs::write(staging.join(DATA_DIRECTORY).join("notes.txt"), b"tenant data").unwrap();
         let environment = tenant_environment(&[("TOKEN", "hunter2")]);
 
-        let written = write_bundle(Some(&environment), &staging).unwrap();
+        let written = write_bundle(Some(&environment), None, &staging).unwrap();
         assert!(written.size_bytes > 0);
         assert_eq!(names_in(&written.path), vec![".env", "data/", "data/notes.txt"]);
     }
@@ -226,12 +250,63 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
         std::fs::create_dir_all(staging.join(DATA_DIRECTORY)).unwrap();
-        let written = write_bundle(None, &staging).unwrap();
+        let written = write_bundle(None, None, &staging).unwrap();
         assert!(!names_in(&written.path).contains(&".env".to_string()));
 
         let empty = tenant_environment(&[]);
-        let with_file = write_bundle(Some(&empty), &staging).unwrap();
+        let with_file = write_bundle(Some(&empty), None, &staging).unwrap();
         assert!(names_in(&with_file.path).contains(&".env".to_string()));
+    }
+
+    #[test]
+    fn the_exported_crontab_preserves_its_original_bytes_and_restricts_access_to_its_secrets() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path();
+        std::fs::create_dir(staging.join(DATA_DIRECTORY)).unwrap();
+        let text = "# cleanup\r\nTOKEN=\"a secret\"\r\n@hourly echo \"$TOKEN\"  ";
+        let crontab = Crontab::parse(text).unwrap();
+        let environment = tenant_environment(&[("TOKEN", "secret")]);
+
+        let written = write_bundle(Some(&environment), Some(&crontab), staging).unwrap();
+        assert_eq!(names_in(&written.path), vec![".env", "crontab", "data/"]);
+        assert_eq!(
+            std::fs::read(staging.join(CRONTAB_FILENAME)).unwrap(),
+            text.as_bytes()
+        );
+        assert_eq!(
+            std::fs::metadata(staging.join(CRONTAB_FILENAME))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let read = std::fs::File::open(&written.path).unwrap();
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(read));
+        let mut entry = archive
+            .entries()
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.path().unwrap() == Path::new(CRONTAB_FILENAME))
+            .unwrap();
+        assert_eq!(entry.header().mode().unwrap() & 0o777, 0o600);
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, text.as_bytes());
+    }
+
+    #[test]
+    fn an_app_without_a_crontab_exports_no_crontab_file() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(DATA_DIRECTORY)).unwrap();
+
+        let written = write_bundle(None, None, root.path()).unwrap();
+
+        assert!(!root.path().join(CRONTAB_FILENAME).exists());
+        assert_eq!(names_in(&written.path), vec!["data/"]);
     }
 
     #[tokio::test]
@@ -305,7 +380,7 @@ mod tests {
     fn a_bundle_that_cannot_be_written_is_a_failure_rather_than_an_empty_archive() {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("staging");
-        assert!(write_bundle(None, &staging).is_err());
+        assert!(write_bundle(None, None, &staging).is_err());
     }
 
     fn names_in(bundle: &Path) -> Vec<String> {
