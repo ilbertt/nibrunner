@@ -51,6 +51,82 @@ async fn debugfs(device: &std::path::Path, request: &str) -> String {
         .expect("debugfs answers")
 }
 
+#[tokio::test]
+async fn an_oci_filesystem_preserves_root_and_inode_metadata_in_its_read_only_layer() {
+    use sha2::{Digest, Sha256};
+    if !enabled() {
+        return;
+    }
+    require_root();
+    let directory = tempfile::tempdir().unwrap();
+    let mut filesystem = tar::Builder::new(Vec::new());
+    for (path, mode, attribute) in [
+        (".", 0o750, "root"),
+        ("app", 0o755, "directory"),
+        ("app/file", 0o640, "file"),
+    ] {
+        filesystem
+            .append_pax_extensions([("SCHILY.xattr.user.oci", attribute.as_bytes())])
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_uid(1234);
+        header.set_gid(4321);
+        header.set_mode(mode);
+        header.set_mtime(1_234_567_890);
+        let bytes: &[u8] = if path == "app/file" { b"from OCI" } else { b"" };
+        header.set_size(bytes.len() as u64);
+        if bytes.is_empty() {
+            header.set_entry_type(tar::EntryType::Directory);
+        }
+        filesystem.append_data(&mut header, path, bytes).unwrap();
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Link);
+    header.set_mode(0o640);
+    header.set_uid(1234);
+    header.set_gid(4321);
+    header.set_size(0);
+    filesystem
+        .append_link(&mut header, "app/alias", "app/file")
+        .unwrap();
+    let archive = nibrunnerd::test_support::oci::from_filesystem(&filesystem.into_inner().unwrap());
+    let layer = protocol::DesiredLayer::Oci {
+        object: protocol::StoredObject {
+            digest: protocol::Sha256Digest::parse(hex::encode(Sha256::digest(&archive))).unwrap(),
+            object_key: protocol::ObjectKey::parse("oci.tar").unwrap(),
+        },
+    };
+    let store: Arc<dyn nibrunnerd::ports::ArtifactStore> = mocks::artifacts_holding(archive);
+    let image =
+        nibrunnerd::adapters::vm::layers::ensure_layer_image(&store, directory.path(), &layer, &commands())
+            .await
+            .unwrap()
+            .path;
+    for (path, mode, attribute) in [
+        ("/", "0750", "root"),
+        ("/app", "0755", "directory"),
+        ("/app/file", "0640", "file"),
+    ] {
+        let metadata = debugfs(&image, &format!("stat {path}")).await;
+        assert!(metadata.contains("User:  1234"), "{metadata}");
+        assert!(metadata.contains("Group:  4321"), "{metadata}");
+        assert!(metadata.contains(mode), "{metadata}");
+        assert!(metadata.contains("mtime: 0x499602d2"), "{metadata}");
+        let attributes = debugfs(&image, &format!("ea_list {path}")).await;
+        assert!(
+            attributes.contains(&format!("user.oci ({}) = \"{attribute}\"", attribute.len())),
+            "{attributes}"
+        );
+    }
+    assert_eq!(debugfs(&image, "cat /app/alias").await, "from OCI");
+    let metadata = debugfs(&image, "stat /app/file").await;
+    assert!(metadata.contains("Links: 2"), "{metadata}");
+    assert!(
+        metadata.contains("499602d2"),
+        "mtime was not preserved: {metadata}"
+    );
+}
+
 // The real tool copies the archive in as it formats, and what it copied is read back off the
 // device the way an export reads it: by debugfs, so nothing here mounts a tenant's volume.
 #[tokio::test]

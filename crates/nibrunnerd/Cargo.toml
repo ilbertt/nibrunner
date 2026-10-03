@@ -44,6 +44,7 @@ path = "tests/guest/main.rs"
 base64.workspace = true
 clap = { version = "4", features = ["derive"] }
 protocol.workspace = true
+oci-image.workspace = true
 guest-contract.workspace = true
 nft-render.workspace = true
 serde.workspace = true
@@ -79,14 +80,16 @@ nix.workspace = true
 uuid.workspace = true
 async-trait = "0.1"
 mockall = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
+xattr = "1"
+filetime = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink.workspace = true
 netlink-packet-route.workspace = true
 
 [features]
-testing = ["dep:mockall", "dep:tempfile"]
+testing = ["dep:mockall"]
 schema = ["protocol/schema"]
 
 [dev-dependencies]
