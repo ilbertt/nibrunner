@@ -65,6 +65,10 @@ pub struct VmRecord {
     pub signal: Option<i32>,
     #[serde(default)]
     pub stop_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jail_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jail_uid: Option<u32>,
 }
 
 impl VmRecord {
@@ -237,6 +241,8 @@ impl VmProcesses {
             exit_code: None,
             signal: None,
             stop_requested: false,
+            jail_root: None,
+            jail_uid: None,
         };
         self.write_record(&record)?;
 
@@ -335,6 +341,8 @@ mod tests {
                 exit_code: None,
                 signal: None,
                 stop_requested: false,
+                jail_root: None,
+                jail_uid: None,
             })
             .unwrap();
         let status = processes.status(&app_id());
@@ -357,6 +365,8 @@ mod tests {
                 exit_code: None,
                 signal: None,
                 stop_requested: false,
+                jail_root: None,
+                jail_uid: None,
             })
             .unwrap();
         let status = processes.status(&app_id());
@@ -377,6 +387,8 @@ mod tests {
             exit_code: Some(1),
             signal: None,
             stop_requested: false,
+            jail_root: None,
+            jail_uid: None,
         };
         processes.write_record(&record).unwrap();
         let crashed = processes.status(&app_id());
@@ -386,6 +398,8 @@ mod tests {
         processes
             .write_record(&VmRecord {
                 stop_requested: true,
+                jail_root: None,
+                jail_uid: None,
                 ..record.clone()
             })
             .unwrap();
@@ -461,6 +475,8 @@ mod tests {
                 exit_code: Some(0),
                 signal: None,
                 stop_requested: true,
+                jail_root: None,
+                jail_uid: None,
             })
             .unwrap();
         std::fs::write(processes.console_path(&app_id()), b"[nibrun] gone\n").unwrap();
@@ -640,6 +656,8 @@ mod tests {
                 exit_code: None,
                 signal: None,
                 stop_requested: false,
+                jail_root: None,
+                jail_uid: None,
             })
             .unwrap();
         processes.stop(&app_id()).await;

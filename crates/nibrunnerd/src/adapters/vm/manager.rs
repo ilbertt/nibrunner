@@ -48,7 +48,10 @@ pub struct VmManager {
 
 impl VmManager {
     pub fn working_dir_for(&self, app_id: &AppId) -> PathBuf {
-        self.vm_dir.join(app_id.as_str())
+        self.processes
+            .read_record(app_id)
+            .and_then(|record| record.jail_root)
+            .unwrap_or_else(|| self.vm_dir.join(app_id.as_str()))
     }
 
     fn api(&self, app_id: &AppId) -> FirecrackerApi {
@@ -385,6 +388,21 @@ impl Vmm for VmManager {
         {
             self.logs.detach(app_id).await;
             return Err(VmError::Host(error.to_string()));
+        }
+        if self
+            .processes
+            .read_record(app_id)
+            .is_some_and(|record| record.jail_root.is_some())
+        {
+            use std::os::unix::fs::MetadataExt;
+            let owner = std::fs::metadata(&working_dir).map_err(|error| VmError::Host(error.to_string()))?;
+            for socket in [
+                tenant_log_socket_path(&working_dir),
+                cron_registration_socket_path(&working_dir),
+            ] {
+                crate::unix_socket::own(&socket, owner.uid(), owner.gid())
+                    .map_err(|error| VmError::Host(error.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -774,6 +792,76 @@ mod tests {
             tokio::net::UnixStream::connect(&socket).await.is_ok(),
             "the host is bound where the guest reconnects after a daemon restart"
         );
+    }
+
+    #[tokio::test]
+    async fn a_running_legacy_vmm_keeps_its_existing_channels_until_it_is_redeployed() {
+        let fixture = fixture();
+        fixture.state.put_record(instance_record(|_| {})).await;
+        fixture
+            .manager
+            .processes
+            .write_record(&crate::adapters::vm::process::VmRecord {
+                app_id: app_id(),
+                pid: std::process::id() as i32,
+                host_boot_id: fixture.manager.processes.boot_id().into(),
+                started_at_ms: 0,
+                exit_code: None,
+                signal: None,
+                stop_requested: false,
+                jail_root: None,
+                jail_uid: None,
+            })
+            .unwrap();
+        let legacy_directory = fixture.manager.vm_dir.join(app_id().as_str());
+        assert_eq!(fixture.manager.working_dir_for(&app_id()), legacy_directory);
+        fixture.manager.readopt(&app_id()).await.unwrap();
+        assert!(
+            tokio::net::UnixStream::connect(tenant_log_socket_path(&legacy_directory))
+                .await
+                .is_ok()
+        );
+        assert!(
+            tokio::net::UnixStream::connect(cron_registration_socket_path(&legacy_directory))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recorded_jail_is_readopted_using_its_existing_identity() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = fixture();
+        let short_directory = tempfile::tempdir_in("/tmp").unwrap();
+        let root = short_directory.path().join("root");
+        make_directory(&root, VM_DIR_MODE).unwrap();
+        let identity = std::fs::metadata(&root).unwrap();
+        fixture.state.put_record(instance_record(|_| {})).await;
+        fixture
+            .manager
+            .processes
+            .write_record(&crate::adapters::vm::process::VmRecord {
+                app_id: app_id(),
+                pid: std::process::id() as i32,
+                host_boot_id: fixture.manager.processes.boot_id().into(),
+                started_at_ms: 0,
+                exit_code: None,
+                signal: None,
+                stop_requested: false,
+                jail_root: Some(root.clone()),
+                jail_uid: None,
+            })
+            .unwrap();
+        fixture.manager.readopt(&app_id()).await.unwrap();
+        assert_eq!(fixture.manager.working_dir_for(&app_id()), root);
+        for socket in [
+            tenant_log_socket_path(&root),
+            cron_registration_socket_path(&root),
+        ] {
+            let owner = std::fs::metadata(&socket).unwrap();
+            assert_eq!((owner.uid(), owner.gid()), (identity.uid(), identity.gid()));
+            assert!(tokio::net::UnixStream::connect(socket).await.is_ok());
+        }
     }
 
     #[tokio::test]

@@ -57,6 +57,19 @@ pub(crate) fn bind(path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
+#[allow(
+    unsafe_code,
+    reason = "a VMM may replace a socket with a symlink; ownership must never follow it"
+)]
+pub(crate) fn own(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
+    if unsafe { libc::lchown(name.as_ptr(), uid, gid) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub(crate) async fn connect(path: &Path) -> std::io::Result<UnixStream> {
     use std::os::unix::fs::MetadataExt;
 
