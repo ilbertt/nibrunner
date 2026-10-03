@@ -14,6 +14,23 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
+    #[command(about = "Package a local Linux x86_64 Docker image as a filesystem layer and command")]
+    ImportImage {
+        #[arg(help = "An image already built or pulled into Docker's local image store")]
+        image: String,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "A new directory for the digest-named layer and import.json"
+        )]
+        output: PathBuf,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Override the image's program with an absolute guest path"
+        )]
+        program: Option<protocol::GuestPath>,
+    },
     #[command(about = "Lay out the guest image, kernel settings, ZeroFS and units without starting them")]
     Install {
         #[arg(long, help = "Replace files these commands did not write")]
@@ -132,12 +149,47 @@ mod tests {
             vec!["start", "--help"],
             vec!["help", "install"],
             vec!["help", "start"],
+            vec!["import-image", "--help"],
         ] {
             let help = parse(&arguments).unwrap_err();
             assert_eq!(help.kind(), ErrorKind::DisplayHelp);
             assert_eq!(help.exit_code(), 0);
             assert!(!help.use_stderr());
         }
+    }
+
+    #[test]
+    fn image_import_requires_an_image_and_a_new_output_directory() {
+        assert!(parse(&["import-image", "demo:build"]).is_err());
+        assert!(parse(&["import-image", "--output", "./imported"]).is_err());
+        let Some(Command::ImportImage {
+            image,
+            output,
+            program,
+        }) = parse(&[
+            "import-image",
+            "demo:build",
+            "--output",
+            "./imported",
+            "--program",
+            "/app/server",
+        ])
+        .unwrap()
+        else {
+            panic!("import-image accepts a local image and an output directory");
+        };
+        assert_eq!(image, "demo:build");
+        assert_eq!(output, PathBuf::from("./imported"));
+        assert_eq!(program.unwrap().as_str(), "/app/server");
+        assert!(parse(&[
+            "import-image",
+            "demo:build",
+            "--output",
+            "./imported",
+            "--program",
+            "server"
+        ])
+        .is_err());
     }
 
     #[test]

@@ -79,14 +79,14 @@ nix.workspace = true
 uuid.workspace = true
 async-trait = "0.1"
 mockall = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink.workspace = true
 netlink-packet-route.workspace = true
 
 [features]
-testing = ["dep:mockall", "dep:tempfile"]
+testing = ["dep:mockall"]
 schema = ["protocol/schema"]
 
 [dev-dependencies]

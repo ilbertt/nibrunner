@@ -3,12 +3,12 @@ title: Deploy from a Dockerfile
 description: Build a Docker image, package its filesystem, and run it in a microVM.
 ---
 
-Build your Dockerfile for Linux x86_64, export the image's filesystem, and pack it as a
-`filesystem` [layer](/docs/guides/layers). nibrunner boots that layer in a microVM and runs the
-command you put in `desired.json`.
+Build your Dockerfile for Linux x86_64, then use `nibrunnerd import-image` to package its filesystem
+as a [layer](/docs/guides/layers) and translate its command configuration. Choose the app's ports,
+health check, volume, and hostname in `desired.json`.
 
 Run these commands in one Bash session as root on a Linux nibrunner host with Docker and Buildx,
-`squashfs-tools`, and `jq`. The host must be [configured](/docs/getting-started/configuration)
+`squashfs-tools` 4.7.5 or newer, and `jq`. The host must be [configured](/docs/getting-started/configuration)
 with the default local artifact store and an existing `desired.json`. For a fresh host, use the
 [deployment guide's document](/docs/getting-started/deploy-an-app#write-desiredjson) as the starting
 point, with this page's volume and instance.
@@ -38,38 +38,34 @@ Build from that directory. Use your own Dockerfile in its place for an existing 
 ```bash
 set -euo pipefail
 docker buildx build --platform linux/amd64 --load -t docker-demo:build .
-docker image inspect docker-demo:build --format '{{json .Config}}' | jq .
 ```
 
-Keep the inspected configuration: the export in the next step carries files, not the command,
-environment, or working directory. Inspection includes defaults inherited from the base image.
+For an existing registry image, use `docker pull --platform linux/amd64 IMAGE` instead. The importer
+uses Docker's local image store and does not pull or run the image.
 
 </Step>
 <Step>
 
 ## Pack and upload the filesystem
 
-Use a temporary directory so files left by an earlier export cannot enter the next image:
+Choose a new output directory. The command writes a digest-named squashfs and `import.json`,
+which contains the image ID, original user, filesystem layer, and translated command:
 
 ```bash
-work=$(mktemp -d)
-container=$(docker create --platform linux/amd64 --entrypoint /bin/true docker-demo:build)
-trap 'docker rm -v "$container" >/dev/null; rm -rf "$work"' EXIT
-mkdir "$work/rootfs"
-docker export "$container" | tar --numeric-owner -xpf - -C "$work/rootfs"
-mksquashfs "$work/rootfs" "$work/rootfs.squashfs" -comp zstd -noappend
-digest=$(sha256sum "$work/rootfs.squashfs" | cut -d ' ' -f 1)
-install -D -m 0644 "$work/rootfs.squashfs" "/var/lib/nibrunner/artifact-store/$digest"
-printf '%s\n' "$digest"
+nibrunnerd import-image docker-demo:build --output /tmp/docker-demo-import
+digest=$(jq -r '.layers[0].digest' /tmp/docker-demo-import/import.json)
+install -D -m 0644 "/tmp/docker-demo-import/$digest" "/var/lib/nibrunner/artifact-store/$digest"
 ```
 
-Keep that digest for both `digest` and `objectKey` below. If you build on a different Linux
+Keep that digest for both `digest` and `objectKey` below. If you import on a different Linux
 machine, copy the squashfs to the host's artifact store under that digest instead. For an object
 store, upload it to the store named by `artifacts.store_url` under the same key.
 
-<Callout title="Pack on Linux">
-  Root preserves the exported ownership and permissions. Keep extraction and squashfs packaging
-  on Linux; copying the extracted tree through a macOS or Windows filesystem can change it.
+<Callout title="Files and environment">
+  Packaging reads the exported archive directly, preserving numeric ownership and permissions
+  without extracting image files onto the host. Importing needs access to Docker but does not
+  need root. The output directory is private, and `import.json` has mode `0600` because inherited
+  environment variables may contain secrets. Review them before sharing or copying the file.
   [`docker export`](https://docs.docker.com/reference/cli/docker/container/export/) also excludes
   mounted volume contents: it packages the underlying image files, not data from a running app.
 </Callout>
@@ -130,9 +126,15 @@ Add this entry to `instances`, replacing both digest placeholders with the value
 }
 ```
 
-The Python example needs no extra environment. For your own image, translate the configuration
-shown by `docker image inspect` using the table below. The program must listen on `0.0.0.0`, not
-only the guest's loopback address.
+Replace this example's `layers` with `import.json`'s `layers`, and its `config.command` with
+`import.json`'s `command`. The importer combines `ENTRYPOINT` and `CMD` without splitting
+arguments, copies inherited `ENV`, and uses `/` when `WORKDIR` is empty. It resolves a bare
+program name using the image's `PATH`, including symbolic links. To select an explicit program,
+pass `--program /absolute/guest/path`; the image's arguments are kept.
+
+Choose the port and health check explicitly: `EXPOSE` and Docker's `HEALTHCHECK` do not establish
+them. The program must listen on `0.0.0.0`, not only the guest's loopback address. Importing does
+not edit `desired.json` or deploy the app.
 
 Check the edited file against the [desired-state schema](/docs/reference/desired), then replace
 the live file. `jq` checks JSON syntax here; it does not validate the schema. Make this edit while
@@ -174,13 +176,13 @@ it from elsewhere; see [HTTPS](/docs/guides/https) for TLS. App output is in
 </Step>
 </Steps>
 
-## Translate your image's configuration
+## Image configuration and runtime differences
 
 | Docker image setting | What to put in `desired.json` |
 | --- | --- |
-| `ENTRYPOINT`, `CMD` | `config.command.program` and `args`. Preserve the effective entrypoint and its arguments, including any wrapper script. Use an absolute program path; resolve names such as `python3` using the image's `PATH`. |
-| `WORKDIR` | `config.command.workingDirectory`. Use `/` if the image has none. |
-| `ENV` | `config.command.environment`. Include inherited variables the app needs, and supply deployment secrets separately from the image. |
+| `ENTRYPOINT`, `CMD` | Imported as `config.command.program` and `args`, preserving wrapper scripts and argument boundaries. A program name is resolved using the image's `PATH`. |
+| `WORKDIR` | Imported as `config.command.workingDirectory`, with `/` for an empty directory. |
+| `ENV` | Imported as `config.command.environment`. Review inherited variables and supply deployment secrets separately from the image. |
 | `EXPOSE` | Select `config.httpPort` explicitly. Other ports use [`config.ports`](/docs/guides/raw-ports); exposing a port does not select a health check. |
 | `HEALTHCHECK` | Choose a nibrunner [health check](/docs/guides/health-checks). Docker's command-based check is not imported. |
 | `USER` | The guest runs the app as uid/gid 65534. Files must be readable and programs executable by that account; writable data directories must allow it access. |
@@ -195,8 +197,9 @@ it from elsewhere; see [HTTPS](/docs/guides/https) for TLS. App output is in
 
 ## Redeploy
 
-Build and upload a new squashfs, then replace the existing instance's layer digest and object
-key. Change its `deploymentId` and the document's `revision`, and apply the edited document as
+Build and import the new image into a new output directory, upload its layer, and replace the
+existing instance's `layers` and `config.command` from its `import.json`. Change its `deploymentId`
+and the document's `revision`, and apply the edited document as
 above. Keep the existing volume entry and `volumeId` to retain the app's data.
 
 <Callout title="Writes survive a redeploy">

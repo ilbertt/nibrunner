@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
 
 mod cli;
+mod image_import;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -11,6 +12,26 @@ use nibrunnerd::{install, run, start};
 
 fn main() -> std::process::ExitCode {
     let command = Cli::parse().command;
+    if let Some(Command::ImportImage {
+        image,
+        output,
+        program,
+    }) = &command
+    {
+        return match image_import::run(image, output, program.as_ref()) {
+            Ok(()) => {
+                println!(
+                    "{} contains the layer and import.json; see https://nibrunner.dev/docs/guides/dockerfile",
+                    output.display()
+                );
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     nibrunnerd::install_crypto_provider();
 
     // An installer talks to whoever ran it, and a daemon talks to the log store. Structured JSON
@@ -38,6 +59,7 @@ fn main() -> std::process::ExitCode {
             runtime.block_on(lay_out(config, force, release, origin))
         }
         Some(Command::Start { force }) => runtime.block_on(bring_up(config, force)),
+        Some(Command::ImportImage { .. }) => std::process::ExitCode::FAILURE,
     }
 }
 
@@ -118,7 +140,7 @@ fn configuration(command: Option<&Command>) -> Result<(HostConfig, Origin), std:
     let refused = |error: &nibrunnerd::config::ConfigError| {
         match command {
             None => tracing::error!(error = %error.message(), "this host is not configured"),
-            Some(Command::Install { .. } | Command::Start { .. }) => {
+            Some(Command::Install { .. } | Command::Start { .. } | Command::ImportImage { .. }) => {
                 eprintln!("this host is not configured: {}", error.message())
             }
         }
