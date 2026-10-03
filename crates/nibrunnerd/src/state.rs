@@ -55,12 +55,31 @@ pub struct HostSnapshot {
 pub type SharedState = Arc<HostState>;
 
 type Transitions = BTreeMap<AppId, Arc<tokio::sync::Mutex<()>>>;
+type CronRuns = Arc<Mutex<BTreeMap<AppId, usize>>>;
+
+pub struct CronActivity {
+    runs: CronRuns,
+    app_id: AppId,
+}
+
+impl Drop for CronActivity {
+    fn drop(&mut self) {
+        let mut runs = self.runs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = runs.get_mut(&self.app_id) {
+            *count -= 1;
+            if *count == 0 {
+                runs.remove(&self.app_id);
+            }
+        }
+    }
+}
 
 pub struct HostState {
     snapshot: RwLock<HostSnapshot>,
     refresh: Notify,
     report: Notify,
     transitions: Mutex<Transitions>,
+    cron_runs: CronRuns,
 }
 
 impl HostState {
@@ -70,6 +89,7 @@ impl HostState {
             refresh: Notify::new(),
             report: Notify::new(),
             transitions: Mutex::new(BTreeMap::new()),
+            cron_runs: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -93,6 +113,25 @@ impl HostState {
 
     pub async fn snapshot(&self) -> HostSnapshot {
         self.snapshot.read().await.clone()
+    }
+
+    pub fn cron_activity(&self, app_id: &AppId) -> CronActivity {
+        let mut runs = self
+            .cron_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *runs.entry(app_id.clone()).or_default() += 1;
+        CronActivity {
+            runs: self.cron_runs.clone(),
+            app_id: app_id.clone(),
+        }
+    }
+
+    pub fn cron_running(&self, app_id: &AppId) -> bool {
+        self.cron_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(app_id)
     }
 
     pub async fn records(&self) -> Vec<InstanceRecord> {
@@ -203,6 +242,25 @@ mod tests {
     use super::*;
     use crate::test_support::{app_id, instance_record, volume_id};
     use protocol::{InstanceState, VolumeState};
+
+    #[test]
+    fn cron_activity_lasts_until_the_last_command_finishes() {
+        let state = HostState::shared();
+        let first = state.cron_activity(&app_id());
+        let second = state.cron_activity(&app_id());
+        assert!(state.cron_running(&app_id()));
+        drop(first);
+        assert!(state.cron_running(&app_id()));
+        drop(second);
+        assert!(!state.cron_running(&app_id()));
+    }
+
+    #[test]
+    fn a_cron_command_keeps_only_its_own_app_active() {
+        let state = HostState::shared();
+        let _command = state.cron_activity(&app_id());
+        assert!(!state.cron_running(&AppId::parse("app-2").unwrap()));
+    }
 
     fn reported(state: VolumeState) -> ReportedVolume {
         ReportedVolume {

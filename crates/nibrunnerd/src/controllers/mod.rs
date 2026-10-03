@@ -1,5 +1,6 @@
 pub mod activity_controller;
 pub mod converge_controller;
+pub mod cron_controller;
 pub mod idle_controller;
 pub mod lifecycle_controller;
 pub mod measurement_controller;

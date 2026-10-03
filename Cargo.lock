@@ -1687,6 +1687,7 @@ version = "2026.9.1"
 dependencies = [
  "async-trait",
  "backhand",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "chrono-tz",
