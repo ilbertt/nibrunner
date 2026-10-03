@@ -34,6 +34,7 @@ pub struct VmManager {
     pub snapshot_dir: PathBuf,
     pub guest_image_dir: PathBuf,
     pub firecracker: PathBuf,
+    pub(crate) jailer: super::jailer::Jailer,
     pub guest_image_version: String,
     pub processes: VmProcesses,
     pub network: Arc<dyn HostNetwork>,
@@ -46,12 +47,21 @@ pub struct VmManager {
     pub in_flight: SnapshotsInFlight,
 }
 
+struct PreparedVm {
+    #[cfg(test)]
+    config_file: PathBuf,
+    jail: super::jailer::Jail,
+}
+
 impl VmManager {
     pub fn working_dir_for(&self, app_id: &AppId) -> PathBuf {
-        self.processes
-            .read_record(app_id)
-            .and_then(|record| record.jail_root)
-            .unwrap_or_else(|| self.vm_dir.join(app_id.as_str()))
+        if let Some(record) = self.processes.read_record(app_id) {
+            if let Some(root) = record.jail_root {
+                return root;
+            }
+            return self.vm_dir.join(app_id.as_str());
+        }
+        super::jailer::root(&self.vm_dir.join("jailer"), app_id)
     }
 
     fn api(&self, app_id: &AppId) -> FirecrackerApi {
@@ -97,7 +107,7 @@ impl VmManager {
             .await
             .map_err(host)?;
 
-        let working_dir = self.working_dir_for(&request.desired.app_id);
+        let working_dir = self.vm_dir.join(request.desired.app_id.as_str());
         make_directory(&working_dir, VM_DIR_MODE).map_err(|error| VmError::Host(error.to_string()))?;
 
         let rendered = render_instance_env(&InstanceEnvContent {
@@ -186,15 +196,57 @@ impl VmManager {
         Ok(())
     }
 
-    async fn stage(&self, request: &BootRequest) -> Result<PathBuf, VmError> {
+    async fn stage(&self, request: &BootRequest) -> Result<PreparedVm, VmError> {
         let config_file = self.stage_inputs(request).await?;
+        #[cfg(not(test))]
+        let _ = config_file;
+        let jail = self.prepare_jail(&request.desired.app_id).await?;
         self.attach_channels(
             &request.desired.app_id,
             &request.desired.deployment_id,
-            &self.working_dir_for(&request.desired.app_id),
+            &jail.root,
         )
         .await?;
-        Ok(config_file)
+        let granted = async {
+            jail.grant_socket(&tenant_log_socket_path(&jail.root))
+                .map_err(|error| VmError::Host(error.to_string()))?;
+            jail.grant_socket(&cron_registration_socket_path(&jail.root))
+                .map_err(|error| VmError::Host(error.to_string()))?;
+            self.network
+                .set_tap_owner(&request.slot.tap_name, jail.uid)
+                .await
+                .map_err(|error| VmError::Host(error.message()))
+        }
+        .await;
+        if let Err(error) = granted {
+            self.cron_registration.detach(&request.desired.app_id).await;
+            self.logs.detach(&request.desired.app_id).await;
+            return Err(error);
+        }
+        Ok(PreparedVm {
+            #[cfg(test)]
+            config_file,
+            jail,
+        })
+    }
+
+    async fn prepare_jail(&self, app_id: &AppId) -> Result<super::jailer::Jail, VmError> {
+        if self.processes.status(app_id).active {
+            return Err(VmError::Host(
+                "a running microVM cannot have its jail rebuilt".into(),
+            ));
+        }
+        self.logs.detach(app_id).await;
+        self.cron_registration.detach(app_id).await;
+        self.jailer
+            .prepare(
+                &self.vm_dir.join(app_id.as_str()),
+                &self.vm_dir.join("jailer"),
+                &self.snapshot_dir,
+                app_id,
+                self.processes.boot_id(),
+            )
+            .map_err(|error| VmError::Host(error.to_string()))
     }
 
     async fn create_snapshot(&self, app_id: &AppId, state: &Path, memory: &Path) -> Result<(), VmError> {
@@ -215,8 +267,22 @@ impl VmManager {
             let _ = std::fs::remove_file(exchange.join(name));
         }
         let outcome = async {
+            let jailed = self
+                .processes
+                .read_record(app_id)
+                .is_some_and(|record| record.jail_root.is_some());
+            let state_source = if jailed {
+                PathBuf::from("/snapshots/state")
+            } else {
+                exchange.join("state")
+            };
+            let memory_source = if jailed {
+                PathBuf::from("/snapshots/memory")
+            } else {
+                exchange.join("memory")
+            };
             self.api(app_id)
-                .create_snapshot(&exchange.join("state"), &exchange.join("memory"))
+                .create_snapshot(&state_source, &memory_source)
                 .await?;
             for (name, destination) in [("state", state), ("memory", memory)] {
                 publish_snapshot_file(&exchange.join(name), destination)
@@ -269,14 +335,13 @@ impl Vmm for VmManager {
         let app_id = request.desired.app_id.clone();
         self.discard_snapshot(&app_id);
         let staged = std::time::Instant::now();
-        let config_file = self.stage(&request).await?;
+        let prepared = self.stage(&request).await?;
         let staged_ms = staged.elapsed().as_millis();
 
         let starting = std::time::Instant::now();
-        let working_dir = self.working_dir_for(&app_id);
         let started = self
             .processes
-            .spawn(&app_id, &self.firecracker, &working_dir, Some(&config_file))
+            .spawn(&app_id, &self.firecracker, &self.jailer, &prepared.jail, true)
             .await;
         if let Err(error) = started {
             self.cron_registration.detach(&app_id).await;
@@ -344,20 +409,52 @@ impl Vmm for VmManager {
             return Err(error);
         }
 
-        let _ = std::fs::remove_file(&paths.stamp_path);
+        if !self
+            .processes
+            .read_record(&request.app_id)
+            .is_some_and(|record| record.jail_root.is_some())
+        {
+            self.discard_snapshot(&request.app_id);
+            return Err(VmError::SnapshotUnusable {
+                reason: "the snapshot was created by a legacy VMM without a jail".into(),
+            });
+        }
 
+        let _ = std::fs::remove_file(&paths.stamp_path);
         let restoring = std::time::Instant::now();
-        let working_dir = self.working_dir_for(&request.app_id);
+        let jail = self.prepare_jail(&request.app_id).await?;
+        self.readopt(&request.app_id).await?;
+        jail.grant_socket(&tenant_log_socket_path(&jail.root))
+            .map_err(|error| VmError::Host(error.to_string()))?;
+        jail.grant_socket(&cron_registration_socket_path(&jail.root))
+            .map_err(|error| VmError::Host(error.to_string()))?;
+        self.network
+            .set_tap_owner(&request.slot.tap_name, jail.uid)
+            .await
+            .map_err(|error| VmError::Host(error.message()))?;
+        let exchange = super::snapshot::exchange(&self.snapshot_dir, &request.app_id);
+        for (source, name) in [(&paths.state_path, "state"), (&paths.memory_path, "memory")] {
+            let target = exchange.join(name);
+            let _ = std::fs::remove_file(&target);
+            use std::os::unix::fs::PermissionsExt;
+            std::os::unix::fs::chown(source, Some(0), Some(jail.gid))
+                .map_err(|error| VmError::Host(error.to_string()))?;
+            std::fs::set_permissions(source, std::fs::Permissions::from_mode(0o440))
+                .map_err(|error| VmError::Host(error.to_string()))?;
+            std::fs::hard_link(source, &target).map_err(|error| VmError::Host(error.to_string()))?;
+        }
+        let state_path = PathBuf::from("/snapshots/state");
+        let memory_path = PathBuf::from("/snapshots/memory");
         let started = self
             .processes
-            .spawn(&request.app_id, &self.firecracker, &working_dir, None)
+            .spawn(&request.app_id, &self.firecracker, &self.jailer, &jail, false)
             .await
             .map_err(|error| VmError::Host(error.to_string()));
         let outcome = match started {
             Err(error) => Err(error),
             Ok(_) => {
                 let api = self.api(&request.app_id);
-                match api.load_snapshot(&paths.state_path, &paths.memory_path).await {
+                match api.load_snapshot(&state_path, &memory_path).await {
                     Err(error) => Err(error),
                     Ok(()) => match api.resume().await {
                         Err(error) => Err(error),
@@ -378,6 +475,9 @@ impl Vmm for VmManager {
             self.processes.stop(&request.app_id).await;
         }
         self.discard_snapshot(&request.app_id);
+        for name in ["state", "memory"] {
+            let _ = std::fs::remove_file(exchange.join(name));
+        }
         outcome?;
         self.metrics.sleep_wake.restored(restoring.elapsed());
         tracing::info!(
@@ -400,7 +500,12 @@ impl Vmm for VmManager {
         self.processes.forget(app_id);
         self.logs.detach(app_id).await;
         self.cron_registration.detach(app_id).await;
-        let _ = std::fs::remove_dir_all(self.working_dir_for(app_id));
+        let _ = std::fs::remove_dir_all(self.vm_dir.join(app_id.as_str()));
+        let _ = std::fs::remove_dir_all(
+            super::jailer::root(&self.vm_dir.join("jailer"), app_id)
+                .parent()
+                .expect("a jail root has an app directory"),
+        );
         let _ = std::fs::remove_dir_all(super::snapshot::exchange(&self.snapshot_dir, app_id));
         Ok(())
     }
@@ -540,6 +645,7 @@ mod tests {
     use crate::test_support::mocks;
     use crate::test_support::*;
     use protocol::ObjectKey;
+    use std::os::unix::fs::MetadataExt;
 
     struct Fixture {
         _directory: tempfile::TempDir,
@@ -549,7 +655,7 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
         let root = directory.path();
         let (network, network_spy) = mocks::network();
         let state = HostState::shared();
@@ -559,6 +665,7 @@ mod tests {
             snapshot_dir: root.join("snapshots"),
             guest_image_dir: root.join("guest"),
             firecracker: root.join("bin/firecracker"),
+            jailer: super::super::jailer::Jailer::for_testing(root.join("bin/jailer")),
             guest_image_version: "6.1.180-test".into(),
             processes: VmProcesses::new(root.join("run")),
             network,
@@ -628,7 +735,7 @@ mod tests {
         let request = boot_request(desired_instance(|instance| {
             instance.hostnames = vec![app_hostname()]
         }));
-        let config_file = fixture.manager.stage(&request).await.unwrap();
+        let config_file = fixture.manager.stage(&request).await.unwrap().config_file;
 
         let config: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
@@ -657,6 +764,15 @@ mod tests {
 
         assert_eq!(fixture.network.taps()[0].tap_name, "nbr0");
         assert_eq!(fixture.network.neighbours()[0].guest_mac, "02:00:0a:c9:00:02");
+        assert_eq!(
+            fixture.network.owners(),
+            vec![(
+                "nbr0".into(),
+                std::fs::metadata(fixture.manager.working_dir_for(&app_id()))
+                    .unwrap()
+                    .uid()
+            )]
+        );
         assert_eq!(fixture.manager.logs.attached().await, vec![app_id()]);
     }
 
@@ -669,7 +785,7 @@ mod tests {
             .layer_image_paths
             .push(PathBuf::from("/cache/def/layer.img"));
         fixture.manager.stage(&request).await.unwrap();
-        let written = config_drive(&fixture.manager.working_dir_for(&app_id()));
+        let written = config_drive(&fixture.manager.vm_dir.join(app_id().as_str()));
         assert!(written.contains("NIBRUN_HTTP_PORT=3000"));
         assert!(written.contains("NIBRUN_LAYERS=2\n"), "{written}");
     }
@@ -803,6 +919,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tap_that_cannot_be_granted_to_the_jail_leaves_no_partial_channels() {
+        let mut fixture = fixture();
+        let mut network = crate::adapters::net::tap::MockHostNetwork::new();
+        network.expect_ensure_tap().returning(|_| Ok(()));
+        network.expect_refresh_neighbour().returning(|_| Ok(()));
+        network.expect_set_tap_owner().returning(|name, _| {
+            Err(crate::adapters::net::tap::NetworkError {
+                what: "tap ownership",
+                device: name.into(),
+                reason: "operation not permitted".into(),
+            })
+        });
+        fixture.manager.network = Arc::new(network);
+        let error = fixture
+            .manager
+            .boot(boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap_err();
+        assert!(error.message().contains("tap ownership"));
+        assert!(fixture.manager.logs.attached().await.is_empty());
+        assert!(fixture.manager.cron_registration.attached().await.is_empty());
+        assert!(fixture.manager.processes.read_record(&app_id()).is_none());
+    }
+
+    #[tokio::test]
     async fn a_hypervisor_that_would_not_start_takes_the_log_attachment_down_behind_it() {
         let fixture = fixture();
         let error = fixture
@@ -881,7 +1022,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let fixture = fixture();
         let short_directory = tempfile::tempdir_in("/tmp").unwrap();
-        let root = short_directory.path().join("root");
+        let root = super::super::jailer::root(short_directory.path(), &app_id());
         make_directory(&root, VM_DIR_MODE).unwrap();
         let identity = std::fs::metadata(&root).unwrap();
         fixture.state.put_record(instance_record(|_| {})).await;
@@ -1107,6 +1248,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_legacy_snapshot_is_refused_before_spawning_so_the_waker_can_cold_boot() {
+        let fixture = fixture();
+        let request = SuspendRequest {
+            app_id: app_id(),
+            deployment_id: deployment_id(),
+            slot: nft_render::describe_slot(0, app_id()),
+        };
+        let paths = snapshot_paths(&fixture.manager.snapshot_dir, &app_id());
+        write_json(&paths.stamp_path, &fixture.manager.current_stamp(&request)).unwrap();
+        fixture
+            .manager
+            .processes
+            .write_record(&crate::adapters::vm::process::VmRecord {
+                app_id: app_id(),
+                pid: 1,
+                host_boot_id: fixture.manager.processes.boot_id().into(),
+                started_at_ms: 0,
+                exit_code: Some(0),
+                signal: None,
+                stop_requested: true,
+                jail_root: None,
+                jail_uid: None,
+            })
+            .unwrap();
+        let refused = fixture.manager.wake(request).await.unwrap_err();
+        assert!(matches!(refused, VmError::SnapshotUnusable { .. }));
+        assert!(refused.message().contains("legacy VMM without a jail"));
+        assert_eq!(fixture.manager.processes.read_record(&app_id()).unwrap().pid, 1);
+        assert!(!paths.directory.exists());
+    }
+
+    #[tokio::test]
     async fn a_wake_with_no_snapshot_kept_at_all_says_so_rather_than_starting_a_cold_guest() {
         let fixture = fixture();
         let error = fixture
@@ -1134,7 +1307,7 @@ mod tests {
             instance.config.command.environment = tenant_environment(&[("MODE", "production")])
         });
         fixture.manager.stage(&boot_request(changed)).await.unwrap();
-        let written = config_drive(&fixture.manager.working_dir_for(&app_id()));
+        let written = config_drive(&fixture.manager.vm_dir.join(app_id().as_str()));
         assert!(written.contains("MODE"), "{written}");
         assert_eq!(fixture.manager.logs.attached().await, vec![app_id()]);
     }
