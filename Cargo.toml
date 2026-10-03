@@ -4,6 +4,7 @@ members = [
   "crates/protocol",
   "crates/guest-contract",
   "crates/nft-render",
+  "crates/oci-image",
   "crates/nibrunnerd",
   "crates/init",
   "crates/test-tenant",
@@ -42,6 +43,7 @@ base64 = "0.22"
 protocol = { path = "crates/protocol", package = "nibrunner-protocol" }
 guest-contract = { path = "crates/guest-contract", package = "nibrunner-guest-contract" }
 nft-render = { path = "crates/nft-render", package = "nibrunner-nft-render" }
+oci-image = { path = "crates/oci-image", package = "nibrunner-oci-image" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -51,6 +53,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 tar = "0.4"
 flate2 = "1"
+zstd = "0.13"
 # Stored and deflated entries, through the flate2 already here: what `zip -r` writes.
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 thiserror = "2"
