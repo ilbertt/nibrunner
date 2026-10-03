@@ -145,3 +145,46 @@ async fn a_request_is_answered_across_a_sleep_the_proxy_was_holding_a_connection
 
     host.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corrupt_snapshot_cold_boots_the_app_and_still_answers_the_request() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    use nibrunnerd::adapters::vm::snapshot::{
+        snapshot_paths, SNAPSHOT_MEMORY_FILENAME, SNAPSHOT_STATE_FILENAME,
+    };
+
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    for (number, filename) in [(1, SNAPSHOT_STATE_FILENAME), (2, SNAPSHOT_MEMORY_FILENAME)] {
+        let app = host.tenant(number).on_request(IDLE_TIMEOUT_MS);
+        host.deploy(std::slice::from_ref(&app)).await;
+        host.until_state(&app.app_id, InstanceState::Running).await;
+        assert_eq!(host.get(&app, "/remember").await.expect("an answer").body, "1");
+        assert_eq!(host.get(&app, "/remember").await.expect("an answer").body, "2");
+        host.let_sleep(&app).await;
+        let paths = snapshot_paths(&host.host.config.snapshot_dir, &app.app_id);
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(paths.directory.join(filename))
+            .unwrap();
+        let mut byte = [0];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 1;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&byte).unwrap();
+        drop(file);
+        let [restored_before, cold_before, _] = host.host.metrics.sleep_wake.of(&app.app_id).wakes;
+
+        let answer = host.get(&app, "/remember").await.expect("the cold boot answers");
+        assert_eq!(answer.status, 200, "{answer:?}");
+        assert_eq!(answer.body, "1", "the corrupted snapshot was restored");
+        let [restored_after, cold_after, _] = host.host.metrics.sleep_wake.of(&app.app_id).wakes;
+        assert_eq!(restored_after, restored_before);
+        assert_eq!(cold_after, cold_before + 1);
+        assert!(!paths.directory.exists());
+    }
+    host.stop().await;
+}
