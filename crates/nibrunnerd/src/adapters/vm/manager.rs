@@ -55,7 +55,11 @@ impl VmManager {
     }
 
     fn api(&self, app_id: &AppId) -> FirecrackerApi {
-        FirecrackerApi::at(self.processes.api_socket(app_id))
+        let api = FirecrackerApi::at(self.processes.api_socket(app_id));
+        match self.processes.read_record(app_id) {
+            Some(record) if record.jail_root.is_some() => api.require_process(record.pid, record.jail_uid),
+            _ => api,
+        }
     }
 
     fn current_stamp(&self, request: &SuspendRequest) -> SnapshotStamp {
