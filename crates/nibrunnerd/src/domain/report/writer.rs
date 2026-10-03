@@ -134,16 +134,60 @@ mod tests {
         );
 
         let document = accepted_document(desired_state(|state| {
+            state.host_id = HostId::parse("hetzner-test").unwrap();
             state.revision = protocol::Revision::parse("deploy-4821").unwrap();
         }));
         host.remember_accepted_document(&document).await;
         let report = build(&host, versions()).await;
+        assert_eq!(report.host_id.as_str(), "hetzner-test");
         assert_eq!(report.accepted_digest, Some(document.digest));
         assert_eq!(
             report.accepted_revision,
             Some(protocol::Revision::parse("deploy-4821").unwrap()),
             "what whoever wrote the document called it is handed back to them"
         );
+    }
+
+    #[tokio::test]
+    async fn a_restart_recovers_a_missing_identity_from_the_saved_document_before_reporting() {
+        let host = test_host().await;
+        let document = accepted_document(desired_state(|state| {
+            state.host_id = HostId::parse("hetzner-test").unwrap();
+        }));
+        host.repositories
+            .accepted_document
+            .remember(&document)
+            .await
+            .unwrap();
+        assert_eq!(host.known_host_id().await, None);
+
+        host.load().await;
+
+        assert_eq!(host.known_host_id().await, Some(document.desired.host_id.clone()));
+        let report = build(&host, versions()).await;
+        assert_eq!(report.host_id, document.desired.host_id);
+        assert_eq!(report.accepted_digest, Some(document.digest));
+        assert_eq!(report.accepted_revision, Some(document.desired.revision));
+    }
+
+    #[tokio::test]
+    async fn an_existing_identity_survives_loading_and_accepting_documents_naming_another_host() {
+        let host = test_host().await;
+        host.remember_host_id("host-7").await;
+        let document = accepted_document(desired_state(|state| {
+            state.host_id = HostId::parse("hetzner-test").unwrap();
+        }));
+        host.repositories
+            .accepted_document
+            .remember(&document)
+            .await
+            .unwrap();
+
+        host.load().await;
+        assert_eq!(build(&host, versions()).await.host_id.as_str(), "host-7");
+
+        host.remember_accepted_document(&document).await;
+        assert_eq!(build(&host, versions()).await.host_id.as_str(), "host-7");
     }
 
     #[tokio::test]

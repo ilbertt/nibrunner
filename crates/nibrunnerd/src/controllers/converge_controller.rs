@@ -378,12 +378,16 @@ mod tests {
     #[tokio::test]
     async fn a_document_that_has_not_moved_does_not_run_a_second_pass() {
         let host = test_host().await;
-        write_desired_state(&host.config.desired_state_file, &desired_state(|_| {}));
+        let desired = desired_state(|state| {
+            state.host_id = protocol::HostId::parse("hetzner-test").unwrap();
+        });
+        write_desired_state(&host.config.desired_state_file, &desired);
 
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().times(1).returning(|_, _| ());
         let controller = controller(&host, reconciler);
         assert!(controller.converge_once().await);
+        assert_eq!(host.known_host_id().await, Some(desired.host_id));
         assert!(!controller.converge_once().await);
     }
 
@@ -427,6 +431,7 @@ mod tests {
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().never();
         assert!(!controller(&host, reconciler).converge_once().await);
+        assert_eq!(host.known_host_id().await, None);
 
         let refusal = host
             .state

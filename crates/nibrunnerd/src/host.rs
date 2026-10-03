@@ -125,6 +125,9 @@ impl Host {
             .read()
             .await
             .unwrap_or_default();
+        if let Some(document) = &accepted {
+            self.remember_host_id(document.desired.host_id.as_str()).await;
+        }
 
         let held = records.len();
         self.allocator.lock().await.restore(assignments, cursor);
@@ -163,6 +166,7 @@ impl Host {
     /// The row is written only when the bytes moved: a document read again unchanged — which the
     /// watch's backstop brings round every half minute — is the one already there.
     pub async fn remember_accepted_document(&self, document: &AcceptedDocument) {
+        self.remember_host_id(document.desired.host_id.as_str()).await;
         let moved = self
             .state
             .modify(|snapshot| {
@@ -253,7 +257,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_document_read_again_unchanged_is_not_written_down_a_second_time() {
-        let (instances, slots, activity, deleted, identity) = mocked();
+        let (instances, slots, activity, deleted, mut identity) = mocked();
+        identity.expect_remember().returning(|_| Ok(()));
         let written = Arc::new(AtomicUsize::new(0));
         let counted = written.clone();
         let mut accepted = MockAcceptedDocumentRepository::new();
@@ -277,6 +282,31 @@ mod tests {
         host.remember_accepted_document(&later).await;
         assert_eq!(written.load(Ordering::SeqCst), 2);
         assert_eq!(host.state.snapshot().await.accepted_digest, Some(later.digest));
+    }
+
+    #[tokio::test]
+    async fn an_identity_write_that_failed_is_retried_when_the_document_has_not_moved() {
+        let (instances, slots, activity, deleted, mut identity) = mocked();
+        let mut sequence = mockall::Sequence::new();
+        identity
+            .expect_remember()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .withf(|host_id| host_id == "hetzner-test")
+            .returning(|_| Err(StoreError::Unwritable("the disk is full".into())));
+        identity
+            .expect_remember()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .withf(|host_id| host_id == "hetzner-test")
+            .returning(|_| Ok(()));
+        let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
+        let document = accepted_document(desired_state(|state| {
+            state.host_id = protocol::HostId::parse("hetzner-test").unwrap();
+        }));
+
+        host.remember_accepted_document(&document).await;
+        host.remember_accepted_document(&document).await;
     }
 
     #[tokio::test]
