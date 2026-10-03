@@ -6,6 +6,7 @@
     "dockerfile",
     "volumes",
     "sleep-and-wake",
+    "wake-benchmarks",
     "cron-jobs",
     "health-checks",
     "https",

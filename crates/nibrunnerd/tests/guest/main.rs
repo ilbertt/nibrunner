@@ -15,6 +15,8 @@
 
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
+mod benchmarks;
+
 #[cfg(target_os = "linux")]
 mod cron;
 #[cfg(target_os = "linux")]

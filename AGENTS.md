@@ -118,6 +118,11 @@ invariant. Both are gated on `NIBRUNNER_INTEGRATION=1`. What more than one test 
 asserted as text, the codecs against byte fixtures taken from the C headers, and the reconcile pass
 driven against mocked collaborators.
 
+Wake benchmarks live in `crates/nibrunnerd/tests/guest/benchmarks.rs`. The full run is ignored:
+on an otherwise idle Linux test host, run `just integration-guest benchmarks::machine::wake_latency --ignored`.
+`NIBRUNNER_BENCHMARK_ROUNDS` sets the number of measured rounds and `NIBRUNNER_BENCHMARK_OUTPUT`
+names a new JSON report file. CI runs one short functional round without latency thresholds.
+
 Hosts may already be in use. Keep existing files in `crates/nibrunnerd/migrations` unchanged:
 sqlx verifies their checksums when a host opens its database. Add a new numbered migration for
 each schema change, and test upgrading an existing database without losing its state. Schema

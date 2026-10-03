@@ -125,8 +125,8 @@ jobs:
         include:
           - shard: cron
             families: cron
-          - shard: sleep
-            families: sleep
+          - shard: sleep+benchmarks
+            families: sleep benchmarks
           - shard: idle+isolation
             families: idle isolation
           - shard: lifecycle+volumes+tenant+raw

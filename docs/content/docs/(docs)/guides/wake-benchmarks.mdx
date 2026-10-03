@@ -1,0 +1,66 @@
+---
+title: Wake benchmarks
+description: Measure requests that restore sleeping apps on a Linux test host.
+---
+
+Run the benchmark from a checkout on an otherwise idle Linux x86_64 test machine, as root.
+It needs `/dev/kvm`, `/dev/net/tun`, `nft`, `mke2fs`, `ip`, `iptables`, Docker and the build
+tools from [the contributing guide](https://github.com/ilbertt/nibrunner/blob/main/.github/CONTRIBUTING.md).
+
+The harness takes the machine's nibrunner nftables table and TAP names. Use a machine that
+is serving no apps. Keep the machine, kernel, storage and CPU settings the same across runs.
+
+## Run
+
+```bash
+just guest-image
+NIBRUNNER_BENCHMARK_ROUNDS=100 \
+NIBRUNNER_BENCHMARK_OUTPUT="$PWD/wake-benchmark.json" \
+  just integration-guest benchmarks::machine::wake_latency --ignored
+```
+
+The output path must not exist. The JSON report is also printed to stdout. Record the Git
+revision alongside it with `git rev-parse HEAD`.
+
+Without `NIBRUNNER_BENCHMARK_ROUNDS`, each scenario runs 20 measured rounds. One initial
+sleep/wake round is excluded from each scenario. These are repeated wakes with cached
+artifacts; they do not measure first deployment, host reboot recovery, or cold storage.
+
+## Scenarios
+
+| Scenario | Sleeping apps | Callers per app | What it measures |
+| --- | --- | --- | --- |
+| `single` | 1 | 1 | One request restores one guest. |
+| `coalesced` | 1 | 32 | Callers share one guest restoration. |
+| `concurrent` | 4 | 8 | Several guests restore while callers wait. |
+
+Every app uses the test tenant, 1 vCPU, 256 MiB of guest memory and a 64 MiB local-file
+volume. Sleeps finish before requests start. A barrier releases the whole batch together,
+and every caller uses a fresh HTTP connection to the loopback proxy.
+
+The benchmark checks that each app restores once per round and that its in-memory counter
+survives. A failed request, cold boot, or duplicate restore fails the run rather than entering
+the latency distribution.
+
+## Read the report
+
+Each scenario reports counts, minimum, p50, p95, p99 and maximum in microseconds, together
+with the raw measurements:
+
+| Distribution | Population and boundary |
+| --- | --- |
+| `responses` | Every caller, from the batch starting through connection, wake, proxying and reading the complete HTTP response. |
+| `firstResponses` | The first completed response for each app in each round. |
+| `ready` | One host-measured wake per app and round, ending when the app is ready to receive traffic. The underlying measurement has millisecond precision. |
+
+The report includes the daemon version, kernel release, CPU model, logical CPU count and
+total host memory. The [metrics endpoint](/docs/guides/logs-and-metrics) provides further
+breakdown through `nibrunner_vm_restore_duration_seconds` and
+`nibrunner_wake_operation_duration_seconds`.
+
+Percentiles use the nearest rank without interpolation. Small populations make p99 effectively
+the maximum; use more rounds when comparing tails. There are no latency pass/fail thresholds,
+and these loopback measurements exclude internet latency and TLS.
+
+The benchmark is ignored by ordinary tests and CI. On a test host, run it before and after a
+change to compare results.
