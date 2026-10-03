@@ -270,6 +270,9 @@ async fn a_tap_is_created_addressed_and_given_the_guest_it_will_hold() {
         .await
         .expect("a second pass changes nothing");
     assert!(network.tap_names().await.contains(&slot.tap_name));
+    network.set_tap_owner(&slot.tap_name, 100_000).await.unwrap();
+    let owner = std::fs::read_to_string(format!("/sys/class/net/{}/owner", slot.tap_name)).unwrap();
+    assert_eq!(owner.trim(), "100000");
 
     network
         .refresh_neighbour(&Neighbour {

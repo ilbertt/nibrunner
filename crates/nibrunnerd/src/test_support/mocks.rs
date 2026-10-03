@@ -505,12 +505,17 @@ pub fn exports_answering(
 
 #[derive(Clone, Default)]
 pub struct NetworkSpy {
+    owners: Arc<Mutex<Vec<(String, u32)>>>,
     taps: Arc<Mutex<Vec<TapInterface>>>,
     neighbours: Arc<Mutex<Vec<Neighbour>>>,
     removed: Arc<Mutex<Vec<String>>>,
 }
 
 impl NetworkSpy {
+    pub fn owners(&self) -> Vec<(String, u32)> {
+        held(&self.owners)
+    }
+
     pub fn taps(&self) -> Vec<TapInterface> {
         held(&self.taps)
     }
@@ -531,6 +536,11 @@ pub fn network() -> (Arc<MockHostNetwork>, NetworkSpy) {
     let taps = spy.taps.clone();
     network.expect_ensure_tap().returning(move |tap: &TapInterface| {
         push(&taps, tap.clone());
+        Ok(())
+    });
+    let owners = spy.owners.clone();
+    network.expect_set_tap_owner().returning(move |name, uid| {
+        push(&owners, (name.to_string(), uid));
         Ok(())
     });
     let neighbours = spy.neighbours.clone();
