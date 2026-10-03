@@ -8,7 +8,11 @@ use backhand::{FilesystemCompressor, FilesystemWriter, NodeHeader};
 use protocol::DesiredLayer;
 
 use crate::json_store::make_directory;
-use crate::ports::{ArtifactError, ArtifactStore, ArtifactStoreExt, PayloadBuilder, PreparedPayload};
+use crate::ports::{
+    ArtifactError, ArtifactStore, ArtifactStoreExt, CommandRunner, PayloadBuilder, PreparedPayload,
+};
+
+mod oci;
 
 pub const VERBATIM_IMAGE_FILENAME: &str = "layer.img";
 
@@ -91,6 +95,7 @@ fn short_hash(text: &str) -> String {
 pub fn layer_image_path(cache_dir: &Path, layer: &DesiredLayer) -> PathBuf {
     let directory = cache_dir.join(layer.object().digest.as_str());
     match layer {
+        DesiredLayer::Oci { .. } => directory.join("oci.ext4"),
         DesiredLayer::Filesystem { .. } => directory.join(VERBATIM_IMAGE_FILENAME),
         DesiredLayer::Executable { destination_path, .. } => directory.join(format!(
             "executable-{}.squashfs",
@@ -102,11 +107,20 @@ pub fn layer_image_path(cache_dir: &Path, layer: &DesiredLayer) -> PathBuf {
 pub struct LayerImages {
     store: Arc<dyn ArtifactStore>,
     cache_dir: PathBuf,
+    commands: Arc<dyn CommandRunner>,
 }
 
 impl LayerImages {
-    pub fn new(store: Arc<dyn ArtifactStore>, cache_dir: PathBuf) -> Arc<Self> {
-        Arc::new(Self { store, cache_dir })
+    pub fn new(
+        store: Arc<dyn ArtifactStore>,
+        cache_dir: PathBuf,
+        commands: Arc<dyn CommandRunner>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            cache_dir,
+            commands,
+        })
     }
 }
 
@@ -116,7 +130,7 @@ impl PayloadBuilder for LayerImages {
         let mut layer_image_paths = Vec::with_capacity(layers.len());
         let mut fetched_bytes = 0;
         for layer in layers {
-            let image = ensure_layer_image(&self.store, &self.cache_dir, layer).await?;
+            let image = ensure_layer_image(&self.store, &self.cache_dir, layer, &self.commands).await?;
             layer_image_paths.push(image.path);
             fetched_bytes += image.fetched_bytes;
         }
@@ -138,6 +152,7 @@ pub async fn ensure_layer_image(
     store: &Arc<dyn ArtifactStore>,
     cache_dir: &Path,
     layer: &DesiredLayer,
+    commands: &Arc<dyn CommandRunner>,
 ) -> Result<LayerImage, ArtifactError> {
     let image_path = layer_image_path(cache_dir, layer);
     if image_path.exists() {
@@ -157,6 +172,13 @@ pub async fn ensure_layer_image(
     let bytes = store.read_verified(layer.object()).await?;
     let fetched_bytes = bytes.len() as u64;
     let image = match layer {
+        DesiredLayer::Oci { .. } => {
+            oci::prepare(bytes, image_path.clone(), commands).await?;
+            return Ok(LayerImage {
+                path: image_path,
+                fetched_bytes,
+            });
+        }
         DesiredLayer::Filesystem { .. } if is_filesystem_image(&bytes) => bytes,
         DesiredLayer::Filesystem { object } => {
             return Err(ArtifactError::NotAnImage {
@@ -240,6 +262,15 @@ mod tests {
         mocks::artifacts_holding(bytes)
     }
 
+    async fn prepare_layer(
+        store: &Arc<dyn ArtifactStore>,
+        cache_dir: &Path,
+        layer: &DesiredLayer,
+    ) -> Result<LayerImage, ArtifactError> {
+        let commands: Arc<dyn CommandRunner> = mocks::commands_succeeding().0;
+        super::ensure_layer_image(store, cache_dir, layer, &commands).await
+    }
+
     fn read_back(image: &[u8], path: &str) -> Vec<u8> {
         use std::io::Read;
         let filesystem = backhand::FilesystemReader::from_reader(Cursor::new(image.to_vec())).unwrap();
@@ -259,7 +290,7 @@ mod tests {
     async fn an_executable_is_packed_once_per_digest_and_holds_the_program_where_the_guest_runs_it() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(artifact_bytes());
-        let fetched = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
+        let fetched = prepare_layer(&store, directory.path(), &layer(|_| {}))
             .await
             .unwrap();
         let image_path = fetched.path.clone();
@@ -274,7 +305,7 @@ mod tests {
         assert_eq!(read_back(&image, "/app/server"), artifact_bytes());
 
         let before = std::fs::metadata(&image_path).unwrap().len();
-        let again = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
+        let again = prepare_layer(&store, directory.path(), &layer(|_| {}))
             .await
             .unwrap();
         assert_eq!(again.path, image_path);
@@ -288,7 +319,7 @@ mod tests {
     async fn the_program_sits_where_the_document_put_it_and_the_directories_above_are_made() {
         let directory = tempfile::tempdir().unwrap();
         let deep = placed_at(layer(|_| {}), "/usr/local/bin/server");
-        let image_path = ensure_layer_image(&store(artifact_bytes()), directory.path(), &deep)
+        let image_path = prepare_layer(&store(artifact_bytes()), directory.path(), &deep)
             .await
             .unwrap()
             .path;
@@ -300,11 +331,10 @@ mod tests {
     #[tokio::test]
     async fn a_filesystem_is_attached_as_it_was_uploaded() {
         let directory = tempfile::tempdir().unwrap();
-        let image_path =
-            ensure_layer_image(&store(BASE_LAYER_BYTES.to_vec()), directory.path(), &base_layer())
-                .await
-                .unwrap()
-                .path;
+        let image_path = prepare_layer(&store(BASE_LAYER_BYTES.to_vec()), directory.path(), &base_layer())
+            .await
+            .unwrap()
+            .path;
         assert!(image_path.ends_with(VERBATIM_IMAGE_FILENAME));
         assert_eq!(std::fs::read(&image_path).unwrap(), BASE_LAYER_BYTES);
     }
@@ -313,7 +343,7 @@ mod tests {
     async fn a_filesystem_that_is_not_one_is_refused_by_name() {
         let directory = tempfile::tempdir().unwrap();
         let not_an_image = as_filesystem(layer(|_| {}));
-        let error = ensure_layer_image(&store(artifact_bytes()), directory.path(), &not_an_image)
+        let error = prepare_layer(&store(artifact_bytes()), directory.path(), &not_an_image)
             .await
             .unwrap_err();
         assert!(matches!(error, ArtifactError::NotAnImage { .. }), "{error}");
@@ -336,7 +366,7 @@ mod tests {
     async fn bytes_that_are_not_what_they_claim_never_reach_a_guest() {
         let directory = tempfile::tempdir().unwrap();
         let wrong = store(b"something else entirely\n".to_vec());
-        let error = ensure_layer_image(&wrong, directory.path(), &layer(|_| {}))
+        let error = prepare_layer(&wrong, directory.path(), &layer(|_| {}))
             .await
             .unwrap_err();
         assert!(matches!(error, ArtifactError::DigestMismatch { .. }));
@@ -383,7 +413,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let refusing = mocks::artifacts_refusing(ArtifactError::Transfer("no such key".into()))
             as Arc<dyn ArtifactStore>;
-        let error = ensure_layer_image(&refusing, directory.path(), &layer(|_| {}))
+        let error = prepare_layer(&refusing, directory.path(), &layer(|_| {}))
             .await
             .unwrap_err();
         assert!(matches!(error, ArtifactError::Transfer(_)), "{error}");
@@ -410,7 +440,11 @@ mod tests {
                 ARTIFACT_BYTES.to_vec()
             })
         });
-        let images = LayerImages::new(Arc::new(store), directory.path().to_path_buf());
+        let images = LayerImages::new(
+            Arc::new(store),
+            directory.path().to_path_buf(),
+            mocks::commands_succeeding().0,
+        );
         let prepared = images.prepare(&[base_layer(), layer(|_| {})]).await.unwrap();
         assert_eq!(
             prepared.layer_image_paths,
@@ -494,7 +528,7 @@ mod tests {
     async fn an_image_already_in_the_cache_is_touched_so_a_reap_takes_the_cold_ones_first() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(artifact_bytes());
-        let image_path = ensure_layer_image(&store, directory.path(), &layer(|_| {}))
+        let image_path = prepare_layer(&store, directory.path(), &layer(|_| {}))
             .await
             .unwrap()
             .path;
@@ -506,7 +540,7 @@ mod tests {
             .set_times(std::fs::FileTimes::new().set_modified(backdated))
             .unwrap();
 
-        ensure_layer_image(&store, directory.path(), &layer(|_| {}))
+        prepare_layer(&store, directory.path(), &layer(|_| {}))
             .await
             .unwrap();
         let touched = std::fs::metadata(&image_path).unwrap().modified().unwrap();

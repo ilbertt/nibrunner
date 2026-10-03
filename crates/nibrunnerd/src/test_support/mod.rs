@@ -3,6 +3,7 @@ pub mod egress;
 #[cfg(target_os = "linux")]
 pub mod machine;
 pub mod mocks;
+pub mod oci;
 
 use std::ops::Deref;
 use std::sync::Arc;
@@ -505,7 +506,11 @@ async fn test_host_over(
             .given_to(owner.0, owner.1),
         )),
         artifacts: artifacts.clone(),
-        payloads: crate::adapters::vm::layers::LayerImages::new(artifacts, config.artifact_cache_dir()),
+        payloads: crate::adapters::vm::layers::LayerImages::new(
+            artifacts,
+            config.artifact_cache_dir(),
+            commands.clone(),
+        ),
         repositories,
         exports,
         checkpoint_servers: None,

@@ -335,6 +335,28 @@
       "description": "One read-only layer of the root filesystem an instance boots into. Layers stack in the order\nthe document lists them, first at the bottom, and the app's volume is stacked writable over\nall of them. The kind says what the object is, and so what the host does with it.",
       "oneOf": [
         {
+          "description": "An OCI image-layout archive for Linux x86_64, flattened and packed by the host. Its image\nconfiguration does not replace the instance's explicit command or guest account.",
+          "type": "object",
+          "properties": {
+            "digest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "kind": {
+              "type": "string",
+              "const": "oci"
+            },
+            "objectKey": {
+              "description": "Where the object lives in the store.",
+              "$ref": "#/$defs/ObjectKey"
+            }
+          },
+          "required": [
+            "kind",
+            "digest",
+            "objectKey"
+          ]
+        },
+        {
           "description": "A squashfs or ext4 image, attached as it was uploaded.",
           "type": "object",
           "properties": {

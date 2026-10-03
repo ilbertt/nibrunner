@@ -94,7 +94,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
             contents,
         )),
     };
-    let payloads = LayerImages::new(artifacts.clone(), config.artifact_cache_dir());
+    let payloads = LayerImages::new(artifacts.clone(), config.artifact_cache_dir(), commands.clone());
     let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let network = open_network()?;
     let cron = Arc::new(crate::domain::cron::registry::CronRegistry::new(

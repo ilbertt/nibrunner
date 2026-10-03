@@ -7,6 +7,39 @@ use std::time::Duration;
 use protocol::{DesiredInstanceState, DesiredPresence, InstanceState, VolumeState};
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_oci_archive_runs_the_explicit_command_from_its_filesystem_layer() {
+    use sha2::{Digest, Sha256};
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let store = std::path::Path::new(&host.host.config.artifact_store_url);
+    let program = std::fs::read(store.join("tenant")).expect("the host's static tenant");
+    let archive = nibrunnerd::test_support::oci::archive(&program);
+    std::fs::write(store.join("tenant-oci"), &archive).unwrap();
+    let app = host.tenant(1).edited(|instance| {
+        instance.layers = vec![protocol::DesiredLayer::Oci {
+            object: protocol::StoredObject {
+                digest: protocol::Sha256Digest::parse(hex::encode(Sha256::digest(&archive))).unwrap(),
+                object_key: protocol::ObjectKey::parse("tenant-oci").unwrap(),
+            },
+        }];
+    });
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    let answer = host
+        .get(&app, "/")
+        .await
+        .expect("the OCI tenant answers through the proxy");
+    assert_eq!(answer.status, 200, "{answer:?}");
+    let image = nibrunnerd::adapters::vm::layers::layer_image_path(
+        &host.host.config.artifact_cache_dir(),
+        &app.instance.layers[0],
+    );
+    assert!(image.exists());
+    host.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_killed_microvm_is_replaced_without_losing_its_disk_or_interrupting_its_neighbour() {
     use nibrunnerd::adapters::vm::process::VmProcesses;
     let Some(host) = crate::host().await else {
