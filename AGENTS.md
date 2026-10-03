@@ -132,6 +132,9 @@ Firecracker release it pins and embeds it; `NIBRUNNER_FIRECRACKER_BINARY` points
 without fetching. `just guest-image` builds `guest/rootfs.ext4` and needs Linux, root, docker and
 e2fsprogs.
 
+`nibrunnerd import-image` packages a Linux x86_64 image from Docker's local image store. It needs
+Docker access and `squashfs-tools` 4.7.5 or newer to preserve numeric ownership with `-numeric-owner`.
+
 ## Releases
 
 Run `prepare-release` on GitHub to open a release PR from `main`. `git-cliff`, pinned to a minor version in

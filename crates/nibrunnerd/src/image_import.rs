@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -344,26 +344,30 @@ fn resolve_program(
         }
         let target = entry.link_name()?.map(|target| {
             if entry.header().entry_type().is_hard_link() {
-                normalize(Path::new("/").join(target))
+                Path::new("/").join(target)
             } else {
-                normalize(
-                    Path::new("/")
-                        .join(path.parent().unwrap_or(Path::new("")))
-                        .join(target),
-                )
+                target.into_owned()
             }
         });
+        let path = normalize_archive_path(&path);
+        for parent in path.ancestors().skip(1) {
+            files.entry(parent.to_path_buf()).or_insert(ImageEntry {
+                kind: tar::EntryType::Directory,
+                mode: 0o755,
+                target: None,
+            });
+        }
         files.insert(
-            normalize(Path::new("/").join(&path)),
+            path,
             ImageEntry {
-                regular_file: entry.header().entry_type().is_file(),
+                kind: entry.header().entry_type(),
                 mode: entry.header().mode()?,
                 target,
             },
         );
     }
     let candidates = if program.contains('/') {
-        vec![normalize(Path::new(working_directory.as_str()).join(program))]
+        vec![Path::new(working_directory.as_str()).join(program)]
     } else {
         let search_path = search_path.ok_or_else(|| {
             Error::Unsupported(format!(
@@ -373,17 +377,16 @@ fn resolve_program(
         search_path
             .split(':')
             .map(|directory| {
-                normalize(
-                    Path::new(working_directory.as_str())
-                        .join(directory)
-                        .join(program),
-                )
+                Path::new(working_directory.as_str())
+                    .join(directory)
+                    .join(program)
             })
             .collect()
     };
     for candidate in candidates {
-        if executable(&candidate, &files) {
-            return Ok(GuestPath::parse(candidate.to_string_lossy().into_owned())?);
+        if let Some(invoked) = executable_path(&candidate, &files) {
+            return Ok(GuestPath::parse(candidate.to_string_lossy().into_owned())
+                .or_else(|_| GuestPath::parse(invoked.to_string_lossy().into_owned()))?);
         }
     }
     Err(Error::Unsupported(format!(
@@ -392,7 +395,7 @@ fn resolve_program(
 }
 
 struct ImageEntry {
-    regular_file: bool,
+    kind: tar::EntryType,
     mode: u32,
     target: Option<PathBuf>,
 }
@@ -400,45 +403,53 @@ struct ImageEntry {
 type ImageFiles = BTreeMap<PathBuf, ImageEntry>;
 const MAX_LINKS: usize = 40;
 
-fn executable(path: &Path, files: &ImageFiles) -> bool {
-    let mut path = path.to_path_buf();
-    for _ in 0..MAX_LINKS {
-        let mut prefix = PathBuf::new();
-        let mut followed = false;
-        for component in path.components() {
-            prefix.push(component);
-            if let Some(ImageEntry {
-                target: Some(target), ..
-            }) = files.get(&prefix)
-            {
-                path = normalize(
-                    target.join(
-                        path.strip_prefix(&prefix)
-                            .expect("prefix was built from the same path"),
-                    ),
-                );
-                followed = true;
-                break;
+fn executable_path(path: &Path, files: &ImageFiles) -> Option<PathBuf> {
+    let mut pending: VecDeque<_> = path.components().collect();
+    let mut resolved = PathBuf::from("/");
+    let mut invoked = None;
+    let mut links = 0;
+    while let Some(component) = pending.pop_front() {
+        match component {
+            Component::RootDir => resolved = PathBuf::from("/"),
+            Component::ParentDir => {
+                resolved.pop();
             }
-        }
-        if !followed {
-            return files
-                .get(&path)
-                .is_some_and(|entry| entry.regular_file && entry.mode & 0o111 != 0);
+            Component::Normal(name) => {
+                let next = resolved.join(name);
+                let entry = files.get(&next)?;
+                if pending.is_empty() && invoked.is_none() {
+                    invoked = Some(next.clone());
+                }
+                if let Some(target) = &entry.target {
+                    links += 1;
+                    if links > MAX_LINKS {
+                        return None;
+                    }
+                    for component in target.components().rev() {
+                        pending.push_front(component);
+                    }
+                } else {
+                    if !pending.is_empty() && !entry.kind.is_dir() {
+                        return None;
+                    }
+                    resolved = next;
+                }
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) => return None,
         }
     }
-    false
+    files
+        .get(&resolved)
+        .filter(|entry| entry.kind.is_file() && entry.mode & 0o111 != 0)?;
+    invoked
 }
 
-fn normalize(path: PathBuf) -> PathBuf {
+fn normalize_archive_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::from("/");
     for component in path.components() {
-        match component {
-            Component::Normal(name) => normalized.push(name),
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => {}
+        if let Component::Normal(name) = component {
+            normalized.push(name);
         }
     }
     normalized
@@ -452,7 +463,13 @@ mod tests {
     fn archive(root: &Path) -> PathBuf {
         let path = root.join("rootfs.tar");
         let mut archive = tar::Builder::new(File::create(&path).unwrap());
-        for path in ["usr/bin/python3", "bin/sh", "app/server"] {
+        for path in [
+            "usr/bin/python3",
+            "bin/sh",
+            "app/server",
+            "opt/bin/server",
+            "opt/app/data",
+        ] {
             let mut header = tar::Header::new_gnu();
             header.set_size(0);
             header.set_mode(0o755);
@@ -463,6 +480,8 @@ mod tests {
             ("bin/python", "../usr/bin/python3"),
             ("usr/local/bin", "/bin"),
             ("bin/loop", "loop"),
+            ("app/current", "/opt/app"),
+            ("app/linked-server", "current/../bin/server"),
         ] {
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(tar::EntryType::Symlink);
@@ -514,6 +533,33 @@ mod tests {
         assert!(resolve_program("loop", &cwd, Some("/bin"), &archive).is_err());
         assert!(resolve_program("cargo", &cwd, Some("/bin"), &archive).is_err());
         assert!(resolve_program("python", &cwd, None, &archive).is_err());
+    }
+
+    #[test]
+    fn parent_components_are_applied_after_directory_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = archive(root.path());
+        let cwd = GuestPath::parse("/app/current").unwrap();
+        assert_eq!(
+            resolve_program("../bin/server", &cwd, None, &archive)
+                .unwrap()
+                .as_str(),
+            "/opt/bin/server"
+        );
+        assert_eq!(
+            resolve_program("server", &cwd, Some("../bin"), &archive)
+                .unwrap()
+                .as_str(),
+            "/opt/bin/server"
+        );
+        assert_eq!(
+            resolve_program("/app/linked-server", &cwd, None, &archive)
+                .unwrap()
+                .as_str(),
+            "/app/linked-server"
+        );
+        assert!(resolve_program("/app/server/../server", &cwd, None, &archive).is_err());
+        assert!(resolve_program("/missing/../app/server", &cwd, None, &archive).is_err());
     }
 
     #[test]
