@@ -34,6 +34,8 @@ pub fn check(config: &HostConfig) -> Vec<Check> {
     for tool in ["nft", "mke2fs"] {
         checks.push(binary(tool, "install the nftables and e2fsprogs packages"));
     }
+    checks.push(binary("useradd", "install the passwd package"));
+    checks.push(binary("getent", "install the libc-bin package"));
     // What sets this host's kernel settings, which `install` does rather than asks for.
     checks.push(binary("modprobe", "install the kmod package"));
 
@@ -49,11 +51,6 @@ pub fn check(config: &HostConfig) -> Vec<Check> {
                 (
                     "fusermount3",
                     "install the nbd-client, e2fsprogs and fuse3 packages",
-                ),
-                // ZeroFS does not run as root, and this is what creates the account it does run as.
-                (
-                    "useradd",
-                    "install the passwd package, or create the zerofs account by hand",
                 ),
             ] {
                 checks.push(binary(tool, remedy));

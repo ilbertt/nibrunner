@@ -9,6 +9,7 @@
 //! asks systemd for it.
 
 pub mod guest_image;
+pub(crate) mod jailer_identities;
 pub mod kernel;
 pub mod max_apps;
 pub mod prerequisites;
@@ -130,6 +131,14 @@ pub async fn run(
         make_directory(&directory, DIRECTORY_MODE).map_err(|error| {
             InstallError::Refused(format!("{} could not be made: {error}", directory.display()))
         })?;
+    }
+
+    if jailer_identities::ensure(config.max_apps)? {
+        let identities = jailer_identities::read(config.max_apps)?;
+        laid.did(format!(
+            "jailer identity ranges reserved from UID {} and GID {}",
+            identities.uid_base, identities.gid_base
+        ));
     }
 
     if let Some(settings) = config.volumes.zerofs() {
