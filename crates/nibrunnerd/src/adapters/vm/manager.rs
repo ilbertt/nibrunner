@@ -150,6 +150,8 @@ impl VmManager {
         );
         let config_file = working_dir.join(FIRECRACKER_CONFIG_FILENAME);
         write_json(&config_file, &config).map_err(|error| VmError::Host(error.message()))?;
+        super::jailer_inputs::stage(&working_dir, slot.slot, config)
+            .map_err(|error| VmError::Host(error.message()))?;
 
         Ok(config_file)
     }
