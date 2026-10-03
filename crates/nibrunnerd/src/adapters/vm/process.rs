@@ -191,19 +191,27 @@ impl VmProcesses {
         let _ = std::fs::remove_file(&api_socket);
         let _ = std::fs::remove_file(working_dir.join(guest_contract::vsock::GUEST_VSOCK_FILENAME));
 
-        let console = std::fs::File::create(self.console_path(app_id))?;
         let mut command = tokio::process::Command::new(binary);
+        command.arg("--api-sock").arg(&api_socket);
+        if let Some(config_file) = config_file {
+            command.arg("--config-file").arg(config_file);
+        }
+        self.launch(app_id, command, working_dir).await
+    }
+
+    async fn launch(
+        &self,
+        app_id: &AppId,
+        mut command: tokio::process::Command,
+        working_dir: &Path,
+    ) -> std::io::Result<VmRecord> {
+        let console = std::fs::File::create(self.console_path(app_id))?;
         command
-            .arg("--api-sock")
-            .arg(&api_socket)
             .current_dir(working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::from(console.try_clone()?))
             .stderr(Stdio::from(console))
             .kill_on_drop(false);
-        if let Some(config_file) = config_file {
-            command.arg("--config-file").arg(config_file);
-        }
         #[cfg(unix)]
         {
             #[allow(
