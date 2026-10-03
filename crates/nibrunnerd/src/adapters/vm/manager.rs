@@ -197,6 +197,43 @@ impl VmManager {
         Ok(config_file)
     }
 
+    async fn create_snapshot(&self, app_id: &AppId, state: &Path, memory: &Path) -> Result<(), VmError> {
+        use crate::adapters::vm::snapshot::{exchange, publish_snapshot_file, EXCHANGE_BOOT_ID_FILENAME};
+        let exchange = exchange(&self.snapshot_dir, app_id);
+        let parent = exchange
+            .parent()
+            .expect("an exchange belongs to its snapshot directory");
+        make_directory(parent, VM_DIR_MODE).map_err(|error| VmError::Host(error.to_string()))?;
+        crate::json_store::write_text(
+            &parent.join(EXCHANGE_BOOT_ID_FILENAME),
+            self.processes.boot_id(),
+            0o600,
+        )
+        .map_err(|error| VmError::Host(error.message()))?;
+        make_directory(&exchange, VM_DIR_MODE).map_err(|error| VmError::Host(error.to_string()))?;
+        for name in ["state", "memory"] {
+            let _ = std::fs::remove_file(exchange.join(name));
+        }
+        let outcome = async {
+            self.api(app_id)
+                .create_snapshot(&exchange.join("state"), &exchange.join("memory"))
+                .await?;
+            for (name, destination) in [("state", state), ("memory", memory)] {
+                publish_snapshot_file(&exchange.join(name), destination)
+                    .map_err(|error| VmError::Host(error.to_string()))?;
+            }
+            Ok(())
+        }
+        .await;
+        for name in ["state", "memory"] {
+            let _ = std::fs::remove_file(exchange.join(name));
+        }
+        if outcome.is_err() {
+            self.discard_snapshot(app_id);
+        }
+        outcome
+    }
+
     /// Whether this microVM may be snapshotted now, and its share of the disk while it is.
     async fn admit_snapshot(&self, app_id: &AppId) -> Result<Reserved<'_>, String> {
         let record = self.state.record(app_id).await;
@@ -275,7 +312,10 @@ impl Vmm for VmManager {
 
         let paused = std::time::Instant::now();
         api.pause().await?;
-        if let Err(error) = api.create_snapshot(&paths.state_path, &paths.memory_path).await {
+        if let Err(error) = self
+            .create_snapshot(&request.app_id, &paths.state_path, &paths.memory_path)
+            .await
+        {
             let _ = api.resume().await;
             return Err(error);
         }
@@ -361,6 +401,7 @@ impl Vmm for VmManager {
         self.logs.detach(app_id).await;
         self.cron_registration.detach(app_id).await;
         let _ = std::fs::remove_dir_all(self.working_dir_for(app_id));
+        let _ = std::fs::remove_dir_all(super::snapshot::exchange(&self.snapshot_dir, app_id));
         Ok(())
     }
 
