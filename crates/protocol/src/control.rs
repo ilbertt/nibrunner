@@ -61,6 +61,12 @@ pub struct StoredObject {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum DesiredLayer {
+    /// An OCI image-layout archive for Linux x86_64, flattened and packed by the host. Its image
+    /// configuration does not replace the instance's explicit command or guest account.
+    Oci {
+        #[serde(flatten)]
+        object: StoredObject,
+    },
     /// A squashfs or ext4 image, attached as it was uploaded.
     Filesystem {
         #[serde(flatten)]
@@ -78,7 +84,9 @@ pub enum DesiredLayer {
 impl DesiredLayer {
     pub fn object(&self) -> &StoredObject {
         match self {
-            DesiredLayer::Filesystem { object } | DesiredLayer::Executable { object, .. } => object,
+            DesiredLayer::Oci { object }
+            | DesiredLayer::Filesystem { object }
+            | DesiredLayer::Executable { object, .. } => object,
         }
     }
 }

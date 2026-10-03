@@ -266,6 +266,21 @@ fn a_layer_that_still_declares_its_size_is_read_as_one_that_does_not() {
 }
 
 #[test]
+fn an_oci_layer_names_an_archive_without_changing_the_explicit_command() {
+    let mut document = instance_json();
+    document["layers"] = serde_json::json!([{
+        "kind": "oci", "digest": "a".repeat(64), "objectKey": "images/app.tar"
+    }]);
+    let parsed: DesiredInstance = serde_json::from_value(document.clone()).unwrap();
+    assert!(matches!(parsed.layers[0], DesiredLayer::Oci { .. }));
+    assert_eq!(parsed.layers[0].object().object_key.as_str(), "images/app.tar");
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap()["config"]["command"],
+        document["config"]["command"]
+    );
+}
+
+#[test]
 fn a_secret_never_prints_itself() {
     let secret = SecretString::parse("hunter2").unwrap();
     assert_eq!(format!("{secret:?}"), REDACTED);

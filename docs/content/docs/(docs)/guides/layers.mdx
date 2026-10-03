@@ -21,6 +21,7 @@ A layer is an object in the artifact store, identified by its digest, with a `ki
 | --- | --- |
 | `executable` | One program. The host packs it into an image at `destinationPath`. |
 | `filesystem` | A squashfs or ext4 image. Attached as uploaded. |
+| `oci` | A Linux x86_64 OCI image-layout archive. The host verifies its manifests and layers, applies whiteouts, and prepares a read-only filesystem image. |
 
 ```json
 "layers": [
@@ -59,6 +60,12 @@ so it cannot reach the guest's init, the raw volume, or the host.
 
 ## From a Docker image
 
-[Deploy from a Dockerfile](/docs/guides/dockerfile) walks through building an image, packing its
-filesystem as a layer, translating its command configuration, and deploying it. nibrunner runs
-the result in a microVM; Docker is used to build and export it.
+[Deploy from a Dockerfile](/docs/guides/dockerfile) walks through building an OCI archive and
+uploading it as an `oci` layer. The host prepares its filesystem using its existing `mke2fs` and `debugfs` tools;
+Docker and squashfs tools are not needed on the host. The image's `ENTRYPOINT`, `CMD`, `ENV`,
+`WORKDIR`, `USER`, ports, and health check do not replace the configuration in `desired.json`.
+
+OCI archives must contain one Linux amd64 image in a plain OCI layout tar, with at most 128
+layers, 1 GiB of decoded data, 100,000 entries, and 4 MiB of JSON metadata. Device nodes, FIFOs,
+sparse files, `LIBARCHIVE` extended attributes, and hard links to symbolic links are refused.
+Supported extended attributes use the `SCHILY.xattr.*` tar convention.
