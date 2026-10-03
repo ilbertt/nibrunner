@@ -77,7 +77,7 @@ impl VmManager {
         let _ = std::fs::remove_dir_all(&paths.directory);
     }
 
-    async fn stage(&self, request: &BootRequest) -> Result<PathBuf, VmError> {
+    async fn stage_inputs(&self, request: &BootRequest) -> Result<PathBuf, VmError> {
         let slot = &request.slot;
         let host = |error: crate::adapters::net::tap::NetworkError| VmError::Host(error.message());
         self.network
@@ -151,11 +151,20 @@ impl VmManager {
         let config_file = working_dir.join(FIRECRACKER_CONFIG_FILENAME);
         write_json(&config_file, &config).map_err(|error| VmError::Host(error.message()))?;
 
+        Ok(config_file)
+    }
+
+    async fn attach_channels(
+        &self,
+        app_id: &AppId,
+        deployment_id: &protocol::DeploymentId,
+        working_dir: &Path,
+    ) -> Result<(), VmError> {
         self.logs
             .attach(
-                request.desired.app_id.clone(),
-                request.desired.deployment_id.clone(),
-                tenant_log_socket_path(&working_dir),
+                app_id.clone(),
+                deployment_id.clone(),
+                tenant_log_socket_path(working_dir),
                 self.sink.clone(),
             )
             .await
@@ -163,15 +172,26 @@ impl VmManager {
         if let Err(error) = self
             .cron_registration
             .attach(
-                request.desired.app_id.clone(),
-                request.desired.deployment_id.clone(),
-                cron_registration_socket_path(&working_dir),
+                app_id.clone(),
+                deployment_id.clone(),
+                cron_registration_socket_path(working_dir),
             )
             .await
         {
-            self.logs.detach(&request.desired.app_id).await;
+            self.logs.detach(app_id).await;
             return Err(VmError::Host(error.to_string()));
         }
+        Ok(())
+    }
+
+    async fn stage(&self, request: &BootRequest) -> Result<PathBuf, VmError> {
+        let config_file = self.stage_inputs(request).await?;
+        self.attach_channels(
+            &request.desired.app_id,
+            &request.desired.deployment_id,
+            &self.working_dir_for(&request.desired.app_id),
+        )
+        .await?;
         Ok(config_file)
     }
 
@@ -372,27 +392,8 @@ impl Vmm for VmManager {
             return Ok(());
         };
         let working_dir = self.working_dir_for(app_id);
-        self.logs
-            .attach(
-                app_id.clone(),
-                record.deployment_id.clone(),
-                tenant_log_socket_path(&working_dir),
-                self.sink.clone(),
-            )
-            .await
-            .map_err(|error| VmError::Host(error.to_string()))?;
-        if let Err(error) = self
-            .cron_registration
-            .attach(
-                app_id.clone(),
-                record.deployment_id,
-                cron_registration_socket_path(&working_dir),
-            )
-            .await
-        {
-            self.logs.detach(app_id).await;
-            return Err(VmError::Host(error.to_string()));
-        }
+        self.attach_channels(app_id, &record.deployment_id, &working_dir)
+            .await?;
         if self
             .processes
             .read_record(app_id)
