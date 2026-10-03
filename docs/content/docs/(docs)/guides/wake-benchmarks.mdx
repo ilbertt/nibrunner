@@ -51,7 +51,6 @@ with the raw measurements:
 | --- | --- |
 | `responses` | Every caller, from the batch starting through connection, wake, proxying and reading the complete HTTP response. |
 | `firstResponses` | The first completed response for each app in each round. |
-| `ready` | One host-measured wake per app and round, ending when the app is ready to receive traffic. The underlying measurement has millisecond precision. |
 
 The report includes the daemon version, kernel release, CPU model, logical CPU count and
 total host memory. The [metrics endpoint](/docs/guides/logs-and-metrics) provides further

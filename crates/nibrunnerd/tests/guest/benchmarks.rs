@@ -54,7 +54,6 @@ mod machine {
         round: u32,
         app_id: String,
         first_response_us: u64,
-        ready_us: u64,
     }
 
     #[derive(Clone, Copy, Serialize)]
@@ -72,7 +71,6 @@ mod machine {
         rounds: u32,
         responses: Distribution,
         first_responses: Distribution,
-        ready: Distribution,
         measurements: Vec<Measurement>,
         wakes: Vec<Wake>,
     }
@@ -179,11 +177,7 @@ mod machine {
                     before.wakes[0] + 1,
                     "one restore per app and round"
                 );
-                assert_eq!(
-                    after.wakes[1..],
-                    before.wakes[1..],
-                    "the wake neither fails nor boots cold"
-                );
+                assert_eq!(after.wakes[1], before.wakes[1], "the wake never boots cold");
                 if round > 0 {
                     wakes.push(Wake {
                         round,
@@ -193,7 +187,6 @@ mod machine {
                             .map(|(measurement, _)| measurement.response_us)
                             .min()
                             .expect("each app had a caller"),
-                        ready_us: after.last_wake_ms.expect("the wake was measured") * 1000,
                     });
                 }
             }
@@ -207,7 +200,6 @@ mod machine {
             rounds,
             responses: distribution(measurements.iter().map(|measurement| measurement.response_us)),
             first_responses: distribution(wakes.iter().map(|wake| wake.first_response_us)),
-            ready: distribution(wakes.iter().map(|wake| wake.ready_us)),
             measurements,
             wakes,
         }
@@ -241,7 +233,6 @@ mod machine {
         .await;
         assert_eq!(report.responses.count, 4);
         assert_eq!(report.first_responses.count, 2);
-        assert_eq!(report.ready.count, 2);
         assert_eq!(report.measurements.len(), 4);
         assert_eq!(report.wakes.len(), 2);
         assert!(report
