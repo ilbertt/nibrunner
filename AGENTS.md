@@ -75,6 +75,10 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - Cron runs may overlap. Editing a crontab reschedules future runs; stopping or replacing its
   deployment cancels and drains active runs before the guest stops. Registry notifications and
   the next due time drive scheduling, without polling or catching up missed runs.
+- Every VMM cold boot and snapshot restore uses the matching embedded Firecracker jailer.
+  Installation reserves the locked nibrunner-jailer account's subordinate UID/GID ranges; startup
+  validates them. There is no jailer configuration or direct-launch fallback. Existing direct
+  VMMs may be readopted during an upgrade, but their snapshots cold boot when woken.
 - Docs site: Biome is strict — one parameter per function (`useMaxParams: 1`; wrap several in an
   object), no magic numbers, braces on every block, components declared with `function`, no barrel
   files, sorted Tailwind classes. `bun run fix:lint` and `bun run fix:format` in `docs/` apply
