@@ -21,6 +21,7 @@ pub mod start;
 pub mod state;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
+mod unix_socket;
 
 pub fn install_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();

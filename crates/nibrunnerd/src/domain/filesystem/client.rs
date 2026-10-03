@@ -44,7 +44,9 @@ impl GuestFilesystem {
         let unreachable = || GuestFilesystemError::Unreachable {
             app_id: app_id.clone(),
         };
-        let stream = UnixStream::connect(vsock_path).await.map_err(|_| unreachable())?;
+        let stream = crate::unix_socket::connect(vsock_path)
+            .await
+            .map_err(|_| unreachable())?;
         let mut client = Self {
             app_id: app_id.clone(),
             wire: BufReader::new(stream),

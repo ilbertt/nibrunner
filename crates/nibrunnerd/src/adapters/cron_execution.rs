@@ -69,7 +69,7 @@ impl GuestCronExecution {
         sink: &dyn LogSink,
     ) -> Result<CronExitStatus, CronExecutionError> {
         let connect = async {
-            let stream = UnixStream::connect(path)
+            let stream = crate::unix_socket::connect(path)
                 .await
                 .map_err(|_| CronExecutionError::Disconnected)?;
             let mut stream = BufReader::new(stream);
