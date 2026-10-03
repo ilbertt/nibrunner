@@ -123,6 +123,9 @@ pub async fn started_with(edit: impl FnOnce(&mut crate::config::HostConfig)) -> 
     crate::install::kernel::apply(&config, &mut crate::install::Laid::default())
         .expect("this machine takes the settings a host needs");
 
+    crate::install::jailer_identities::ensure(config.max_apps)
+        .expect("the installer reserves this machine's jailer identities");
+
     let host = crate::run::build_host(config)
         .await
         .expect("a host on this machine");
