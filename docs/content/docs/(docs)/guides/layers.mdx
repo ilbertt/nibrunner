@@ -35,8 +35,9 @@ one copy.
 ## The volume
 
 The volume is the writable top of the stack. Every write goes there and persists. Nothing else
-persists. An export contains the volume and the environment, never the contents of a layer. If a
-layer and the volume both hold a file at the same path, the volume's copy wins.
+persists. An export contains the volume, the environment, and the original crontab when the app
+has registered cron jobs, never the contents of a layer. If a layer and the volume both hold a
+file at the same path, the volume's copy wins.
 
 ## What runs
 

@@ -128,7 +128,13 @@ as an archive:
   store until `desiredState` is `absent`.
 - An **export** freezes the guest's filesystem, takes its own checkpoint, and writes a gzipped
   tar to `objectKey` in `exports.store_url`. The tar holds the volume's contents under `data/`
-  and `environment` as `.env`. To start a new volume from it, point `initialContents` at an
+  and `environment` as `.env`, plus the original `crontab` when the app has registered cron jobs.
+  The crontab preserves comments and environment assignments; `.env` and `crontab` have mode
+  `0600`. Empty tables and tables containing only comments or environment assignments are omitted.
+  To start a new volume from it, point `initialContents` at an
   archive of the `data/` contents, with `destinationPath` `/`.
+
+After restoring the volume, install the exported crontab with `crontab /path/to/crontab` inside
+the new deployment.
 
 `reported.json` reports the state of each checkpoint and export, with the reason on failure.
