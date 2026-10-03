@@ -12,6 +12,7 @@
     "raw-ports",
     "logs-and-metrics",
     "file-listings",
-    "host-capacity"
+    "host-capacity",
+    "firecracker-jailer"
   ]
 }

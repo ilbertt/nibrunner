@@ -1,0 +1,42 @@
+---
+title: Firecracker jailer
+description: Every new VMM runs in a filesystem jail with a dedicated non-root identity.
+---
+
+Every cold boot and snapshot restore uses the Firecracker jailer. The matching
+jailer ships inside `nibrunnerd`; jail setup failures refuse the launch.
+
+`nibrunnerd install` creates the locked `nibrunner-jailer` system account and
+reserves its subordinate UID and GID ranges in `/etc/subuid` and `/etc/subgid`.
+Each app slot gets one identity from those ranges. Startup checks that the
+reservation fits `max_apps` and overlaps no other reservation or host account.
+The ranges remain stable across daemon restarts and installation upgrades.
+
+| Resource | Inside the jail |
+| --- | --- |
+| Kernel, root filesystem and layers | Read-only files |
+| App volume | The app's own writable image or NBD device |
+| Snapshots | A directory for this app on the snapshot disk |
+| Host channels | Private sockets owned by this VMM's UID |
+| Network | The existing TAP, assigned to this VMM's UID |
+
+The daemon still runs as root. The jailer creates the filesystem boundary and
+drops the VMM's UID and GID. The VMM remains in the host network namespace and
+retains the existing nftables isolation. Local-file volume images keep their
+owner and gain read/write access for the slot's reserved group; host NBD device
+ownership stays unchanged.
+
+A jail is rebuilt before each launch from host-owned inputs. Jailed apps retain
+their volume and memory across sleep and wake, and the daemon can readopt their
+sockets after a restart.
+
+## Upgrade an existing host
+
+Run `nibrunnerd install`, then `nibrunnerd start`. Existing VMMs keep serving until
+stopped or redeployed. Redeploy apps to move their next boot into a jail. A
+snapshot from a direct launch falls back to a cold boot, preserving the app's
+volume.
+
+If an unreleased configuration already contains a `[jailer]` section, remove it
+before upgrading. Installation manages the identities; the configuration has
+no jailer settings.
