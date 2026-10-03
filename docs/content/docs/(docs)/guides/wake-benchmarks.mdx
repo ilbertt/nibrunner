@@ -56,7 +56,7 @@ with the raw measurements:
 The report includes the daemon version, kernel release, CPU model, logical CPU count and
 total host memory. The [metrics endpoint](/docs/guides/logs-and-metrics) provides further
 breakdown through `nibrunner_vm_restore_duration_seconds` and
-`nibrunner_wake_operation_duration_seconds`.
+`nibrunner_wake_phase_seconds`.
 
 Percentiles use the nearest rank without interpolation. Small populations make p99 effectively
 the maximum; use more rounds when comparing tails. There are no latency pass/fail thresholds,
