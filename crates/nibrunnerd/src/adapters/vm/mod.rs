@@ -7,3 +7,6 @@ pub mod snapshot;
 pub mod status;
 
 pub use status::{VmExit, VmStatus, UNKNOWN_VM};
+
+#[cfg(not(test))]
+pub(crate) mod mount_namespace;

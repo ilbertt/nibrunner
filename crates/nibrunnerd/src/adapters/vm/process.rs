@@ -200,6 +200,8 @@ impl VmProcesses {
         if let Some(config_file) = config_file {
             command.arg("--config-file").arg(config_file);
         }
+        #[cfg(not(test))]
+        super::mount_namespace::configure(&mut command);
         self.launch(app_id, command, working_dir).await
     }
 
