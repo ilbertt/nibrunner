@@ -183,34 +183,71 @@ impl VmProcesses {
         }
     }
 
-    pub async fn spawn(
+    pub(crate) async fn spawn(
+        &self,
+        app_id: &AppId,
+        binary: &Path,
+        jailer: &super::jailer::Jailer,
+        jail: &super::jailer::Jail,
+        boot: bool,
+    ) -> std::io::Result<VmRecord> {
+        make_directory(&self.runtime_dir, RUNTIME_DIR_MODE)?;
+        let api_socket = self.api_socket(app_id);
+        let _ = std::fs::remove_file(&api_socket);
+        let _ = std::fs::remove_file(jail.root.join(guest_contract::vsock::GUEST_VSOCK_FILENAME));
+        let base = jail
+            .root
+            .ancestors()
+            .nth(3)
+            .ok_or_else(|| std::io::Error::other("the jail has no base directory"))?;
+        std::os::unix::fs::symlink(jail.root.join("api.sock"), &api_socket)?;
+        let mut command = tokio::process::Command::new(&jailer.binary);
+        command
+            .arg("--id")
+            .arg(super::jailer::jail_id(app_id))
+            .arg("--exec-file")
+            .arg(binary)
+            .arg("--uid")
+            .arg(jail.uid.to_string())
+            .arg("--gid")
+            .arg(jail.gid.to_string())
+            .arg("--chroot-base-dir")
+            .arg(base)
+            .arg("--cgroup-version")
+            .arg("2")
+            .arg("--parent-cgroup")
+            .arg("nibrunner-jailer")
+            .arg("--")
+            .arg("--api-sock")
+            .arg("/api.sock");
+        if boot {
+            command.arg("--config-file").arg("/firecracker.json");
+        }
+        jail.configure_command(&mut command)?;
+        self.launch(app_id, command, jail).await
+    }
+
+    #[cfg(test)]
+    async fn spawn_test_process(
         &self,
         app_id: &AppId,
         binary: &Path,
         working_dir: &Path,
         config_file: Option<&Path>,
     ) -> std::io::Result<VmRecord> {
-        make_directory(&self.runtime_dir, RUNTIME_DIR_MODE)?;
-        let api_socket = self.api_socket(app_id);
-        let _ = std::fs::remove_file(&api_socket);
-        let _ = std::fs::remove_file(working_dir.join(guest_contract::vsock::GUEST_VSOCK_FILENAME));
-
-        let mut command = tokio::process::Command::new(binary);
-        command.arg("--api-sock").arg(&api_socket);
-        if let Some(config_file) = config_file {
-            command.arg("--config-file").arg(config_file);
-        }
-        #[cfg(not(test))]
-        super::mount_namespace::configure(&mut command);
-        self.launch(app_id, command, working_dir).await
+        let jail = super::jailer::Jail::for_testing(working_dir.into());
+        let jailer = super::jailer::Jailer::for_testing(binary.into());
+        self.spawn(app_id, binary, &jailer, &jail, config_file.is_some())
+            .await
     }
 
     async fn launch(
         &self,
         app_id: &AppId,
         mut command: tokio::process::Command,
-        working_dir: &Path,
+        jail: &super::jailer::Jail,
     ) -> std::io::Result<VmRecord> {
+        let working_dir = &jail.root;
         let console = std::fs::File::create(self.console_path(app_id))?;
         command
             .current_dir(working_dir)
@@ -243,8 +280,8 @@ impl VmProcesses {
             exit_code: None,
             signal: None,
             stop_requested: false,
-            jail_root: None,
-            jail_uid: None,
+            jail_root: Some(jail.root.clone()),
+            jail_uid: Some(jail.uid),
         };
         self.write_record(&record)?;
 
@@ -558,13 +595,15 @@ mod tests {
         make_directory(&working_dir, 0o700).unwrap();
 
         let record = processes
-            .spawn(&app_id(), Path::new("/bin/echo"), &working_dir, None)
+            .spawn_test_process(&app_id(), Path::new("/bin/echo"), &working_dir, None)
             .await
             .unwrap();
         assert_eq!(record.app_id, app_id());
         assert_eq!(record.host_boot_id, "boot-1");
         assert_eq!(record.exit_code, None);
         assert!(!record.stop_requested);
+        assert_eq!(record.jail_root, Some(working_dir.clone()));
+        assert!(record.jail_uid.is_some());
         assert_eq!(processes.adopted_app_ids(), vec![app_id()]);
 
         for _ in 0..200 {
@@ -578,9 +617,17 @@ mod tests {
         assert!(settled.loaded);
         assert!(!settled.active);
         assert!(!settled.failed, "an exit of 0 is not a failure");
-        assert!(std::fs::read_to_string(processes.console_path(&app_id()))
-            .unwrap()
-            .contains("--api-sock"));
+        let console = std::fs::read_to_string(processes.console_path(&app_id())).unwrap();
+        for argument in [
+            "--id",
+            "--exec-file",
+            "--uid",
+            "--gid",
+            "--chroot-base-dir",
+            "--api-sock /api.sock",
+        ] {
+            assert!(console.contains(argument), "{console}");
+        }
     }
 
     #[tokio::test]
@@ -599,7 +646,7 @@ mod tests {
         .unwrap();
 
         let record = processes
-            .spawn(&app_id(), &lingering, &working_dir, None)
+            .spawn_test_process(&app_id(), &lingering, &working_dir, None)
             .await
             .unwrap();
         signal(record.pid, libc::SIGKILL);
@@ -626,7 +673,7 @@ mod tests {
         let working_dir = directory.path().join("vm");
         make_directory(&working_dir, 0o700).unwrap();
         assert!(processes
-            .spawn(
+            .spawn_test_process(
                 &app_id(),
                 Path::new("/nowhere/nibrunner-no-such-hypervisor"),
                 &working_dir,
