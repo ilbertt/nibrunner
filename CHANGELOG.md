@@ -1,5 +1,17 @@
 # Changelog
 
+## [2026.10.2] - 2026-10-04
+
+### Features
+
+- Pull digest-pinned images from public OCI registries (#234)
+- Prepare OCI image layers on the host (#218)
+- Assemble OCI image archives (#217)
+
+### Documentation
+
+- Consolidate OCI image guidance in layers (#235)
+
 ## [2026.10.1] - 2026-10-04
 
 ### Features
