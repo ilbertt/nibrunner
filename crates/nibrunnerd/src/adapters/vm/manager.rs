@@ -409,6 +409,21 @@ impl Vmm for VmManager {
                     .map_err(|error| VmError::Host(error.to_string()))?;
             }
         }
+        if self
+            .processes
+            .read_record(app_id)
+            .is_some_and(|record| record.jail_root.is_some())
+        {
+            use std::os::unix::fs::MetadataExt;
+            let owner = std::fs::metadata(&working_dir).map_err(|error| VmError::Host(error.to_string()))?;
+            for socket in [
+                tenant_log_socket_path(&working_dir),
+                cron_registration_socket_path(&working_dir),
+            ] {
+                crate::unix_socket::own(&socket, owner.uid(), owner.gid())
+                    .map_err(|error| VmError::Host(error.to_string()))?;
+            }
+        }
         Ok(())
     }
 
