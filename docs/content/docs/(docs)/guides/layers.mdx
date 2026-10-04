@@ -21,7 +21,7 @@ A layer names content by its digest, either in the artifact store or in a public
 | --- | --- |
 | `executable` | One program. The host packs it into an image at `destinationPath`. |
 | `filesystem` | A squashfs or ext4 image. Attached as uploaded. |
-| `oci` | A Linux x86_64 OCI image from an artifact-store archive or public registry. The host verifies its manifests and layers, applies whiteouts, and prepares a read-only filesystem image. |
+| `oci` | A Linux amd64 image from an artifact-store archive or public registry. |
 
 ```json
 "layers": [
@@ -30,8 +30,7 @@ A layer names content by its digest, either in the artifact store or in a public
 ]
 ```
 
-A layer is downloaded once per host and cached by digest. Ten apps on the same base image share
-one copy.
+Downloaded layers are cached by digest. Apps on the same host share cached layers.
 
 ## The volume
 
@@ -58,23 +57,23 @@ If no layer contains the working directory, the host creates it and gives it to 
 program can write to the working directory and to `/tmp`. It is chrooted into the stacked root,
 so it cannot reach the guest's init, the raw volume, or the host.
 
-## From a Docker image
+## From an OCI image
 
-[Deploy from a Dockerfile](/docs/guides/dockerfile) walks through building an OCI archive and
-uploading it as an `oci` layer. The host prepares its filesystem using its existing `mke2fs` and `debugfs` tools;
-Docker and squashfs tools are not needed on the host. The image's `ENTRYPOINT`, `CMD`, `ENV`,
-`WORKDIR`, `USER`, ports, and health check do not replace the configuration in `desired.json`.
+Use `kind: "oci"` for a Linux amd64 Docker or OCI image. The host downloads the image, verifies
+its manifests and layers, and prepares its filesystem. Docker is not needed on the host.
 
-OCI archives must contain one Linux amd64 image in a plain OCI layout tar, with at most 128
-layers, 1 GiB of decoded data, 100,000 entries, and 4 MiB of JSON metadata. Device nodes, FIFOs,
-sparse files, `LIBARCHIVE` extended attributes, and hard links to symbolic links are refused.
-Supported extended attributes use the `SCHILY.xattr.*` tar convention.
+| Source | Field | What `digest` identifies |
+| --- | --- | --- |
+| Public image registry | `repository` | The image manifest or multi-platform index. |
+| OCI archive in the artifact store | `objectKey` | The whole archive. |
 
-## From a public registry
+Set exactly one of `repository` or `objectKey`. Digests are lowercase SHA256 hex, without the
+`sha256:` prefix. Add the layer to your instance in [desired.json](/docs/getting-started/deploy-an-app#write-desiredjson).
 
-Use `kind: "oci"` with `repository` to pull an image directly, without exporting an archive or uploading to the
-artifact store. Name the registry and full repository path, plus a lowercase SHA256 digest of
-its image manifest or multi-platform index:
+### From a registry
+
+Name the registry and full repository path. This example pins Docker's official BusyBox
+`1.37.0-musl` image:
 
 ```json
 "layers": [
@@ -86,16 +85,67 @@ its image manifest or multi-platform index:
 ]
 ```
 
-Name exactly one source: `objectKey` for an archive in the artifact store, or `repository` for a
-registry image. Existing archive layers keep their current shape.
+The host selects Linux amd64 from a multi-platform index. Registry pulls require HTTPS and
+public access. Private repositories and tags are not supported.
 
-This pins Docker's official BusyBox `1.37.0-musl` image. The host selects Linux amd64 from an
-index, verifies manifests and blobs, and caches the prepared filesystem by the pinned digest.
-A cache hit needs no registry access. Change both the digest and `deploymentId` to deploy another
-image version. Image startup defaults still need translating into `config.command`, as described
-in [Deploy from a Dockerfile](/docs/guides/dockerfile#translate-your-images-configuration).
+### From an archive
 
-Registry access uses HTTPS and anonymous authentication, including public bearer-token challenges.
-Private repositories, tags, and insecure HTTP registries are not supported. Registry downloads
-are limited to 1 GiB of blobs and use the same filesystem limits as OCI archives above. A registry
-outage or rate limit can prevent an uncached deployment; bucket archives remain an alternative.
+Export your Dockerfile with a Buildx builder that supports the OCI exporter, such as the
+`docker-container` driver:
+
+```bash
+docker buildx build --platform linux/amd64 --output type=oci,dest=app.oci.tar .
+```
+
+Copy the archive to the host. For the default local artifact store:
+
+```bash
+set -euo pipefail
+digest=$(sha256sum app.oci.tar | cut -d ' ' -f 1)
+install -D -m 0644 app.oci.tar "/var/lib/nibrunner/artifact-store/$digest"
+printf '%s\n' "$digest"
+```
+
+For an object store, upload the archive to `artifacts.store_url` under a key of your choice.
+Set `objectKey` to that key and `digest` to the archive's SHA256:
+
+```json
+"layers": [
+  { "kind": "oci", "objectKey": "<store key>", "digest": "<archive sha256>" }
+]
+```
+
+Use the OCI exporter shown above. Archives from `docker save` or `docker export` are not supported.
+
+### Image configuration
+
+The image supplies files. Set how the app runs in `desired.json`. Copy any image defaults your
+app needs, including those inherited from its base image:
+
+| Image setting | nibrunner setting |
+| --- | --- |
+| `ENTRYPOINT`, `CMD` | `config.command.program` and `args`. Preserve the entrypoint and its arguments, including wrapper scripts. Use an absolute program path. |
+| `WORKDIR` | `config.command.workingDirectory`. Use `/` if the image has none. |
+| `ENV` | `config.command.environment`. Include inherited variables the app needs. |
+| `EXPOSE` | `config.httpPort` or [`config.ports`](/docs/guides/raw-ports). |
+| `HEALTHCHECK` | [`config.healthCheck`](/docs/guides/health-checks). Docker's check is not imported. |
+| `USER` | The app runs as uid/gid 65534. Files must be readable and programs executable by that account. |
+| `VOLUME` | The app uses its nibrunner volume. Image volume declarations and host mounts are not imported. |
+
+The server must listen on `0.0.0.0`. Writable directories must allow uid 65534 access. Entrypoints
+that require root or Docker-specific mounts need adapting.
+
+### Limits
+
+OCI archives must contain one Linux amd64 image. Both sources allow at most 128 image layers,
+1 GiB of decoded data, 100,000 filesystem entries, and 4 MiB of JSON metadata. Registry downloads
+also allow at most 1 GiB of blobs.
+
+Device nodes, FIFOs, sparse files, `LIBARCHIVE` extended attributes, and hard links to symbolic
+links are refused. Supported extended attributes use the `SCHILY.xattr.*` tar convention.
+
+### Update the image
+
+Upload a new archive or choose a new registry digest, then update the layer, `deploymentId`, and
+document `revision`. Keep `volumeId` to retain the app's data. Files already written to the
+volume take precedence over files in the new image.

@@ -174,9 +174,9 @@ full bundle, which `src/lib/shiki-full-stub.ts` and the alias beside it in `vite
 there to keep out. Its playground and its generated code samples are both off — a unix socket has
 no URL to build a call from, so the document carries the one that works as `x-codeSamples`.
 A page that moves leaves its old path in the `moved` map in `docs/src/routes/docs/$.tsx`. Link the
-docs by their nibrunner.dev URL, from the daemon's messages and the README alike. Style: short,
-steps and tables first, the why in a callout. `just docs-build` produces `docs/dist/app`, one Linux
-binary with the site inside; it is deployed by hand with `nib run` from `main` once a pull request
+docs by their nibrunner.dev URL, from the daemon's messages and the README alike. Style: plain, concise, direct;
+no fluff or playful wording. Steps and tables first, the why in a callout. `just docs-build`
+produces `docs/dist/app`, one Linux binary with the site inside; it is deployed by hand with `nib run` from `main` once a pull request
 merges.
 
 ## READMEs

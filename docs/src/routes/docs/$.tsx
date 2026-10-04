@@ -22,6 +22,7 @@ const moved: Record<string, string> = {
   'quick-start': 'getting-started/installation',
   config: 'reference/config',
   'desired-state': 'getting-started/deploy-an-app',
+  'guides/dockerfile': 'guides/layers',
   reference: 'reference/config',
   'reference/desired-state': 'reference/desired',
   'reference/reported-state': 'reference/reported',
