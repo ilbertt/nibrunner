@@ -6,6 +6,50 @@ use std::time::Duration;
 
 use protocol::{DesiredInstanceState, DesiredPresence, InstanceState, VolumeState};
 
+// Docker's official BusyBox 1.37.0-musl index; the digest fixes both the image and its platform selection.
+const BUSYBOX_INDEX: &str = "5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_public_busybox_image_serves_a_cow_through_a_jailed_microvm() {
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1).edited(|instance| {
+        instance.layers = vec![protocol::DesiredLayer::OciRegistry {
+            repository: protocol::OciRepository::parse("docker.io/library/busybox").unwrap(),
+            digest: protocol::Sha256Digest::parse(BUSYBOX_INDEX).unwrap(),
+        }];
+        instance.config.command.program = protocol::GuestPath::parse("/bin/busybox").unwrap();
+        instance.config.command.args = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            r#"printf '%s\n' '<pre>moo from a microVM' '  ^__^' '  (oo)\_______' '  (__)\       )\/\' '      ||----w |' '      ||     ||' "uid=$(/bin/busybox id -u)" '</pre>' > index.html; exec /bin/busybox httpd -f -p 0.0.0.0:3000 -h /app"#.to_string(),
+        ].try_into().unwrap();
+    });
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    let answer = host
+        .get(&app, "/")
+        .await
+        .expect("BusyBox answers through the proxy");
+    assert_eq!(answer.status, 200, "{answer:?}");
+    assert!(answer.body.contains("moo from a microVM"), "{answer:?}");
+    assert!(answer.body.contains("(oo)"), "{answer:?}");
+    assert!(answer.body.contains("uid=65534"), "{answer:?}");
+    assert_eq!(
+        host.instance(&app.app_id).await.unwrap().layer_digests,
+        vec![protocol::Sha256Digest::parse(BUSYBOX_INDEX).unwrap()]
+    );
+    let cached = nibrunnerd::adapters::vm::layers::layer_image_path(
+        &host.host.config.artifact_cache_dir(),
+        &app.instance.layers[0],
+    );
+    assert!(cached.exists());
+    let again = host.host.payloads.prepare(&app.instance.layers).await.unwrap();
+    assert_eq!(again.fetched_bytes, 0);
+    host.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_oci_archive_runs_the_explicit_command_from_its_filesystem_layer() {
     use sha2::{Digest, Sha256};

@@ -260,7 +260,7 @@ fn a_layer_that_still_declares_its_size_is_read_as_one_that_does_not() {
     let mut document = instance_json();
     document["layers"][1]["sizeBytes"] = serde_json::json!(27);
     let parsed: DesiredInstance = serde_json::from_value(document).expect("parses");
-    assert_eq!(parsed.layers[1].object().digest.as_str(), "a".repeat(64));
+    assert_eq!(parsed.layers[1].digest().as_str(), "a".repeat(64));
     let written = serde_json::to_value(&parsed).expect("serialises");
     assert!(written["layers"][1].get("sizeBytes").is_none());
 }
@@ -273,11 +273,58 @@ fn an_oci_layer_names_an_archive_without_changing_the_explicit_command() {
     }]);
     let parsed: DesiredInstance = serde_json::from_value(document.clone()).unwrap();
     assert!(matches!(parsed.layers[0], DesiredLayer::Oci { .. }));
-    assert_eq!(parsed.layers[0].object().object_key.as_str(), "images/app.tar");
+    assert_eq!(
+        parsed.layers[0].stored_object().unwrap().object_key.as_str(),
+        "images/app.tar"
+    );
     assert_eq!(
         serde_json::to_value(parsed).unwrap()["config"]["command"],
         document["config"]["command"]
     );
+}
+
+#[test]
+fn registry_layers_pin_content_and_keep_startup_configuration_explicit() {
+    let mut document = instance_json();
+    document["layers"] = serde_json::json!([{
+        "kind": "oci-registry", "repository": "docker.io/library/busybox", "digest": "a".repeat(64)
+    }]);
+    let parsed: DesiredInstance = serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(parsed.layers[0].digest().as_str(), "a".repeat(64));
+    assert!(parsed.layers[0].stored_object().is_none());
+    let written = serde_json::to_value(parsed).unwrap();
+    assert_eq!(written["layers"], document["layers"]);
+    assert_eq!(written["config"]["command"], document["config"]["command"]);
+}
+
+#[test]
+fn registry_repository_validation_agrees_with_its_schema() {
+    let validator =
+        jsonschema::validator_for(&serde_json::to_value(schemars::schema_for!(OciRepository)).unwrap())
+            .unwrap();
+    for (repository, accepted) in [
+        ("docker.io/library/busybox", true),
+        ("ghcr.io/owner/my_image", true),
+        ("registry.example.com:5000/team/image", true),
+        ("registry.example-host/team/image", true),
+        ("localhost:5000/test", true),
+        ("busybox", false),
+        ("library/busybox", false),
+        ("https://docker.io/library/busybox", false),
+        ("docker.io/library/busybox:latest", false),
+        ("docker.io/library/busybox@sha256:abc", false),
+        ("docker.io/../busybox", false),
+        ("docker.io/library//busybox", false),
+        ("docker.io/Library/Busybox", false),
+        ("user:password@registry.example.com/image", false),
+    ] {
+        assert_eq!(OciRepository::parse(repository).is_ok(), accepted, "{repository}");
+        assert_eq!(
+            validator.is_valid(&serde_json::json!(repository)),
+            accepted,
+            "{repository}"
+        );
+    }
 }
 
 #[test]

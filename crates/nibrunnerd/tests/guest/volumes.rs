@@ -85,10 +85,8 @@ async fn replacing_a_sleeping_release_runs_its_new_artifact_and_preserves_only_t
     let reported = host.instance(&replacement.app_id).await.expect("a record");
     assert!(reported
         .layer_digests
-        .contains(&replacement.instance.layers[1].object().digest));
-    assert!(!reported
-        .layer_digests
-        .contains(&app.instance.layers[1].object().digest));
+        .contains(replacement.instance.layers[1].digest()));
+    assert!(!reported.layer_digests.contains(app.instance.layers[1].digest()));
 
     host.let_sleep(&replacement).await;
     assert_eq!(

@@ -67,6 +67,12 @@ pub enum DesiredLayer {
         #[serde(flatten)]
         object: StoredObject,
     },
+    /// A public registry image pinned to its manifest or index digest. Startup configuration
+    /// remains explicit in the desired document.
+    OciRegistry {
+        repository: OciRepository,
+        digest: Sha256Digest,
+    },
     /// A squashfs or ext4 image, attached as it was uploaded.
     Filesystem {
         #[serde(flatten)]
@@ -82,14 +88,65 @@ pub enum DesiredLayer {
 }
 
 impl DesiredLayer {
-    pub fn object(&self) -> &StoredObject {
+    pub fn digest(&self) -> &Sha256Digest {
         match self {
-            DesiredLayer::Oci { object }
-            | DesiredLayer::Filesystem { object }
-            | DesiredLayer::Executable { object, .. } => object,
+            Self::OciRegistry { digest, .. } => digest,
+            Self::Oci { object } | Self::Filesystem { object } | Self::Executable { object, .. } => {
+                &object.digest
+            }
+        }
+    }
+
+    pub fn stored_object(&self) -> Option<&StoredObject> {
+        match self {
+            Self::OciRegistry { .. } => None,
+            Self::Oci { object } | Self::Filesystem { object } | Self::Executable { object, .. } => {
+                Some(object)
+            }
         }
     }
 }
+
+#[cfg(feature = "schema")]
+const OCI_REPOSITORY_PATTERN: &str = r"^(localhost|[a-z0-9]+([.-][a-z0-9]+)*\.[a-z0-9]+(-[a-z0-9]+)*)(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+$";
+const MAX_OCI_REPOSITORY_LENGTH: usize = 255;
+
+fn is_oci_repository(value: &str) -> bool {
+    let Some((registry, repository)) = value.split_once('/') else {
+        return false;
+    };
+    let host = match registry.split_once(':') {
+        Some((host, port))
+            if !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            host
+        }
+        Some(_) => return false,
+        None => registry,
+    };
+    let alphanumeric = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let host_valid = (host == "localhost" || host.contains('.'))
+        && host
+            .split(['.', '-'])
+            .all(|part| !part.is_empty() && part.bytes().all(alphanumeric));
+    value.len() <= MAX_OCI_REPOSITORY_LENGTH
+        && host_valid
+        && repository.split('/').all(|part| {
+            part.as_bytes().first().is_some_and(|b| alphanumeric(*b))
+                && part.as_bytes().last().is_some_and(|b| alphanumeric(*b))
+                && part
+                    .bytes()
+                    .all(|b| alphanumeric(b) || matches!(b, b'.' | b'_' | b'-'))
+        })
+}
+
+validated_string!(
+    OciRepository,
+    "OCI repository",
+    "a lowercase registry hostname and repository path, without a scheme, tag or digest",
+    is_oci_repository,
+    { "pattern": OCI_REPOSITORY_PATTERN, "maxLength": MAX_OCI_REPOSITORY_LENGTH }
+);
 
 /// Where the guest's init lives in a stacked root, and so the one place a program cannot be put.
 pub const INIT_PATH: &str = "/sbin/init";

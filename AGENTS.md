@@ -77,6 +77,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - Cron runs may overlap. Editing a crontab reschedules future runs; stopping or replacing its
   deployment cancels and drains active runs before the guest stops. Registry notifications and
   the next due time drive scheduling, without polling or catching up missed runs.
+- OCI registry pulls use `oci-client` over HTTPS with anonymous registry authentication. Desired
+  layers pin the manifest or index digest; image startup defaults do not override `config.command`.
 - Every VMM cold boot and snapshot restore uses the matching embedded Firecracker jailer.
   Installation reserves the locked nibrunner-jailer account's subordinate UID/GID ranges; startup
   validates them. There is no jailer configuration or direct-launch fallback. Existing direct

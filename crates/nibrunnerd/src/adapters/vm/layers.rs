@@ -13,6 +13,7 @@ use crate::ports::{
 };
 
 mod oci;
+mod registry;
 
 pub const VERBATIM_IMAGE_FILENAME: &str = "layer.img";
 
@@ -93,9 +94,10 @@ fn short_hash(text: &str) -> String {
 /// Where a layer's image lives in the cache. The object is the same bytes whether it is attached
 /// whole or packed as a program at some path, so the kind and the path are part of the name.
 pub fn layer_image_path(cache_dir: &Path, layer: &DesiredLayer) -> PathBuf {
-    let directory = cache_dir.join(layer.object().digest.as_str());
+    let directory = cache_dir.join(layer.digest().as_str());
     match layer {
         DesiredLayer::Oci { .. } => directory.join("oci.ext4"),
+        DesiredLayer::OciRegistry { .. } => directory.join("registry.ext4"),
         DesiredLayer::Filesystem { .. } => directory.join(VERBATIM_IMAGE_FILENAME),
         DesiredLayer::Executable { destination_path, .. } => directory.join(format!(
             "executable-{}.squashfs",
@@ -169,10 +171,21 @@ pub async fn ensure_layer_image(
         });
     }
 
-    let bytes = store.read_verified(layer.object()).await?;
-    let fetched_bytes = bytes.len() as u64;
+    let (bytes, fetched_bytes) = match layer {
+        DesiredLayer::OciRegistry { repository, digest } => {
+            let pulled = registry::pull(repository, digest).await?;
+            (pulled.archive, pulled.fetched_bytes)
+        }
+        DesiredLayer::Oci { object }
+        | DesiredLayer::Filesystem { object }
+        | DesiredLayer::Executable { object, .. } => {
+            let bytes = store.read_verified(object).await?;
+            let fetched_bytes = bytes.len() as u64;
+            (bytes, fetched_bytes)
+        }
+    };
     let image = match layer {
-        DesiredLayer::Oci { .. } => {
+        DesiredLayer::Oci { .. } | DesiredLayer::OciRegistry { .. } => {
             oci::prepare(bytes, image_path.clone(), commands).await?;
             return Ok(LayerImage {
                 path: image_path,
@@ -203,7 +216,7 @@ pub async fn ensure_layer_image(
     std::fs::write(&staged, &image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     std::fs::rename(&staged, &image_path).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     tracing::info!(
-        digest = %layer.object().digest,
+        digest = %layer.digest(),
         size_bytes = fetched_bytes,
         image_bytes = image.len(),
         packed = matches!(layer, DesiredLayer::Executable { .. }),
@@ -247,13 +260,13 @@ mod tests {
 
     fn as_filesystem(layer: DesiredLayer) -> DesiredLayer {
         DesiredLayer::Filesystem {
-            object: layer.object().clone(),
+            object: layer.stored_object().unwrap().clone(),
         }
     }
 
     fn placed_at(layer: DesiredLayer, path: &str) -> DesiredLayer {
         DesiredLayer::Executable {
-            object: layer.object().clone(),
+            object: layer.stored_object().unwrap().clone(),
             destination_path: ExecutablePath::parse(path).unwrap(),
         }
     }
@@ -424,7 +437,10 @@ mod tests {
     async fn bytes_that_match_are_handed_back_whole_before_anything_is_built_from_them() {
         let store = store(artifact_bytes());
         assert_eq!(
-            store.read_verified(layer(|_| {}).object()).await.unwrap(),
+            store
+                .read_verified(layer(|_| {}).stored_object().unwrap())
+                .await
+                .unwrap(),
             artifact_bytes()
         );
     }
@@ -434,7 +450,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut store = crate::ports::MockArtifactStore::new();
         store.expect_read().returning(|key| {
-            Ok(if key == &base_layer().object().object_key {
+            Ok(if key == &base_layer().stored_object().unwrap().object_key {
                 BASE_LAYER_BYTES.to_vec()
             } else {
                 ARTIFACT_BYTES.to_vec()

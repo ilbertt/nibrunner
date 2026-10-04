@@ -43,6 +43,7 @@ base64 = "0.22"
 protocol = { path = "crates/protocol", package = "nibrunner-protocol" }
 guest-contract = { path = "crates/guest-contract", package = "nibrunner-guest-contract" }
 nft-render = { path = "crates/nft-render", package = "nibrunner-nft-render" }
+oci-client = { version = "0.18", default-features = false, features = ["rustls-tls-no-provider"] }
 oci-image = { path = "crates/oci-image", package = "nibrunner-oci-image" }
 
 serde = { version = "1", features = ["derive"] }

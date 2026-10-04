@@ -45,6 +45,7 @@ base64.workspace = true
 clap = { version = "4", features = ["derive"] }
 protocol.workspace = true
 oci-image.workspace = true
+oci-client.workspace = true
 guest-contract.workspace = true
 nft-render.workspace = true
 serde.workspace = true
