@@ -1,5 +1,40 @@
 # Changelog
 
+## [2026.10.1] - 2026-10-04
+
+### Features
+
+- Require the Firecracker jailer for every microVM (#232)
+- Isolate VMM children in private mount namespaces (#227)
+- Stage trusted VM inputs for jail rebuilding (#226)
+- Reserve stable non-root identities during installation (#224)
+- Readopt VMMs from their recorded root and identity (#222)
+- Assign persistent TAPs to non-root VMMs (#220)
+- **exports:** Include the app crontab in export bundles (#216)
+
+### Fixes
+
+- Verify and atomically publish microVM snapshots (#212)
+- Publish snapshots through a private exchange (#228)
+- Verify recorded VMM peers before API commands (#223)
+- Reach guest services through their VMM directory (#219)
+- Protect private guest sockets from path replacement (#214)
+- Persist host identity from accepted desired state (#209)
+
+### Refactoring
+
+- Share guest channel attachment across boot and readoption (#225)
+- Separate VMM command construction from supervision (#221)
+
+### Documentation
+
+- Explain automatic jailer isolation in host setup (#230)
+
+### Maintenance
+
+- Prove jailed VMM isolation across sleep and readoption (#229)
+- Embed the matching Firecracker jailer (#211)
+
 ## [2026.10.0] - 2026-10-03
 
 ### Features

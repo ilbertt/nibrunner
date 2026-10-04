@@ -15,7 +15,7 @@ use crate::adapters::proxy::activator::AppActivator;
 use crate::adapters::proxy::{router, Router};
 use crate::adapters::vm::layers::LayerImages;
 use crate::adapters::vm::manager::{verify_guest_image, VmManager};
-use crate::adapters::vm::process::{extract_firecracker, VmProcesses, FIRECRACKER_VERSION};
+use crate::adapters::vm::process::{extract_firecracker, extract_jailer, VmProcesses, FIRECRACKER_VERSION};
 use crate::adapters::vm::snapshot::reap_stale_snapshots;
 use crate::adapters::volumes::initial_contents::ContentsStaging;
 use crate::adapters::volumes::local_file::LocalFileVolumes;
@@ -48,6 +48,12 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         .map_err(|error| StartupError::Unusable(error.message()))?;
     let firecracker = extract_firecracker(&config.firecracker_dir)
         .map_err(|error| StartupError::Unusable(error.to_string()))?;
+    let identities = crate::install::jailer_identities::read(config.max_apps)
+        .map_err(|error| StartupError::Unusable(error.message()))?;
+    let jailer = crate::adapters::vm::jailer::Jailer::new(
+        extract_jailer(&config.firecracker_dir).map_err(|error| StartupError::Unusable(error.to_string()))?,
+        identities,
+    );
     let commands: Arc<dyn crate::ports::CommandRunner> = Arc::new(HostCommands);
     let state = HostState::shared();
     let repositories = crate::repositories::Repositories::sqlite(
@@ -123,6 +129,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         guest_image_dir: config.guest_image_dir.clone(),
         guest_image_version: guest_image_version.clone(),
         firecracker,
+        jailer,
         processes,
         network,
         volumes: volumes.clone(),

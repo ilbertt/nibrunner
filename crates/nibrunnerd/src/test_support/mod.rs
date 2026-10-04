@@ -473,7 +473,7 @@ async fn test_host_over(
     let state = HostState::shared();
     let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let (commands, command_log) = mocks::commands_formatting();
-    let (vms, vm_spy) = mocks::vmm();
+    let (vms, vm_spy) = mocks::vmm_under(config.vm_dir().join("jailer"));
     let (exports, export_spy) = mocks::exports_accepting();
     let artifacts: Arc<dyn crate::ports::ArtifactStore> = artifacts;
     let cron = Arc::new(crate::domain::cron::registry::CronRegistry::new(

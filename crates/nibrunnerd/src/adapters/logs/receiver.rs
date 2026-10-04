@@ -14,7 +14,6 @@ use crate::ports::{LogSink, TenantLogBody, TenantLogEvent};
 use guest_contract::logs::{decode_frames, GuestLogFrame};
 
 const MAX_GUEST_CONNECTIONS: usize = 4;
-const PRIVATE_SOCKET_MODE: u32 = 0o600;
 
 /// How long a line the guest has not ended is held for its newline before it is handed over as
 /// it stands: long enough that a frame boundary never splits a line, short enough that a prompt
@@ -65,12 +64,7 @@ impl TenantLogReceiver {
             crate::json_store::make_directory(parent, 0o700)?;
         }
         let _ = std::fs::remove_file(&socket_path);
-        let listener = UnixListener::bind(&socket_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(PRIVATE_SOCKET_MODE))?;
-        }
+        let listener = crate::unix_socket::bind(&socket_path)?;
         let source = Arc::new(Mutex::new((app_id.clone(), deployment_id)));
         let (detached, detaching) = watch::channel(());
         let task = tokio::spawn(serve(listener, source.clone(), sink, detaching));

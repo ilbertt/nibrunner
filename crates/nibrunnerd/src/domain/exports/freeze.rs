@@ -49,16 +49,25 @@ impl FreezeLease {
 }
 
 pub async fn frozen(app_id: &AppId, vsock_path: &Path) -> Result<FreezeLease, FreezeError> {
-    let Ok(stream) = UnixStream::connect(vsock_path).await else {
-        tracing::info!(
-            %app_id,
-            socket_path = %vsock_path.display(),
-            "no running guest to freeze; reading the volume as it lies"
-        );
-        return Ok(FreezeLease {
-            app_id: app_id.clone(),
-            held: None,
-        });
+    let stream = match crate::unix_socket::connect(vsock_path).await {
+        Ok(stream) => stream,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(FreezeError::Refused {
+                app_id: app_id.clone(),
+                reply: error.to_string(),
+            });
+        }
+        Err(_) => {
+            tracing::info!(
+                %app_id,
+                socket_path = %vsock_path.display(),
+                "no running guest to freeze; reading the volume as it lies"
+            );
+            return Ok(FreezeLease {
+                app_id: app_id.clone(),
+                held: None,
+            });
+        }
     };
     let socket_path = vsock_path.display().to_string();
     let silent = || FreezeError::Silent {

@@ -1,16 +1,38 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use protocol::{AppId, DeploymentId};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::domain::report::capacity::FilesystemSpace;
-use crate::json_store::read_json;
+use crate::json_store::{make_directory, read_json, write_json};
 use crate::ports::VmError;
 
 pub const SNAPSHOT_STATE_FILENAME: &str = "vmstate";
 pub const SNAPSHOT_MEMORY_FILENAME: &str = "memory";
 
 pub const SNAPSHOT_STAMP_FILENAME: &str = "stamp.json";
+
+pub(crate) const EXCHANGE_BOOT_ID_FILENAME: &str = "host-boot-id";
+
+pub(crate) fn exchange(snapshot_dir: &Path, app_id: &AppId) -> PathBuf {
+    snapshot_dir.join(".jailer").join(app_id.as_str())
+}
+
+pub(crate) fn publish_snapshot_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::rename(source, destination)?;
+    if !std::fs::symlink_metadata(destination)?.is_file() {
+        let _ = std::fs::remove_file(destination);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the VMM did not produce a regular snapshot file",
+        ));
+    }
+    std::os::unix::fs::chown(destination, Some(0), Some(0))?;
+    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o400))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,7 +189,10 @@ pub struct SnapshotPaths {
 }
 
 pub fn snapshot_paths(snapshot_dir: &Path, app_id: &AppId) -> SnapshotPaths {
-    let directory = snapshot_dir.join(app_id.as_str());
+    paths_in(snapshot_dir.join(app_id.as_str()))
+}
+
+fn paths_in(directory: PathBuf) -> SnapshotPaths {
     SnapshotPaths {
         state_path: directory.join(SNAPSHOT_STATE_FILENAME),
         memory_path: directory.join(SNAPSHOT_MEMORY_FILENAME),
@@ -205,7 +230,8 @@ pub struct Reaped {
 /// another boot id, and one with no stamp this host can read. Neither can ever be woken from —
 /// a wake refuses them by name — and each holds the memory its app was promised, so left alone
 /// they are the disk a reboot leaves behind, for good. One stamped this boot is never touched,
-/// whatever else its stamp says: that is the wake's to judge, and to say why.
+/// whatever else its stamp says: that is the wake's to judge, and to say why. Unpublished
+/// staging directories are removed even during the same host boot.
 pub fn reap_stale_snapshots(snapshot_dir: &Path, host_boot_id: &str) -> Reaped {
     let mut reaped = Reaped::default();
     let Ok(entries) = std::fs::read_dir(snapshot_dir) else {
@@ -216,8 +242,18 @@ pub fn reap_stale_snapshots(snapshot_dir: &Path, host_boot_id: &str) -> Reaped {
             continue;
         }
         let directory = entry.path();
+        if entry.file_name() == ".jailer"
+            && crate::json_store::read_text(&directory.join(EXCHANGE_BOOT_ID_FILENAME))
+                .ok()
+                .flatten()
+                .is_some_and(|stored| stored == host_boot_id)
+        {
+            continue;
+        }
         let stamp: Option<SnapshotStamp> = read_json(&directory.join(SNAPSHOT_STAMP_FILENAME)).ok().flatten();
-        if stamp.is_some_and(|stamp| stamp.host_boot_id == host_boot_id) {
+        if !entry.file_name().to_string_lossy().starts_with(STAGING_PREFIX)
+            && stamp.is_some_and(|stamp| stamp.host_boot_id == host_boot_id)
+        {
             continue;
         }
         let bytes = read_snapshot_bytes(&directory);
@@ -265,17 +301,141 @@ pub fn measure_disk_under(snapshot_dir: &Path, cache_bytes: u64) -> std::io::Res
     })
 }
 
-pub fn ensure_loadable(stamp_path: &Path, expected: &SnapshotStamp) -> Result<(), VmError> {
-    let stored: Option<SnapshotStamp> = read_json(stamp_path).ok().flatten();
+const STAGING_PREFIX: &str = ".pending-";
+const HASH_BUFFER_BYTES: usize = 65_536;
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotFile {
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SnapshotManifest {
+    #[serde(flatten)]
+    stamp: SnapshotStamp,
+    state: SnapshotFile,
+    memory: SnapshotFile,
+}
+
+fn hash_file(file: &mut std::fs::File) -> std::io::Result<SnapshotFile> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0; HASH_BUFFER_BYTES];
+    let mut bytes = 0;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        bytes += read as u64;
+    }
+    if bytes == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the file is empty",
+        ));
+    }
+    Ok(SnapshotFile {
+        bytes,
+        sha256: hex::encode(digest.finalize()),
+    })
+}
+
+fn seal_file(path: &Path) -> Result<SnapshotFile, VmError> {
+    let failed =
+        |error: std::io::Error| VmError::Host(format!("{} could not be committed: {error}", path.display()));
+    let mut file = std::fs::File::open(path).map_err(failed)?;
+    let integrity = hash_file(&mut file).map_err(failed)?;
+    file.sync_all().map_err(failed)?;
+    Ok(integrity)
+}
+
+fn sync_directory(path: &Path) -> Result<(), VmError> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| VmError::Host(error.to_string()))
+}
+
+pub(crate) struct StagedSnapshot {
+    pub(crate) paths: SnapshotPaths,
+}
+
+impl StagedSnapshot {
+    pub(crate) fn create(snapshot_dir: &Path) -> Result<Self, VmError> {
+        let paths = paths_in(snapshot_dir.join(format!("{STAGING_PREFIX}{}", uuid::Uuid::new_v4())));
+        make_directory(&paths.directory, 0o700).map_err(|error| VmError::Host(error.to_string()))?;
+        Ok(Self { paths })
+    }
+
+    pub(crate) fn publish(self, published: &SnapshotPaths, stamp: SnapshotStamp) -> Result<u64, VmError> {
+        let manifest = SnapshotManifest {
+            stamp,
+            state: seal_file(&self.paths.state_path)?,
+            memory: seal_file(&self.paths.memory_path)?,
+        };
+        write_json(&self.paths.stamp_path, &manifest).map_err(|error| VmError::Host(error.message()))?;
+        std::fs::File::open(&self.paths.stamp_path)
+            .and_then(|stamp| stamp.sync_all())
+            .map_err(|error| VmError::Host(error.to_string()))?;
+        sync_directory(&self.paths.directory)?;
+        std::fs::rename(&self.paths.directory, &published.directory)
+            .map_err(|error| VmError::Host(error.to_string()))?;
+        sync_directory(
+            published
+                .directory
+                .parent()
+                .expect("a snapshot has a parent directory"),
+        )?;
+        Ok(manifest.memory.bytes)
+    }
+}
+
+impl Drop for StagedSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.paths.directory);
+    }
+}
+
+fn verify_file(path: &Path, expected: &SnapshotFile) -> Result<(), VmError> {
+    let verify = || -> std::io::Result<bool> {
+        let mut file = std::fs::File::open(path)?;
+        if file.metadata()?.len() != expected.bytes {
+            return Ok(false);
+        }
+        Ok(hash_file(&mut file)? == *expected)
+    };
+    let reason = match verify() {
+        Ok(true) => return Ok(()),
+        Ok(false) => format!(
+            "{} no longer matches its recorded size or SHA-256",
+            path.display()
+        ),
+        Err(error) => format!("{} could not be verified: {error}", path.display()),
+    };
+    Err(VmError::SnapshotUnusable { reason })
+}
+
+pub fn ensure_loadable(paths: &SnapshotPaths, expected: &SnapshotStamp) -> Result<(), VmError> {
+    let stored: Option<SnapshotStamp> = read_json(&paths.stamp_path).ok().flatten();
     let Some(stored) = stored else {
         return Err(VmError::SnapshotUnusable {
             reason: "this host kept none".into(),
         });
     };
-    match drift_from(&stored, expected) {
-        None => Ok(()),
-        Some(reason) => Err(VmError::SnapshotUnusable { reason }),
+    if let Some(reason) = drift_from(&stored, expected) {
+        return Err(VmError::SnapshotUnusable { reason });
     }
+    let manifest: SnapshotManifest =
+        read_json(&paths.stamp_path)
+            .ok()
+            .flatten()
+            .ok_or_else(|| VmError::SnapshotUnusable {
+                reason: "its stamp has no readable integrity record".into(),
+            })?;
+    verify_file(&paths.state_path, &manifest.state)?;
+    verify_file(&paths.memory_path, &manifest.memory)
 }
 
 #[cfg(test)]
@@ -435,16 +595,19 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let paths = snapshot_paths(directory.path(), &app_id());
         assert!(matches!(
-            ensure_loadable(&paths.stamp_path, &stamp()),
+            ensure_loadable(&paths, &stamp()),
             Err(VmError::SnapshotUnusable { .. })
         ));
-        write_json(&paths.stamp_path, &stamp()).unwrap();
-        ensure_loadable(&paths.stamp_path, &stamp()).unwrap();
+        let staging = StagedSnapshot::create(directory.path()).unwrap();
+        std::fs::write(&staging.paths.state_path, b"state").unwrap();
+        std::fs::write(&staging.paths.memory_path, b"memory").unwrap();
+        staging.publish(&paths, stamp()).unwrap();
+        ensure_loadable(&paths, &stamp()).unwrap();
         let rebooted = SnapshotStamp {
             host_boot_id: "after-a-reboot".into(),
             ..stamp()
         };
-        let refused = ensure_loadable(&paths.stamp_path, &rebooted).unwrap_err();
+        let refused = ensure_loadable(&paths, &rebooted).unwrap_err();
         assert!(refused.message().contains("rebooted"));
     }
 
@@ -454,8 +617,129 @@ mod tests {
         let paths = snapshot_paths(directory.path(), &app_id());
         std::fs::create_dir_all(&paths.directory).unwrap();
         std::fs::write(&paths.stamp_path, "{ not a stamp").unwrap();
-        let refused = ensure_loadable(&paths.stamp_path, &stamp()).unwrap_err();
+        let refused = ensure_loadable(&paths, &stamp()).unwrap_err();
         assert!(refused.message().contains("kept none"), "{refused}");
+    }
+
+    fn published_snapshot(directory: &Path) -> SnapshotPaths {
+        let paths = snapshot_paths(directory, &app_id());
+        let staged = StagedSnapshot::create(directory).unwrap();
+        std::fs::write(&staged.paths.state_path, b"state").unwrap();
+        std::fs::write(&staged.paths.memory_path, b"memory").unwrap();
+        assert_eq!(staged.publish(&paths, stamp()).unwrap(), 6);
+        paths
+    }
+
+    #[test]
+    fn both_snapshot_files_are_checked_even_when_corruption_keeps_the_same_size() {
+        for filename in [SNAPSHOT_STATE_FILENAME, SNAPSHOT_MEMORY_FILENAME] {
+            let directory = tempfile::tempdir().unwrap();
+            let paths = published_snapshot(directory.path());
+            let damaged = paths.directory.join(filename);
+            let mut bytes = std::fs::read(&damaged).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(&damaged, bytes).unwrap();
+            let error = ensure_loadable(&paths, &stamp()).unwrap_err();
+            assert!(error.message().contains(filename), "{error}");
+            assert!(error.message().contains("SHA-256"), "{error}");
+        }
+    }
+
+    #[test]
+    fn missing_and_truncated_snapshot_files_are_refused_before_restoration() {
+        for filename in [SNAPSHOT_STATE_FILENAME, SNAPSHOT_MEMORY_FILENAME] {
+            for missing in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let paths = published_snapshot(directory.path());
+                let damaged = paths.directory.join(filename);
+                if missing {
+                    std::fs::remove_file(&damaged).unwrap();
+                } else {
+                    std::fs::write(&damaged, b"x").unwrap();
+                }
+                let error = ensure_loadable(&paths, &stamp()).unwrap_err();
+                assert!(matches!(error, VmError::SnapshotUnusable { .. }), "{error}");
+                assert!(error.message().contains(filename), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_older_snapshot_without_integrity_records_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = snapshot_paths(directory.path(), &app_id());
+        write_json(&paths.stamp_path, &stamp()).unwrap();
+        let error = ensure_loadable(&paths, &stamp()).unwrap_err();
+        assert!(error.message().contains("integrity record"), "{error}");
+    }
+
+    #[test]
+    fn an_interrupted_snapshot_is_never_published_and_its_staging_files_are_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = snapshot_paths(directory.path(), &app_id());
+        let staged = StagedSnapshot::create(directory.path()).unwrap();
+        let staging_directory = staged.paths.directory.clone();
+        std::fs::write(&staged.paths.state_path, b"state").unwrap();
+        assert!(!paths.directory.exists());
+        assert!(ensure_loadable(&paths, &stamp()).is_err());
+        assert!(staged.publish(&paths, stamp()).is_err());
+        assert!(!paths.directory.exists());
+        assert!(!staging_directory.exists());
+    }
+
+    #[test]
+    fn a_snapshot_can_only_be_published_with_two_complete_nonempty_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = snapshot_paths(directory.path(), &app_id());
+        let staged = StagedSnapshot::create(directory.path()).unwrap();
+        std::fs::write(&staged.paths.state_path, b"state").unwrap();
+        std::fs::write(&staged.paths.memory_path, b"").unwrap();
+        assert!(staged.publish(&paths, stamp()).is_err());
+        assert!(!paths.directory.exists());
+        assert_eq!(read_snapshot_bytes(directory.path()), 0);
+    }
+
+    #[test]
+    fn a_failed_manifest_write_or_directory_rename_publishes_nothing() {
+        for failed_manifest in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let paths = snapshot_paths(directory.path(), &app_id());
+            let staged = StagedSnapshot::create(directory.path()).unwrap();
+            let staging_directory = staged.paths.directory.clone();
+            std::fs::write(&staged.paths.state_path, b"state").unwrap();
+            std::fs::write(&staged.paths.memory_path, b"memory").unwrap();
+            if failed_manifest {
+                std::fs::create_dir(&staged.paths.stamp_path).unwrap();
+            } else {
+                std::fs::write(&paths.directory, b"occupied").unwrap();
+            }
+            assert!(staged.publish(&paths, stamp()).is_err());
+            assert!(!staging_directory.exists());
+            assert!(!paths.stamp_path.exists());
+            assert!(ensure_loadable(&paths, &stamp()).is_err());
+        }
+    }
+
+    #[test]
+    fn publication_exposes_the_files_and_integrity_record_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = published_snapshot(directory.path());
+        let manifest: SnapshotManifest = read_json(&paths.stamp_path).unwrap().unwrap();
+        assert_eq!(manifest.state.sha256, hex::encode(Sha256::digest(b"state")));
+        assert_eq!(manifest.memory.sha256, hex::encode(Sha256::digest(b"memory")));
+        ensure_loadable(&paths, &stamp()).unwrap();
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_staging_directory_left_by_an_interruption_is_reaped_even_during_the_same_host_boot() {
+        let directory = tempfile::tempdir().unwrap();
+        let staged = StagedSnapshot::create(directory.path()).unwrap();
+        std::fs::write(&staged.paths.memory_path, b"memory").unwrap();
+        write_json(&staged.paths.stamp_path, &stamp()).unwrap();
+        let reaped = reap_stale_snapshots(directory.path(), &stamp().host_boot_id);
+        assert_eq!(reaped.snapshots, 1);
+        assert!(!staged.paths.directory.exists());
     }
 
     #[test]
@@ -702,5 +986,41 @@ mod tests {
         std::fs::write(nested.join("memory"), vec![b'x'; 100]).unwrap();
         std::fs::write(directory.path().join("stamp.json"), vec![b'x'; 10]).unwrap();
         assert_eq!(read_snapshot_bytes(directory.path()), 110);
+    }
+    #[test]
+    fn a_snapshot_output_symlink_is_rejected_without_changing_the_file_it_points_at() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let protected = directory.path().join("host-file");
+        std::fs::write(&protected, b"host state").unwrap();
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let before = std::fs::metadata(&protected).unwrap();
+        let output = directory.path().join("output");
+        let destination = directory.path().join("snapshot");
+        std::os::unix::fs::symlink(&protected, &output).unwrap();
+        assert!(publish_snapshot_file(&output, &destination).is_err());
+        let after = std::fs::metadata(&protected).unwrap();
+        assert_eq!(
+            (after.uid(), after.gid(), after.mode()),
+            (before.uid(), before.gid(), before.mode())
+        );
+        assert_eq!(std::fs::read(&protected).unwrap(), b"host state");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn live_jail_exchanges_survive_readoption_and_old_boot_exchanges_are_reclaimed() {
+        let directory = tempfile::tempdir().unwrap();
+        let exchange = directory.path().join(".jailer");
+        std::fs::create_dir_all(exchange.join("app-1")).unwrap();
+        std::fs::write(exchange.join("app-1/memory"), b"unpublished memory").unwrap();
+        std::fs::write(exchange.join(EXCHANGE_BOOT_ID_FILENAME), "boot-1").unwrap();
+        assert_eq!(
+            reap_stale_snapshots(directory.path(), "boot-1"),
+            Reaped::default()
+        );
+        assert!(exchange.join("app-1/memory").exists());
+        assert!(reap_stale_snapshots(directory.path(), "boot-2").bytes > 0);
+        assert!(!exchange.exists());
     }
 }

@@ -157,6 +157,10 @@ impl VmmSpy {
 pub const NOWHERE_VM_DIR: &str = "/nowhere/vm";
 
 pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
+    vmm_under(PathBuf::from(NOWHERE_VM_DIR))
+}
+
+pub(crate) fn vmm_under(directory: PathBuf) -> (Arc<MockVmm>, VmmSpy) {
     let spy = VmmSpy::default();
     let mut vms = MockVmm::new();
 
@@ -211,7 +215,7 @@ pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
     let verdict = spy.verdict.clone();
     vms.expect_guest_verdict().returning(move |_| held(&verdict));
     vms.expect_working_dir()
-        .returning(|app_id: &AppId| PathBuf::from(NOWHERE_VM_DIR).join(app_id.as_str()));
+        .returning(move |app_id: &AppId| directory.join(app_id.as_str()));
 
     (Arc::new(vms), spy)
 }
@@ -501,12 +505,17 @@ pub fn exports_answering(
 
 #[derive(Clone, Default)]
 pub struct NetworkSpy {
+    owners: Arc<Mutex<Vec<(String, u32)>>>,
     taps: Arc<Mutex<Vec<TapInterface>>>,
     neighbours: Arc<Mutex<Vec<Neighbour>>>,
     removed: Arc<Mutex<Vec<String>>>,
 }
 
 impl NetworkSpy {
+    pub fn owners(&self) -> Vec<(String, u32)> {
+        held(&self.owners)
+    }
+
     pub fn taps(&self) -> Vec<TapInterface> {
         held(&self.taps)
     }
@@ -527,6 +536,11 @@ pub fn network() -> (Arc<MockHostNetwork>, NetworkSpy) {
     let taps = spy.taps.clone();
     network.expect_ensure_tap().returning(move |tap: &TapInterface| {
         push(&taps, tap.clone());
+        Ok(())
+    });
+    let owners = spy.owners.clone();
+    network.expect_set_tap_owner().returning(move |name, uid| {
+        push(&owners, (name.to_string(), uid));
         Ok(())
     });
     let neighbours = spy.neighbours.clone();

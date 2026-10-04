@@ -34,6 +34,10 @@ The script:
 exist, it writes one: volumes as files on the local disk, plain HTTP on port 80, no object store,
 and `max_apps` set to what it measured the machine can hold. It does not start anything.
 
+The matching Firecracker jailer is bundled in `nibrunnerd`. Installation creates the locked
+`nibrunner-jailer` system account and reserves the host identities used by each app's VMM.
+This setup is automatic; there are no jailer settings in `config.toml`.
+
 <Callout title="Options">
   - `NIBRUNNER_VERSION=<tag>` before the command installs that release instead of the latest.
   - On a machine without `apt-get`, install `nftables`, `e2fsprogs`, `kmod`, `curl` and
@@ -70,3 +74,9 @@ journalctl -u nibrunnerd -f
 
 </Step>
 </Steps>
+
+## Upgrade an existing host
+
+After updating `nibrunnerd`, run `nibrunnerd install`, then `nibrunnerd start`. Existing microVMs
+keep serving until stopped or redeployed. Redeploy apps to move their next boot into a jail.
+Waking a snapshot from a direct launch cold boots the app while preserving its volume.

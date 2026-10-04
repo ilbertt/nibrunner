@@ -36,6 +36,14 @@ pub trait HostNetwork: Send + Sync {
 
     async fn refresh_neighbour(&self, neighbour: &Neighbour) -> Result<(), NetworkError>;
 
+    async fn set_tap_owner(&self, tap_name: &str, _uid: u32) -> Result<(), NetworkError> {
+        Err(NetworkError {
+            what: "tap ownership",
+            device: tap_name.into(),
+            reason: "this network adapter cannot assign an owner".into(),
+        })
+    }
+
     // A tap outlives the process that made it, which is what lets a daemon restart leave every
     // tenant serving. The same persistence means nothing reclaims one, so an app that leaves has
     // to say so.
@@ -140,6 +148,43 @@ mod linux {
         Ok(())
     }
 
+    #[allow(
+        unsafe_code,
+        reason = "assigning a persistent TAP to its jailed VMM requires TUNSETOWNER"
+    )]
+    fn set_tap_owner(tap_name: &str, uid: u32) -> Result<(), NetworkError> {
+        use std::os::fd::AsRawFd;
+        const TUNSETIFF: libc::Ioctl = 0x400454ca;
+        const TUNSETOWNER: libc::Ioctl = 0x400454cc;
+        const IFF_TAP: libc::c_short = 0x0002;
+        const IFF_NO_PI: libc::c_short = 0x1000;
+        #[repr(C)]
+        struct InterfaceRequest {
+            name: [libc::c_char; libc::IFNAMSIZ],
+            flags: libc::c_short,
+            padding: [u8; 22],
+        }
+        let device = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/net/tun")
+            .map_err(|error| failed("tap ownership", tap_name, error))?;
+        let mut request = InterfaceRequest {
+            name: [0; libc::IFNAMSIZ],
+            flags: IFF_TAP | IFF_NO_PI,
+            padding: [0; 22],
+        };
+        for (index, byte) in tap_name.as_bytes().iter().take(libc::IFNAMSIZ - 1).enumerate() {
+            request.name[index] = *byte as libc::c_char;
+        }
+        if unsafe { libc::ioctl(device.as_raw_fd(), TUNSETIFF, &mut request) } < 0
+            || unsafe { libc::ioctl(device.as_raw_fd(), TUNSETOWNER, uid) } < 0
+        {
+            return Err(failed("tap ownership", tap_name, std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
     fn allow_route_localnet(tap_name: &str) -> Result<(), NetworkError> {
         let path = format!("/proc/sys/net/ipv4/conf/{tap_name}/route_localnet");
         std::fs::write(&path, b"1").map_err(|error| failed("route_localnet", tap_name, error))
@@ -169,6 +214,10 @@ mod linux {
                 .await
                 .map_err(|error| failed("bringing the link up", &tap.tap_name, error))?;
             allow_route_localnet(&tap.tap_name)
+        }
+
+        async fn set_tap_owner(&self, tap_name: &str, uid: u32) -> Result<(), NetworkError> {
+            set_tap_owner(tap_name, uid)
         }
 
         async fn refresh_neighbour(&self, neighbour: &Neighbour) -> Result<(), NetworkError> {

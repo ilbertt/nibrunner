@@ -17,7 +17,6 @@ use crate::domain::cron::registry::CronRegistry;
 
 const MAX_CONNECTIONS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const PRIVATE_SOCKET_MODE: u32 = 0o600;
 
 pub fn cron_registration_socket_path(working_dir: &Path) -> PathBuf {
     working_dir.join(format!(
@@ -74,17 +73,7 @@ impl CronRegistrationReceiver {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let listener = UnixListener::bind(&socket_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Err(error) =
-                std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(PRIVATE_SOCKET_MODE))
-            {
-                let _ = std::fs::remove_file(&socket_path);
-                return Err(error);
-            }
-        }
+        let listener = crate::unix_socket::bind(&socket_path)?;
         let task = tokio::spawn(serve(
             listener,
             self.registry.clone(),

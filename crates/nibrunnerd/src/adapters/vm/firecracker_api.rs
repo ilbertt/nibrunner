@@ -46,13 +46,20 @@ struct LoadSnapshot<'a> {
 
 pub struct FirecrackerApi {
     socket_path: PathBuf,
+    expected_process: Option<(i32, Option<u32>)>,
 }
 
 impl FirecrackerApi {
     pub fn at(socket_path: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: socket_path.into(),
+            expected_process: None,
         }
+    }
+
+    pub(crate) fn require_process(mut self, pid: i32, uid: Option<u32>) -> Self {
+        self.expected_process = Some((pid, uid));
+        self
     }
 
     async fn call<B: Serialize>(&self, method: Method, path: &str, body: &B) -> Result<(), VmError> {
@@ -64,6 +71,26 @@ impl FirecrackerApi {
         let stream = tokio::net::UnixStream::connect(&self.socket_path)
             .await
             .map_err(|error| unreachable(error.to_string()))?;
+        if let Some((pid, uid)) = self.expected_process {
+            #[cfg(target_os = "linux")]
+            {
+                let peer = stream
+                    .peer_cred()
+                    .map_err(|error| unreachable(error.to_string()))?;
+                if peer.pid() != Some(pid) || uid.is_some_and(|uid| peer.uid() != uid) {
+                    return Err(VmError::Host(
+                        "the Firecracker API socket does not belong to the recorded VMM".into(),
+                    ));
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (pid, uid);
+                return Err(VmError::Host(
+                    "checking a jailed VMM's API peer requires Linux".into(),
+                ));
+            }
+        }
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .map_err(|error| unreachable(error.to_string()))?;
@@ -371,5 +398,26 @@ mod tests {
         let absent = directory.path().join("absent.sock");
         let error = FirecrackerApi::at(&absent).pause().await.unwrap_err();
         assert!(error.message().contains(&absent.display().to_string()), "{error}");
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_jailed_api_refuses_another_process_before_sending_any_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let (socket, seen) = FakeVmm::listening(directory.path(), hyper::StatusCode::NO_CONTENT, "").await;
+        let api = FirecrackerApi::at(socket).require_process(std::process::id() as i32 + 1, None);
+        assert!(matches!(api.pause().await, Err(VmError::Host(_))));
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_jailed_api_refuses_an_unexpected_uid_before_sending_any_command() {
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let uid = std::fs::metadata(directory.path()).unwrap().uid();
+        let (socket, seen) = FakeVmm::listening(directory.path(), hyper::StatusCode::NO_CONTENT, "").await;
+        let api = FirecrackerApi::at(socket).require_process(std::process::id() as i32, Some(uid + 1));
+        assert!(matches!(api.pause().await, Err(VmError::Host(_))));
+        assert!(seen.lock().unwrap().is_empty());
     }
 }

@@ -5,9 +5,8 @@ use crate::host::Host;
 use crate::ports::GuestReading;
 
 pub fn guest_vsock_path(host: &Host, app_id: &AppId) -> std::path::PathBuf {
-    host.config
-        .vm_dir()
-        .join(app_id.as_str())
+    host.vms
+        .working_dir(app_id)
         .join(guest_contract::vsock::GUEST_VSOCK_FILENAME)
 }
 
@@ -36,12 +35,16 @@ mod tests {
     use crate::test_support::*;
 
     #[tokio::test]
-    async fn each_guest_is_reached_on_a_socket_inside_its_own_microvm_directory() {
+    async fn each_guest_is_reached_in_the_directory_selected_by_its_vmm() {
         let host = test_host().await;
         let neighbour = AppId::parse("app-2").unwrap();
         let path = guest_vsock_path(host.arc(), &app_id());
 
-        assert!(path.starts_with(host.config.vm_dir()));
+        assert_eq!(path.parent().unwrap(), host.host.vms.working_dir(&app_id()));
+        assert_ne!(
+            path.parent().unwrap(),
+            host.config.vm_dir().join(app_id().as_str())
+        );
         assert!(path.ends_with(guest_contract::vsock::GUEST_VSOCK_FILENAME));
         assert_eq!(path.parent().unwrap().file_name().unwrap(), app_id().as_str());
         assert_ne!(path, guest_vsock_path(host.arc(), &neighbour));
