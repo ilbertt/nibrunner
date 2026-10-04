@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "nibrunner-guest-contract"
-version = "2026.10.0"
+version = "2026.10.1"
 dependencies = [
  "nibrunner-protocol",
  "serde",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "nibrunner-init"
-version = "2026.10.0"
+version = "2026.10.1"
 dependencies = [
  "libc",
  "nibrunner-guest-contract",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "nibrunner-nft-render"
-version = "2026.10.0"
+version = "2026.10.1"
 dependencies = [
  "nibrunner-protocol",
  "serde",
@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "nibrunner-protocol"
-version = "2026.10.0"
+version = "2026.10.1"
 dependencies = [
  "chrono",
  "jsonschema",
@@ -1679,11 +1679,11 @@ dependencies = [
 
 [[package]]
 name = "nibrunner-test-tenant"
-version = "2026.10.0"
+version = "2026.10.1"
 
 [[package]]
 name = "nibrunnerd"
-version = "2026.10.0"
+version = "2026.10.1"
 dependencies = [
  "async-trait",
  "backhand",
