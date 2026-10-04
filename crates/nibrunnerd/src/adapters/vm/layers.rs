@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use backhand::compression::{CompressionOptions, Compressor, Zstd};
 use backhand::{FilesystemCompressor, FilesystemWriter, NodeHeader};
-use protocol::DesiredLayer;
+use protocol::{DesiredLayer, OciSource};
 
 use crate::json_store::make_directory;
 use crate::ports::{
@@ -97,7 +97,6 @@ pub fn layer_image_path(cache_dir: &Path, layer: &DesiredLayer) -> PathBuf {
     let directory = cache_dir.join(layer.digest().as_str());
     match layer {
         DesiredLayer::Oci { .. } => directory.join("oci.ext4"),
-        DesiredLayer::OciRegistry { .. } => directory.join("registry.ext4"),
         DesiredLayer::Filesystem { .. } => directory.join(VERBATIM_IMAGE_FILENAME),
         DesiredLayer::Executable { destination_path, .. } => directory.join(format!(
             "executable-{}.squashfs",
@@ -172,11 +171,15 @@ pub async fn ensure_layer_image(
     }
 
     let (bytes, fetched_bytes) = match layer {
-        DesiredLayer::OciRegistry { repository, digest } => {
+        DesiredLayer::Oci {
+            source: OciSource::Registry { repository, digest },
+        } => {
             let pulled = registry::pull(repository, digest).await?;
             (pulled.archive, pulled.fetched_bytes)
         }
-        DesiredLayer::Oci { object }
+        DesiredLayer::Oci {
+            source: OciSource::Archive(object),
+        }
         | DesiredLayer::Filesystem { object }
         | DesiredLayer::Executable { object, .. } => {
             let bytes = store.read_verified(object).await?;
@@ -185,7 +188,7 @@ pub async fn ensure_layer_image(
         }
     };
     let image = match layer {
-        DesiredLayer::Oci { .. } | DesiredLayer::OciRegistry { .. } => {
+        DesiredLayer::Oci { .. } => {
             oci::prepare(bytes, image_path.clone(), commands).await?;
             return Ok(LayerImage {
                 path: image_path,

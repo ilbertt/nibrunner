@@ -61,17 +61,11 @@ pub struct StoredObject {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum DesiredLayer {
-    /// An OCI image-layout archive for Linux x86_64, flattened and packed by the host. Its image
+    /// An OCI image for Linux x86_64, from an artifact-store archive or public registry. Its image
     /// configuration does not replace the instance's explicit command or guest account.
     Oci {
         #[serde(flatten)]
-        object: StoredObject,
-    },
-    /// A public registry image pinned to its manifest or index digest. Startup configuration
-    /// remains explicit in the desired document.
-    OciRegistry {
-        repository: OciRepository,
-        digest: Sha256Digest,
+        source: OciSource,
     },
     /// A squashfs or ext4 image, attached as it was uploaded.
     Filesystem {
@@ -90,19 +84,88 @@ pub enum DesiredLayer {
 impl DesiredLayer {
     pub fn digest(&self) -> &Sha256Digest {
         match self {
-            Self::OciRegistry { digest, .. } => digest,
-            Self::Oci { object } | Self::Filesystem { object } | Self::Executable { object, .. } => {
-                &object.digest
+            Self::Oci {
+                source: OciSource::Registry { digest, .. },
+            } => digest,
+            Self::Oci {
+                source: OciSource::Archive(object),
             }
+            | Self::Filesystem { object }
+            | Self::Executable { object, .. } => &object.digest,
         }
     }
 
     pub fn stored_object(&self) -> Option<&StoredObject> {
         match self {
-            Self::OciRegistry { .. } => None,
-            Self::Oci { object } | Self::Filesystem { object } | Self::Executable { object, .. } => {
-                Some(object)
+            Self::Oci {
+                source: OciSource::Registry { .. },
+            } => None,
+            Self::Oci {
+                source: OciSource::Archive(object),
             }
+            | Self::Filesystem { object }
+            | Self::Executable { object, .. } => Some(object),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = oci_source_rules))]
+#[serde(untagged)]
+pub enum OciSource {
+    Archive(StoredObject),
+    Registry {
+        repository: OciRepository,
+        digest: Sha256Digest,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OciSourceFields {
+    digest: Sha256Digest,
+    #[serde(default, deserialize_with = "present_source_field")]
+    object_key: Option<ObjectKey>,
+    #[serde(default, deserialize_with = "present_source_field")]
+    repository: Option<OciRepository>,
+}
+
+fn present_source_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+impl<'de> Deserialize<'de> for OciSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = OciSourceFields::deserialize(deserializer)?;
+        match (fields.object_key, fields.repository) {
+            (Some(object_key), None) => Ok(Self::Archive(StoredObject {
+                digest: fields.digest,
+                object_key,
+            })),
+            (None, Some(repository)) => Ok(Self::Registry {
+                repository,
+                digest: fields.digest,
+            }),
+            _ => Err(serde::de::Error::custom(
+                "an OCI layer names exactly one of objectKey or repository",
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "schema")]
+fn oci_source_rules(schema: &mut Schema) {
+    if let Some(variants) = schema.get_mut("anyOf").and_then(serde_json::Value::as_array_mut) {
+        for (variant, other_source) in variants.iter_mut().zip(["repository", "objectKey"]) {
+            variant
+                .as_object_mut()
+                .expect("OCI source variants are object schemas")
+                .insert("not".into(), serde_json::json!({ "required": [other_source] }));
         }
     }
 }

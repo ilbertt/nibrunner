@@ -91,10 +91,10 @@ async fn an_oci_filesystem_preserves_root_and_inode_metadata_in_its_read_only_la
         .unwrap();
     let archive = nibrunnerd::test_support::oci::from_filesystem(&filesystem.into_inner().unwrap());
     let layer = protocol::DesiredLayer::Oci {
-        object: protocol::StoredObject {
+        source: protocol::OciSource::Archive(protocol::StoredObject {
             digest: protocol::Sha256Digest::parse(hex::encode(Sha256::digest(&archive))).unwrap(),
             object_key: protocol::ObjectKey::parse("oci.tar").unwrap(),
-        },
+        }),
     };
     let store: Arc<dyn nibrunnerd::ports::ArtifactStore> = mocks::artifacts_holding(archive);
     let image =

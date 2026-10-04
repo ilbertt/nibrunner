@@ -21,8 +21,7 @@ A layer names content by its digest, either in the artifact store or in a public
 | --- | --- |
 | `executable` | One program. The host packs it into an image at `destinationPath`. |
 | `filesystem` | A squashfs or ext4 image. Attached as uploaded. |
-| `oci-registry` | A public registry image pinned to its manifest or index digest. The host selects Linux amd64 and prepares its filesystem. |
-| `oci` | A Linux x86_64 OCI image-layout archive. The host verifies its manifests and layers, applies whiteouts, and prepares a read-only filesystem image. |
+| `oci` | A Linux x86_64 OCI image from an artifact-store archive or public registry. The host verifies its manifests and layers, applies whiteouts, and prepares a read-only filesystem image. |
 
 ```json
 "layers": [
@@ -73,19 +72,22 @@ Supported extended attributes use the `SCHILY.xattr.*` tar convention.
 
 ## From a public registry
 
-Use `oci-registry` to pull an image directly, without exporting an archive or uploading to the
+Use `kind: "oci"` with `repository` to pull an image directly, without exporting an archive or uploading to the
 artifact store. Name the registry and full repository path, plus a lowercase SHA256 digest of
 its image manifest or multi-platform index:
 
 ```json
 "layers": [
   {
-    "kind": "oci-registry",
+    "kind": "oci",
     "repository": "docker.io/library/busybox",
     "digest": "5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092"
   }
 ]
 ```
+
+Name exactly one source: `objectKey` for an archive in the artifact store, or `repository` for a
+registry image. Existing archive layers keep their current shape.
 
 This pins Docker's official BusyBox `1.37.0-musl` image. The host selects Linux amd64 from an
 index, verifies manifests and blobs, and caches the prepared filesystem by the pinned digest.

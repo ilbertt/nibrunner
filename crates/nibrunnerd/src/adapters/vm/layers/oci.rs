@@ -302,15 +302,15 @@ mod tests {
     use super::*;
     use crate::ports::{ArtifactStore, CommandError, CommandResult};
     use crate::test_support::{mocks, oci};
-    use protocol::{DesiredLayer, ObjectKey, Sha256Digest, StoredObject};
+    use protocol::{DesiredLayer, ObjectKey, OciSource, Sha256Digest, StoredObject};
     use sha2::{Digest, Sha256};
 
     fn layer(bytes: &[u8]) -> DesiredLayer {
         DesiredLayer::Oci {
-            object: StoredObject {
+            source: OciSource::Archive(StoredObject {
                 digest: Sha256Digest::parse(hex::encode(Sha256::digest(bytes))).unwrap(),
                 object_key: ObjectKey::parse("image.tar").unwrap(),
-            },
+            }),
         }
     }
 

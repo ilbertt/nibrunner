@@ -15,10 +15,10 @@ async fn a_public_busybox_image_serves_a_cow_through_a_jailed_microvm() {
         return;
     };
     let app = host.tenant(1).edited(|instance| {
-        instance.layers = vec![protocol::DesiredLayer::OciRegistry {
+        instance.layers = vec![protocol::DesiredLayer::Oci { source: protocol::OciSource::Registry {
             repository: protocol::OciRepository::parse("docker.io/library/busybox").unwrap(),
             digest: protocol::Sha256Digest::parse(BUSYBOX_INDEX).unwrap(),
-        }];
+        }, }];
         instance.config.command.program = protocol::GuestPath::parse("/bin/busybox").unwrap();
         instance.config.command.args = vec![
             "sh".to_string(),
@@ -62,10 +62,10 @@ async fn an_oci_archive_runs_the_explicit_command_from_its_filesystem_layer() {
     std::fs::write(store.join("tenant-oci"), &archive).unwrap();
     let app = host.tenant(1).edited(|instance| {
         instance.layers = vec![protocol::DesiredLayer::Oci {
-            object: protocol::StoredObject {
+            source: protocol::OciSource::Archive(protocol::StoredObject {
                 digest: protocol::Sha256Digest::parse(hex::encode(Sha256::digest(&archive))).unwrap(),
                 object_key: protocol::ObjectKey::parse("tenant-oci").unwrap(),
-            },
+            }),
         }];
     });
     host.deploy(std::slice::from_ref(&app)).await;

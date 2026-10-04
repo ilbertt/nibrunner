@@ -287,7 +287,7 @@ fn an_oci_layer_names_an_archive_without_changing_the_explicit_command() {
 fn registry_layers_pin_content_and_keep_startup_configuration_explicit() {
     let mut document = instance_json();
     document["layers"] = serde_json::json!([{
-        "kind": "oci-registry", "repository": "docker.io/library/busybox", "digest": "a".repeat(64)
+        "kind": "oci", "repository": "docker.io/library/busybox", "digest": "a".repeat(64)
     }]);
     let parsed: DesiredInstance = serde_json::from_value(document.clone()).unwrap();
     assert_eq!(parsed.layers[0].digest().as_str(), "a".repeat(64));
@@ -295,6 +295,43 @@ fn registry_layers_pin_content_and_keep_startup_configuration_explicit() {
     let written = serde_json::to_value(parsed).unwrap();
     assert_eq!(written["layers"], document["layers"]);
     assert_eq!(written["config"]["command"], document["config"]["command"]);
+}
+
+#[test]
+fn an_oci_layer_requires_one_unambiguous_source_in_both_the_parser_and_schema() {
+    let validator =
+        jsonschema::validator_for(&serde_json::to_value(schemars::schema_for!(DesiredLayer)).unwrap())
+            .unwrap();
+    for (source, accepted) in [
+        (serde_json::json!({ "objectKey": "images/app.tar" }), true),
+        (
+            serde_json::json!({ "repository": "docker.io/library/busybox" }),
+            true,
+        ),
+        (
+            serde_json::json!({ "objectKey": "images/app.tar", "repository": "docker.io/library/busybox" }),
+            false,
+        ),
+        (serde_json::json!({}), false),
+        (
+            serde_json::json!({ "objectKey": null, "repository": "docker.io/library/busybox" }),
+            false,
+        ),
+        (
+            serde_json::json!({ "objectKey": "images/app.tar", "repository": null }),
+            false,
+        ),
+    ] {
+        let mut layer = source;
+        layer["kind"] = serde_json::json!("oci");
+        layer["digest"] = serde_json::json!("a".repeat(64));
+        let parsed = serde_json::from_value::<DesiredLayer>(layer.clone());
+        assert_eq!(parsed.is_ok(), accepted, "{layer}");
+        assert_eq!(validator.is_valid(&layer), accepted, "{layer}");
+        if let Ok(parsed) = parsed {
+            assert_eq!(serde_json::to_value(parsed).unwrap(), layer);
+        }
+    }
 }
 
 #[test]
