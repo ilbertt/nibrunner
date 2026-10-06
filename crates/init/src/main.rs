@@ -12,6 +12,9 @@ mod ceiling;
 )]
 mod supervise;
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod clock_sync;
+
 mod crontab;
 
 #[cfg(target_os = "linux")]

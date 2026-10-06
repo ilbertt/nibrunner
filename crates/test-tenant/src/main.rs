@@ -203,6 +203,14 @@ fn decode(value: &str) -> String {
 fn answer(target: &str, data_dir: &Path) -> (&'static str, String) {
     match target_path(target) {
         "/" => ("200 OK", "ok".to_string()),
+        "/time" => (
+            "200 OK",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                .to_string(),
+        ),
         "/remember" => (
             "200 OK",
             (REMEMBERED.fetch_add(1, Ordering::SeqCst) + 1).to_string(),
