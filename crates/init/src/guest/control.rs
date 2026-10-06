@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,10 @@ const TENANT_EVENTS: &str = "/sys/fs/cgroup/tenant/cgroup.events";
 
 const MAX_HOLD: Duration = Duration::from_secs(900);
 
+// kvmclock is restored without advancing, so time spent paused cannot expire this lease.
+const TENANT_LEASE: Duration = Duration::from_millis(guest_contract::control::TENANT_FREEZE_LEASE_MS);
+const CONTROL_TIMEOUT: Duration = Duration::from_millis(guest_contract::control::TENANT_CONTROL_TIMEOUT_MS);
+
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) fn serve() -> ! {
@@ -22,44 +26,73 @@ pub(crate) fn serve() -> ! {
             std::thread::sleep(Duration::from_secs(3600));
         }
     };
+    if nix::fcntl::fcntl(
+        &listener,
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    )
+    .is_err()
+    {
+        log("the control listener could not be made nonblocking");
+        loop {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+    let mut frozen_until = None;
     loop {
+        if frozen_until.is_some_and(|deadline| Instant::now() >= deadline)
+            && std::fs::write(TENANT_FREEZE, "0").is_ok()
+        {
+            frozen_until = None;
+            log("the host abandoned the tenant freeze; the tenant has been released");
+        }
         match vsock::accept_from_host(&listener) {
-            Ok(connection) => answer(connection),
+            Ok(connection) => answer(connection, &mut frozen_until),
             Err(_) => std::thread::sleep(POLL_INTERVAL),
         }
     }
 }
 
-fn answer(connection: OwnedFd) {
-    let mut wire = BufReader::new(std::fs::File::from(connection));
-    let mut request = String::new();
-    if wire.read_line(&mut request).is_err() {
+fn answer(connection: OwnedFd, frozen_until: &mut Option<Instant>) {
+    use nix::sys::socket::{setsockopt, sockopt};
+    use nix::sys::time::{TimeVal, TimeValLike};
+    let timeout = TimeVal::milliseconds(CONTROL_TIMEOUT.as_millis() as i64);
+    if setsockopt(&connection, sockopt::ReceiveTimeout, &timeout).is_err()
+        || setsockopt(&connection, sockopt::SendTimeout, &timeout).is_err()
+    {
         return;
     }
+    let mut wire = BufReader::new(std::fs::File::from(connection));
+    let Ok(request) = crate::clock_sync::request(&mut wire) else {
+        return;
+    };
     if request.trim() == guest_contract::control::TENANT_FREEZE_REQUEST {
-        let result = freeze_tenant();
+        let result = crate::clock_sync::confirm_freeze(&mut wire).and_then(|()| freeze_tenant());
+        if result.is_ok() {
+            *frozen_until = Some(Instant::now() + TENANT_LEASE);
+        }
         if wire
             .get_mut()
             .write_all(if result.is_ok() { b"OK\n" } else { b"REFUSED\n" })
             .is_err()
             && result.is_ok()
+            && std::fs::write(TENANT_FREEZE, "0").is_ok()
         {
-            let _ = std::fs::write(TENANT_FREEZE, "0");
+            *frozen_until = None;
         }
         return;
     }
-    if let Some(nanos) = request
-        .trim()
-        .strip_prefix(guest_contract::control::TENANT_CLOCK_REQUEST)
-    {
-        let result = synchronize_clock(nanos, &mut wire);
+    if request == guest_contract::control::TENANT_CLOCK_REQUEST {
+        let result = synchronize_clock(&mut wire);
+        if result.is_ok() {
+            *frozen_until = None;
+        }
         if let Err(error) = result {
             log(&format!("the tenant's clock could not be synchronized: {error}"));
             let _ = wire.get_mut().write_all(b"REFUSED\n");
         }
         return;
     }
-    if request.trim() != FREEZE_REQUEST {
+    if request != FREEZE_REQUEST || frozen_until.is_some() {
         return;
     }
     if let Err(error) = freeze(paths::VOLUME_MOUNT) {
@@ -112,22 +145,15 @@ fn freeze_tenant() -> std::io::Result<()> {
     }
 }
 
-fn synchronize_clock(nanos: &str, wire: &mut BufReader<std::fs::File>) -> std::io::Result<()> {
-    let nanos = nanos
-        .parse()
-        .map_err(|_| std::io::Error::other("invalid host time"))?;
+fn synchronize_clock(wire: &mut BufReader<std::fs::File>) -> std::io::Result<()> {
+    let nanos = crate::clock_sync::host_time(wire)?;
     set_clock(nanos)?;
-    wire.get_mut()
-        .write_all(format!("{}\n", guest_contract::control::TENANT_CLOCK_READY).as_bytes())?;
-    let mut release = String::new();
-    wire.read_line(&mut release)?;
-    if release.trim() != guest_contract::control::TENANT_CLOCK_RELEASE {
-        return Err(std::io::Error::other("the host did not approve the guest clock"));
-    }
     std::fs::write(TENANT_FREEZE, "0")?;
-    wire.get_mut()
-        .write_all(format!("{}\n", guest_contract::control::TENANT_CLOCK_RELEASED).as_bytes())?;
-    Ok(())
+    writeln!(
+        wire.get_mut(),
+        "{}",
+        guest_contract::control::TENANT_CLOCK_RELEASED
+    )
 }
 
 #[allow(unsafe_code)]

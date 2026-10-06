@@ -188,3 +188,79 @@ async fn a_corrupt_snapshot_cold_boots_the_app_and_still_answers_the_request() {
     }
     host.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restored_tenant_answers_with_current_host_time_and_keeps_its_memory() {
+    const SNAPSHOT_HOLD: Duration = Duration::from_secs(3);
+    const MAX_CLOCK_ERROR: Duration = Duration::from_secs(1);
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1).on_request(IDLE_TIMEOUT_MS);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
+    host.let_sleep(&app).await;
+    tokio::time::sleep(SNAPSHOT_HOLD).await;
+    let before = nibrunnerd::clock::now_ms();
+    let answer = host.get(&app, "/time").await.unwrap();
+    let after = nibrunnerd::clock::now_ms();
+    assert_eq!(answer.status, 200);
+    let guest_time: i64 = answer.body.parse().unwrap();
+    let tolerance = MAX_CLOCK_ERROR.as_millis() as i64;
+    assert!(
+        guest_time >= before - tolerance && guest_time <= after + tolerance,
+        "guest time {guest_time}, host interval {before}..{after}"
+    );
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "2");
+    host.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abandoned_tenant_freeze_expires_without_restarting_the_app() {
+    use guest_contract::{control, vsock};
+    use nibrunnerd::domain::guest_line;
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1).on_request(IDLE_TIMEOUT_MS);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
+    let socket = host
+        .host
+        .vms
+        .working_dir(&app.app_id)
+        .join(vsock::GUEST_VSOCK_FILENAME);
+    let mut wire = BufReader::new(UnixStream::connect(socket).await.unwrap());
+    let timeout = Duration::from_millis(control::TENANT_CONTROL_TIMEOUT_MS);
+    wire.get_mut()
+        .write_all(vsock::connect_request(vsock::GUEST_CONTROL_VSOCK_PORT).as_bytes())
+        .await
+        .unwrap();
+    let connected = guest_line::read(&mut wire, timeout).await.unwrap();
+    vsock::read_connect_reply(&connected, vsock::GUEST_CONTROL_VSOCK_PORT).unwrap();
+    wire.get_mut()
+        .write_all(format!("{}\n", control::TENANT_FREEZE_REQUEST).as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(
+        guest_line::read(&mut wire, timeout).await.unwrap(),
+        control::TENANT_FREEZE_READY
+    );
+    wire.get_mut()
+        .write_all(format!("{}\n", control::TENANT_FREEZE_COMMIT).as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(
+        guest_line::read(&mut wire, timeout).await.unwrap(),
+        control::TENANT_FREEZE_HELD
+    );
+    drop(wire);
+    tokio::time::sleep(Duration::from_millis(control::TENANT_FREEZE_LEASE_MS) + timeout).await;
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "2");
+    host.stop().await;
+}

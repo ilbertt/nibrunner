@@ -301,6 +301,60 @@ impl VmManager {
         outcome
     }
 
+    async fn resume_restored_tenant(&self, request: &SuspendRequest) -> Result<(), VmError> {
+        self.api(&request.app_id).resume().await?;
+        let control = self
+            .working_dir_for(&request.app_id)
+            .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
+        time_sync::wake(&control)
+            .await
+            .map_err(|error| VmError::SnapshotUnusable {
+                reason: error.message(),
+            })?;
+        self.network
+            .refresh_neighbour(&Neighbour {
+                guest_ipv4: request.slot.guest_ipv4.clone(),
+                guest_mac: request.slot.guest_mac.clone(),
+                tap_name: request.slot.tap_name.clone(),
+            })
+            .await
+            .map_err(|error| VmError::Host(error.message()))
+    }
+
+    async fn resume_frozen_tenant(&self, app_id: &AppId, control: &Path) {
+        let recovered = async {
+            self.api(app_id).resume().await?;
+            time_sync::wake(control).await
+        }
+        .await;
+        if let Err(error) = recovered {
+            tracing::error!(%app_id, error = %error.message(), "the tenant could not resume after a refused sleep");
+            self.processes.stop(app_id).await;
+        }
+    }
+
+    async fn publish_sleep_snapshot(
+        &self,
+        request: &SuspendRequest,
+        control: &Path,
+        staged: StagedSnapshot,
+        paths: super::snapshot::SnapshotPaths,
+        stamp: SnapshotStamp,
+    ) -> Result<u64, VmError> {
+        let published = tokio::task::spawn_blocking(move || staged.publish(&paths, stamp))
+            .await
+            .map_err(|error| VmError::Host(error.to_string()))
+            .and_then(std::convert::identity);
+        match published {
+            Ok(bytes) => Ok(bytes),
+            Err(error) => {
+                self.discard_snapshot(&request.app_id);
+                self.resume_frozen_tenant(&request.app_id, control).await;
+                Err(error)
+            }
+        }
+    }
+
     /// Whether this microVM may be snapshotted now, and its share of the disk while it is.
     async fn admit_snapshot(&self, app_id: &AppId) -> Result<Reserved<'_>, String> {
         let record = self.state.record(app_id).await;
@@ -386,12 +440,18 @@ impl Vmm for VmManager {
             return Err(error);
         }
         let paused = std::time::Instant::now();
-        if let Err(error) = api.pause().await {
-            let _ = api.resume().await;
-            if let Err(recovery) = time_sync::wake(&control).await {
-                tracing::error!(app_id = %request.app_id, error = %recovery.message(), "guest clock recovery failed after pause refusal");
-                self.processes.stop(&request.app_id).await;
-            }
+        // The guest must still hold its freeze lease when the VMM is paused.
+        let pause = tokio::time::timeout(
+            std::time::Duration::from_millis(guest_contract::control::TENANT_CONTROL_TIMEOUT_MS),
+            api.pause(),
+        )
+        .await
+        .map_err(|_| {
+            VmError::Host("the VMM did not pause before the tenant freeze lease could expire".into())
+        })
+        .and_then(std::convert::identity);
+        if let Err(error) = pause {
+            self.resume_frozen_tenant(&request.app_id, &control).await;
             return Err(error);
         }
         if let Err(error) = self
@@ -402,27 +462,14 @@ impl Vmm for VmManager {
             )
             .await
         {
-            let _ = api.resume().await;
-            if let Err(recovery) = time_sync::wake(&control).await {
-                tracing::error!(app_id = %request.app_id, error = %recovery.message(), "guest clock recovery failed after snapshot refusal");
-                self.processes.stop(&request.app_id).await;
-            }
+            self.resume_frozen_tenant(&request.app_id, &control).await;
             return Err(error);
         }
         // Keep the paused guest until its snapshot is committed: a failed hash, sync or rename
         // can then resume it without losing memory, at the cost of one extra read while paused.
-        let published = tokio::task::spawn_blocking(move || staged.publish(&paths, stamp))
-            .await
-            .map_err(|error| VmError::Host(error.to_string()))
-            .and_then(std::convert::identity);
-        let memory_bytes = match published {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.discard_snapshot(&request.app_id);
-                let _ = api.resume().await;
-                return Err(error);
-            }
-        };
+        let memory_bytes = self
+            .publish_sleep_snapshot(&request, &control, staged, paths, stamp)
+            .await?;
         self.processes.stop(&request.app_id).await;
 
         self.metrics.sleep_wake.snapshotted(paused.elapsed());
@@ -496,26 +543,7 @@ impl Vmm for VmManager {
                 let api = self.api(&request.app_id);
                 match api.load_snapshot(&state_path, &memory_path).await {
                     Err(error) => Err(error),
-                    Ok(()) => match api.resume().await {
-                        Err(error) => Err(error),
-                        Ok(()) => {
-                            let control = working_dir.join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
-                            match time_sync::wake(&control).await {
-                                Err(error) => Err(VmError::SnapshotUnusable {
-                                    reason: error.message(),
-                                }),
-                                Ok(()) => self
-                                    .network
-                                    .refresh_neighbour(&Neighbour {
-                                        guest_ipv4: request.slot.guest_ipv4.clone(),
-                                        guest_mac: request.slot.guest_mac.clone(),
-                                        tap_name: request.slot.tap_name.clone(),
-                                    })
-                                    .await
-                                    .map_err(|error| VmError::Host(error.message())),
-                            }
-                        }
-                    },
+                    Ok(()) => self.resume_restored_tenant(&request).await,
                 }
             }
         };
@@ -769,11 +797,13 @@ mod tests {
         }
     }
 
-    async fn fake_firecracker(listener: UnixListener, calls: Arc<Mutex<Vec<String>>>) {
+    async fn fake_firecracker(
+        listener: UnixListener,
+        calls: Arc<Mutex<Vec<String>>>,
+        refuse: Option<&'static str>,
+    ) {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                return;
-            };
+            let (stream, _) = listener.accept().await.unwrap();
             let calls = calls.clone();
             tokio::spawn(async move {
                 let service =
@@ -782,17 +812,21 @@ mod tests {
                         async move {
                             let path = request.uri().path().to_string();
                             let body = request.into_body().collect().await.unwrap().to_bytes();
-                            if path == "/snapshot/create" {
-                                let snapshot: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                                std::fs::write(snapshot["snapshot_path"].as_str().unwrap(), b"state")
-                                    .unwrap();
-                                std::fs::write(snapshot["mem_file_path"].as_str().unwrap(), b"memory")
-                                    .unwrap();
+                            if refuse == Some("silent-pause")
+                                && String::from_utf8_lossy(&body).contains("Paused")
+                            {
+                                std::future::pending::<()>().await;
                             }
+                            let refused = refuse.is_some_and(|target| target == path)
+                                && (path != "/vm" || String::from_utf8_lossy(&body).contains("Paused"));
                             calls.lock().unwrap().push(path);
                             Ok::<_, std::convert::Infallible>(
                                 hyper::Response::builder()
-                                    .status(hyper::StatusCode::NO_CONTENT)
+                                    .status(if refused {
+                                        hyper::StatusCode::BAD_REQUEST
+                                    } else {
+                                        hyper::StatusCode::NO_CONTENT
+                                    })
                                     .body(Full::new(bytes::Bytes::new()))
                                     .unwrap(),
                             )
@@ -805,7 +839,12 @@ mod tests {
         }
     }
 
-    async fn fake_guest_control(listener: UnixListener, calls: Arc<Mutex<Vec<String>>>, old_init: bool) {
+    async fn fake_guest_control(
+        listener: UnixListener,
+        calls: Arc<Mutex<Vec<String>>>,
+        old_init: bool,
+        refuse_clock: bool,
+    ) {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
@@ -825,13 +864,24 @@ mod tests {
                     return;
                 }
                 if request == guest_contract::control::TENANT_FREEZE_REQUEST {
-                    wire.get_mut().write_all(b"OK\n").await.unwrap();
-                } else if request.starts_with(guest_contract::control::TENANT_CLOCK_REQUEST) {
                     wire.get_mut().write_all(b"READY\n").await.unwrap();
                     line.clear();
                     wire.read_line(&mut line).await.unwrap();
+                    assert_eq!(line.trim(), guest_contract::control::TENANT_FREEZE_COMMIT);
+                    calls.lock().unwrap().push(line.trim().into());
+                    wire.get_mut().write_all(b"OK\n").await.unwrap();
+                } else if request.starts_with(guest_contract::control::TENANT_CLOCK_REQUEST) {
+                    wire.get_mut()
+                        .write_all(if refuse_clock { b"REFUSED\n" } else { b"READY\n" })
+                        .await
+                        .unwrap();
+                    line.clear();
+                    wire.read_line(&mut line).await.unwrap();
+                    if refuse_clock {
+                        return;
+                    }
                     calls.lock().unwrap().push(line.trim().to_string());
-                    if line == "GO\n" {
+                    if line.starts_with(guest_contract::control::TENANT_CLOCK_RELEASE) {
                         wire.get_mut().write_all(b"OK\n").await.unwrap();
                     }
                 }
@@ -840,34 +890,55 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn running_fake_vm(fixture: &mut Fixture, old_init: bool) -> Arc<Mutex<Vec<String>>> {
+    async fn running_fake_vm(
+        fixture: &mut Fixture,
+        old_init: bool,
+        refuse_api: Option<&'static str>,
+        refuse_clock: bool,
+    ) -> Arc<Mutex<Vec<String>>> {
         use std::os::unix::fs::PermissionsExt;
-        let working_dir = fixture.manager.working_dir_for(&app_id());
+        let working_dir = fixture.manager.vm_dir.join(app_id().as_str());
         std::fs::create_dir_all(&working_dir).unwrap();
         let binary = fixture._directory.path().join("fake-firecracker");
         std::fs::write(&binary, b"#!/bin/sh\n: > started\nexec sleep 30\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        fixture.manager.firecracker = binary;
+        fixture.manager.jailer.binary = binary;
         fixture
             .manager
             .processes
-            .spawn(&app_id(), &fixture.manager.firecracker, &working_dir, None)
+            .spawn(
+                &app_id(),
+                &fixture.manager.firecracker,
+                &fixture.manager.jailer,
+                &super::super::jailer::Jail::for_testing(working_dir.clone()),
+                false,
+            )
             .await
             .unwrap();
+        let mut record = fixture.manager.processes.read_record(&app_id()).unwrap();
+        record.jail_root = None;
+        record.jail_uid = None;
+        fixture.manager.processes.write_record(&record).unwrap();
+        std::fs::remove_file(fixture.manager.processes.api_socket(&app_id())).unwrap();
         let marker = working_dir.join("started");
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !marker.exists() {
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             }
         })
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            panic!(
+                "fake VMM did not start: {error}; console: {:?}",
+                std::fs::read_to_string(fixture.manager.processes.console_path(&app_id()))
+            )
+        });
         let calls = Arc::new(Mutex::new(Vec::new()));
         let api = UnixListener::bind(fixture.manager.processes.api_socket(&app_id())).unwrap();
         let control =
             UnixListener::bind(working_dir.join(guest_contract::vsock::GUEST_VSOCK_FILENAME)).unwrap();
-        tokio::spawn(fake_firecracker(api, calls.clone()));
-        tokio::spawn(fake_guest_control(control, calls.clone(), old_init));
+        tokio::spawn(fake_firecracker(api, calls.clone(), refuse_api));
+        tokio::spawn(fake_guest_control(control, calls.clone(), old_init, refuse_clock));
         fixture
             .state
             .put_record(instance_record(|record| record.health.ever_healthy = true))
@@ -879,7 +950,7 @@ mod tests {
     #[tokio::test]
     async fn an_old_guest_that_does_not_answer_sleep_keeps_running() {
         let mut fixture = fixture();
-        let calls = running_fake_vm(&mut fixture, true).await;
+        let calls = running_fake_vm(&mut fixture, true, None, false).await;
         let request = SuspendRequest {
             app_id: app_id(),
             deployment_id: deployment_id(),
@@ -890,52 +961,103 @@ mod tests {
         assert!(fixture.manager.processes.status(&app_id()).active);
         let calls = calls.lock().unwrap().clone();
         assert_eq!(calls[0], "SLEEP");
-        assert!(calls[1].starts_with("WAKE "));
+        assert!(calls[1] == "WAKE");
         fixture.manager.processes.stop(&app_id()).await;
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn sleep_and_wake_hold_the_tenant_until_its_clock_is_set() {
-        let mut fixture = fixture();
-        let calls = running_fake_vm(&mut fixture, false).await;
-        let request = SuspendRequest {
+    fn suspend_request() -> SuspendRequest {
+        SuspendRequest {
             app_id: app_id(),
             deployment_id: deployment_id(),
             slot: nft_render::describe_slot(0, app_id()),
-        };
+        }
+    }
 
-        fixture.manager.sleep(request.clone()).await.unwrap();
+    #[tokio::test]
+    async fn refused_pauses_and_snapshots_resume_and_release_the_tenant() {
+        for refused in ["/vm", "/snapshot/create", "silent-pause"] {
+            let mut fixture = fixture();
+            let calls = running_fake_vm(&mut fixture, false, Some(refused), false).await;
+            assert!(fixture.manager.sleep(suspend_request()).await.is_err());
+            assert!(fixture.manager.processes.status(&app_id()).active);
+            let calls = calls.lock().unwrap().clone();
+            assert_eq!(&calls[..2], ["SLEEP", "HOLD"]);
+            assert_eq!(calls[calls.len() - 3], "/vm");
+            assert_eq!(calls[calls.len() - 2], "WAKE");
+            assert!(calls.last().unwrap().starts_with("GO "));
+            assert!(!snapshot_paths(&fixture.manager.snapshot_dir, &app_id())
+                .stamp_path
+                .exists());
+            fixture.manager.processes.stop(&app_id()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_snapshot_publication_resumes_and_releases_the_tenant() {
+        let mut fixture = fixture();
+        let calls = running_fake_vm(&mut fixture, false, None, false).await;
+        let request = suspend_request();
+        let control = fixture
+            .manager
+            .working_dir_for(&app_id())
+            .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
+        time_sync::freeze_tenant(&control).await.unwrap();
+        let staged = StagedSnapshot::create(&fixture.manager.snapshot_dir).unwrap();
         let paths = snapshot_paths(&fixture.manager.snapshot_dir, &app_id());
-        assert!(paths.stamp_path.exists());
-        assert!(!fixture.manager.processes.status(&app_id()).active);
-
-        let working_dir = fixture.manager.working_dir_for(&app_id());
-        let marker = working_dir.join("started");
-        std::fs::remove_file(&marker).unwrap();
-        let api_path = fixture.manager.processes.api_socket(&app_id());
-        let control_path = working_dir.join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
-        let seen = calls.clone();
-        let listeners = tokio::spawn(async move {
-            while !marker.exists() {
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            }
-            let api = UnixListener::bind(api_path).unwrap();
-            let control = UnixListener::bind(control_path).unwrap();
-            tokio::spawn(fake_firecracker(api, seen.clone()));
-            tokio::spawn(fake_guest_control(control, seen, false));
-        });
-
-        fixture.manager.wake(request).await.unwrap();
-        listeners.await.unwrap();
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(calls[0], "SLEEP");
-        assert_eq!(calls[1..4], ["/vm", "/snapshot/create", "/snapshot/load"]);
-        assert_eq!(calls[4], "/vm");
-        assert!(calls[5].starts_with("WAKE "));
-        assert_eq!(calls[6], "GO");
-        assert_eq!(fixture.network.neighbours().len(), 1);
+        assert!(fixture
+            .manager
+            .publish_sleep_snapshot(
+                &request,
+                &control,
+                staged,
+                paths.clone(),
+                fixture.manager.current_stamp(&request)
+            )
+            .await
+            .is_err());
+        assert!(fixture.manager.processes.status(&app_id()).active);
         assert!(!paths.directory.exists());
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(&calls[..4], ["SLEEP", "HOLD", "/vm", "WAKE"]);
+        assert!(calls[4].starts_with("GO "));
+        fixture.manager.processes.stop(&app_id()).await;
+    }
+
+    #[tokio::test]
+    async fn a_tenant_that_cannot_be_released_after_a_snapshot_refusal_is_stopped() {
+        let mut fixture = fixture();
+        running_fake_vm(&mut fixture, false, Some("/snapshot/create"), true).await;
+        assert!(fixture.manager.sleep(suspend_request()).await.is_err());
+        assert!(!fixture.manager.processes.status(&app_id()).active);
+    }
+
+    #[tokio::test]
+    async fn a_restored_tenant_is_released_before_its_neighbour_is_refreshed() {
+        let mut fixture = fixture();
+        let calls = running_fake_vm(&mut fixture, false, None, false).await;
+        fixture
+            .manager
+            .resume_restored_tenant(&suspend_request())
+            .await
+            .unwrap();
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(&calls[..2], ["/vm", "WAKE"]);
+        assert!(calls[2].starts_with("GO "));
+        assert_eq!(fixture.network.neighbours().len(), 1);
+        fixture.manager.processes.stop(&app_id()).await;
+    }
+
+    #[tokio::test]
+    async fn a_restored_guest_that_refuses_clock_sync_requires_a_cold_boot() {
+        let mut fixture = fixture();
+        running_fake_vm(&mut fixture, false, None, true).await;
+        let error = fixture
+            .manager
+            .resume_restored_tenant(&suspend_request())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VmError::SnapshotUnusable { .. }));
+        assert!(fixture.network.neighbours().is_empty());
         fixture.manager.processes.stop(&app_id()).await;
     }
 
@@ -1098,6 +1220,12 @@ mod tests {
             .state
             .put_record(instance_record(|record| record.health.ever_healthy = true))
             .await;
+        let working_dir = fixture.manager.working_dir_for(&app_id());
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let control =
+            UnixListener::bind(working_dir.join(guest_contract::vsock::GUEST_VSOCK_FILENAME)).unwrap();
+        let control_calls = Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn(fake_guest_control(control, control_calls.clone(), false, false));
         let socket = fixture.manager.processes.api_socket(&app_id());
         make_directory(socket.parent().unwrap(), 0o700).unwrap();
         let listener = tokio::net::UnixListener::bind(socket).unwrap();
@@ -1146,6 +1274,9 @@ mod tests {
             .await
             .unwrap_err();
         server.await.unwrap();
+        let control_calls = control_calls.lock().unwrap().clone();
+        assert_eq!(&control_calls[..3], ["SLEEP", "HOLD", "WAKE"]);
+        assert!(control_calls[3].starts_with("GO "));
         assert!(matches!(error, VmError::Host(_)), "{error}");
         let calls = seen.lock().unwrap();
         assert_eq!(calls[0].1["state"], "Paused");
