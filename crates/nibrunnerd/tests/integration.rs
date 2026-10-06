@@ -127,6 +127,55 @@ async fn an_oci_filesystem_preserves_root_and_inode_metadata_in_its_read_only_la
     );
 }
 
+#[tokio::test]
+async fn a_ustar_layer_preserves_long_file_paths_and_short_hardlinks() {
+    use sha2::{Digest, Sha256};
+    if !enabled() {
+        return;
+    }
+    require_root();
+    let original = format!("{}original", "long-directory/".repeat(8));
+    let mut filesystem = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_ustar();
+    header.set_uid(1234);
+    header.set_gid(4321);
+    header.set_mode(0o640);
+    header.set_mtime(1_234_567_890);
+    header.set_size(8);
+    filesystem
+        .append_data(&mut header, &original, b"from OCI".as_slice())
+        .unwrap();
+    let mut link_header = tar::Header::new_gnu();
+    link_header.set_entry_type(tar::EntryType::Link);
+    link_header.set_size(0);
+    filesystem
+        .append_link(&mut link_header, "alias", &original)
+        .unwrap();
+    let archive = nibrunnerd::test_support::oci::from_filesystem(&filesystem.into_inner().unwrap());
+    let layer = protocol::DesiredLayer::Oci {
+        source: protocol::OciSource::Archive(protocol::StoredObject {
+            digest: protocol::Sha256Digest::parse(hex::encode(Sha256::digest(&archive))).unwrap(),
+            object_key: protocol::ObjectKey::parse("ustar.tar").unwrap(),
+        }),
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn nibrunnerd::ports::ArtifactStore> = mocks::artifacts_holding(archive);
+    let image =
+        nibrunnerd::adapters::vm::layers::ensure_layer_image(&store, directory.path(), &layer, &commands())
+            .await
+            .unwrap()
+            .path;
+    for path in ["alias", original.as_str()] {
+        assert_eq!(debugfs(&image, &format!("cat /{path}")).await, "from OCI");
+        let metadata = debugfs(&image, &format!("stat /{path}")).await;
+        assert!(metadata.contains("User:  1234"), "{metadata}");
+        assert!(metadata.contains("Group:  4321"), "{metadata}");
+        assert!(metadata.contains("Mode:  0640"), "{metadata}");
+        assert!(metadata.contains("Links: 2"), "{metadata}");
+        assert!(metadata.contains("mtime: 0x499602d2"), "{metadata}");
+    }
+}
+
 // The real tool copies the archive in as it formats, and what it copied is read back off the
 // device the way an export reads it: by debugfs, so nothing here mounts a tenant's volume.
 #[tokio::test]

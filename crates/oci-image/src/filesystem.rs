@@ -308,6 +308,10 @@ impl Filesystem {
         for (name, node) in ordered {
             let name = if name.is_empty() { "." } else { name.as_str() };
             let mut header = node.header.clone();
+            // USTAR retains its prefix when the tar writer replaces a path shorter than 100 bytes.
+            if let Some(ustar) = header.as_ustar_mut() {
+                ustar.prefix.fill(0);
+            }
             if !node.attributes.is_empty() {
                 archive.append_pax_extensions(
                     node.attributes
@@ -516,6 +520,80 @@ mod tests {
         assert_eq!(entries[2].link_name().unwrap().unwrap(), Path::new("alias"));
         assert_eq!(entries[1].header().uid().unwrap(), 42);
         assert_eq!(entries[1].header().mode().unwrap(), 0o751);
+    }
+
+    #[test]
+    fn short_ustar_directory_paths_are_not_prefixed_twice() {
+        let mut input = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_uid(42);
+        header.set_gid(43);
+        header.set_mode(0o751);
+        header.set_mtime(123);
+        header.set_size(0);
+        header.set_path("licenses").unwrap();
+        let prefix = b"usr/local/lib/python3.13/site-packages/pip";
+        header.as_ustar_mut().unwrap().prefix[..prefix.len()].copy_from_slice(prefix);
+        header.set_cksum();
+        input.append(&header, std::io::empty()).unwrap();
+        let mut filesystem = Filesystem::new();
+        filesystem.apply(&input.into_inner().unwrap()).unwrap();
+        let output = filesystem.finish().unwrap();
+        let mut archive = tar::Archive::new(Cursor::new(output.tar));
+        let entries: Vec<_> = archive.entries().unwrap().map(Result::unwrap).collect();
+        let expected = Path::new("usr/local/lib/python3.13/site-packages/pip/licenses");
+        let directory = entries
+            .iter()
+            .find(|entry| entry.path().unwrap() == expected)
+            .unwrap();
+        assert!(directory.header().entry_type().is_dir());
+        assert_eq!(directory.header().uid().unwrap(), 42);
+        assert_eq!(directory.header().gid().unwrap(), 43);
+        assert_eq!(directory.header().mode().unwrap(), 0o751);
+        assert_eq!(directory.header().mtime().unwrap(), 123);
+        assert_eq!(entries.len(), 8);
+    }
+
+    #[test]
+    fn ustar_prefixes_do_not_follow_hardlinks_to_shorter_paths() {
+        let original = format!("{}original", "long-directory/".repeat(8));
+        let mut input = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_ustar();
+        header.set_uid(42);
+        header.set_gid(43);
+        header.set_mode(0o751);
+        header.set_mtime(123);
+        header.set_size(7);
+        input
+            .append_data(&mut header, &original, b"payload".as_slice())
+            .unwrap();
+        assert_ne!(header.as_ustar().unwrap().prefix[0], 0);
+        let mut filesystem = Filesystem::new();
+        filesystem.apply(&input.into_inner().unwrap()).unwrap();
+        filesystem
+            .apply(&layer(&[("alias", tar::EntryType::Link, &original)]))
+            .unwrap();
+        let output = filesystem.finish().unwrap();
+        let mut archive = tar::Archive::new(Cursor::new(output.tar));
+        let entries: Vec<_> = archive.entries().unwrap().map(Result::unwrap).collect();
+        let alias = entries
+            .iter()
+            .find(|entry| entry.path().unwrap() == Path::new("alias"))
+            .unwrap();
+        assert!(alias.header().entry_type().is_file());
+        let original = entries
+            .iter()
+            .find(|entry| entry.path().unwrap() == Path::new(&original))
+            .unwrap();
+        assert!(original.header().entry_type().is_hard_link());
+        assert_eq!(original.link_name().unwrap().unwrap(), Path::new("alias"));
+        for entry in [alias, original] {
+            assert_eq!(entry.header().uid().unwrap(), 42);
+            assert_eq!(entry.header().gid().unwrap(), 43);
+            assert_eq!(entry.header().mode().unwrap(), 0o751);
+            assert_eq!(entry.header().mtime().unwrap(), 123);
+        }
     }
 
     #[test]
