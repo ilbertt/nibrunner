@@ -16,10 +16,10 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::domain::metrics::{HostMetrics, Outcome};
 use tokio::sync::RwLock;
 
-use crate::adapters::proxy::access::{AccessLog, AccessRecord};
 use crate::adapters::proxy::forward::{
     forward, hostname_of, note_the_hop, say, ProxyBody, Unreachable, Upstreams,
 };
+use crate::adapters::proxy::http_log::{HttpRequestLog, HttpRequestRecord};
 use crate::adapters::proxy::pem;
 use crate::domain::metrics::proxy::Handshake;
 use crate::domain::report::routes::RouteTarget;
@@ -106,22 +106,25 @@ pub struct Router {
     routes: RwLock<Arc<RouteTable>>,
     upstreams: Upstreams,
     metrics: Arc<HostMetrics>,
-    access: Option<Arc<AccessLog>>,
+    http_log: Option<Arc<HttpRequestLog>>,
 }
 
 impl Router {
-    pub fn new(metrics: Arc<HostMetrics>, access: Option<Arc<AccessLog>>) -> Arc<Self> {
+    pub fn new(metrics: Arc<HostMetrics>, http_log: Option<Arc<HttpRequestLog>>) -> Arc<Self> {
         Arc::new(Self {
             routes: RwLock::new(Arc::new(RouteTable::default())),
             upstreams: Upstreams::default(),
             metrics,
-            access,
+            http_log,
         })
     }
 
-    pub fn discard_access(&self, app_id: &AppId) {
-        if let Some(access) = &self.access {
-            access.discard(app_id);
+    pub async fn discard_http_log(&self, app_id: &AppId) {
+        Arc::make_mut(&mut *self.routes.write().await)
+            .by_hostname
+            .retain(|_, route| &route.app_id != app_id);
+        if let Some(http_log) = &self.http_log {
+            http_log.discard(app_id).await;
         }
     }
 
@@ -144,13 +147,6 @@ impl Router {
         arrival: Arrival,
     ) -> Response<ProxyBody> {
         let http2 = request.version() == hyper::Version::HTTP_2;
-        let access = self.access.as_ref().map(|sink| {
-            (
-                sink.clone(),
-                request.method().as_str().to_owned(),
-                request.uri().clone(),
-            )
-        });
         let started = std::time::Instant::now();
         let metrics = self.metrics.clone();
         metrics.proxy.began();
@@ -160,18 +156,6 @@ impl Router {
             .proxy
             .answered(outcome, elapsed, route.as_ref().map(|route| &route.app_id));
         metrics.proxy.ended();
-        if let (Some((sink, method, uri)), Some(route)) = (access, route) {
-            sink.record(
-                route.app_id,
-                AccessRecord::new(
-                    &method,
-                    &uri,
-                    response.status().as_u16(),
-                    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
-                    route.deployment_id,
-                ),
-            );
-        }
         if http2 {
             // Illegal over HTTP/2, and hyper logs a warning for each one it has to strip.
             response.headers_mut().remove(hyper::header::CONNECTION);
@@ -184,6 +168,7 @@ impl Router {
         mut request: Request<Incoming>,
         arrival: Arrival,
     ) -> (Response<ProxyBody>, Outcome, Option<Route>) {
+        let started = std::time::Instant::now();
         let Some(hostname) = hostname_of(&request) else {
             return (
                 say(StatusCode::BAD_REQUEST, "This request names no host.\n"),
@@ -207,15 +192,28 @@ impl Router {
                 None,
             );
         }
-        let Some(route) = self.routes().await.route_for(&hostname) else {
-            return (
-                say(
-                    StatusCode::NOT_FOUND,
-                    "No app on this host answers for that hostname.\n",
-                ),
-                Outcome::NoSuchHost,
-                None,
-            );
+        let (route, logging) = {
+            let routes = self.routes.read().await;
+            let Some(route) = routes.route_for(&hostname) else {
+                return (
+                    say(
+                        StatusCode::NOT_FOUND,
+                        "No app on this host answers for that hostname.\n",
+                    ),
+                    Outcome::NoSuchHost,
+                    None,
+                );
+            };
+            let logging = if let Some(log) = &self.http_log {
+                Some((
+                    log.begin(&route.app_id).await,
+                    request.method().as_str().to_owned(),
+                    request.uri().clone(),
+                ))
+            } else {
+                None
+            };
+            (route, logging)
         };
         note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
         let open = self.metrics.proxy.open(&route.app_id);
@@ -230,6 +228,18 @@ impl Router {
         } else {
             Outcome::Unreachable
         };
+        if let (Some(log), Some((scope, method, uri))) = (&self.http_log, logging) {
+            log.record(
+                scope,
+                HttpRequestRecord::new(
+                    &method,
+                    &uri,
+                    response.status().as_u16(),
+                    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                    route.deployment_id.clone(),
+                ),
+            );
+        }
         (response, outcome, Some(route))
     }
 }
@@ -568,10 +578,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_routed_request_writes_an_access_record_without_its_query() {
-        let directory = tempfile::tempdir().expect("an access log directory");
-        let access = Arc::new(AccessLog::new(directory.path().to_path_buf()).expect("access logs"));
-        let router = Router::new(Arc::new(HostMetrics::new()), Some(access));
+    async fn a_routed_request_writes_an_http_record_without_its_query() {
+        let directory = tempfile::tempdir().expect("an HTTP request log directory");
+        let http_log =
+            Arc::new(HttpRequestLog::new(directory.path().to_path_buf()).expect("HTTP request logs"));
+        let router = Router::new(Arc::new(HostMetrics::new()), Some(http_log));
         routed_at(&router, nobody_listening().await).await;
         let port = serving(router).await;
         let answered = asked(
@@ -581,7 +592,7 @@ mod tests {
         .await;
         assert!(answered.starts_with("HTTP/1.0 502 "), "{answered}");
 
-        let path = directory.path().join("app-1.access.jsonl");
+        let path = directory.path().join("app-1.http.jsonl");
         let record = tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 if let Ok(content) = std::fs::read_to_string(&path) {
@@ -593,7 +604,7 @@ mod tests {
             }
         })
         .await
-        .expect("the access writer flushes the routed request");
+        .expect("the HTTP log writer flushes the routed request");
         assert!(record.contains("\"path\":\"/catalog\""), "{record}");
         assert!(record.contains("\"status\":502"), "{record}");
         assert!(record.contains("\"deploymentId\":\"dep-1\""), "{record}");
@@ -739,6 +750,45 @@ mod tests {
             2,
             "the app left and came back, and nothing was kept from before"
         );
+    }
+
+    #[tokio::test]
+    async fn forgetting_an_app_removes_its_route_and_rejects_a_late_http_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = Arc::new(HttpRequestLog::new(directory.path().to_path_buf()).unwrap());
+        let router = Router::new(Arc::new(HostMetrics::new()), Some(logs.clone()));
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
+        let (seen, received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            seen.send(()).unwrap();
+            released.await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        routed_at(&router, host_port).await;
+        let proxy = serving(router.clone()).await;
+        let request = tokio::spawn(asked(
+            proxy,
+            "GET /forgotten HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n",
+        ));
+        received.await.unwrap();
+        router.discard_http_log(&crate::test_support::app_id()).await;
+        assert!(router.routes().await.is_empty());
+        let missing = asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n").await;
+        assert!(missing.starts_with("HTTP/1.0 404 "));
+        release.send(()).unwrap();
+        assert!(request.await.unwrap().starts_with("HTTP/1.0 200 "));
+        // Draining the writer makes a late record observable before checking the directory.
+        logs.discard(&AppId::parse("writer-barrier").unwrap()).await;
+        assert!(!directory.path().join("app-1.http.jsonl").exists());
     }
 
     /// Answers one request and then reports how that connection ended: the bytes read next, so
