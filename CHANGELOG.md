@@ -1,5 +1,24 @@
 # Changelog
 
+## [2026.10.3] - 2026-10-07
+
+### Features
+
+- Derive VM CPU and memory limits from guest resources (#244)
+- Bound concurrent VM boots and restores (#243)
+- Bound HTTP concurrency across the host and per app (#242)
+- Keep bounded HTTP request logs for each app (#239)
+
+### Fixes
+
+- Report a start refused for want of a slot on a record, not only in a log (#241)
+- Preserve USTAR paths when assembling OCI layers (#238)
+- Synchronize guest clocks before resuming restored tenants (#237)
+
+### Maintenance
+
+- Cover popular remote OCI image unpacking in CI (#240)
+
 ## [2026.10.2] - 2026-10-04
 
 ### Features
