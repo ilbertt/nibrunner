@@ -33,7 +33,7 @@
       "minimum": 1
     },
     "max_concurrent_vm_starts": {
-      "description": "Optional host-wide bound on simultaneous VM boots and snapshot restores.",
+      "description": "Host-wide bound on simultaneous VM boots and snapshot restores. Required, from 1 to 65535.\n`install` writes 2; changing it requires `nibrunnerd start`.",
       "type": "integer",
       "format": "uint16",
       "maximum": 65535,
@@ -63,6 +63,7 @@
   "additionalProperties": false,
   "required": [
     "max_apps",
+    "max_concurrent_vm_starts",
     "cron",
     "paths",
     "artifacts",

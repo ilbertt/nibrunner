@@ -12,7 +12,8 @@ const BUSYBOX_INDEX: &str = "5cec3fc171c87218698e85a52af7087de727372aae264a787b8
 #[tokio::test(flavor = "multi_thread")]
 async fn a_guest_that_initialized_releases_start_capacity_before_its_app_is_healthy() {
     let Some(host) =
-        crate::host_with(|config| config.max_concurrent_vm_starts = std::num::NonZeroU16::new(1)).await
+        crate::host_with(|config| config.max_concurrent_vm_starts = std::num::NonZeroU16::new(1).unwrap())
+            .await
     else {
         return;
     };

@@ -172,6 +172,8 @@ Pages are MDX under `docs/content/docs/`: `(docs)/index.mdx` is the introduction
 `(docs)/getting-started/` is read in order, `(docs)/guides/` is one feature per page, and the
 `reference/` pages are rendered from the JSON Schemas by `<SchemaReference file="..." />`, which
 `docs/src/lib/remark-schema-reference.ts` expands at build time — no generated MDX is checked in.
+Link named configuration keys to their reference table rows; top-level keys use
+`/docs/reference/config#hostconfig-<key>`.
 `reference/metrics.mdx` is the same shape over `crates/nibrunnerd/metrics.json`, through
 `<MetricsReference file="..." />` and `remark-metrics-reference.ts`. `reference/filesystem.mdx` is
 `fumadocs-openapi` instead, over `crates/nibrunnerd/filesystem.openapi.json`, wired up in

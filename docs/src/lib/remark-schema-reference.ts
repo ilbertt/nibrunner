@@ -13,7 +13,7 @@ import type {
   Text,
 } from 'mdast';
 import { fromMarkdown } from 'mdast-util-from-markdown';
-import type { MdxJsxAttribute, MdxJsxFlowElement } from 'mdast-util-mdx-jsx';
+import type { MdxJsxAttribute, MdxJsxFlowElement, MdxJsxTextElement } from 'mdast-util-mdx-jsx';
 import type { Plugin } from 'unified';
 import { z } from 'zod';
 
@@ -175,11 +175,11 @@ function section({
   return [
     heading({ depth, value: name }),
     ...(schema.description === undefined ? [] : blocks(schema.description)),
-    ...body(schema),
+    ...body({ schema, name }),
   ];
 }
 
-function body(schema: Schema): RootContent[] {
+function body({ schema, name }: { schema: Schema; name: string }): RootContent[] {
   if (schema.oneOf) {
     return variants(schema.oneOf);
   }
@@ -188,7 +188,7 @@ function body(schema: Schema): RootContent[] {
     return [paragraph([text('One of '), ...values, text('.')])];
   }
   if (schema.properties) {
-    return [propertiesTable(schema)];
+    return [propertiesTable({ schema, section: name })];
   }
   return [paragraph(phrase(schema))];
 }
@@ -234,18 +234,38 @@ function variantName({ variant, tag }: { variant: Schema; tag: string | undefine
   return (variant.required ?? Object.keys(variant.properties ?? {})).join(', ') || 'variant';
 }
 
-function propertiesTable(schema: Schema): Table {
+function propertiesTable({ schema, section }: { schema: Schema; section: string }): Table {
   const required = new Set(schema.required ?? []);
   return table({
     header: ['Name', 'Type', 'Description'],
     rows: properties(schema).map(([name, property]) => [
       required.has(name)
-        ? [code(name)]
-        : [code(name), text(' '), { type: 'emphasis', children: [text('optional')] }],
+        ? [propertyAnchor({ section, name })]
+        : [
+            propertyAnchor({ section, name }),
+            text(' '),
+            { type: 'emphasis', children: [text('optional')] },
+          ],
       phrase(property),
       inline(property.description),
     ]),
   });
+}
+
+function propertyAnchor({ section, name }: { section: string; name: string }): MdxJsxTextElement {
+  return {
+    type: 'mdxJsxTextElement',
+    name: 'span',
+    attributes: [
+      {
+        type: 'mdxJsxAttribute',
+        name: 'id',
+        value: `${new GithubSlugger().slug(section)}-${name}`,
+      },
+      { type: 'mdxJsxAttribute', name: 'className', value: 'scroll-mt-28' },
+    ],
+    children: [code(name)],
+  };
 }
 
 /** A type, the way a table cell says it: a link for a named one, a word and its bounds otherwise. */

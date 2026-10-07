@@ -129,9 +129,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
     }
 
     let vms = Arc::new(VmManager {
-        start_permits: config
-            .max_concurrent_vm_starts
-            .map(|count| tokio::sync::Semaphore::new(usize::from(count.get()))),
+        start_permits: tokio::sync::Semaphore::new(usize::from(config.max_concurrent_vm_starts.get())),
         vm_dir: config.vm_dir(),
         snapshot_dir: config.snapshot_dir.clone(),
         guest_image_dir: config.guest_image_dir.clone(),

@@ -31,7 +31,7 @@ const VM_DIR_MODE: u32 = 0o700;
 const FIRST_GUEST_CID: u32 = 3;
 
 pub struct VmManager {
-    pub start_permits: Option<tokio::sync::Semaphore>,
+    pub start_permits: tokio::sync::Semaphore,
     pub vm_dir: PathBuf,
     pub snapshot_dir: PathBuf,
     pub guest_image_dir: PathBuf,
@@ -56,11 +56,8 @@ struct PreparedVm {
 }
 
 impl VmManager {
-    fn admit_start(&self) -> Result<Option<tokio::sync::SemaphorePermit<'_>>, VmError> {
-        self.start_permits
-            .as_ref()
-            .map(|permits| permits.try_acquire().map_err(|_| VmError::StartBusy))
-            .transpose()
+    fn admit_start(&self) -> Result<tokio::sync::SemaphorePermit<'_>, VmError> {
+        self.start_permits.try_acquire().map_err(|_| VmError::StartBusy)
     }
 
     pub fn working_dir_for(&self, app_id: &AppId) -> PathBuf {
@@ -395,7 +392,7 @@ impl VmManager {
 #[async_trait]
 impl Vmm for VmManager {
     async fn boot(&self, request: BootRequest) -> Result<(), VmError> {
-        let start_permit = self.admit_start()?;
+        let _starting = self.admit_start()?;
         let app_id = request.desired.app_id.clone();
         self.discard_snapshot(&app_id);
         let staged = std::time::Instant::now();
@@ -412,19 +409,17 @@ impl Vmm for VmManager {
             let _ = self.logs.detach(&app_id).await;
             return Err(VmError::Host(error.to_string()));
         }
-        if start_permit.is_some() {
-            let control = prepared
-                .jail
-                .root
-                .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
-            if let Err(error) =
-                super::startup::initialized(&control, || self.processes.status(&app_id).active).await
-            {
-                self.processes.stop(&app_id).await;
-                self.cron_registration.detach(&app_id).await;
-                self.logs.detach(&app_id).await;
-                return Err(error);
-            }
+        let control = prepared
+            .jail
+            .root
+            .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
+        if let Err(error) =
+            super::startup::initialized(&control, || self.processes.status(&app_id).active).await
+        {
+            self.processes.stop(&app_id).await;
+            self.cron_registration.detach(&app_id).await;
+            self.logs.detach(&app_id).await;
+            return Err(error);
         }
         tracing::info!(
             %app_id,
@@ -770,8 +765,7 @@ mod tests {
     #[test]
     fn a_full_start_budget_refuses_immediately_and_recovers_when_a_start_finishes() {
         let mut host = fixture();
-        assert!(host.manager.admit_start().unwrap().is_none());
-        host.manager.start_permits = Some(tokio::sync::Semaphore::new(1));
+        host.manager.start_permits = tokio::sync::Semaphore::new(1);
         let first = host.manager.admit_start().unwrap();
         assert!(host.manager.admit_start().is_err());
         drop(first);
@@ -784,7 +778,7 @@ mod tests {
         std::fs::write(&binary, format!("#!/bin/sh\nexec {command}\n")).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         fixture.manager.jailer.binary = binary;
-        fixture.manager.start_permits = Some(tokio::sync::Semaphore::new(1));
+        fixture.manager.start_permits = tokio::sync::Semaphore::new(1);
     }
 
     #[tokio::test]
@@ -876,7 +870,7 @@ mod tests {
         let (network, network_spy) = mocks::network();
         let state = HostState::shared();
         let manager = VmManager {
-            start_permits: None,
+            start_permits: tokio::sync::Semaphore::new(2),
             metrics: Arc::new(crate::domain::metrics::HostMetrics::new()),
             vm_dir: root.join("vm"),
             snapshot_dir: root.join("snapshots"),
