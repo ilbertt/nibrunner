@@ -71,7 +71,7 @@ async fn resource_limits_preserve_allocated_memory_across_sleep_restore_and_rede
     let Some(host) = crate::host().await else {
         return;
     };
-    for (cpus, memory, allocated) in [(1_u32, 128_u32, 80_u32), (2, 256, 192)] {
+    for (cpus, memory, allocated) in [(1_u32, 256_u32, 160_u32), (2, 512, 384)] {
         let app = host
             .tenant(1)
             .on_request(IDLE_TIMEOUT_MS)
@@ -93,12 +93,16 @@ async fn resource_limits_preserve_allocated_memory_across_sleep_restore_and_rede
         .await;
         let path = assert_limits(&host, &app);
         let first_pid = processes(&host).read_record(&app.app_id).unwrap().pid;
+        let answer = host
+            .get(&app, &format!("/allocate?mib={allocated}"))
+            .await
+            .unwrap();
         assert_eq!(
-            host.get(&app, &format!("/allocate?mib={allocated}"))
-                .await
-                .unwrap()
-                .status,
-            200
+            answer.status,
+            200,
+            "{answer:?}; memory events: {}; console: {}",
+            std::fs::read_to_string(path.join("memory.events")).unwrap(),
+            std::fs::read_to_string(processes(&host).console_path(&app.app_id)).unwrap_or_default()
         );
         assert_eq!(
             host.get(&app, "/write?path=kept&body=limited")
@@ -115,12 +119,16 @@ async fn resource_limits_preserve_allocated_memory_across_sleep_restore_and_rede
         );
         let restored = assert_limits(&host, &app);
         assert_ne!(processes(&host).read_record(&app.app_id).unwrap().pid, first_pid);
+        let answer = host
+            .get(&app, &format!("/allocate?mib={allocated}"))
+            .await
+            .unwrap();
         assert_eq!(
-            host.get(&app, &format!("/allocate?mib={allocated}"))
-                .await
-                .unwrap()
-                .status,
-            200
+            answer.status,
+            200,
+            "{answer:?}; memory events: {}; console: {}",
+            std::fs::read_to_string(path.join("memory.events")).unwrap(),
+            std::fs::read_to_string(processes(&host).console_path(&app.app_id)).unwrap_or_default()
         );
         assert_eq!(
             host.get(&app, "/allocated").await.unwrap().body,
