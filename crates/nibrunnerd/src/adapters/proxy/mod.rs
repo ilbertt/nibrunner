@@ -1,5 +1,5 @@
 pub mod activator;
-pub(crate) mod admission;
+pub(crate) mod concurrency;
 pub mod datagram_activator;
 pub mod forward;
 pub mod http_log;

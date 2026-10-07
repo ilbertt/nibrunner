@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use protocol::AppId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::config::HttpAdmission;
+use crate::config::HttpConcurrency;
 
-pub(crate) struct Admission {
-    limits: HttpAdmission,
+pub(crate) struct ConcurrencyLimiter {
+    limits: HttpConcurrency,
     host: Arc<Semaphore>,
     apps: Mutex<BTreeMap<AppId, Arc<Semaphore>>>,
 }
@@ -17,8 +17,8 @@ pub(crate) struct Permit {
     _app: OwnedSemaphorePermit,
 }
 
-impl Admission {
-    pub(crate) fn new(limits: HttpAdmission) -> Self {
+impl ConcurrencyLimiter {
+    pub(crate) fn new(limits: HttpConcurrency) -> Self {
         Self {
             host: Arc::new(Semaphore::new(usize::from(limits.host_concurrent.get()))),
             limits,
@@ -62,7 +62,7 @@ mod tests {
     fn an_overloaded_app_does_not_consume_another_apps_capacity() {
         let one = AppId::parse("app-one").unwrap();
         let two = AppId::parse("app-two").unwrap();
-        let gate = Admission::new(HttpAdmission {
+        let gate = ConcurrencyLimiter::new(HttpConcurrency {
             host_concurrent: 3.try_into().unwrap(),
             app_concurrent: 1.try_into().unwrap(),
             apps: BTreeMap::from([(two.clone(), 2.try_into().unwrap())]),
@@ -79,5 +79,19 @@ mod tests {
         drop((second, third));
         gate.keep_only(&BTreeSet::new());
         assert!(gate.apps.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn the_host_limit_covers_distinct_apps_and_recovers_after_a_request_ends() {
+        let limiter = ConcurrencyLimiter::new(HttpConcurrency {
+            host_concurrent: 1.try_into().unwrap(),
+            app_concurrent: 2.try_into().unwrap(),
+            apps: BTreeMap::new(),
+        });
+        let one = AppId::parse("app-one").unwrap();
+        let two = AppId::parse("app-two").unwrap();
+        let held = limiter.acquire(&one).unwrap();
+        assert!(limiter.acquire(&two).is_err());
+        drop(held);
+        assert!(limiter.acquire(&two).is_ok());
     }
 }

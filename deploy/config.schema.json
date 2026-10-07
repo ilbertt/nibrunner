@@ -21,9 +21,9 @@
       "description": "Absent is a host nothing can ask about a guest's files.",
       "$ref": "#/$defs/filesystem"
     },
-    "http_admission": {
+    "http_concurrency": {
       "description": "Absent preserves unlimited concurrent HTTP requests. Changes require `nibrunnerd start`.",
-      "$ref": "#/$defs/HttpAdmission"
+      "$ref": "#/$defs/HttpConcurrency"
     },
     "logs": {
       "description": "Absent keeps the newest 256 MiB of each app's output.",
@@ -68,7 +68,7 @@
     "network"
   ],
   "$defs": {
-    "HttpAdmission": {
+    "HttpConcurrency": {
       "description": "Optional limits on requests through the hostname router. Omission preserves unrestricted ingress.",
       "type": "object",
       "properties": {

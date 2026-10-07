@@ -82,11 +82,11 @@ By default the HTTP router imposes no concurrency limit. To bound requests acros
 apps and per app, add an optional section to `config.toml`:
 
 ```toml
-[http_admission]
+[http_concurrency]
 host_concurrent = 128
 app_concurrent = 16
 
-[http_admission.apps]
+[http_concurrency.apps]
 app-one = 8
 ```
 
@@ -96,8 +96,9 @@ limit. Run `nibrunnerd start` after changing host configuration. This restarts t
 daemon when needed, interrupting proxy connections, without redeploying guests.
 
 A full app or host returns HTTP 503 with `Retry-After: 1` immediately. Requests
-waiting for a cold start, streaming response bodies and upgraded connections keep
-their permits until they finish or disconnect. No waiting queue is created. Unknown
-hostnames do not allocate admission state. This covers the hostname router, not raw
+waiting for a cold start, uploads, streaming response bodies and upgraded connections keep
+their permits until they finish or disconnect. An ordinary request releases its permit only
+after both its upload and response finish or are dropped. No waiting queue is created. Unknown
+hostnames do not allocate concurrency state. This covers the hostname router, not raw
 ports, guest-to-guest connections or the private activator listeners. Limits bound
 proxy work; they do not cancel work a tenant continues after a client disconnects.

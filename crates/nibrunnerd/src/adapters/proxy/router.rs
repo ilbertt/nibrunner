@@ -107,21 +107,21 @@ pub struct Router {
     upstreams: Upstreams,
     metrics: Arc<HostMetrics>,
     http_log: Option<Arc<HttpRequestLog>>,
-    admission: Option<super::admission::Admission>,
+    concurrency: Option<super::concurrency::ConcurrencyLimiter>,
 }
 
 impl Router {
     pub fn new(metrics: Arc<HostMetrics>, http_log: Option<Arc<HttpRequestLog>>) -> Arc<Self> {
-        Self::with_admission(metrics, http_log, None)
+        Self::with_concurrency(metrics, http_log, None)
     }
 
-    pub fn with_admission(
+    pub fn with_concurrency(
         metrics: Arc<HostMetrics>,
         http_log: Option<Arc<HttpRequestLog>>,
-        limits: Option<crate::config::HttpAdmission>,
+        limits: Option<crate::config::HttpConcurrency>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            admission: limits.map(super::admission::Admission::new),
+            concurrency: limits.map(super::concurrency::ConcurrencyLimiter::new),
             routes: RwLock::new(Arc::new(RouteTable::default())),
             upstreams: Upstreams::default(),
             metrics,
@@ -140,8 +140,8 @@ impl Router {
 
     pub async fn apply(&self, table: RouteTable) {
         self.upstreams.keep_only(&table.apps()).await;
-        if let Some(admission) = &self.admission {
-            admission.keep_only(&table.apps());
+        if let Some(concurrency) = &self.concurrency {
+            concurrency.keep_only(&table.apps());
         }
         *self.routes.write().await = Arc::new(table);
     }
@@ -229,13 +229,12 @@ impl Router {
             (route, logging)
         };
         note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
-        let permit = match self
-            .admission
+        let permit = self
+            .concurrency
             .as_ref()
             .map(|limits| limits.acquire(&route.app_id))
-            .transpose()
-        {
-            Ok(permit) => permit,
+            .transpose();
+        let (response, outcome) = match permit {
             Err(()) => {
                 let mut response = say(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -244,20 +243,25 @@ impl Router {
                 response
                     .headers_mut()
                     .insert("retry-after", hyper::header::HeaderValue::from_static("1"));
-                return (response, Outcome::Refused, Some(route));
+                self.metrics.proxy.app_refused(&route.app_id);
+                (response, Outcome::Refused)
             }
-        };
-        let open = super::forward::ForwardedRequest::new(self.metrics.proxy.open(&route.app_id), permit);
-        let upstream = self.upstreams.to(&route.app_id).await;
-        let response = forward(&upstream, request, LOOPBACK, route.host_port.get(), true, open).await;
-        let reached = response.extensions().get::<Unreachable>().is_none();
-        self.metrics
-            .proxy
-            .app_answered(&route.app_id, response.status(), reached);
-        let outcome = if reached {
-            Outcome::Served
-        } else {
-            Outcome::Unreachable
+            Ok(permit) => {
+                let open =
+                    super::forward::ForwardedRequest::new(self.metrics.proxy.open(&route.app_id), permit);
+                let upstream = self.upstreams.to(&route.app_id).await;
+                let response = forward(&upstream, request, LOOPBACK, route.host_port.get(), true, open).await;
+                let reached = response.extensions().get::<Unreachable>().is_none();
+                self.metrics
+                    .proxy
+                    .app_answered(&route.app_id, response.status(), reached);
+                let outcome = if reached {
+                    Outcome::Served
+                } else {
+                    Outcome::Unreachable
+                };
+                (response, outcome)
+            }
         };
         if let (Some(log), Some((scope, method, uri))) = (&self.http_log, logging) {
             log.record(
@@ -1023,6 +1027,151 @@ mod tests {
             .await
             .unwrap();
         visitor
+    }
+
+    fn limited_router(metrics: Arc<HostMetrics>, host: u16, app: u16) -> Arc<Router> {
+        Router::with_concurrency(
+            metrics,
+            None,
+            Some(crate::config::HttpConcurrency {
+                host_concurrent: host.try_into().unwrap(),
+                app_concurrent: app.try_into().unwrap(),
+                apps: BTreeMap::new(),
+            }),
+        )
+    }
+
+    async fn answering_before_the_upload_ends() -> (HostPort, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+        use http_body_util::BodyExt;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = HostPort::new(listener.local_addr().unwrap().port()).unwrap();
+        let (done, uploaded) = tokio::sync::oneshot::channel();
+        let done = Arc::new(std::sync::Mutex::new(Some(done)));
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let done = done.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let done = done.clone();
+                        async move {
+                            if request.method() == hyper::Method::POST {
+                                let done = done.lock().unwrap().take().unwrap();
+                                tokio::spawn(async move {
+                                    if let Ok(body) = request.into_body().collect().await {
+                                        let _ = done.send(body.to_bytes().to_vec());
+                                    }
+                                });
+                            }
+                            let body: ProxyBody = http_body_util::Full::new(bytes::Bytes::new())
+                                .map_err(|never| match never {})
+                                .boxed();
+                            Ok::<_, std::convert::Infallible>(Response::new(body))
+                        }
+                    });
+                    http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await
+                        .unwrap();
+                });
+            }
+        });
+        (port, uploaded)
+    }
+
+    async fn upload_answered_before_it_ended(proxy: u16, upgrade: bool) -> TcpStream {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut visitor = TcpStream::connect(("127.0.0.1", proxy)).await.unwrap();
+        let upgrade = if upgrade {
+            "Connection: Upgrade\r\nUpgrade: websocket\r\n"
+        } else {
+            ""
+        };
+        visitor.write_all(format!("POST / HTTP/1.1\r\nHost: app-1.apps.example.com\r\nTransfer-Encoding: chunked\r\n{upgrade}\r\n1\r\nx\r\n").as_bytes()).await.unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0u8; 1];
+            tokio::time::timeout(Duration::from_secs(5), visitor.read_exact(&mut byte))
+                .await
+                .unwrap()
+                .unwrap();
+            headers.push(byte[0]);
+        }
+        assert!(String::from_utf8(headers).unwrap().starts_with("HTTP/1.1 200 "));
+        visitor
+    }
+
+    #[tokio::test]
+    async fn a_finished_response_keeps_host_and_app_capacity_until_its_upload_ends() {
+        use tokio::io::AsyncWriteExt;
+        for (host_limit, app_limit, upgrade) in [(1, 1, false), (1, 2, false), (2, 1, false), (1, 1, true)] {
+            let metrics = Arc::new(HostMetrics::new());
+            let router = limited_router(metrics.clone(), host_limit, app_limit);
+            let (port, mut uploaded) = answering_before_the_upload_ends().await;
+            routed_at(&router, port).await;
+            let proxy = serving(router).await;
+            let mut visitor = upload_answered_before_it_ended(proxy, upgrade).await;
+            assert!(matches!(
+                uploaded.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            let second = asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n").await;
+            assert!(second.starts_with("HTTP/1.0 503 "), "{second}");
+            assert!(second.to_ascii_lowercase().contains("retry-after: 1"), "{second}");
+            let counted = metrics.proxy.of(&crate::test_support::app_id());
+            assert_eq!(counted.requests.iter().sum::<u64>(), 2);
+            assert_eq!(counted.unreachable, 0);
+            visitor.write_all(b"1\r\ny\r\n0\r\n\r\n").await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), uploaded)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                b"xy"
+            );
+            once_open_on_the_app_reads(&metrics, 0).await;
+            let third = asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n").await;
+            assert!(third.starts_with("HTTP/1.0 200 "), "{third}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_upload_releases_capacity_after_an_early_response() {
+        let metrics = Arc::new(HostMetrics::new());
+        let router = limited_router(metrics.clone(), 1, 1);
+        let (port, uploaded) = answering_before_the_upload_ends().await;
+        routed_at(&router, port).await;
+        let proxy = serving(router).await;
+        let visitor = upload_answered_before_it_ended(proxy, false).await;
+        assert_eq!(open_on_the_app(&metrics), 1);
+        drop(visitor);
+        assert!(tokio::time::timeout(Duration::from_secs(5), uploaded)
+            .await
+            .unwrap()
+            .is_err());
+        once_open_on_the_app_reads(&metrics, 0).await;
+        let next = asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n").await;
+        assert!(next.starts_with("HTTP/1.0 200 "), "{next}");
+    }
+
+    #[tokio::test]
+    async fn a_streaming_response_keeps_capacity_until_its_body_ends() {
+        use tokio::io::AsyncReadExt;
+        let metrics = Arc::new(HostMetrics::new());
+        let router = limited_router(metrics.clone(), 1, 1);
+        let (host_port, feed) = streaming_as_fed().await;
+        routed_at(&router, host_port).await;
+        let proxy = serving(router.clone()).await;
+        let mut visitor = asking_for_a_stream(proxy).await;
+        once_open_on_the_app_reads(&metrics, 1).await;
+        let second = asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n").await;
+        assert!(second.starts_with("HTTP/1.0 503 "), "{second}");
+        drop(feed);
+        visitor.read_to_end(&mut Vec::new()).await.unwrap();
+        once_open_on_the_app_reads(&metrics, 0).await;
+        routed_at(&router, answering_with(StatusCode::OK).await).await;
+        let third = asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\n\r\n").await;
+        assert!(third.starts_with("HTTP/1.0 200 "), "{third}");
     }
 
     #[tokio::test]

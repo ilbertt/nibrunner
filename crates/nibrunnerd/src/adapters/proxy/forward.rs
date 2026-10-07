@@ -11,6 +11,7 @@ use protocol::AppId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -21,14 +22,14 @@ pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
 
 pub(crate) struct ForwardedRequest {
     _metrics: OpenRequest,
-    _admission: Option<super::admission::Permit>,
+    _concurrency: Option<super::concurrency::Permit>,
 }
 
 impl ForwardedRequest {
-    pub(crate) fn new(metrics: OpenRequest, admission: Option<super::admission::Permit>) -> Self {
+    pub(crate) fn new(metrics: OpenRequest, concurrency: Option<super::concurrency::Permit>) -> Self {
         Self {
             _metrics: metrics,
-            _admission: admission,
+            _concurrency: concurrency,
         }
     }
 }
@@ -39,12 +40,11 @@ impl From<OpenRequest> for ForwardedRequest {
     }
 }
 
-/// An upstream's body carrying the request it answers, so the request stays open until the body
-/// has been sent whole or dropped: the proxy hands the response on as soon as its headers are in,
-/// and a stream's body is still being written long after that.
+// An upstream may finish its response while the visitor is still uploading. Both bodies hold
+// the same request so an early response cannot release capacity still carrying an upload.
 struct HeldOpen<B> {
     body: B,
-    _request: ForwardedRequest,
+    _request: Arc<ForwardedRequest>,
 }
 
 impl<B: Body + Unpin> Body for HeldOpen<B> {
@@ -90,11 +90,11 @@ fn strip_hop_by_hop(headers: &mut hyper::HeaderMap) {
 // and twice this, which is before the first probe and long before an idle window runs out.
 const UPSTREAM_IDLE: Duration = Duration::from_secs(5);
 
-pub fn upstream_client() -> Client<HttpConnector, Incoming> {
+pub fn upstream_client() -> Client<HttpConnector, ProxyBody> {
     upstream_client_dropping_idle_after(UPSTREAM_IDLE)
 }
 
-fn upstream_client_dropping_idle_after(idle: Duration) -> Client<HttpConnector, Incoming> {
+fn upstream_client_dropping_idle_after(idle: Duration) -> Client<HttpConnector, ProxyBody> {
     let mut connector = HttpConnector::new();
     connector.set_nodelay(true);
     Client::builder(TokioExecutor::new())
@@ -111,7 +111,7 @@ fn upstream_client_dropping_idle_after(idle: Duration) -> Client<HttpConnector, 
 /// nobody has asked for. Hyper's pool cannot be told to forget one address, so an app's
 /// connections are held apart from every other app's in order to be droppable at all.
 pub struct Upstreams {
-    clients: RwLock<BTreeMap<AppId, Client<HttpConnector, Incoming>>>,
+    clients: RwLock<BTreeMap<AppId, Client<HttpConnector, ProxyBody>>>,
     idle: Duration,
 }
 
@@ -123,7 +123,7 @@ impl Upstreams {
         }
     }
 
-    pub async fn to(&self, app_id: &AppId) -> Client<HttpConnector, Incoming> {
+    pub async fn to(&self, app_id: &AppId) -> Client<HttpConnector, ProxyBody> {
         if let Some(client) = self.clients.read().await.get(app_id) {
             return client.clone();
         }
@@ -186,11 +186,18 @@ async fn forward_upgrade(
     request: Request<Incoming>,
     host: &str,
     port: u16,
-    open: ForwardedRequest,
+    open: Arc<ForwardedRequest>,
 ) -> Response<ProxyBody> {
     let (mut parts, body) = request.into_parts();
     parts.uri = rewritten(&parts.uri, host, port);
-    let mut forwarded = Request::from_parts(parts, body);
+    let mut forwarded = Request::from_parts(
+        parts,
+        HeldOpen {
+            body,
+            _request: open.clone(),
+        }
+        .boxed(),
+    );
     let downstream = hyper::upgrade::on(&mut forwarded);
 
     let Ok(stream) = tokio::net::TcpStream::connect((host, port)).await else {
@@ -256,14 +263,14 @@ fn as_the_upstream_speaks(parts: &mut hyper::http::request::Parts) {
 }
 
 pub(crate) async fn forward(
-    client: &Client<HttpConnector, Incoming>,
+    client: &Client<HttpConnector, ProxyBody>,
     request: Request<Incoming>,
     host: &str,
     port: u16,
     keep_alive: bool,
     open: impl Into<ForwardedRequest>,
 ) -> Response<ProxyBody> {
-    let open = open.into();
+    let open = Arc::new(open.into());
     if upgrade_requested(&request) {
         return forward_upgrade(request, host, port, open).await;
     }
@@ -271,7 +278,14 @@ pub(crate) async fn forward(
     as_the_upstream_speaks(&mut parts);
     parts.uri = rewritten(&parts.uri, host, port);
     strip_hop_by_hop(&mut parts.headers);
-    let forwarded = Request::from_parts(parts, body);
+    let forwarded = Request::from_parts(
+        parts,
+        HeldOpen {
+            body,
+            _request: open.clone(),
+        }
+        .boxed(),
+    );
 
     match client.request(forwarded).await {
         Ok(upstream) => {
@@ -579,7 +593,7 @@ mod tests {
     }
 
     async fn proxying_with(
-        client: Client<HttpConnector, Incoming>,
+        client: Client<HttpConnector, ProxyBody>,
         host: &'static str,
         port: u16,
         keep_alive: bool,
@@ -596,10 +610,21 @@ mod tests {
 
     async fn proxying_counted_by(
         metrics: std::sync::Arc<crate::domain::metrics::ProxyMetrics>,
-        client: Client<HttpConnector, Incoming>,
+        client: Client<HttpConnector, ProxyBody>,
         host: &'static str,
         port: u16,
         keep_alive: bool,
+    ) -> u16 {
+        proxying_with_limit(metrics, client, host, port, keep_alive, None).await
+    }
+
+    async fn proxying_with_limit(
+        metrics: Arc<crate::domain::metrics::ProxyMetrics>,
+        client: Client<HttpConnector, ProxyBody>,
+        host: &'static str,
+        port: u16,
+        keep_alive: bool,
+        limiter: Option<Arc<super::super::concurrency::ConcurrencyLimiter>>,
     ) -> u16 {
         let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -611,12 +636,23 @@ mod tests {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
                 };
-                let (client, metrics) = (client.clone(), metrics.clone());
+                let (client, metrics, limiter) = (client.clone(), metrics.clone(), limiter.clone());
                 tokio::spawn(async move {
                     let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-                        let (client, metrics) = (client.clone(), metrics.clone());
+                        let (client, metrics, limiter) = (client.clone(), metrics.clone(), limiter.clone());
                         async move {
-                            let open = metrics.open(&crate::test_support::app_id());
+                            let app_id = crate::test_support::app_id();
+                            let permit =
+                                match limiter.as_ref().map(|limits| limits.acquire(&app_id)).transpose() {
+                                    Ok(permit) => permit,
+                                    Err(()) => {
+                                        return Ok::<_, std::convert::Infallible>(say(
+                                            StatusCode::SERVICE_UNAVAILABLE,
+                                            "busy",
+                                        ))
+                                    }
+                                };
+                            let open = ForwardedRequest::new(metrics.open(&app_id), permit);
                             Ok::<_, std::convert::Infallible>(
                                 forward(&client, request, host, port, keep_alive, open).await,
                             )
@@ -820,14 +856,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_websocket_is_open_on_its_app_for_as_long_as_the_two_sides_talk() {
+    async fn a_websocket_keeps_its_metrics_and_concurrency_permits_until_the_two_sides_hang_up() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let patience = std::time::Duration::from_secs(10);
         let metrics = std::sync::Arc::new(crate::domain::metrics::ProxyMetrics::default());
         let open = || metrics.open_requests_for(&crate::test_support::app_id());
         let upstream = echoing_once_it_is_no_longer_http().await;
-        let proxy =
-            proxying_counted_by(metrics.clone(), upstream_client(), "127.0.0.1", upstream, true).await;
+        let limiter = Arc::new(super::super::concurrency::ConcurrencyLimiter::new(
+            crate::config::HttpConcurrency {
+                host_concurrent: 1.try_into().unwrap(),
+                app_concurrent: 1.try_into().unwrap(),
+                apps: BTreeMap::new(),
+            },
+        ));
+        let proxy = proxying_with_limit(
+            metrics.clone(),
+            upstream_client(),
+            "127.0.0.1",
+            upstream,
+            true,
+            Some(limiter.clone()),
+        )
+        .await;
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
             .await
             .unwrap();
@@ -855,6 +905,11 @@ mod tests {
             .expect("the tenant answered past the proxy")
             .unwrap();
         assert_eq!(open(), 1, "talking, and the request is still open");
+        assert!(limiter.acquire(&crate::test_support::app_id()).is_err());
+        assert_eq!(
+            asked(proxy, "GET / HTTP/1.0\r\nHost: app-1.example.com\r\n\r\n").await,
+            "busy"
+        );
 
         drop(stream);
         let deadline = std::time::Instant::now() + patience;
@@ -865,6 +920,7 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+        assert!(limiter.acquire(&crate::test_support::app_id()).is_ok());
     }
 
     #[test]

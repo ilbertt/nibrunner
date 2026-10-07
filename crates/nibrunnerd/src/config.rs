@@ -88,7 +88,7 @@ pub struct ZerofsSettings {
 /// Optional limits on requests through the hostname router. Omission preserves unrestricted ingress.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct HttpAdmission {
+pub struct HttpConcurrency {
     /// Requests across all routed apps, including those waiting for a wake or streaming a body.
     pub host_concurrent: std::num::NonZeroU16,
     /// Default per-app limit. Aliases of an app share this capacity.
@@ -197,7 +197,7 @@ pub struct CronConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
-    pub http_admission: Option<HttpAdmission>,
+    pub http_concurrency: Option<HttpConcurrency>,
     /// How many apps this host is laid out for. Everything that counts slots follows from it —
     /// the ring the allocator walks, the loopback ports reserved, the nbd minors the module is
     /// loaded with, the conntrack table's size, what the metrics page calls the total — and
@@ -298,7 +298,7 @@ mod file {
     pub(super) struct ConfigFile {
         /// Absent preserves unlimited concurrent HTTP requests. Changes require `nibrunnerd start`.
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub(super) http_admission: Option<super::HttpAdmission>,
+        pub(super) http_concurrency: Option<super::HttpConcurrency>,
         /// How many apps this host is laid out for. Everything that counts slots follows from it:
         /// the slot ring, the loopback ports reserved from 21000, the nbd minors on a zerofs host,
         /// the kernel's conntrack table at 1024 entries an app, what the metrics page calls the
@@ -714,7 +714,7 @@ impl HostConfig {
         let logs = logs(document.logs.as_ref())?;
 
         Ok(Self {
-            http_admission: document.http_admission.clone(),
+            http_concurrency: document.http_concurrency.clone(),
             max_apps,
             cron,
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
@@ -814,7 +814,7 @@ impl HostConfig {
             proxy: ProxyConfig::default(),
             metrics: None,
             filesystem: None,
-            http_admission: None,
+            http_concurrency: None,
             logs: LogsConfig::default(),
             export_store_url: state_dir.join("export-store").display().to_string(),
             export_staging_dir: state_dir.join("exports"),
@@ -887,7 +887,7 @@ impl HostConfig {
             filesystem: Some(FilesystemConfig {
                 socket: PathBuf::from("/run/nibrunner/filesystem.sock"),
             }),
-            http_admission: Some(HttpAdmission {
+            http_concurrency: Some(HttpConcurrency {
                 host_concurrent: std::num::NonZeroU16::new(128).expect("positive limit"),
                 app_concurrent: std::num::NonZeroU16::new(16).expect("positive limit"),
                 apps: Default::default(),
@@ -994,7 +994,7 @@ impl HostConfig {
             filesystem: self.filesystem.as_ref().map(|filesystem| file::Filesystem {
                 socket: text(&filesystem.socket),
             }),
-            http_admission: self.http_admission.clone(),
+            http_concurrency: self.http_concurrency.clone(),
             logs: Some(file::Logs {
                 keep_mib_per_app: Some(self.logs.keep_bytes_per_app / BYTES_PER_MEBIBYTE),
             }),
@@ -1471,13 +1471,20 @@ denied_egress_addresses_v6 = []
     }
 
     #[test]
-    fn http_admission_is_opt_in_and_refuses_zero_unknown_and_invalid_app_limits() {
+    fn http_concurrency_is_opt_in_and_refuses_zero_unknown_and_invalid_app_limits() {
         let original = HostConfig::starter(10).to_toml();
-        assert!(HostConfig::from_toml(&original).unwrap().http_admission.is_none());
-        let valid = format!("{original}\n[http_admission]\nhost_concurrent=8\napp_concurrent=2\n[http_admission.apps]\napp-one=3\n");
+        assert!(HostConfig::from_toml(&original)
+            .unwrap()
+            .http_concurrency
+            .is_none());
+        let valid = format!("{original}\n[http_concurrency]\nhost_concurrent=8\napp_concurrent=2\n[http_concurrency.apps]\napp-one=3\n");
         let enabled = HostConfig::from_toml(&valid).unwrap();
+        let validator = jsonschema::validator_for(&HostConfig::schema().to_value()).unwrap();
+        let json = |text: &str| serde_json::to_value(toml::from_str::<toml::Value>(text).unwrap()).unwrap();
+        assert!(validator.is_valid(&json(&valid)));
         assert_eq!(
-            enabled.http_admission.as_ref().unwrap().apps[&protocol::AppId::parse("app-one").unwrap()].get(),
+            enabled.http_concurrency.as_ref().unwrap().apps[&protocol::AppId::parse("app-one").unwrap()]
+                .get(),
             3
         );
         assert_eq!(HostConfig::from_toml(&enabled.to_toml()).unwrap(), enabled);
@@ -1489,6 +1496,7 @@ denied_egress_addresses_v6 = []
             valid.replace("app_concurrent=2", "unknown=2"),
         ] {
             assert!(HostConfig::from_toml(&invalid).is_err());
+            assert!(!validator.is_valid(&json(&invalid)), "{invalid}");
         }
     }
 

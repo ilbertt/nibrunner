@@ -231,6 +231,12 @@ impl ProxyMetrics {
         });
     }
 
+    pub(crate) fn app_refused(&self, app_id: &AppId) {
+        self.app(app_id, |app| {
+            app.requests[class_of(StatusCode::SERVICE_UNAVAILABLE)] += 1;
+        });
+    }
+
     pub fn began(&self) {
         self.in_flight.fetch_add(1, Ordering::Relaxed);
     }
