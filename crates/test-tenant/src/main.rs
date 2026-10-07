@@ -12,11 +12,13 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Lives as long as the process, so a wake that restored the microVM answers with the count it
 /// was holding and a wake that booted a fresh one starts over.
 static REMEMBERED: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 const REACH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -215,6 +217,39 @@ fn answer(target: &str, data_dir: &Path) -> (&'static str, String) {
             "200 OK",
             (REMEMBERED.fetch_add(1, Ordering::SeqCst) + 1).to_string(),
         ),
+        "/allocate" => {
+            let mib: usize = query(target, "mib").and_then(|n| n.parse().ok()).unwrap_or(0);
+            let mut memory = ALLOCATED.lock().unwrap();
+            memory.resize(mib * 1024 * 1024, 0);
+            for byte in memory.iter_mut() {
+                *byte = byte.wrapping_add(1);
+            }
+            ("200 OK", memory.len().to_string())
+        }
+        "/allocated" => {
+            let memory = ALLOCATED.lock().unwrap();
+            (
+                "200 OK",
+                format!("{}:{}", memory.len(), memory.first().copied().unwrap_or(0)),
+            )
+        }
+        "/burn" => {
+            let ms: u64 = query(target, "ms").and_then(|n| n.parse().ok()).unwrap_or(0);
+            let threads: usize = query(target, "threads").and_then(|n| n.parse().ok()).unwrap_or(1);
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            std::thread::scope(|scope| {
+                for _ in 0..threads {
+                    scope.spawn(move || {
+                        let mut value = 1_u64;
+                        while Instant::now() < deadline {
+                            value =
+                                std::hint::black_box(value.wrapping_mul(6364136223846793005).wrapping_add(1));
+                        }
+                    });
+                }
+            });
+            ("200 OK", "burned".to_string())
+        }
         "/write" => write_file(target, data_dir),
         "/read" => read_file(target, data_dir),
         "/log" => {

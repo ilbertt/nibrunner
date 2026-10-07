@@ -31,6 +31,7 @@ pub(crate) struct Jail {
     pub(crate) gid: u32,
     pub(crate) root: PathBuf,
     mounts: Vec<Mount>,
+    pub(crate) limits: super::limits::VmLimits,
     #[cfg(test)]
     fake_mounts: bool,
 }
@@ -101,10 +102,12 @@ impl Jailer {
             .map_err(io_error)?
             .ok_or_else(|| io_error("the jail has no staged inputs"))?;
         let (uid, gid) = self.identities(inputs.slot)?;
+        let limits = super::limits::VmLimits::for_machine(&inputs.config.machine_config)?;
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (
                 inputs,
+                limits,
                 uid,
                 gid,
                 directory,
@@ -177,6 +180,7 @@ impl Jailer {
                 gid,
                 root,
                 mounts,
+                limits,
                 #[cfg(test)]
                 fake_mounts: false,
             })
@@ -194,6 +198,12 @@ impl Jail {
             gid: metadata.gid(),
             root,
             mounts: Vec::new(),
+            limits: super::limits::VmLimits::for_machine(&guest_contract::firecracker::MachineConfig {
+                vcpu_count: 1,
+                mem_size_mib: 256,
+                smt: false,
+            })
+            .expect("valid test resources"),
             fake_mounts: true,
         }
     }

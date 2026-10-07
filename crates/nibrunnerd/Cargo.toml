@@ -43,7 +43,7 @@ path = "tests/guest/main.rs"
 [dependencies]
 base64.workspace = true
 clap = { version = "4", features = ["derive"] }
-protocol = { workspace = true, features = ["schema"] }
+protocol.workspace = true
 oci-image.workspace = true
 oci-client.workspace = true
 guest-contract.workspace = true

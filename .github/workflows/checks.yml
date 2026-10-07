@@ -133,8 +133,8 @@ jobs:
             families: cron
           - shard: sleep
             families: sleep
-          - shard: idle+isolation
-            families: idle isolation
+          - shard: idle+isolation+resources
+            families: idle isolation resources
           - shard: lifecycle+volumes+tenant+raw
             families: lifecycle volumes tenant raw
     steps:

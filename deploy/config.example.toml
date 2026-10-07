@@ -19,10 +19,6 @@ max_concurrent_vm_starts = 2
 max_jobs_per_app = 10
 time_zone = "UTC"
 
-[vm_budgets.default]
-cpu_percent = 100
-memory_mib = 2304
-
 [paths]
 state_dir = "/var/lib/nibrunner"
 runtime_dir = "/run/nibrunner"

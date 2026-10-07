@@ -109,42 +109,13 @@ pub fn host_boot_id_or_session() -> String {
 }
 
 pub struct VmProcesses {
-    budgets: Option<crate::config::VmBudgets>,
     runtime_dir: PathBuf,
     boot_id: String,
 }
 
 impl VmProcesses {
-    pub fn with_budgets(runtime_dir: PathBuf, budgets: Option<crate::config::VmBudgets>) -> Self {
-        Self {
-            budgets,
-            ..Self::new(runtime_dir)
-        }
-    }
-
-    fn command(&self, app_id: &AppId, binary: &Path) -> tokio::process::Command {
-        let Some(budgets) = &self.budgets else {
-            return tokio::process::Command::new(binary);
-        };
-        let budget = budgets.apps.get(app_id).unwrap_or(&budgets.default);
-        let mut command = tokio::process::Command::new("systemd-run");
-        // Scope mode execs the VMM in place; a fresh unit name avoids waiting for the old scope to be collected.
-        command
-            .args(["--scope", "--quiet", "--collect"])
-            .arg(format!("--property=CPUQuota={}%", budget.cpu_percent))
-            .arg(format!(
-                "--property=MemoryMax={}",
-                u64::from(budget.memory_mib.get()) * 1024 * 1024
-            ))
-            .arg("--property=MemorySwapMax=0")
-            .arg("--")
-            .arg(binary);
-        command
-    }
-
     pub fn new(runtime_dir: PathBuf) -> Self {
         Self {
-            budgets: None,
             runtime_dir,
             boot_id: host_boot_id_or_session(),
         }
@@ -180,6 +151,8 @@ impl VmProcesses {
         let _ = std::fs::remove_file(self.record_path(app_id));
         let _ = std::fs::remove_file(self.api_socket(app_id));
         let _ = std::fs::remove_file(self.console_path(app_id));
+        #[cfg(target_os = "linux")]
+        let _ = std::fs::remove_dir(super::limits::cgroup_path(app_id));
     }
 
     pub fn adopted_app_ids(&self) -> Vec<AppId> {
@@ -230,7 +203,7 @@ impl VmProcesses {
             .nth(3)
             .ok_or_else(|| std::io::Error::other("the jail has no base directory"))?;
         std::os::unix::fs::symlink(jail.root.join("api.sock"), &api_socket)?;
-        let mut command = self.command(app_id, &jailer.binary);
+        let mut command = tokio::process::Command::new(&jailer.binary);
         command
             .arg("--id")
             .arg(super::jailer::jail_id(app_id))
@@ -245,10 +218,9 @@ impl VmProcesses {
             .arg("--cgroup-version")
             .arg("2")
             .arg("--parent-cgroup")
-            .arg("nibrunner-jailer")
-            .arg("--")
-            .arg("--api-sock")
-            .arg("/api.sock");
+            .arg(super::limits::CGROUP_PARENT);
+        jail.limits.configure(&mut command);
+        command.arg("--").arg("--api-sock").arg("/api.sock");
         if boot {
             command.arg("--config-file").arg("/firecracker.json");
         }
@@ -291,13 +263,13 @@ impl VmProcesses {
                 reason = "session and OOM policy must be set between fork and exec"
             )]
             unsafe {
-                let constrained = self.budgets.is_some();
-                command.pre_exec(move || {
+                command.pre_exec(|| {
                     if libc::setsid() < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     #[cfg(target_os = "linux")]
-                    if constrained {
+                    {
+                        // The daemon is OOM-protected; a VMM must remain killable at its memory ceiling.
                         let descriptor = libc::open(
                             c"/proc/self/oom_score_adj".as_ptr(),
                             libc::O_WRONLY | libc::O_CLOEXEC,
@@ -311,10 +283,6 @@ impl VmProcesses {
                         if written != 1 {
                             return Err(error);
                         }
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    if constrained {
-                        return Err(std::io::Error::other("VM budgets require Linux and systemd"));
                     }
                     Ok(())
                 });
@@ -336,7 +304,6 @@ impl VmProcesses {
         self.write_record(&record)?;
 
         let processes = Self {
-            budgets: self.budgets.clone(),
             runtime_dir: self.runtime_dir.clone(),
             boot_id: self.boot_id.clone(),
         };
@@ -405,44 +372,9 @@ mod tests {
 
     fn processes(directory: &Path) -> VmProcesses {
         VmProcesses {
-            budgets: None,
             runtime_dir: directory.to_path_buf(),
             boot_id: "boot-1".into(),
         }
-    }
-
-    #[test]
-    fn vm_budgets_are_opt_in_and_scope_the_same_executable_with_explicit_limits() {
-        let root = tempfile::tempdir().unwrap();
-        let direct = VmProcesses::new(root.path().into());
-        assert_eq!(
-            direct
-                .command(&app_id(), Path::new("/bin/firecracker"))
-                .as_std()
-                .get_program(),
-            "/bin/firecracker"
-        );
-        let scoped = VmProcesses::with_budgets(
-            root.path().into(),
-            Some(crate::config::VmBudgets {
-                default: crate::config::VmBudget {
-                    cpu_percent: 50.try_into().unwrap(),
-                    memory_mib: 1280.try_into().unwrap(),
-                },
-                apps: Default::default(),
-            }),
-        );
-        let command = scoped.command(&app_id(), Path::new("/bin/firecracker"));
-        let args: Vec<_> = command
-            .as_std()
-            .get_args()
-            .map(|arg| arg.to_str().unwrap())
-            .collect();
-        assert_eq!(command.as_std().get_program(), "systemd-run");
-        assert!(args.contains(&"--scope"));
-        assert!(args.contains(&"--property=CPUQuota=50%"));
-        assert!(args.contains(&"--property=MemoryMax=1342177280"));
-        assert_eq!(args.last(), Some(&"/bin/firecracker"));
     }
 
     #[test]
@@ -710,7 +642,9 @@ mod tests {
             "--uid",
             "--gid",
             "--chroot-base-dir",
-            "--api-sock /api.sock",
+            "--cgroup cpu.max=100000 100000",
+            "--cgroup memory.max=369098752",
+            "--cgroup memory.swap.max=0 -- --api-sock /api.sock",
         ] {
             assert!(console.contains(argument), "{console}");
         }
