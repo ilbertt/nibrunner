@@ -18,11 +18,13 @@ async fn a_guest_that_initialized_releases_start_capacity_before_its_app_is_heal
     };
     let waiting = host.tenant(1).arguments(&["--never-listen"]).edited(|instance| {
         instance.config.health_check = protocol::HealthCheck::Tcp {
-            interval_ms: 1000,
-            timeout_ms: 100,
-            grace_period_ms: 120_000,
-            healthy_threshold: 1,
-            unhealthy_threshold: 3,
+            probe: protocol::Probe {
+                interval_ms: 1000,
+                timeout_ms: 100,
+                grace_period_ms: 120_000,
+                healthy_threshold: 1,
+                unhealthy_threshold: 3,
+            },
         };
     });
     host.deploy(std::slice::from_ref(&waiting)).await;
