@@ -79,14 +79,14 @@ still takes the restart path.
 ## HTTP concurrency
 
 By default the HTTP router imposes no concurrency limit. To bound requests across
-apps and per app, add an optional section to `config.toml`:
+apps and per app, add an optional section under your HTTP listener in `config.toml`:
 
 ```toml
-[http_concurrency]
+[proxy.http.concurrency]
 host_concurrent = 128
 app_concurrent = 16
 
-[http_concurrency.apps]
+[proxy.http.concurrency.apps]
 app-one = 8
 ```
 

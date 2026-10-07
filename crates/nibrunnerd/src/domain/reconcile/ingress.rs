@@ -66,6 +66,7 @@ mod tests {
     fn serving_http() -> ProxyConfig {
         ProxyConfig {
             http: Some(HttpListener {
+                concurrency: None,
                 listen_address: here(),
                 port: 8080,
                 tls: None,

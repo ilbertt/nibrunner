@@ -97,6 +97,7 @@ pub async fn started_with(edit: impl FnOnce(&mut crate::config::HostConfig)) -> 
     let port = free_port();
     config.proxy = crate::config::ProxyConfig {
         http: Some(crate::config::HttpListener {
+            concurrency: None,
             listen_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port,
             tls: None,

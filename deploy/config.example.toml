@@ -14,10 +14,6 @@
 
 max_apps = 1000
 
-[http_concurrency]
-host_concurrent = 128
-app_concurrent = 16
-
 [cron]
 max_jobs_per_app = 10
 time_zone = "UTC"
@@ -70,6 +66,10 @@ key = "/etc/nibrunner/tls/origin.key"
 
 [proxy.http.tls.client_ca]
 certificate = "/etc/nibrunner/tls/origin-pull-ca.pem"
+
+[proxy.http.concurrency]
+host_concurrent = 128
+app_concurrent = 16
 
 [proxy.raw]
 listen_address = "10.0.5.18"
