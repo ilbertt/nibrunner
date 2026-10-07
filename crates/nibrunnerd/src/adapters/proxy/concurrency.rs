@@ -29,15 +29,9 @@ impl ConcurrencyLimiter {
     pub(crate) fn acquire(&self, app: &AppId) -> Result<Permit, ()> {
         let host = self.host.clone().try_acquire_owned().map_err(|_| ())?;
         let mut apps = self.apps.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let permits = apps.entry(app.clone()).or_insert_with(|| {
-            Arc::new(Semaphore::new(usize::from(
-                self.limits
-                    .apps
-                    .get(app)
-                    .unwrap_or(&self.limits.app_concurrent)
-                    .get(),
-            )))
-        });
+        let permits = apps
+            .entry(app.clone())
+            .or_insert_with(|| Arc::new(Semaphore::new(usize::from(self.limits.app_concurrent.get()))));
         let app = permits.clone().try_acquire_owned().map_err(|_| ())?;
         Ok(Permit {
             _host: host,
@@ -65,18 +59,16 @@ mod tests {
         let gate = ConcurrencyLimiter::new(HttpConcurrency {
             host_concurrent: 3.try_into().unwrap(),
             app_concurrent: 1.try_into().unwrap(),
-            apps: BTreeMap::from([(two.clone(), 2.try_into().unwrap())]),
         });
         let first = gate.acquire(&one).unwrap();
         assert!(gate.acquire(&one).is_err());
         let second = gate.acquire(&two).unwrap();
-        let third = gate.acquire(&two).unwrap();
         assert!(gate.acquire(&two).is_err());
         gate.keep_only(&BTreeSet::new());
         assert!(gate.acquire(&one).is_err());
         drop(first);
         assert!(gate.acquire(&one).is_ok());
-        drop((second, third));
+        drop(second);
         gate.keep_only(&BTreeSet::new());
         assert!(gate.apps.lock().unwrap().is_empty());
     }
@@ -85,7 +77,6 @@ mod tests {
         let limiter = ConcurrencyLimiter::new(HttpConcurrency {
             host_concurrent: 1.try_into().unwrap(),
             app_concurrent: 2.try_into().unwrap(),
-            apps: BTreeMap::new(),
         });
         let one = AppId::parse("app-one").unwrap();
         let two = AppId::parse("app-two").unwrap();

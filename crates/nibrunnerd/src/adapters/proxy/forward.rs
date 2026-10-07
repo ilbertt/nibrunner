@@ -866,7 +866,6 @@ mod tests {
             crate::config::HttpConcurrency {
                 host_concurrent: 1.try_into().unwrap(),
                 app_concurrent: 1.try_into().unwrap(),
-                apps: BTreeMap::new(),
             },
         ));
         let proxy = proxying_with_limit(

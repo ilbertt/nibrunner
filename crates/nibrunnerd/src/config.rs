@@ -92,10 +92,8 @@ pub struct ZerofsSettings {
 pub struct HttpConcurrency {
     /// Requests across all routed apps, including those waiting for a wake or streaming a body.
     pub host_concurrent: std::num::NonZeroU16,
-    /// Default per-app limit. Aliases of an app share this capacity.
+    /// Limit applied to every app. Aliases of an app share this capacity.
     pub app_concurrent: std::num::NonZeroU16,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub apps: std::collections::BTreeMap<protocol::AppId, std::num::NonZeroU16>,
 }
 
 /// Where the world reaches an app on this host.
@@ -870,7 +868,6 @@ impl HostConfig {
                     concurrency: Some(HttpConcurrency {
                         host_concurrent: std::num::NonZeroU16::new(128).expect("positive limit"),
                         app_concurrent: std::num::NonZeroU16::new(16).expect("positive limit"),
-                        apps: Default::default(),
                     }),
                     listen_address: IpAddr::from([0, 0, 0, 0]),
                     port: 443,
@@ -1472,7 +1469,7 @@ denied_egress_addresses_v6 = []
     }
 
     #[test]
-    fn http_concurrency_is_opt_in_and_refuses_zero_unknown_and_invalid_app_limits() {
+    fn http_concurrency_is_opt_in_and_refuses_zero_unknown_and_out_of_range_limits() {
         let original = HostConfig::starter(10).to_toml();
         assert!(HostConfig::from_toml(&original)
             .unwrap()
@@ -1481,30 +1478,16 @@ denied_egress_addresses_v6 = []
             .unwrap()
             .concurrency
             .is_none());
-        let valid = format!("{original}\n[proxy.http.concurrency]\nhost_concurrent=8\napp_concurrent=2\n[proxy.http.concurrency.apps]\napp-one=3\n");
+        let valid = format!("{original}\n[proxy.http.concurrency]\nhost_concurrent=8\napp_concurrent=2\n");
         let enabled = HostConfig::from_toml(&valid).unwrap();
         let validator = jsonschema::validator_for(&HostConfig::schema().to_value()).unwrap();
         let json = |text: &str| serde_json::to_value(toml::from_str::<toml::Value>(text).unwrap()).unwrap();
         assert!(validator.is_valid(&json(&valid)));
-        assert_eq!(
-            enabled
-                .proxy
-                .http
-                .as_ref()
-                .unwrap()
-                .concurrency
-                .as_ref()
-                .unwrap()
-                .apps[&protocol::AppId::parse("app-one").unwrap()]
-                .get(),
-            3
-        );
         assert_eq!(HostConfig::from_toml(&enabled.to_toml()).unwrap(), enabled);
         for invalid in [
             valid.replace("host_concurrent=8", "host_concurrent=0"),
             valid.replace("app_concurrent=2", "app_concurrent=65536"),
-            valid.replace("app-one=3", "app-one=0"),
-            valid.replace("app-one=3", "'../app'=3"),
+            format!("{valid}\n[proxy.http.concurrency.apps]\napp-one=3\n"),
             valid.replace("app_concurrent=2", "unknown=2"),
             valid.replace("proxy.http.concurrency", "http_concurrency"),
         ] {

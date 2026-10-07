@@ -296,23 +296,11 @@
       "type": "object",
       "properties": {
         "app_concurrent": {
-          "description": "Default per-app limit. Aliases of an app share this capacity.",
+          "description": "Limit applied to every app. Aliases of an app share this capacity.",
           "type": "integer",
           "format": "uint16",
           "maximum": 65535,
           "minimum": 1
-        },
-        "apps": {
-          "type": "object",
-          "additionalProperties": false,
-          "patternProperties": {
-            "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$": {
-              "type": "integer",
-              "format": "uint16",
-              "maximum": 65535,
-              "minimum": 1
-            }
-          }
         },
         "host_concurrent": {
           "description": "Requests across all routed apps, including those waiting for a wake or streaming a body.",

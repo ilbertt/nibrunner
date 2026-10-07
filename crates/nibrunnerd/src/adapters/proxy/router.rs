@@ -1033,7 +1033,6 @@ mod tests {
             Some(crate::config::HttpConcurrency {
                 host_concurrent: host.try_into().unwrap(),
                 app_concurrent: app.try_into().unwrap(),
-                apps: BTreeMap::new(),
             }),
         )
     }

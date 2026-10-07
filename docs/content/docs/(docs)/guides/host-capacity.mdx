@@ -85,15 +85,13 @@ apps and per app, add an optional section under your HTTP listener in `config.to
 [proxy.http.concurrency]
 host_concurrent = 128
 app_concurrent = 16
-
-[proxy.http.concurrency.apps]
-app-one = 8
 ```
 
 These are example capacities, not measured application throughput. Values must be
-between 1 and 65535. App overrides use app IDs; all hostnames of an app share its
-limit. Run `nibrunnerd start` after changing host configuration. This restarts the
-daemon when needed, interrupting proxy connections, without redeploying guests.
+between 1 and 65535. The per-app ceiling applies automatically to every app,
+including newly added apps. All hostnames of an app share its limit. Run
+`nibrunnerd start` after changing host configuration. This restarts the daemon when
+needed, interrupting proxy connections, without redeploying guests.
 
 A full app or host returns HTTP 503 with `Retry-After: 1` immediately. Requests
 waiting for a cold start, uploads, streaming response bodies and upgraded connections keep
