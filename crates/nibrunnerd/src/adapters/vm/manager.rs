@@ -340,24 +340,84 @@ impl VmManager {
 
     async fn publish_sleep_snapshot(
         &self,
-        request: &SuspendRequest,
-        control: &Path,
         staged: StagedSnapshot,
         paths: super::snapshot::SnapshotPaths,
         stamp: SnapshotStamp,
     ) -> Result<u64, VmError> {
-        let published = tokio::task::spawn_blocking(move || staged.publish(&paths, stamp))
+        tokio::task::spawn_blocking(move || staged.publish(&paths, stamp))
             .await
             .map_err(|error| VmError::Host(error.to_string()))
-            .and_then(std::convert::identity);
-        match published {
-            Ok(bytes) => Ok(bytes),
-            Err(error) => {
-                self.discard_snapshot(&request.app_id);
-                self.resume_frozen_tenant(&request.app_id, control).await;
-                Err(error)
+            .and_then(std::convert::identity)
+    }
+
+    fn reserve_snapshot_memory(
+        &self,
+        app_id: &AppId,
+    ) -> Result<Option<super::limits::SnapshotMemoryLimit>, VmError> {
+        let Some(root) = self
+            .processes
+            .read_record(app_id)
+            .and_then(|record| record.jail_root)
+        else {
+            return Ok(None);
+        };
+        let config: guest_contract::firecracker::FirecrackerConfig =
+            crate::json_store::read_json(&root.join(FIRECRACKER_CONFIG_FILENAME))
+                .map_err(|error| VmError::Host(error.message()))?
+                .ok_or_else(|| VmError::Host("the paused VM has no staged machine configuration".into()))?;
+        super::limits::VmLimits::for_machine(&config.machine_config)
+            .and_then(|limits| limits.reserve_snapshot_memory(&super::limits::cgroup_path(app_id)))
+            .map_err(|error| VmError::Host(format!("snapshot memory could not be reserved: {error}")))
+    }
+
+    async fn snapshot_paused_vm(
+        &self,
+        request: &SuspendRequest,
+        paths: super::snapshot::SnapshotPaths,
+        stamp: SnapshotStamp,
+    ) -> Result<u64, VmError> {
+        let mut memory = self.reserve_snapshot_memory(&request.app_id)?;
+        let outcome = async {
+            let staged = StagedSnapshot::create(&self.snapshot_dir)?;
+            self.create_snapshot(
+                &request.app_id,
+                &staged.paths.state_path,
+                &staged.paths.memory_path,
+            )
+            .await?;
+            // Publication keeps the paused VMM alive so a failed seal can recover its memory.
+            self.publish_sleep_snapshot(staged, paths, stamp).await
+        }
+        .await;
+        if outcome.is_ok() {
+            self.processes.stop(&request.app_id).await;
+        } else {
+            self.discard_snapshot(&request.app_id);
+        }
+        if let Some(memory) = memory.as_mut() {
+            if let Err(error) = memory.restore() {
+                self.processes.stop(&request.app_id).await;
+                return Err(VmError::Host(format!(
+                    "the VM's memory ceiling could not be restored: {error}"
+                )));
             }
         }
+        drop(memory);
+        #[cfg(target_os = "linux")]
+        if outcome.is_ok()
+            && self
+                .processes
+                .read_record(&request.app_id)
+                .is_some_and(|record| record.jail_root.is_some())
+        {
+            // Retained snapshot pages belong to host storage, not the next VMM's running ceiling.
+            super::limits::release_stopped_cgroup(&request.app_id)
+                .await
+                .map_err(|error| {
+                    VmError::Host(format!("the sleeping VM's cgroup could not be released: {error}"))
+                })?;
+        }
+        outcome
     }
 
     /// Whether this microVM may be snapshotted now, and its share of the disk while it is.
@@ -443,7 +503,6 @@ impl Vmm for VmManager {
         let api = self.api(&request.app_id);
 
         self.discard_snapshot(&request.app_id);
-        let staged = StagedSnapshot::create(&self.snapshot_dir)?;
         if let Err(error) = self.volumes.flush().await {
             tracing::warn!(app_id = %request.app_id, error = %error.message(), "the volume backend would not flush");
         }
@@ -472,23 +531,13 @@ impl Vmm for VmManager {
             self.resume_frozen_tenant(&request.app_id, &control).await;
             return Err(error);
         }
-        if let Err(error) = self
-            .create_snapshot(
-                &request.app_id,
-                &staged.paths.state_path,
-                &staged.paths.memory_path,
-            )
-            .await
-        {
-            self.resume_frozen_tenant(&request.app_id, &control).await;
-            return Err(error);
-        }
-        // Keep the paused guest until its snapshot is committed: a failed hash, sync or rename
-        // can then resume it without losing memory, at the cost of one extra read while paused.
-        let memory_bytes = self
-            .publish_sleep_snapshot(&request, &control, staged, paths, stamp)
-            .await?;
-        self.processes.stop(&request.app_id).await;
+        let memory_bytes = match self.snapshot_paused_vm(&request, paths, stamp).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.resume_frozen_tenant(&request.app_id, &control).await;
+                return Err(error);
+            }
+        };
 
         self.metrics.sleep_wake.snapshotted(paused.elapsed());
         tracing::info!(
@@ -1108,34 +1157,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_snapshot_publication_resumes_and_releases_the_tenant() {
-        let mut fixture = fixture();
-        let calls = running_fake_vm(&mut fixture, false, None, false).await;
-        let request = suspend_request();
-        let control = fixture
-            .manager
-            .working_dir_for(&app_id())
-            .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
-        time_sync::freeze_tenant(&control).await.unwrap();
+    async fn a_failed_snapshot_publication_leaves_no_loadable_snapshot() {
+        let fixture = fixture();
         let staged = StagedSnapshot::create(&fixture.manager.snapshot_dir).unwrap();
+        let pending = staged.paths.directory.clone();
         let paths = snapshot_paths(&fixture.manager.snapshot_dir, &app_id());
         assert!(fixture
             .manager
             .publish_sleep_snapshot(
-                &request,
-                &control,
                 staged,
                 paths.clone(),
-                fixture.manager.current_stamp(&request)
+                fixture.manager.current_stamp(&suspend_request())
             )
             .await
             .is_err());
-        assert!(fixture.manager.processes.status(&app_id()).active);
+        assert!(!pending.exists());
         assert!(!paths.directory.exists());
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(&calls[..4], ["SLEEP", "HOLD", "/vm", "WAKE"]);
-        assert!(calls[4].starts_with("GO "));
-        fixture.manager.processes.stop(&app_id()).await;
     }
 
     #[tokio::test]

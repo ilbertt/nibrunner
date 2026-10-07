@@ -36,6 +36,47 @@ const PATIENCE: Duration = Duration::from_secs(90);
 /// above, so that a request nothing answers fails its own test rather than the whole run.
 const ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 
+pub struct MemorySnapshots {
+    directory: tempfile::TempDir,
+}
+
+impl MemorySnapshots {
+    pub fn new() -> Self {
+        let directory = tempfile::tempdir_in("/var/tmp").expect("a disk-backed mount point");
+        // Snapshot admission keeps an 8 GiB reserve; tmpfs capacity does not preallocate RAM.
+        let mounted = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "-o", "size=16G", "tmpfs"])
+            .arg(directory.path())
+            .output()
+            .expect("the tmpfs mount tool");
+        assert!(
+            mounted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&mounted.stderr)
+        );
+        Self { directory }
+    }
+
+    pub fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+impl Default for MemorySnapshots {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for MemorySnapshots {
+    fn drop(&mut self) {
+        let unmounted = std::process::Command::new("umount").arg(self.path()).output();
+        if !unmounted.as_ref().is_ok_and(|result| result.status.success()) {
+            tracing::warn!(?unmounted, "the test snapshot tmpfs could not be unmounted");
+        }
+    }
+}
+
 pub struct RunningHost {
     pub host: Arc<Host>,
     pub tenant_digest: Sha256Digest,
@@ -432,9 +473,12 @@ impl RunningHost {
         }
         let snapshot = self.host.state.snapshot().await;
         panic!(
-            "{} never went to sleep: state={:?}, open_requests={}, failed_sleeps={:?}, activity={:?}, measured={:?}, outcomes={:?}",
+            "{} never went to sleep: state={:?}, message={:?}, vmm={:?}, memory_events={:?}, open_requests={}, failed_sleeps={:?}, activity={:?}, measured={:?}, outcomes={:?}",
             tenant.app_id,
             snapshot.records.get(&tenant.app_id).map(|record| record.state),
+            snapshot.records.get(&tenant.app_id).and_then(|record| record.message.as_ref()),
+            crate::adapters::vm::process::VmProcesses::new(self.host.config.runtime_dir.clone()).read_record(&tenant.app_id),
+            std::fs::read_to_string(crate::adapters::vm::limits::cgroup_path(&tenant.app_id).join("memory.events")),
             self.host.metrics.proxy.open_requests_for(&tenant.app_id),
             snapshot.failed_sleeps.get(&tenant.app_id),
             snapshot.last_active_at_ms.get(&tenant.app_id),

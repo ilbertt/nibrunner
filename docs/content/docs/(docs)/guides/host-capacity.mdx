@@ -142,6 +142,12 @@ I/O threads. Exceeding the memory ceiling can kill the VM; its existing restart
 policy handles that exit. The allowance is covered by guest boot, memory pressure,
 sleep and restore tests; it does not reserve physical memory or change admission.
 
+While Firecracker is paused for a snapshot, its memory ceiling temporarily adds
+one guest RAM to cover the snapshot's filesystem cache. A failed sleep removes
+the allowance before resuming the guest. A completed sleep releases the stopped
+VMM's cgroup; retained snapshot pages remain host storage charges rather than
+consuming the restored VM's running limit. This also applies to snapshots on tmpfs.
+
 The host must provide the cgroup v2 CPU and memory controllers. If limits cannot
 be applied, the VM fails to start. Existing VMs keep their current limits until
 their next boot or restore; restarting the daemon readopts them.

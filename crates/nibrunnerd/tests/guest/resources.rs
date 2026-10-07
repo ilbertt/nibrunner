@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use nibrunnerd::adapters::vm::process::VmProcesses;
 use nibrunnerd::adapters::vm::VmExit;
-use nibrunnerd::test_support::machine::{RunningHost, Tenant};
+use nibrunnerd::test_support::machine::{MemorySnapshots, RunningHost, Tenant};
 use protocol::{InstanceResources, InstanceState};
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
@@ -68,7 +68,26 @@ fn assert_limits(host: &RunningHost, app: &Tenant) -> PathBuf {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resource_limits_preserve_allocated_memory_across_sleep_restore_and_redeployment() {
-    let Some(host) = crate::host().await else {
+    memory_survives_sleep_restore_and_redeployment(None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_pages_do_not_kill_a_vm_or_consume_its_restored_running_limit() {
+    if !std::env::var("NIBRUNNER_INTEGRATION").is_ok_and(|value| value == "1") {
+        return;
+    }
+    let snapshots = MemorySnapshots::new();
+    memory_survives_sleep_restore_and_redeployment(Some(snapshots.path())).await;
+}
+
+async fn memory_survives_sleep_restore_and_redeployment(snapshot_directory: Option<&Path>) {
+    let Some(host) = crate::host_with(|config| {
+        if let Some(directory) = snapshot_directory {
+            config.snapshot_dir = directory.to_owned();
+        }
+    })
+    .await
+    else {
         return;
     };
     for (cpus, memory, allocated) in [(1_u32, 256_u32, 160_u32), (2, 512, 384)] {
@@ -113,6 +132,10 @@ async fn resource_limits_preserve_allocated_memory_across_sleep_restore_and_rede
         );
         assert!(number(&path, "memory.current") < number(&path, "memory.max"));
         host.let_sleep(&app).await;
+        assert!(
+            !path.exists(),
+            "snapshot page charges must leave the stopped VMM's cgroup"
+        );
         assert_eq!(
             host.get(&app, "/allocated").await.unwrap().body,
             format!("{}:1", u64::from(allocated) * BYTES_PER_MIB)

@@ -86,7 +86,10 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
   VMMs may be readopted during an upgrade, but their snapshots cold boot when woken.
 - VM cgroup v2 CPU and memory limits come from the staged Firecracker machine configuration on
   both boot and restore, without a separate host budget. Memory adds 64 MiB plus 12.5% for VMM
-  and kernel overhead; guest tests cover pressure, restore, throttling and OOM recovery.
+  and kernel overhead. A paused VMM gets one guest RAM of temporary snapshot headroom; failed
+  sleeps restore the running limit before resuming, and completed sleeps release the cgroup so
+  retained snapshot pages do not charge the restored VMM. Guest tests cover pressure, tmpfs
+  snapshots, restore, throttling and OOM recovery.
 - Docs site: Biome is strict — one parameter per function (`useMaxParams: 1`; wrap several in an
   object), no magic numbers, braces on every block, components declared with `function`, no barrel
   files, sorted Tailwind classes. `bun run fix:lint` and `bun run fix:format` in `docs/` apply
