@@ -166,6 +166,10 @@ fn evaluate_stopped_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
 }
 
 pub fn evaluate_instance_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
+    // A deferred start has no new VMM; an exit still recorded belongs to the previous attempt.
+    if !inputs.unit.active && inputs.current == InstanceState::Pending && inputs.started_at_ms.is_none() {
+        return evaluate_stopped_state(inputs);
+    }
     if inputs.unit.failed {
         return InstanceState::Failed;
     }

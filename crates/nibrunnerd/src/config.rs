@@ -1505,6 +1505,30 @@ denied_egress_addresses_v6 = []
     }
 
     #[test]
+    fn vm_start_concurrency_is_opt_in_and_accepts_only_positive_u16_limits() {
+        let original = HostConfig::starter(10).to_toml();
+        assert!(HostConfig::from_toml(&original)
+            .unwrap()
+            .max_concurrent_vm_starts
+            .is_none());
+        let validator = jsonschema::validator_for(&HostConfig::schema().to_value()).unwrap();
+        for limit in [1, 65535] {
+            let valid = format!("max_concurrent_vm_starts={limit}\n{original}");
+            let config = HostConfig::from_toml(&valid).unwrap();
+            assert_eq!(config.max_concurrent_vm_starts.unwrap().get(), limit);
+            assert_eq!(HostConfig::from_toml(&config.to_toml()).unwrap(), config);
+            assert!(validator
+                .is_valid(&serde_json::to_value(toml::from_str::<toml::Value>(&valid).unwrap()).unwrap()));
+        }
+        for limit in [0, 65536] {
+            let invalid = format!("max_concurrent_vm_starts={limit}\n{original}");
+            assert!(HostConfig::from_toml(&invalid).is_err());
+            assert!(!validator
+                .is_valid(&serde_json::to_value(toml::from_str::<toml::Value>(&invalid).unwrap()).unwrap()));
+        }
+    }
+
+    #[test]
     fn a_key_the_document_leaves_out_is_refused_rather_than_filled_in() {
         for field in [
             "max_apps",

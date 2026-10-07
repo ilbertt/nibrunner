@@ -111,5 +111,9 @@ after changing configuration.
 A full budget refuses a start immediately rather than queuing it. Reconciliation
 uses its existing retry path; callers waking an app receive the existing start
 failure. Requests for an app already being woken still share its single wake.
-The permit covers VM boot/restore work, not the app's entire health grace period,
-artifact preparation or volume attachment. HTTP request admission is separate.
+A cold boot holds its permit until the guest's control port accepts a connection,
+confirming PID 1 initialized. A restore holds it through the guest clock-sync and
+release handshake. A guest that does not initialize within 60 seconds is stopped
+and releases its permit. Deferred boots remain pending without spending the app's
+restart budget. Application health checks, artifact preparation and volume
+attachment are outside this limit. HTTP request concurrency is separate.

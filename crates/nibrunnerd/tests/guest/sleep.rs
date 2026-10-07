@@ -18,7 +18,9 @@ const IDLE_TIMEOUT_MS: u64 = 60_000;
 async fn concurrent_requests_restore_one_guest_and_every_caller_is_answered() {
     const CALLERS: u64 = 32;
 
-    let Some(host) = crate::host().await else {
+    let Some(host) =
+        crate::host_with(|config| config.max_concurrent_vm_starts = std::num::NonZeroU16::new(1)).await
+    else {
         return;
     };
     let app = host.tenant(1).on_request(IDLE_TIMEOUT_MS);

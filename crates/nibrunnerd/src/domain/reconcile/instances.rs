@@ -478,7 +478,8 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
             };
             host.router.close_connections_to(&desired.app_id).await;
             host.activator.close_connections_to(&desired.app_id).await;
-            let boot = host.vms
+            let boot = host
+                .vms
                 .boot(BootRequest {
                     desired: desired.clone(),
                     slot,
@@ -490,6 +491,8 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
                 host.state
                     .update_record(&desired.app_id, |record| {
                         record.state = InstanceState::Pending;
+                        record.started_at = None;
+                        record.health = initial_tracker();
                         record.start_attempts = existing
                             .as_ref()
                             .map_or(NO_START_ATTEMPTS, |prior| prior.start_attempts);
@@ -598,7 +601,18 @@ pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<W
         Err(VmError::SnapshotUnusable { reason }) => {
             tracing::info!(app_id = %desired.app_id, reason, "nothing to wake this app from; booting it instead");
             start_instance(host, desired).await;
-            Ok(WakeOutcome::ColdBoot)
+            let record = host.state.record(&desired.app_id).await;
+            if record.as_ref().is_some_and(|record| {
+                matches!(record.state, InstanceState::Starting | InstanceState::Running)
+            }) {
+                Ok(WakeOutcome::ColdBoot)
+            } else {
+                let reason = record.and_then(|record| record.message).map_or_else(
+                    || "the cold boot did not start".to_string(),
+                    |message| message.as_str().to_string(),
+                );
+                Err(would_not_start(reason))
+            }
         }
         Err(error) => {
             let reason = error.message();
@@ -959,6 +973,69 @@ mod tests {
             host.state.record(&app_id()).await.unwrap().state,
             InstanceState::Starting
         );
+    }
+
+    #[tokio::test]
+    async fn a_busy_cold_boot_fallback_is_reported_as_a_wake_refusal() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.vms.refuse_wake(VmError::SnapshotUnusable {
+            reason: "no snapshot".into(),
+        });
+        host.vms.boot_error(Some(VmError::StartBusy));
+        let result = resume_instance(&host, &desired_instance(|_| {})).await;
+        assert!(
+            matches!(result, Err(WakeRefusal::Failed { reason, .. }) if reason == VmError::StartBusy.message())
+        );
+        refresh_states(host.arc()).await;
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Pending);
+        assert_eq!(record.start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn a_deferred_restart_stays_pending_across_status_refreshes_without_spending_its_budget() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let spent = crate::domain::backoff::AttemptWindow {
+            attempts: 1,
+            last_attempt_at_ms: None,
+        };
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Failed;
+                record.started_at = Some(observed_at());
+                record.health.ever_healthy = true;
+                record.start_attempts = spent;
+            }))
+            .await;
+        host.vms.boot_error(Some(VmError::StartBusy));
+        for exit in [VmExit::Code(0), VmExit::Code(1), VmExit::Signal(9)] {
+            host.vms.set_status(VmStatus {
+                loaded: true,
+                active: false,
+                failed: exit != VmExit::Code(0),
+                started_this_boot: true,
+                exit: Some(exit),
+            });
+            for _ in 0..3 {
+                start_instance(&host, &desired_instance(|_| {})).await;
+                refresh_states(host.arc()).await;
+                let record = host.state.record(&app_id()).await.unwrap();
+                assert_eq!(record.state, InstanceState::Pending);
+                assert_eq!(record.started_at, None);
+                assert_eq!(record.start_attempts, spent);
+                assert_eq!(record.health, initial_tracker());
+                assert_eq!(record.message.unwrap().as_str(), VmError::StartBusy.message());
+            }
+        }
+        host.vms.boot_error(None);
+        start_instance(&host, &desired_instance(|_| {})).await;
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Starting);
+        assert_eq!(record.start_attempts.attempts, 2);
+        assert!(record.started_at.is_some());
+        assert!(record.message.is_none());
     }
 
     #[tokio::test]

@@ -10,6 +10,35 @@ use protocol::{DesiredInstanceState, DesiredPresence, InstanceState, VolumeState
 const BUSYBOX_INDEX: &str = "5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_guest_that_initialized_releases_start_capacity_before_its_app_is_healthy() {
+    let Some(host) =
+        crate::host_with(|config| config.max_concurrent_vm_starts = std::num::NonZeroU16::new(1)).await
+    else {
+        return;
+    };
+    let waiting = host.tenant(1).arguments(&["--never-listen"]).edited(|instance| {
+        instance.config.health_check = protocol::HealthCheck::Tcp {
+            interval_ms: 1000,
+            timeout_ms: 100,
+            grace_period_ms: 120_000,
+            healthy_threshold: 1,
+            unhealthy_threshold: 3,
+        };
+    });
+    host.deploy(std::slice::from_ref(&waiting)).await;
+    host.until_state(&waiting.app_id, InstanceState::Starting).await;
+    let answering = host.tenant(2);
+    host.deploy(&[waiting.clone(), answering.clone()]).await;
+    host.until_state(&answering.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.instance(&waiting.app_id).await.unwrap().state,
+        InstanceState::Starting
+    );
+    assert_eq!(host.get(&answering, "/").await.unwrap().status, 200);
+    host.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_public_busybox_image_serves_a_cow_through_a_jailed_microvm() {
     let Some(host) = crate::host().await else {
         return;

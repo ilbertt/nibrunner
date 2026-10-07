@@ -395,7 +395,7 @@ impl VmManager {
 #[async_trait]
 impl Vmm for VmManager {
     async fn boot(&self, request: BootRequest) -> Result<(), VmError> {
-        let _starting = self.admit_start()?;
+        let start_permit = self.admit_start()?;
         let app_id = request.desired.app_id.clone();
         self.discard_snapshot(&app_id);
         let staged = std::time::Instant::now();
@@ -411,6 +411,20 @@ impl Vmm for VmManager {
             self.cron_registration.detach(&app_id).await;
             let _ = self.logs.detach(&app_id).await;
             return Err(VmError::Host(error.to_string()));
+        }
+        if start_permit.is_some() {
+            let control = prepared
+                .jail
+                .root
+                .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
+            if let Err(error) =
+                super::startup::initialized(&control, || self.processes.status(&app_id).active).await
+            {
+                self.processes.stop(&app_id).await;
+                self.cron_registration.detach(&app_id).await;
+                self.logs.detach(&app_id).await;
+                return Err(error);
+            }
         }
         tracing::info!(
             %app_id,
@@ -762,6 +776,91 @@ mod tests {
         assert!(host.manager.admit_start().is_err());
         drop(first);
         assert!(host.manager.admit_start().is_ok());
+    }
+
+    fn fake_boot_binary(fixture: &mut Fixture, command: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let binary = fixture._directory.path().join("fake-jailer");
+        std::fs::write(&binary, format!("#!/bin/sh\nexec {command}\n")).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fixture.manager.jailer.binary = binary;
+        fixture.manager.start_permits = Some(tokio::sync::Semaphore::new(1));
+    }
+
+    #[tokio::test]
+    async fn a_spawned_vm_holds_start_capacity_until_its_guest_control_port_answers() {
+        let mut fixture = fixture();
+        fake_boot_binary(&mut fixture, "sleep 30");
+        let boot = fixture.manager.boot(boot_request(desired_instance(|_| {})));
+        tokio::pin!(boot);
+        let spawned = async {
+            while !fixture.manager.processes.status(&app_id()).active {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        };
+        tokio::select! {
+            result = &mut boot => panic!("boot ended before guest initialization: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), spawned) => result.unwrap(),
+        }
+        let another = boot_request(desired_instance(|desired| {
+            desired.app_id = AppId::parse("app-2").unwrap()
+        }));
+        assert_eq!(fixture.manager.boot(another).await, Err(VmError::StartBusy));
+        assert_eq!(
+            fixture.manager.wake(suspend_request()).await,
+            Err(VmError::StartBusy)
+        );
+
+        let control = fixture
+            .manager
+            .working_dir_for(&app_id())
+            .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
+        let listener = UnixListener::bind(control).unwrap();
+        let (asked, answer) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut wire = BufReader::new(stream);
+            let mut line = String::new();
+            wire.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "CONNECT 51001\n");
+            wire.get_mut().write_all(b"ERR\n").await.unwrap();
+            drop(wire);
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut wire = BufReader::new(stream);
+            line.clear();
+            wire.read_line(&mut line).await.unwrap();
+            asked.send(()).unwrap();
+            released.await.unwrap();
+            wire.get_mut().write_all(b"OK 1234\n").await.unwrap();
+        });
+        tokio::select! {
+            result = &mut boot => panic!("boot ended before a successful guest handshake: {result:?}"),
+            result = answer => result.unwrap(),
+        }
+        assert!(fixture.manager.admit_start().is_err());
+        release.send(()).unwrap();
+        boot.await.unwrap();
+        server.await.unwrap();
+        assert!(fixture.manager.admit_start().is_ok());
+        assert!(fixture.manager.processes.status(&app_id()).active);
+        fixture.manager.processes.stop(&app_id()).await;
+    }
+
+    #[tokio::test]
+    async fn a_vm_that_exits_before_initializing_releases_capacity_and_detaches_its_channels() {
+        let mut fixture = fixture();
+        fake_boot_binary(&mut fixture, "false");
+        let error = fixture
+            .manager
+            .boot(boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap_err();
+        assert!(error.message().contains("exited before"));
+        assert!(fixture.manager.admit_start().is_ok());
+        assert!(!fixture.manager.processes.status(&app_id()).active);
+        assert!(fixture.manager.logs.attached().await.is_empty());
+        assert!(fixture.manager.cron_registration.attached().await.is_empty());
     }
 
     struct Fixture {
