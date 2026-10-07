@@ -170,14 +170,18 @@ async fn a_tenants_output_stops_growing_where_this_host_says_it_keeps_it() {
     }
 
     tokio::time::sleep(Duration::from_secs(2)).await;
+    let output_prefix = format!("{}.log", app.app_id);
     let mut kept = 0;
     let mut files = Vec::new();
     for entry in std::fs::read_dir(&directory)
         .expect("the log directory")
         .flatten()
     {
-        kept += entry.metadata().map(|held| held.len()).unwrap_or(0);
-        files.push(entry.file_name().to_string_lossy().to_string());
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&output_prefix) {
+            kept += entry.metadata().expect("a tenant output file").len();
+            files.push(name);
+        }
     }
     files.sort();
     assert_eq!(
