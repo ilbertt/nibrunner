@@ -382,16 +382,15 @@ mod tests {
             }))
             .await;
 
-        // Nothing listens on the guest port until well after the client has connected.
-        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Keep the delayed service's port out of parallel tests' ephemeral allocations.
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved
+            .bind(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)))
+            .unwrap();
         let guest_port = reserved.local_addr().unwrap().port();
-        drop(reserved);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            let guest =
-                tokio::net::TcpListener::bind(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, guest_port)))
-                    .await
-                    .unwrap();
+            let guest = reserved.listen(128).unwrap();
             let (mut stream, _) = guest.accept().await.unwrap();
             use tokio::io::AsyncWriteExt;
             stream.write_all(b"SSH-2.0").await.unwrap();
