@@ -109,6 +109,7 @@ run them yourself on a Linux box when the change touches an adapter or the guest
 official images, real ext4 preparation and cache reuse checks. The pins are in
 `crates/nibrunnerd/tests/integration/remote_oci_images.json`; refresh them explicitly when updating
 the corpus. This lane needs internet access and `debugfs` and `e2fsck` in addition to `mke2fs`.
+CI enables it in the required integration job on every pull request and push to `main`.
 
 Some files in the tree are written from the code rather than by hand. After changing what they
 come from, regenerate and commit; CI's `just check-<recipe>` fails otherwise:

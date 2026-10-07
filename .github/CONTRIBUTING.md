@@ -14,7 +14,8 @@ The docs site: `cd docs && bun install`, then `just docs-dev`.
 On a Linux test host as root, `NIBRUNNER_REMOTE_OCI=1 just integration remote_oci`
 pulls the digest-pinned official images in `crates/nibrunnerd/tests/integration/remote_oci_images.json`
 from Docker Hub into fresh caches. It checks unpacking, ext4 integrity and cache reuse.
-This optional lane needs internet access, `mke2fs`, `debugfs` and `e2fsck`; it does not boot guests.
+CI runs this corpus in the required integration job on every pull request and push to `main`.
+It needs internet access, `mke2fs`, `debugfs` and `e2fsck`; it does not boot guests.
 
 ## Tooling
 
