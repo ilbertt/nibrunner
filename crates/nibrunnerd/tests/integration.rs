@@ -5,6 +5,9 @@ use std::sync::Arc;
 use nibrunnerd::ports::{CommandRunner, CommandRunnerExt};
 use nibrunnerd::test_support::mocks;
 
+#[path = "integration/remote_oci.rs"]
+mod remote_oci;
+
 fn enabled() -> bool {
     std::env::var("NIBRUNNER_INTEGRATION").is_ok_and(|value| value == "1")
 }

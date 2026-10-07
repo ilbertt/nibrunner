@@ -141,16 +141,21 @@ fn evaluate_stopped_state(inputs: &LifecycleInputs<'_>) -> InstanceState {
     } else {
         InstanceState::Stopped
     };
-    if inputs.stop_requested || inputs.snapshotting || !inputs.desired_running {
+    if inputs.stop_requested || inputs.snapshotting {
+        return down;
+    }
+    // A start that failed before the microVM ever came up leaves the record Failed with the reason
+    // on it, but no started_at. Collapsing that to Idle or Stopped would read as an app asleep and
+    // well, whether because it is still trying to run or because its desired state has since asked
+    // it to stop; it stays Failed, explained, until a fresh start attempt moves it off, the same
+    // way regardless of which desired state it is refused under.
+    if inputs.current == InstanceState::Failed && inputs.started_at_ms.is_none() {
+        return InstanceState::Failed;
+    }
+    if !inputs.desired_running {
         return down;
     }
     if inputs.started_at_ms.is_some() {
-        return InstanceState::Failed;
-    }
-    // A start that failed before the microVM ever came up leaves the record Failed with the reason
-    // on it, but no started_at. Collapsing that to Idle would read as an on-request app asleep and
-    // well; it stays Failed until a fresh start attempt moves it off.
-    if inputs.current == InstanceState::Failed {
         return InstanceState::Failed;
     }
     if inputs.on_request && inputs.current != InstanceState::Pending {
@@ -752,7 +757,9 @@ mod tests {
             }),
             InstanceState::Failed
         );
-        // A document that no longer wants it up still takes it down, Failed or not.
+        // A document that no longer wants it up still keeps a first-start failure explained,
+        // rather than reading as the clean Stopped a healthy shutdown would report: nothing has
+        // retried it and either cleared the refusal or earned a new one.
         assert_eq!(
             evaluate(Evaluate {
                 unit: absent(),
@@ -763,7 +770,7 @@ mod tests {
                 current: InstanceState::Failed,
                 ..Default::default()
             }),
-            InstanceState::Stopped
+            InstanceState::Failed
         );
     }
 

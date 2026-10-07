@@ -1,0 +1,101 @@
+[
+  {
+    "name": "nginx",
+    "tag": "stable",
+    "repository": "docker.io/library/nginx",
+    "digest": "9bf97bd7714f5e24c1ccd545ecb9eb5435cb6d109c97cebb15e7e455e0239edb",
+    "compressed_bytes": 63616657,
+    "paths": [
+      "/usr/sbin/nginx",
+      "/etc/nginx/nginx.conf"
+    ]
+  },
+  {
+    "name": "nginx",
+    "tag": "stable-alpine",
+    "repository": "docker.io/library/nginx",
+    "digest": "0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94",
+    "compressed_bytes": 26073522,
+    "paths": [
+      "/usr/sbin/nginx",
+      "/etc/nginx/nginx.conf"
+    ]
+  },
+  {
+    "name": "node",
+    "tag": "22-bookworm-slim",
+    "repository": "docker.io/library/node",
+    "digest": "c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392",
+    "compressed_bytes": 79803125,
+    "paths": [
+      "/usr/local/bin/node",
+      "/usr/local/bin/docker-entrypoint.sh"
+    ]
+  },
+  {
+    "name": "node",
+    "tag": "22-alpine",
+    "repository": "docker.io/library/node",
+    "digest": "0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+    "compressed_bytes": 60697390,
+    "paths": [
+      "/usr/local/bin/node",
+      "/usr/local/bin/docker-entrypoint.sh"
+    ]
+  },
+  {
+    "name": "redis",
+    "tag": "7-bookworm",
+    "repository": "docker.io/library/redis",
+    "digest": "4fa24486b8bcca8eec45ee0eb166edc674795e53a2b53d1a9ef263eecebaac85",
+    "compressed_bytes": 45896305,
+    "paths": [
+      "/usr/local/bin/redis-server",
+      "/usr/local/bin/docker-entrypoint.sh"
+    ]
+  },
+  {
+    "name": "redis",
+    "tag": "7-alpine",
+    "repository": "docker.io/library/redis",
+    "digest": "858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499",
+    "compressed_bytes": 16242313,
+    "paths": [
+      "/usr/local/bin/redis-server",
+      "/usr/local/bin/docker-entrypoint.sh"
+    ]
+  },
+  {
+    "name": "postgres",
+    "tag": "16-bookworm",
+    "repository": "docker.io/library/postgres",
+    "digest": "0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4",
+    "compressed_bytes": 157441416,
+    "paths": [
+      "/usr/lib/postgresql/16/bin/postgres",
+      "/usr/local/bin/docker-entrypoint.sh"
+    ]
+  },
+  {
+    "name": "postgres",
+    "tag": "16-alpine",
+    "repository": "docker.io/library/postgres",
+    "digest": "721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+    "compressed_bytes": 116062392,
+    "paths": [
+      "/usr/local/bin/postgres",
+      "/usr/local/bin/docker-entrypoint.sh"
+    ]
+  },
+  {
+    "name": "busybox",
+    "tag": "1.37",
+    "repository": "docker.io/library/busybox",
+    "digest": "bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+    "compressed_bytes": 2211514,
+    "paths": [
+      "/bin/busybox",
+      "/bin/sh"
+    ]
+  }
+]

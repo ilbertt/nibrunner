@@ -667,7 +667,7 @@ mod tests {
                 .routes()
                 .await
                 .port_for(app_hostname().hostname.as_str()),
-            Some(record.host_port)
+            record.host_port
         );
         assert_eq!(host.repositories.instances.all().await.unwrap().len(), 1);
         assert_eq!(host.repositories.slots.all().await.unwrap().len(), 1);
@@ -748,7 +748,7 @@ mod tests {
         assert!(!record.desired_running);
         assert_eq!(record.hostnames, vec![app_hostname()]);
         let slot = host.slot_of(&app_id()).await.expect("held on a slot of its own");
-        assert_eq!(record.host_port, slot.host_port);
+        assert_eq!(record.host_port, Some(slot.host_port));
         assert_eq!(
             host.router
                 .routes()
@@ -769,7 +769,7 @@ mod tests {
         assert!(host.vms.calls().is_empty(), "{:?}", host.vms.calls());
         let held = host.state.record(&app_id()).await.unwrap();
         assert_eq!(held.state, InstanceState::Stopped);
-        assert_eq!(held.host_port, slot.host_port);
+        assert_eq!(held.host_port, Some(slot.host_port));
         assert!(host.state.snapshot().await.converged);
 
         // And when the document wants it up, it comes up on the port it was answering on.
@@ -778,7 +778,7 @@ mod tests {
         let started = host.state.record(&app_id()).await.unwrap();
         assert_eq!(started.state, InstanceState::Starting);
         assert!(started.desired_running);
-        assert_eq!(started.host_port, slot.host_port);
+        assert_eq!(started.host_port, Some(slot.host_port));
     }
 
     #[tokio::test]
@@ -1698,7 +1698,7 @@ mod tests {
                 .routes()
                 .await
                 .port_for(app_hostname().hostname.as_str()),
-            Some(record.host_port)
+            record.host_port
         );
         assert_eq!(host.repositories.instances.all().await.unwrap().len(), 1);
     }

@@ -14,11 +14,15 @@ pub fn renderable_routes(records: &[InstanceRecord]) -> Vec<RouteTarget> {
     records
         .iter()
         .filter(|record| !record.hostnames.is_empty())
-        .map(|record| RouteTarget {
-            app_id: record.app_id.clone(),
-            deployment_id: record.deployment_id.clone(),
-            hostnames: record.hostnames.clone(),
-            host_port: record.host_port,
+        .filter_map(|record| {
+            // No slot, nothing to route to: a start refused before one was ever handed out has
+            // no `host_port` a route could name.
+            Some(RouteTarget {
+                app_id: record.app_id.clone(),
+                deployment_id: record.deployment_id.clone(),
+                hostnames: record.hostnames.clone(),
+                host_port: record.host_port?,
+            })
         })
         .collect()
 }
@@ -32,7 +36,7 @@ mod tests {
     fn named(name: &str, port: u16) -> InstanceRecord {
         instance_record(|record| {
             record.app_id = AppId::parse(name).unwrap();
-            record.host_port = HostPort::new(port).unwrap();
+            record.host_port = Some(HostPort::new(port).unwrap());
             record.hostnames = vec![AppHostname {
                 hostname: Hostname::parse(format!("{name}.apps.example.com")).unwrap(),
                 kind: AppHostnameKind::Platform,

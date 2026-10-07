@@ -105,6 +105,12 @@ of that plus `/dev/kvm`, `ip` from iproute2, `iptables` and a guest image from `
 sleep, a wake or a route into a guest is considered proven. CI runs both on every pull request;
 run them yourself on a Linux box when the change touches an adapter or the guest.
 
+`NIBRUNNER_REMOTE_OCI=1 just integration remote_oci` opts into Docker Hub pulls of digest-pinned
+official images, real ext4 preparation and cache reuse checks. The pins are in
+`crates/nibrunnerd/tests/integration/remote_oci_images.json`; refresh them explicitly when updating
+the corpus. This lane needs internet access and `debugfs` and `e2fsck` in addition to `mke2fs`.
+CI enables it in the required integration job on every pull request and push to `main`.
+
 Some files in the tree are written from the code rather than by hand. After changing what they
 come from, regenerate and commit; CI's `just check-<recipe>` fails otherwise:
 

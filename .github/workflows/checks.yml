@@ -105,6 +105,12 @@ jobs:
         # where rustup, cargo and mise live.
         run: sudo -E env "PATH=$PATH" just integration
 
+      - name: Unpack remote OCI images
+        timeout-minutes: 15
+        env:
+          NIBRUNNER_REMOTE_OCI: "1"
+        run: sudo -E env "PATH=$PATH" just integration remote_oci
+
   # Beside `integration` rather than in it: both want the machine's nftables table and its taps,
   # and a job of its own is also a guest image built while the other tests are already running.
   #

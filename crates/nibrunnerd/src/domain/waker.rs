@@ -136,10 +136,15 @@ impl AppWaker {
         // all — either way, a port a request can be forwarded to.
         let deadline = Instant::now() + Duration::from_millis(record.health_check.probe().grace_period_ms);
         loop {
-            if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check)
-                .await
-                .is_ok()
-            {
+            let answered = match record.guest_ipv4.as_ref() {
+                Some(guest_ipv4) => probe_instance(guest_ipv4, record.http_port, &record.health_check)
+                    .await
+                    .is_ok(),
+                // A booted guest this host has no address for cannot happen — a boot always
+                // holds a slot first — but reads as not yet answering rather than a crash here.
+                None => false,
+            };
+            if answered {
                 break;
             }
             if Instant::now() >= deadline {
@@ -200,10 +205,15 @@ impl AppWaker {
                 .filter(|record| record.started_at.is_some() && !record.stop_requested);
             match booted {
                 Some(record) => {
-                    if probe_instance(&record.guest_ipv4, record.http_port, &record.health_check)
-                        .await
-                        .is_ok()
-                    {
+                    let answered = match record.guest_ipv4.as_ref() {
+                        Some(guest_ipv4) => {
+                            probe_instance(guest_ipv4, record.http_port, &record.health_check)
+                                .await
+                                .is_ok()
+                        }
+                        None => false,
+                    };
+                    if answered {
                         let joined = lock(&self.in_flight).get(app_id).map_or(0, |(_, count)| *count);
                         tracing::debug!(
                             %app_id,
@@ -386,7 +396,7 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.health_check = protocol::HealthCheck::BootCompleted;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = listening;
             }))
             .await;
@@ -437,7 +447,7 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = protocol::HttpPort::new(1).unwrap();
                 let probe = record.health_check.probe_mut().unwrap();
                 probe.grace_period_ms = 200;
@@ -492,7 +502,7 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = listening;
             }))
             .await;
@@ -634,7 +644,7 @@ mod tests {
             .put_record(instance_record(|record| {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = protocol::HttpPort::new(1).unwrap();
                 let probe = record.health_check.probe_mut().unwrap();
                 probe.grace_period_ms = 20;
@@ -694,7 +704,7 @@ mod tests {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
                 record.health_check = protocol::HealthCheck::BootCompleted;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = protocol::HttpPort::new(1).unwrap();
             }))
             .await;
@@ -763,7 +773,7 @@ mod tests {
                 record.on_request = true;
                 record.state = InstanceState::Idle;
                 record.health_check = protocol::HealthCheck::BootCompleted;
-                record.guest_ipv4 = crate::domain::health::probe::loopback();
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
                 record.http_port = listening;
             }))
             .await;
@@ -964,7 +974,7 @@ mod tests {
             record.started_at = Some(protocol::Timestamp::from_epoch_ms(
                 crate::clock::now_ms() - ago_ms,
             ));
-            record.guest_ipv4 = crate::domain::health::probe::loopback();
+            record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
             record.http_port = port;
         })
     }

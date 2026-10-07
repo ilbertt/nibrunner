@@ -194,6 +194,14 @@ fn plan_instance(
                 app_id: wanted.app_id.clone(),
                 reason: InstanceStopReason::DesiredStopped,
             }
+        } else if current.refused {
+            // A record this host already holds for a stopped app is what `present` means here,
+            // but a refused one never held a slot to be stopped out of: it is retried the same
+            // way a refusal lifts for any other desired state, not left to answer for a slot it
+            // never got.
+            InstancePlan::Hold {
+                desired: wanted.clone(),
+            }
         } else {
             InstancePlan::None {
                 app_id: wanted.app_id.clone(),
@@ -642,6 +650,27 @@ mod tests {
             let result = plan(
                 desired_state(|state| state.instances = vec![stopped()]),
                 ObservedState::default(),
+            );
+            assert_eq!(result.instances, vec![InstancePlan::Hold { desired: stopped() }]);
+        }
+
+        #[test]
+        fn a_stopped_app_refused_a_slot_is_held_again_rather_than_left_unrouted() {
+            // What a refused record leaves once a slot frees up: a failed record with no attempt
+            // spent, and nothing running under it. Left at None, its hostname would never become
+            // routable again, even once capacity returned, because `present` reads a record this
+            // host already holds the same whether it ever got a slot or not.
+            let stopped =
+                || desired_instance(|instance| instance.desired_state = DesiredInstanceState::Stopped);
+            let result = plan(
+                desired_state(|state| state.instances = vec![stopped()]),
+                observed_state(|state| {
+                    state.instances = vec![observed_instance(|instance| {
+                        instance.running = false;
+                        instance.exited = false;
+                        instance.refused = true;
+                    })]
+                }),
             );
             assert_eq!(result.instances, vec![InstancePlan::Hold { desired: stopped() }]);
         }
