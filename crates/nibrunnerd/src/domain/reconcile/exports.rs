@@ -1,6 +1,6 @@
 use protocol::{
-    AppId, CheckpointId, Crontab, DesiredExport, ExportId, ExportState, HostDesiredState, ReportedExport,
-    StateMessage, Timestamp,
+    AppId, CheckpointId, Crontab, DesiredExport, ExportId, ExportState, ReportedExport, StateMessage,
+    Timestamp,
 };
 
 use crate::domain::exports::bundle::{dump_volume, write_bundle};
@@ -21,19 +21,15 @@ pub fn is_export_checkpoint(checkpoint_id: &CheckpointId) -> bool {
     checkpoint_id.as_str().starts_with(EXPORT_PREFIX)
 }
 
-pub async fn observe_exports(host: &Host, desired: &HostDesiredState) -> Vec<ObservedExport> {
-    let written = host.state.snapshot().await.export_reports;
-    desired
-        .exports
-        .iter()
-        .filter(|wanted| {
-            written
-                .iter()
-                .any(|report| report.export_id == wanted.export_id && report.state == ExportState::Ready)
-        })
-        .map(|wanted| ObservedExport {
-            export_id: wanted.export_id.clone(),
-            written: true,
+pub async fn observe_exports(host: &Host) -> Vec<ObservedExport> {
+    host.state
+        .snapshot()
+        .await
+        .export_reports
+        .into_iter()
+        .map(|report| ObservedExport {
+            export_id: report.export_id,
+            written: report.state == ExportState::Ready,
         })
         .collect()
 }
@@ -278,7 +274,8 @@ mod tests {
     async fn asked_for(host: &crate::host::Host, exports: Vec<DesiredExport>) -> ReconcilePlan {
         let desired = desired_state(|state| state.exports = exports);
         host.cache.lock().await.accept(desired.clone());
-        plan_reconcile(&desired, &observed_state(|_| {}))
+        let observed = observe_exports(host).await;
+        plan_reconcile(&desired, &observed_state(|state| state.exports = observed))
     }
 
     #[tokio::test]
@@ -420,6 +417,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_export_omitted_from_the_document_disappears_from_the_next_report() {
+        for state in [ExportState::Ready, ExportState::Failed] {
+            let host = test_host().await;
+            let retained = ReportedExport {
+                export_id: ExportId::parse("exp-2").unwrap(),
+                ..note(ExportState::Ready)
+            };
+            holding(host.arc(), vec![note(state), retained.clone()]).await;
+            let desired = desired_state(|desired| {
+                desired.exports = vec![DesiredExport {
+                    export_id: retained.export_id.clone(),
+                    ..wanted(DesiredPresence::Present)
+                }];
+            });
+            host.cache.lock().await.accept(desired.clone());
+            let observed = crate::domain::reconcile::observe(host.arc(), &desired).await;
+            let plan = plan_reconcile(&desired, &observed);
+
+            apply_exports(host.arc(), &plan, Trigger::Tick).await;
+
+            let versions = crate::domain::report::versions::compiled_versions("v1.16.1", "6.1.180-test");
+            let reported = crate::domain::report::writer::build(host.arc(), versions).await;
+            assert_eq!(reported.exports, vec![retained]);
+            assert!(host.exports_written().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn an_export_this_host_has_already_written_is_not_written_twice() {
         let host = test_host().await;
         let desired = desired_state(|state| state.exports = vec![wanted(DesiredPresence::Present)]);
@@ -436,7 +461,7 @@ mod tests {
             })
             .await;
 
-        let observed = observe_exports(host.arc(), &desired).await;
+        let observed = observe_exports(host.arc()).await;
         assert_eq!(observed.len(), 1);
         assert!(observed[0].written);
 
@@ -570,9 +595,10 @@ mod tests {
     async fn a_bundle_that_failed_is_not_a_bundle_this_host_has_written() {
         let host = test_host().await;
         holding(host.arc(), vec![note(ExportState::Failed)]).await;
-        let desired = desired_state(|state| state.exports = vec![wanted(DesiredPresence::Present)]);
 
-        assert!(observe_exports(host.arc(), &desired).await.is_empty());
+        let observed = observe_exports(host.arc()).await;
+        assert_eq!(observed.len(), 1);
+        assert!(!observed[0].written);
     }
 
     #[tokio::test]
