@@ -57,7 +57,7 @@ pub async fn observe(host: &Host, desired: &HostDesiredState) -> ObservedState {
             .collect(),
         volumes: volumes::observe_volumes(host, &volumes::volume_owners(desired, &snapshot.records)).await,
         checkpoints: checkpoints::observe_checkpoints(host, desired).await,
-        exports: exports::observe_exports(host, desired).await,
+        exports: exports::observe_exports(host).await,
     }
 }
 
