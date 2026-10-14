@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026.10.4] - 2026-10-14
+
+### Fixes
+
+- Forget reports for removed exports (#248)
+
+### Maintenance
+
+- Deploy docs on each release (#249)
+
 ## [2026.10.3] - 2026-10-07
 
 ### Features
