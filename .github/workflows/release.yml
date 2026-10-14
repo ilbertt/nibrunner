@@ -4,52 +4,29 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to publish and deploy
-        required: true
-        type: string
 
 permissions:
   contents: write
   id-token: write
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # nibrun's OIDC trust requires a branch ref even when the binary comes from a release tag.
-  dispatch:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - name: Dispatch the release from main
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: gh workflow run release.yml --ref main -f tag="$TAG"
-
   release:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
 
       - uses: ./.github/actions/build-release
 
       - name: Verify the release version
         env:
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ github.ref_name }}
         run: |
           cargo metadata --no-deps --format-version 1 |
             jq -e --arg tag "$TAG" '.packages[] | select(.name == "nibrunnerd") | "v" + .version == $tag'
@@ -69,7 +46,7 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" \
             --verify-tag \
@@ -78,7 +55,7 @@ jobs:
             --latest \
             "$RUNNER_TEMP/dist"/*
 
-      - name: Install nib
+      - name: Install nibrun cli
         uses: nibrunhq/setup-cli@a753b7a37b34d0389298f6b1647cff63a3993724 # v1.0.1
         with:
           version: latest

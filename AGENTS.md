@@ -160,9 +160,8 @@ Run `prepare-release` on GitHub to open a release PR from `main`. `git-cliff`, p
 use `vYEAR.MONTH.PATCH` in UTC, without zero padding. The patch starts at 0 each month and increments
 from the highest stable tag; historical date-counter prereleases do not advance it. The PR updates
 the workspace version in `Cargo.toml` and `Cargo.lock`. After merging, push the prepared tag on the merge commit.
-The `release` workflow dispatches itself on `main` for each pushed tag, checks out that tag,
-verifies it against the workspace version and publishes the binaries, guest image and checksums.
-The branch identity lets the same job deploy the docs through GitHub OIDC after publishing.
+The `release` workflow verifies the pushed tag against the workspace version and publishes the
+binaries, guest image and checksums, then deploys the docs through GitHub OIDC in the same job.
 `just release-notes` runs `git-cliff --current` on the checked-out tag to
 generate the release description from Git history; empty notes are allowed.
 
