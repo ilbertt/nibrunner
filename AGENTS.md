@@ -190,8 +190,9 @@ no URL to build a call from, so the document carries the one that works as `x-co
 A page that moves leaves its old path in the `moved` map in `docs/src/routes/docs/$.tsx`. Link the
 docs by their nibrunner.dev URL, from the daemon's messages and the README alike. Style: plain, concise, direct;
 no fluff or playful wording. Steps and tables first, the why in a callout. `just docs-build`
-produces `docs/dist/app`, one Linux binary with the site inside; it is deployed by hand with `nib run` from `main` once a pull request
-merges.
+produces `docs/dist/app`, one Linux binary with the site inside. After each successful release,
+`.github/workflows/deploy.yml` downloads that release's docs binary and deploys it with `nib`.
+The docs app trusts `ilbertt/nibrunner`, `deploy.yml` and `main` through GitHub OIDC.
 
 ## READMEs
 

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -53,3 +54,10 @@ jobs:
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             --latest \
             "$RUNNER_TEMP/dist"/*
+
+      - name: Deploy the released docs site
+        # nibrun's OIDC trust requires a branch ref, so deployment runs on main rather than the tag.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh workflow run deploy.yml --ref main -f tag="$TAG"

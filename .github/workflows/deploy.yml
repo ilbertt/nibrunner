@@ -1,0 +1,43 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose docs binary to deploy
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-docs
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install nib
+        uses: nibrunhq/setup-cli@a753b7a37b34d0389298f6b1647cff63a3993724 # v1.0.1
+        with:
+          version: 2026.10.14-1
+
+      - name: Download the released docs site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release download "$TAG" \
+            --pattern nibrunner-docs-linux-x64 \
+            --dir "$RUNNER_TEMP/docs"
+
+      - name: Deploy the docs site
+        run: |
+          nib run "$RUNNER_TEMP/docs/nibrunner-docs-linux-x64" \
+            --github-trusted-oidc \
+            --app-id 01a09eb8-ea7a-73d2-98c8-bec0742e4fee
