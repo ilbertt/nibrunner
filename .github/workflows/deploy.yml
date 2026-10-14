@@ -24,7 +24,7 @@ jobs:
       - name: Install nib
         uses: nibrunhq/setup-cli@a753b7a37b34d0389298f6b1647cff63a3993724 # v1.0.1
         with:
-          version: 2026.10.14-1
+          version: latest
 
       - name: Download the released docs site
         env:
