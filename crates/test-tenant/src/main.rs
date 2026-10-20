@@ -2,8 +2,9 @@
 //! running guest from outside it: whether it kept what it had in memory, whether what it wrote
 //! is still there, whether the kernel let it reach somewhere it should not have.
 //!
-//! No dependencies and no runtime: a thread per connection, and the whole thing is one static
-//! musl binary small enough to hand to the artifact store as a layer.
+//! No runtime, and the one dependency (`nix`, for the PTY syscalls std does not wrap) changes
+//! nothing about that: a thread per connection, and the whole thing is one static musl binary
+//! small enough to hand to the artifact store as a layer.
 
 // A tenant the tests boot, and every way it can die is one of them asking it to.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
@@ -267,6 +268,7 @@ fn answer(target: &str, data_dir: &Path) -> (&'static str, String) {
             ("200 OK", "waited".to_string())
         }
         "/reach" => ("200 OK", reach(&query(target, "addr").unwrap_or_default())),
+        "/pty" => pty_opened(),
         "/env" => (
             "200 OK",
             std::env::var(query(target, "name").unwrap_or_default()).unwrap_or_default(),
@@ -340,6 +342,46 @@ fn reach(address: &str) -> String {
         Ok(_) => format!("reached in {took}ms"),
         Err(error) => format!("blocked in {took}ms: {error}"),
     }
+}
+
+/// What a program that allocates a terminal does: open a master, unlock its slave, then open the
+/// slave by the name the kernel gave it under `/dev/pts`. That last open is the one that fails
+/// with `ENOENT` on a guest whose `devpts` was never mounted, so the stage that failed is in the
+/// body rather than folded into one generic error.
+#[cfg(target_os = "linux")]
+fn pty_opened() -> (&'static str, String) {
+    use nix::fcntl::OFlag;
+    use nix::pty::{grantpt, posix_openpt, ptsname_r, unlockpt};
+
+    let master = match posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY) {
+        Ok(master) => master,
+        Err(error) => return ("500 Internal Server Error", format!("posix_openpt: {error}")),
+    };
+    if let Err(error) = grantpt(&master) {
+        return ("500 Internal Server Error", format!("grantpt: {error}"));
+    }
+    if let Err(error) = unlockpt(&master) {
+        return ("500 Internal Server Error", format!("unlockpt: {error}"));
+    }
+    let name = match ptsname_r(&master) {
+        Ok(name) => name,
+        Err(error) => return ("500 Internal Server Error", format!("ptsname_r: {error}")),
+    };
+    match std::fs::File::open(&name) {
+        Ok(_slave) => ("200 OK", name),
+        Err(error) => ("500 Internal Server Error", format!("open {name}: {error}")),
+    }
+}
+
+/// This tenant only ever actually runs inside the Linux guest the integration tests boot; a
+/// non-Linux host building it locally (to check it compiles) gets a plain refusal instead of a
+/// dependency it would never use.
+#[cfg(not(target_os = "linux"))]
+fn pty_opened() -> (&'static str, String) {
+    (
+        "501 Not Implemented",
+        "PTY allocation is only exercised on the Linux guest this tenant is deployed into".to_string(),
+    )
 }
 
 fn echo_stream(port: u16) {

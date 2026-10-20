@@ -188,8 +188,14 @@ async fn forward_upgrade(
     port: u16,
     open: Arc<ForwardedRequest>,
 ) -> Response<ProxyBody> {
-    let (mut parts, body) = request.into_parts();
-    parts.uri = rewritten(&parts.uri, host, port);
+    // Unlike `forward`'s pooled client, this leg dials `host`/`port` directly, so the request
+    // line never needs the authority to know where it's going: the visitor's own origin-form
+    // target (e.g. `/ws`) is carried over as-is. That's not just unnecessary to rewrite, it's
+    // unsafe to: an upstream a visitor can reach directly is not guaranteed to be a forward proxy
+    // itself, and at least one real one (libwebsockets, under ttyd) closes the connection outright
+    // on an absolute-form request-line for an upgrade, though it tolerates one for an ordinary
+    // request.
+    let (parts, body) = request.into_parts();
     let mut forwarded = Request::from_parts(
         parts,
         HeldOpen {
@@ -852,6 +858,80 @@ mod tests {
         assert_eq!(
             &echoed, b"ping",
             "the two ends are talking through a proxy that stepped aside"
+        );
+    }
+
+    /// Answers every upgrade with `101`, after handing the request-target it saw to the test:
+    /// the one thing `echoing_once_it_is_no_longer_http` never looks at, and so the one thing
+    /// that let an absolute-form regression through it uncaught.
+    async fn echoing_the_request_target() -> (u16, tokio::sync::oneshot::Receiver<Uri>) {
+        let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen, saw) = tokio::sync::oneshot::channel();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Some(seen)));
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                        let seen = seen.clone();
+                        async move {
+                            if let Some(sender) = seen.lock().unwrap().take() {
+                                let _ = sender.send(request.uri().clone());
+                            }
+                            Ok::<_, std::convert::Infallible>(
+                                Response::builder()
+                                    .status(StatusCode::SWITCHING_PROTOCOLS)
+                                    .header("upgrade", "websocket")
+                                    .header("connection", "Upgrade")
+                                    .body(empty())
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .with_upgrades()
+                        .await;
+                });
+            }
+        });
+        (port, saw)
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_reaches_the_upstream_in_origin_form_with_its_path_and_query_intact() {
+        use tokio::io::AsyncWriteExt;
+        let patience = std::time::Duration::from_secs(10);
+        let (upstream, saw) = echoing_the_request_target().await;
+        let proxy = proxying("127.0.0.1", upstream, true).await;
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", proxy))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"GET /ws?a=1 HTTP/1.1\r\nHost: app-1.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let target = tokio::time::timeout(patience, saw)
+            .await
+            .expect("the upstream saw a request")
+            .unwrap();
+        assert!(
+            target.scheme().is_none() && target.authority().is_none(),
+            "an upgrade must reach the upstream in origin form, not absolute form: {target}"
+        );
+        assert_eq!(
+            target.path_and_query().map(|path| path.as_str()),
+            Some("/ws?a=1"),
+            "the path and query the visitor asked for must survive the hop: {target}"
         );
     }
 

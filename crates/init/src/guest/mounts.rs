@@ -122,6 +122,19 @@ pub(crate) fn pseudo_filesystems() -> Result<(), MountFailed> {
         writable,
         Some(&format!("mode=1777,{TENANT_TMPFS_SIZE}")),
         Existing::Refuse,
+    )?;
+
+    ensure_directory("/dev/pts", 0o755)?;
+    mounted(
+        "devpts",
+        "devpts",
+        "/dev/pts",
+        "devpts",
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
+        // A tenant has no tty group to be granted device access through, so the multiplexer
+        // itself is left world-writable rather than left unreachable.
+        Some("mode=0620,gid=5,ptmxmode=0666"),
+        Existing::Tolerate,
     )
 }
 
