@@ -249,6 +249,25 @@ async fn a_tenant_that_exited_is_started_again_and_the_report_says_so() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_can_allocate_a_pty_under_the_guests_mounted_devpts() {
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+
+    let answer = host.get(&app, "/pty").await.expect("the proxy answers");
+    assert_eq!(answer.status, 200, "{answer:?}");
+    assert!(
+        answer.body.starts_with("/dev/pts/"),
+        "a successful allocation names its slave under /dev/pts: {answer:?}"
+    );
+
+    host.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_app_whose_program_never_listens_is_reported_unhealthy_and_says_why() {
     let Some(host) = crate::host().await else {
         return;

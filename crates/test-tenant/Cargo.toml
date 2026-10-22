@@ -13,5 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Only for the one syscall sequence std does not wrap: allocating a PTY, to prove a guest's
+# devpts mount actually lets a tenant do it. The guest is the only place this binary runs, so a
+# non-Linux host (building it locally to check it compiles) never needs this at all.
+nix = { workspace = true, features = ["term"] }
+
 [lints]
 workspace = true
