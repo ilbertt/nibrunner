@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.10.5] - 2026-10-22
+
+### Fixes
+
+- Mount devpts and send upgrade requests in origin form (#252)
+
 ## [2026.10.4] - 2026-10-14
 
 ### Fixes
