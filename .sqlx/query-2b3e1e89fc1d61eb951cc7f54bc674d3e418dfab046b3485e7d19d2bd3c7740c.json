@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "update accepted_document set document = ? where only_row = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2b3e1e89fc1d61eb951cc7f54bc674d3e418dfab046b3485e7d19d2bd3c7740c"
+}

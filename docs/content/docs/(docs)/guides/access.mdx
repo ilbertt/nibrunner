@@ -61,9 +61,13 @@ public key when its tokens no longer need to be accepted.
 ## Upgrade existing documents
 
 Set `"access": { "kind": "public" }` on every existing public instance before upgrading the
-daemon. Set `kind` to `jwt` on existing JWT policies. Missing, null and untagged access values are
-rejected in desired state and persisted instance records. Incompatible persisted records are
-not loaded.
+daemon. Missing, null and untagged access values are rejected in desired state.
+
+On the first startup after upgrading, the daemon migrates its SQLite instance records and last
+accepted document to explicit public policies in one transaction. Existing policies and all
+other stored state are preserved, including the accepted revision and original document digest.
+The daemon does not rewrite your desired state file. After this one-time migration, stored
+instances also require an explicit access policy.
 
 <Callout title="HTTP only">
   Access policies protect the [hostname proxy](/docs/guides/https). Explicitly exposed

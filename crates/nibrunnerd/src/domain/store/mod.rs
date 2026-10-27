@@ -1,3 +1,4 @@
+mod access_policy;
 pub mod import;
 
 use std::path::Path;
@@ -75,6 +76,12 @@ pub async fn open(path: &Path) -> Result<SqlitePool, StoreError> {
             path: path.display().to_string(),
             reason: error.to_string(),
         })?;
+    access_policy::migrate(&pool)
+        .await
+        .map_err(|error| StoreError::Unopenable {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
     Ok(pool)
 }
 
@@ -100,6 +107,9 @@ pub async fn in_memory() -> SqlitePool {
         .run(&pool)
         .await
         .expect("the schema applies");
+    access_policy::migrate(&pool)
+        .await
+        .expect("the state data migrations apply");
     pool
 }
 

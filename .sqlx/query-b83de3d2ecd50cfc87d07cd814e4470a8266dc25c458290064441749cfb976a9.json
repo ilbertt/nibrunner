@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "select version from state_data_migrations where version = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "version",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b83de3d2ecd50cfc87d07cd814e4470a8266dc25c458290064441749cfb976a9"
+}

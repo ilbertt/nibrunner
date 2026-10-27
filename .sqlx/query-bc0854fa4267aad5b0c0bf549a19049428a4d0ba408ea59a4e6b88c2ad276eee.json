@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "update instances set record = ? where app_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bc0854fa4267aad5b0c0bf549a19049428a4d0ba408ea59a4e6b88c2ad276eee"
+}

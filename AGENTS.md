@@ -147,6 +147,8 @@ Hosts may already be in use. Keep existing files in `crates/nibrunnerd/migration
 sqlx verifies their checksums when a host opens its database. Add a new numbered migration for
 each schema change, and test upgrading an existing database without losing its state. Schema
 migrations contain DDL only: no inserts, updates, deletes, backfills, or table-copy operations.
+Stored data conversions run transactionally in `domain/store` before repositories load, with
+completion recorded in `state_data_migrations`. They run once, without relaxing normal readers.
 
 ## Building
 

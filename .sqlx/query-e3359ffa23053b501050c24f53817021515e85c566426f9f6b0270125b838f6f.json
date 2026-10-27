@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into state_data_migrations (version) values (?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e3359ffa23053b501050c24f53817021515e85c566426f9f6b0270125b838f6f"
+}
