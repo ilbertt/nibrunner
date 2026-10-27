@@ -483,6 +483,15 @@ mod tests {
         reconciler.expect_reconcile().times(1).returning(|_, _| ());
         let controller = controller(&host, reconciler);
         assert!(controller.converge_once().await);
+        let mut omitted = serde_json::to_value(&good).unwrap();
+        omitted["instances"][0].as_object_mut().unwrap().remove("access");
+        std::fs::write(
+            &host.config.desired_state_file,
+            serde_json::to_vec(&omitted).unwrap(),
+        )
+        .unwrap();
+        assert!(!controller.converge_once().await);
+        assert_eq!(host.cache.lock().await.latest(), Some(&good));
         let mut bad = good.clone();
         bad.instances[0].access.as_mut().unwrap().public_keys.clear();
         write_desired_state(&host.config.desired_state_file, &bad);

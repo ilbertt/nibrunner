@@ -186,6 +186,7 @@ fn instance_json() -> serde_json::Value {
             "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
         },
         "hostnames": [{ "hostname": "app-1.apps.example.com", "kind": "platform" }],
+        "access": null,
         "somethingNewer": true
     })
 }
@@ -233,10 +234,20 @@ fn a_desired_state_round_trips_with_its_wire_names() {
 }
 
 #[test]
-fn an_optional_jwt_policy_round_trips_through_desired_state_and_its_schema() {
+fn access_is_required_and_round_trips_as_null_or_a_jwt_policy() {
     let public: DesiredInstance = serde_json::from_value(instance_json()).unwrap();
     assert_eq!(public.access, None);
-    assert!(serde_json::to_value(public).unwrap().get("access").is_none());
+    assert_eq!(
+        serde_json::to_value(public).unwrap().get("access"),
+        Some(&serde_json::Value::Null)
+    );
+    let validator = jsonschema::validator_for(&crate::schema::desired_state().to_value()).unwrap();
+    assert!(validator.is_valid(&desired_json()));
+    let mut omitted = desired_json();
+    omitted["instances"][0].as_object_mut().unwrap().remove("access");
+    let error = serde_json::from_value::<HostDesiredState>(omitted.clone()).unwrap_err();
+    assert!(error.to_string().contains("missing field `access`"), "{error}");
+    assert!(!validator.is_valid(&omitted));
 
     let policy = serde_json::json!({
         "token": { "header": "Authorization", "format": "bearer" },
@@ -252,7 +263,6 @@ fn an_optional_jwt_policy_round_trips_through_desired_state_and_its_schema() {
         serde_json::to_value(parsed).unwrap()["instances"][0]["access"],
         policy
     );
-    let validator = jsonschema::validator_for(&crate::schema::desired_state().to_value()).unwrap();
     assert!(validator.is_valid(&document));
     for invalid in [
         serde_json::json!(true),

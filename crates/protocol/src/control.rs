@@ -258,8 +258,7 @@ pub struct DesiredInstance {
     /// What the HTTP proxy routes to this app's `httpPort`. Empty for an app nothing outside needs
     /// to reach by name.
     pub hostnames: Vec<AppHostname>,
-    /// Admission policy for every HTTP hostname. Absent, HTTP requests need no access token.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// JWT policy for every HTTP hostname, or null to explicitly allow public access.
     pub access: Option<JwtAccessPolicy>,
 }
 
@@ -295,7 +294,8 @@ struct DesiredInstanceFields {
     layers: Vec<DesiredLayer>,
     config: AppConfig,
     hostnames: Vec<AppHostname>,
-    #[serde(default)]
+    // Serde otherwise treats a missing Option as null.
+    #[serde(deserialize_with = "Option::deserialize")]
     access: Option<JwtAccessPolicy>,
 }
 
@@ -346,6 +346,15 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
 // passes is one this host takes.
 #[cfg(feature = "schema")]
 fn desired_instance_rules(schema: &mut schemars::Schema) {
+    if let Some(required) = schema
+        .get_mut("required")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        let access = serde_json::json!("access");
+        if !required.contains(&access) {
+            required.push(access);
+        }
+    }
     schema.insert(
         "not".into(),
         serde_json::json!({ "required": ["activation", "idleTimeoutMs"] }),

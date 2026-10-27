@@ -3,6 +3,10 @@ title: Access policies
 description: Require a signed JWT before an HTTP request can reach or wake an app.
 ---
 
+Every instance must declare [`access`](/docs/reference/desired#desiredinstance-access): use `null`
+for a public app or a JWT policy object to require a token. Omitting the field refuses the
+desired document.
+
 1. Configure your identity service or access proxy to issue signed JWTs for the app's audience.
 2. Add [`access`](/docs/reference/desired#desiredinstance-access) to the instance in `desired.json`:
 
@@ -38,13 +42,18 @@ the request that opens a WebSocket connection.
 ## Change or remove a policy
 
 Edit `access` in desired state to change the policy. The host applies the change to new requests
-without replacing the deployment or restarting the guest. Remove `access` to allow requests
+without replacing the deployment or restarting the guest. Set `"access": null` to allow requests
 without a token. Policy changes do not close connections that have already upgraded to WebSockets.
 
 The host keeps the policy across daemon restarts. A malformed policy refuses the new desired
 document and leaves the last accepted document in effect. To rotate a supplied key, publish the
 old and new public keys together, switch the issuer to the new signing key, then remove the old
 public key when its tokens no longer need to be accepted.
+
+## Upgrade existing documents
+
+Add `"access": null` to every existing public instance before upgrading the daemon. Desired
+documents that omit `access` are rejected; public instances are serialized with an explicit null.
 
 <Callout title="HTTP only">
   Access policies protect the [hostname proxy](/docs/guides/https). Explicitly exposed

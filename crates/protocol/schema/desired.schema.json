@@ -213,7 +213,7 @@
       "type": "object",
       "properties": {
         "access": {
-          "description": "Admission policy for every HTTP hostname. Absent, HTTP requests need no access token.",
+          "description": "JWT policy for every HTTP hostname, or null to explicitly allow public access.",
           "anyOf": [
             {
               "$ref": "#/$defs/JwtAccessPolicy"
@@ -304,7 +304,8 @@
         "desiredState",
         "layers",
         "config",
-        "hostnames"
+        "hostnames",
+        "access"
       ],
       "then": {
         "properties": {
