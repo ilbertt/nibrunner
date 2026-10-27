@@ -140,7 +140,8 @@ mod tests {
         let path = directory.path().join("state.db");
         let pool = crate::domain::store::open(&path).await.unwrap();
         let protected = instance_record(|record| {
-            record.access = Some(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
+            record.access =
+                protocol::AccessPolicy::Jwt(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
             record.state = InstanceState::Idle;
         });
         let public = record_of("app-2", InstanceState::Running);

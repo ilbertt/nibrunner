@@ -35,7 +35,7 @@ async fn until_http_status(
 async fn jwt_policy_updates_keep_the_vm_and_denied_requests_never_wake_it() {
     use nibrunnerd::adapters::vm::process::VmProcesses;
     use nibrunnerd::test_support::jwt::{claims, policy, token};
-    use protocol::{AppHostname, AppHostnameKind, Hostname, JwtAlgorithm};
+    use protocol::{AccessPolicy, AppHostname, AppHostnameKind, Hostname, JwtAlgorithm};
 
     let Some(host) = crate::host().await else {
         return;
@@ -54,7 +54,7 @@ async fn jwt_policy_updates_keep_the_vm_and_denied_requests_never_wake_it() {
 
     let mut protected = app
         .clone()
-        .edited(|instance| instance.access = Some(policy(JwtAlgorithm::EdDSA)));
+        .edited(|instance| instance.access = AccessPolicy::Jwt(policy(JwtAlgorithm::EdDSA)));
     host.deploy(std::slice::from_ref(&protected)).await;
     until_http_status(&host, &app.hostname, &[], 403).await;
     let signed = token(JwtAlgorithm::EdDSA, &claims());
@@ -94,7 +94,9 @@ async fn jwt_policy_updates_keep_the_vm_and_denied_requests_never_wake_it() {
     host.until_state(&app.app_id, InstanceState::Running).await;
     let after_wake = processes.read_record(&app.app_id).unwrap().pid;
 
-    protected.instance.access.as_mut().unwrap().audiences = vec!["app-two".to_string()];
+    let mut next_policy = policy(JwtAlgorithm::EdDSA);
+    next_policy.audiences = vec!["app-two".to_string()];
+    protected.instance.access = AccessPolicy::Jwt(next_policy);
     host.deploy(std::slice::from_ref(&protected)).await;
     until_http_status(&host, &app.hostname, &headers, 403).await;
     let mut next_claims = claims();

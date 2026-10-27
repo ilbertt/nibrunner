@@ -1,4 +1,4 @@
-use protocol::{AppHostname, AppId, DeploymentId, HostPort, JwtAccessPolicy};
+use protocol::{AccessPolicy, AppHostname, AppId, DeploymentId, HostPort};
 
 use crate::domain::report::InstanceRecord;
 
@@ -8,7 +8,7 @@ pub struct RouteTarget {
     pub deployment_id: DeploymentId,
     pub hostnames: Vec<AppHostname>,
     pub host_port: HostPort,
-    pub access: Option<JwtAccessPolicy>,
+    pub access: AccessPolicy,
 }
 
 pub fn renderable_routes(records: &[InstanceRecord]) -> Vec<RouteTarget> {
@@ -115,11 +115,11 @@ mod tests {
             InstanceState::Stopped,
         ] {
             let record = instance_record(|record| {
-                record.access = Some(policy.clone());
+                record.access = AccessPolicy::Jwt(policy.clone());
                 record.state = state;
             });
             let routes = renderable_routes(&[record]);
-            assert_eq!(routes[0].access.as_ref(), Some(&policy));
+            assert_eq!(routes[0].access, AccessPolicy::Jwt(policy.clone()));
         }
     }
 }

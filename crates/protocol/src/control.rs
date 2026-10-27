@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
-use crate::access::JwtAccessPolicy;
+use crate::access::AccessPolicy;
 use crate::domain::*;
 use crate::wire::*;
 
@@ -258,8 +258,8 @@ pub struct DesiredInstance {
     /// What the HTTP proxy routes to this app's `httpPort`. Empty for an app nothing outside needs
     /// to reach by name.
     pub hostnames: Vec<AppHostname>,
-    /// JWT policy for every HTTP hostname, or null to explicitly allow public access.
-    pub access: Option<JwtAccessPolicy>,
+    /// The access policy for every HTTP hostname.
+    pub access: AccessPolicy,
 }
 
 impl DesiredInstance {
@@ -294,9 +294,7 @@ struct DesiredInstanceFields {
     layers: Vec<DesiredLayer>,
     config: AppConfig,
     hostnames: Vec<AppHostname>,
-    // Serde otherwise treats a missing Option as null.
-    #[serde(deserialize_with = "Option::deserialize")]
-    access: Option<JwtAccessPolicy>,
+    access: AccessPolicy,
 }
 
 impl TryFrom<DesiredInstanceFields> for DesiredInstance {
@@ -346,15 +344,6 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
 // passes is one this host takes.
 #[cfg(feature = "schema")]
 fn desired_instance_rules(schema: &mut schemars::Schema) {
-    if let Some(required) = schema
-        .get_mut("required")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        let access = serde_json::json!("access");
-        if !required.contains(&access) {
-            required.push(access);
-        }
-    }
     schema.insert(
         "not".into(),
         serde_json::json!({ "required": ["activation", "idleTimeoutMs"] }),

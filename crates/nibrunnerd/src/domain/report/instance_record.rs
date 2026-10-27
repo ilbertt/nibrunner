@@ -1,6 +1,6 @@
 use protocol::{
-    AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort, InstanceResources,
-    InstanceState, Ipv4Address, JwtAccessPolicy, PortName, ReportedRestart, RestartPolicy, Sha256Digest,
+    AccessPolicy, AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort,
+    InstanceResources, InstanceState, Ipv4Address, PortName, ReportedRestart, RestartPolicy, Sha256Digest,
     StateMessage, Timestamp, VolumeId, DEFAULT_RESTART_POLICY,
 };
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,7 @@ pub struct InstanceRecord {
     pub deployment_id: DeploymentId,
     pub volume_id: VolumeId,
     pub hostnames: Vec<AppHostname>,
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub access: Option<JwtAccessPolicy>,
+    pub access: AccessPolicy,
     /// Absent for a record whose app never held a slot: a start refused before one was ever
     /// handed out, such as this host being laid out for fewer apps than it was asked to run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,7 +78,7 @@ pub struct RecordFields {
     pub deployment_id: DeploymentId,
     pub volume_id: VolumeId,
     pub hostnames: Vec<AppHostname>,
-    pub access: Option<JwtAccessPolicy>,
+    pub access: AccessPolicy,
     pub host_port: Option<HostPort>,
     pub http_port: HttpPort,
     pub ports: Vec<RecordPort>,
@@ -201,10 +200,10 @@ mod tests {
     }
 
     #[test]
-    fn public_records_write_null_and_a_missing_access_field_is_invalid() {
+    fn public_records_write_their_policy_and_missing_or_null_access_is_invalid() {
         let record = instance_record(|_| {});
         let mut value = serde_json::to_value(&record).unwrap();
-        assert_eq!(value.get("access"), Some(&serde_json::Value::Null));
+        assert_eq!(value.get("access"), Some(&serde_json::json!({"kind": "public"})));
         assert_eq!(
             serde_json::from_value::<InstanceRecord>(value.clone()).unwrap(),
             record
@@ -213,6 +212,9 @@ mod tests {
         let error = serde_json::from_value::<InstanceRecord>(value.clone()).unwrap_err();
         assert!(error.to_string().contains("missing field `access`"), "{error}");
         assert!(read_instance_records(Some(serde_json::json!([value]))).is_empty());
+        let mut value = serde_json::to_value(&record).unwrap();
+        value["access"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<InstanceRecord>(value).is_err());
     }
 
     #[test]

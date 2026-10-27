@@ -259,7 +259,7 @@ impl RunningHost {
                 desired_state: DesiredInstanceState::Running,
                 idle_timeout_ms: None,
                 activation: None,
-                access: None,
+                access: AccessPolicy::Public,
                 layers: vec![DesiredLayer::Executable {
                     object: StoredObject {
                         digest: self.tenant_digest.clone(),

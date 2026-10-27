@@ -427,19 +427,18 @@ mod tests {
         let repositories = Repositories::sqlite(pool);
         let record = instance_record(|_| {});
         repositories.instances.replace_all(&[record]).await.unwrap();
-        let policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        let access =
+            protocol::AccessPolicy::Jwt(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
         let document = accepted_document(desired_state(|state| {
-            state.instances = vec![desired_instance(|instance| {
-                instance.access = Some(policy.clone())
-            })];
+            state.instances = vec![desired_instance(|instance| instance.access = access.clone())];
         }));
         repositories.accepted_document.remember(&document).await.unwrap();
         let host = test_host_with(repositories).await;
         host.load().await;
         let records = host.state.records().await;
-        assert_eq!(records[0].access.as_ref(), Some(&policy));
+        assert_eq!(records[0].access, access);
         let routes = crate::domain::report::routes::renderable_routes(&records);
-        assert_eq!(routes[0].access.as_ref(), Some(&policy));
+        assert_eq!(routes[0].access, access);
     }
 
     #[tokio::test]

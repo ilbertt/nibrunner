@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use protocol::{AppId, DesiredInstance, HostDesiredState, Sha256Digest};
+use protocol::{AccessPolicy, AppId, DesiredInstance, HostDesiredState, Sha256Digest};
 
 use crate::json_store::{parse_json, read_bytes, StoreError};
 
@@ -45,7 +45,7 @@ pub fn read_desired_state(path: &Path) -> Result<Option<AcceptedDocument>, Desir
             reason: error.to_string(),
         })?;
     for instance in &desired.instances {
-        if let Some(policy) = &instance.access {
+        if let AccessPolicy::Jwt(policy) = &instance.access {
             crate::adapters::proxy::jwt::JwtVerifier::compile(policy).map_err(|error| {
                 DesiredStateError::Malformed {
                     path: path.display().to_string(),
@@ -351,7 +351,8 @@ mod tests {
         let mut cache = DesiredStateCache::new();
         let mut desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
         cache.accept(desired.clone());
-        desired.instances[0].access = Some(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
+        desired.instances[0].access =
+            AccessPolicy::Jwt(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
         assert_eq!(cache.changes_in(&desired), Changes::default());
         assert!(cache.accept(desired));
     }
@@ -362,12 +363,15 @@ mod tests {
         let path = directory.path().join("desired.json");
         let mut desired = desired_state(|state| {
             state.instances = vec![desired_instance(|instance| {
-                instance.access = Some(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
+                instance.access =
+                    AccessPolicy::Jwt(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
             })];
         });
         write_desired_state(&path, &desired);
         assert_eq!(read_desired_state(&path).unwrap().unwrap().desired, desired);
-        desired.instances[0].access.as_mut().unwrap().public_keys = vec!["invalid".to_string()];
+        let mut invalid_policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        invalid_policy.public_keys = vec!["invalid".to_string()];
+        desired.instances[0].access = AccessPolicy::Jwt(invalid_policy);
         write_desired_state(&path, &desired);
         let error = read_desired_state(&path).unwrap_err().message();
         assert!(error.contains("app-1"), "{error}");

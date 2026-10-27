@@ -46,6 +46,62 @@
     "exports"
   ],
   "$defs": {
+    "AccessPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "public"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "algorithm": {
+              "$ref": "#/$defs/JwtAlgorithm"
+            },
+            "audiences": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "issuer": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "jwt"
+            },
+            "publicKeys": {
+              "description": "Public keys in PEM format, all for the configured algorithm.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "token": {
+              "$ref": "#/$defs/JwtTokenSource"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "token",
+            "issuer",
+            "audiences",
+            "algorithm",
+            "publicKeys"
+          ]
+        }
+      ]
+    },
     "ActivationPolicy": {
       "type": "object",
       "properties": {
@@ -213,15 +269,8 @@
       "type": "object",
       "properties": {
         "access": {
-          "description": "JWT policy for every HTTP hostname, or null to explicitly allow public access.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/JwtAccessPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "description": "The access policy for every HTTP hostname.",
+          "$ref": "#/$defs/AccessPolicy"
         },
         "activation": {
           "description": "What puts this instance to sleep and what tells the host it is ready. A `sleepWhen` other\nthan `never` is refused on anything but an `on-request` instance.",
@@ -694,41 +743,6 @@
       "required": [
         "vcpuCount",
         "memoryMib"
-      ]
-    },
-    "JwtAccessPolicy": {
-      "type": "object",
-      "properties": {
-        "algorithm": {
-          "$ref": "#/$defs/JwtAlgorithm"
-        },
-        "audiences": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "issuer": {
-          "type": "string"
-        },
-        "publicKeys": {
-          "description": "Public keys in PEM format, all for the configured algorithm.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "token": {
-          "$ref": "#/$defs/JwtTokenSource"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "token",
-        "issuer",
-        "audiences",
-        "algorithm",
-        "publicKeys"
       ]
     },
     "JwtAlgorithm": {

@@ -1180,7 +1180,11 @@ mod tests {
         let mut policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
         let first = policy.clone();
         policy.audiences = vec!["another-app".to_string()];
-        for access in [Some(first), Some(policy), None] {
+        for access in [
+            protocol::AccessPolicy::Jwt(first),
+            protocol::AccessPolicy::Jwt(policy),
+            protocol::AccessPolicy::Public,
+        ] {
             let desired = desired_state(|state| {
                 state.instances = vec![desired_instance(|instance| {
                     instance.hostnames = vec![app_hostname()];

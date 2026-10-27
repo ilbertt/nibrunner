@@ -475,7 +475,9 @@ mod tests {
         let host = test_host().await;
         let good = desired_state(|state| {
             state.instances = vec![desired_instance(|instance| {
-                instance.access = Some(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
+                instance.access = protocol::AccessPolicy::Jwt(crate::test_support::jwt::policy(
+                    protocol::JwtAlgorithm::EdDSA,
+                ));
             })];
         });
         write_desired_state(&host.config.desired_state_file, &good);
@@ -493,7 +495,9 @@ mod tests {
         assert!(!controller.converge_once().await);
         assert_eq!(host.cache.lock().await.latest(), Some(&good));
         let mut bad = good.clone();
-        bad.instances[0].access.as_mut().unwrap().public_keys.clear();
+        let mut invalid_policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        invalid_policy.public_keys.clear();
+        bad.instances[0].access = protocol::AccessPolicy::Jwt(invalid_policy);
         write_desired_state(&host.config.desired_state_file, &bad);
         assert!(!controller.converge_once().await);
         assert_eq!(host.cache.lock().await.latest(), Some(&good));

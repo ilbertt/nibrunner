@@ -186,7 +186,7 @@ fn instance_json() -> serde_json::Value {
             "restartPolicy": { "maxRestarts": 5, "initialBackoffMs": 500, "maxBackoffMs": 30000, "backoffFactor": 2, "resetAfterMs": 60000 }
         },
         "hostnames": [{ "hostname": "app-1.apps.example.com", "kind": "platform" }],
-        "access": null,
+        "access": { "kind": "public" },
         "somethingNewer": true
     })
 }
@@ -234,12 +234,12 @@ fn a_desired_state_round_trips_with_its_wire_names() {
 }
 
 #[test]
-fn access_is_required_and_round_trips_as_null_or_a_jwt_policy() {
+fn access_is_required_and_round_trips_as_public_or_jwt() {
     let public: DesiredInstance = serde_json::from_value(instance_json()).unwrap();
-    assert_eq!(public.access, None);
+    assert_eq!(public.access, AccessPolicy::Public);
     assert_eq!(
         serde_json::to_value(public).unwrap().get("access"),
-        Some(&serde_json::Value::Null)
+        Some(&serde_json::json!({ "kind": "public" }))
     );
     let validator = jsonschema::validator_for(&crate::schema::desired_state().to_value()).unwrap();
     assert!(validator.is_valid(&desired_json()));
@@ -250,6 +250,7 @@ fn access_is_required_and_round_trips_as_null_or_a_jwt_policy() {
     assert!(!validator.is_valid(&omitted));
 
     let policy = serde_json::json!({
+        "kind": "jwt",
         "token": { "header": "Authorization", "format": "bearer" },
         "issuer": "https://issuer.example.com",
         "audiences": ["app-one"],
@@ -264,9 +265,15 @@ fn access_is_required_and_round_trips_as_null_or_a_jwt_policy() {
         policy
     );
     assert!(validator.is_valid(&document));
+    let mut untagged = policy.clone();
+    untagged.as_object_mut().unwrap().remove("kind");
     for invalid in [
+        serde_json::Value::Null,
         serde_json::json!(true),
-        serde_json::json!({ "issuer": "missing fields" }),
+        serde_json::json!({}),
+        serde_json::json!({ "kind": "unknown" }),
+        serde_json::json!({ "kind": "jwt" }),
+        untagged,
     ] {
         document["instances"][0]["access"] = invalid;
         assert!(serde_json::from_value::<HostDesiredState>(document.clone()).is_err());
