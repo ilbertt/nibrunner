@@ -1,5 +1,6 @@
 #[cfg(target_os = "linux")]
 pub mod egress;
+pub mod jwt;
 #[cfg(target_os = "linux")]
 pub mod machine;
 pub mod mocks;

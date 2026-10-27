@@ -1,4 +1,4 @@
-use protocol::{AppHostname, AppId, DeploymentId, HostPort};
+use protocol::{AppHostname, AppId, DeploymentId, HostPort, JwtAccessPolicy};
 
 use crate::domain::report::InstanceRecord;
 
@@ -8,6 +8,7 @@ pub struct RouteTarget {
     pub deployment_id: DeploymentId,
     pub hostnames: Vec<AppHostname>,
     pub host_port: HostPort,
+    pub access: Option<JwtAccessPolicy>,
 }
 
 pub fn renderable_routes(records: &[InstanceRecord]) -> Vec<RouteTarget> {
@@ -22,6 +23,7 @@ pub fn renderable_routes(records: &[InstanceRecord]) -> Vec<RouteTarget> {
                 deployment_id: record.deployment_id.clone(),
                 hostnames: record.hostnames.clone(),
                 host_port: record.host_port?,
+                access: None,
             })
         })
         .collect()
