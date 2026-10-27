@@ -54,6 +54,8 @@ public key when its tokens no longer need to be accepted.
 
 Add `"access": null` to every existing public instance before upgrading the daemon. Desired
 documents that omit `access` are rejected; public instances are serialized with an explicit null.
+Persisted instance records also require `access`. Records written by older daemons without this
+field are not loaded.
 
 <Callout title="HTTP only">
   Access policies protect the [hostname proxy](/docs/guides/https). Explicitly exposed

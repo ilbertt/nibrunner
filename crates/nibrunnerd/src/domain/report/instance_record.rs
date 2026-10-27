@@ -24,7 +24,7 @@ pub struct InstanceRecord {
     pub deployment_id: DeploymentId,
     pub volume_id: VolumeId,
     pub hostnames: Vec<AppHostname>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub access: Option<JwtAccessPolicy>,
     /// Absent for a record whose app never held a slot: a start refused before one was ever
     /// handed out, such as this host being laid out for fewer apps than it was asked to run.
@@ -198,6 +198,21 @@ mod tests {
         let record = instance_record(|_| {});
         let written = serde_json::to_value(vec![record.clone()]).unwrap();
         assert_eq!(read_instance_records(Some(written)), vec![record]);
+    }
+
+    #[test]
+    fn public_records_write_null_and_a_missing_access_field_is_invalid() {
+        let record = instance_record(|_| {});
+        let mut value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value.get("access"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            serde_json::from_value::<InstanceRecord>(value.clone()).unwrap(),
+            record
+        );
+        value.as_object_mut().unwrap().remove("access");
+        let error = serde_json::from_value::<InstanceRecord>(value.clone()).unwrap_err();
+        assert!(error.to_string().contains("missing field `access`"), "{error}");
+        assert!(read_instance_records(Some(serde_json::json!([value]))).is_empty());
     }
 
     #[test]
