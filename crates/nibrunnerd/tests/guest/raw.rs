@@ -4,12 +4,107 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use nibrunnerd::test_support::ingress::IngressClient;
 use protocol::{GuestPort, InstancePort, InstanceState, PortName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const ECHO_TCP: u16 = 4_000;
 const ECHO_UDP: u16 = 4_001;
 const ANSWERED_WITHIN: Duration = Duration::from_secs(15);
+
+fn external_http(client: &IngressClient, address: SocketAddr, hostname: &str) {
+    use std::io::{Read, Write};
+
+    let mut stream = client
+        .connect(address)
+        .expect("the external caller reaches the proxy");
+    write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: {hostname}\r\nConnection: close\r\n\r\n"
+    )
+    .expect("a request");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("the proxy answers");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+}
+
+fn external_echo(client: &IngressClient, address: SocketAddr) {
+    use std::io::{Read, Write};
+
+    let mut stream = client
+        .connect(address)
+        .expect("the exposed raw port accepts a connection");
+    stream.write_all(b"echo").expect("raw bytes");
+    let mut response = [0; 4];
+    stream.read_exact(&mut response).expect("the guest echoes");
+    assert_eq!(&response, b"echo");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_http_requires_the_proxy_while_raw_ports_still_reach_and_wake_the_guest() {
+    let Some(host) = crate::host_with(|config| {
+        config
+            .proxy
+            .http
+            .as_mut()
+            .expect("the HTTP listener")
+            .listen_address = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        config
+            .proxy
+            .raw
+            .as_mut()
+            .expect("the raw listener")
+            .listen_address = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    })
+    .await
+    else {
+        return;
+    };
+    let client = IngressClient::start();
+    let app = echoing(&host, 1);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    host.until_routed(&app).await;
+
+    let slot = host.host.slot_of(&app.app_id).await.expect("a slot");
+    let internal = client.host_address(slot.host_port.get());
+    let direct_guest = SocketAddr::new(
+        slot.guest_ipv4.as_str().parse().expect("the guest IP"),
+        app.instance.config.http_port.get(),
+    );
+    let proxy = client.host_address(host.proxy_address().port());
+    let raw = client.host_address(slot.host_port_at(1).expect("the echo port").get());
+
+    for address in [internal, direct_guest] {
+        let error = client
+            .connect(address)
+            .expect_err("external HTTP must not bypass the proxy");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionRefused,
+            "{address}: {error}"
+        );
+    }
+    external_http(&client, proxy, &app.hostname);
+    external_echo(&client, raw);
+
+    host.let_sleep(&app).await;
+    let error = client
+        .connect(internal)
+        .expect_err("the sleeping app's HTTP activator is internal");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+    assert_eq!(
+        host.instance(&app.app_id).await.expect("an app").state,
+        InstanceState::Idle
+    );
+    external_http(&client, proxy, &app.hostname);
+    host.until_state(&app.app_id, InstanceState::Running).await;
+
+    host.let_sleep(&app).await;
+    external_echo(&client, raw);
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    host.stop().await;
+}
 
 fn at(port: protocol::HostPort) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port.get())

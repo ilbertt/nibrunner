@@ -2,6 +2,8 @@
 pub mod egress;
 pub mod jwt;
 #[cfg(target_os = "linux")]
+pub mod ingress;
+#[cfg(target_os = "linux")]
 pub mod machine;
 pub mod mocks;
 pub mod oci;
