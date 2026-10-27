@@ -20,6 +20,7 @@ use crate::adapters::proxy::forward::{
     forward, hostname_of, note_the_hop, say, ProxyBody, Unreachable, Upstreams,
 };
 use crate::adapters::proxy::http_log::{HttpRequestLog, HttpRequestRecord};
+use crate::adapters::proxy::jwt::{JwtVerifier, PolicyError};
 use crate::adapters::proxy::pem;
 use crate::domain::metrics::proxy::Handshake;
 use crate::domain::report::routes::RouteTarget;
@@ -42,14 +43,24 @@ pub struct Route {
     pub host_port: HostPort,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct RouteTable {
     by_hostname: BTreeMap<String, Route>,
+    verifiers: BTreeMap<AppId, Result<Arc<JwtVerifier>, PolicyError>>,
 }
 
 impl RouteTable {
     pub fn from_targets(targets: &[RouteTarget]) -> Self {
         Self {
+            verifiers: targets
+                .iter()
+                .filter_map(|target| {
+                    target
+                        .access
+                        .as_ref()
+                        .map(|policy| (target.app_id.clone(), JwtVerifier::compile(policy).map(Arc::new)))
+                })
+                .collect(),
             by_hostname: targets
                 .iter()
                 .flat_map(|target| {
@@ -205,7 +216,7 @@ impl Router {
                 None,
             );
         }
-        let (route, logging) = {
+        let (route, logging, access) = {
             let routes = self.routes.read().await;
             let Some(route) = routes.route_for(&hostname) else {
                 return (
@@ -226,41 +237,57 @@ impl Router {
             } else {
                 None
             };
-            (route, logging)
+            let access = routes.verifiers.get(&route.app_id).cloned();
+            (route, logging, access)
         };
-        note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
-        let permit = self
-            .concurrency
-            .as_ref()
-            .map(|limits| limits.acquire(&route.app_id))
-            .transpose();
-        let (response, outcome) = match permit {
-            Err(()) => {
-                let mut response = say(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "This host or app is busy. Please retry.\n",
-                );
-                response
-                    .headers_mut()
-                    .insert("retry-after", hyper::header::HeaderValue::from_static("1"));
-                self.metrics.proxy.app_refused(&route.app_id);
-                (response, Outcome::Refused)
+        let refusal = match access {
+            Some(Err(_)) => Some((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "This app's access policy is invalid.\n",
+            )),
+            Some(Ok(verifier)) if !verifier.permits(request.headers()) => {
+                Some((StatusCode::FORBIDDEN, "A valid access token is required.\n"))
             }
-            Ok(permit) => {
-                let open =
-                    super::forward::ForwardedRequest::new(self.metrics.proxy.open(&route.app_id), permit);
-                let upstream = self.upstreams.to(&route.app_id).await;
-                let response = forward(&upstream, request, LOOPBACK, route.host_port.get(), true, open).await;
-                let reached = response.extensions().get::<Unreachable>().is_none();
-                self.metrics
-                    .proxy
-                    .app_answered(&route.app_id, response.status(), reached);
-                let outcome = if reached {
-                    Outcome::Served
-                } else {
-                    Outcome::Unreachable
-                };
-                (response, outcome)
+            _ => None,
+        };
+        let (response, outcome) = if let Some((status, message)) = refusal {
+            (say(status, message), Outcome::Refused)
+        } else {
+            note_the_hop(request.headers_mut(), arrival.peer, arrival.secure, &hostname);
+            let permit = self
+                .concurrency
+                .as_ref()
+                .map(|limits| limits.acquire(&route.app_id))
+                .transpose();
+            match permit {
+                Err(()) => {
+                    let mut response = say(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "This host or app is busy. Please retry.\n",
+                    );
+                    response
+                        .headers_mut()
+                        .insert("retry-after", hyper::header::HeaderValue::from_static("1"));
+                    self.metrics.proxy.app_refused(&route.app_id);
+                    (response, Outcome::Refused)
+                }
+                Ok(permit) => {
+                    let open =
+                        super::forward::ForwardedRequest::new(self.metrics.proxy.open(&route.app_id), permit);
+                    let upstream = self.upstreams.to(&route.app_id).await;
+                    let response =
+                        forward(&upstream, request, LOOPBACK, route.host_port.get(), true, open).await;
+                    let reached = response.extensions().get::<Unreachable>().is_none();
+                    self.metrics
+                        .proxy
+                        .app_answered(&route.app_id, response.status(), reached);
+                    let outcome = if reached {
+                        Outcome::Served
+                    } else {
+                        Outcome::Unreachable
+                    };
+                    (response, outcome)
+                }
             }
         };
         if let (Some(log), Some((scope, method, uri))) = (&self.http_log, logging) {
@@ -472,7 +499,7 @@ mod tests {
         let down = RouteTable::from_targets(&renderable_routes(&[instance_record(|record| {
             record.state = protocol::InstanceState::Stopped;
         })]));
-        assert_eq!(up, down);
+        assert_eq!(up.by_hostname, down.by_hostname);
         assert!(RouteTable::default().is_empty());
     }
 
@@ -607,6 +634,74 @@ mod tests {
         let answered = asked(port, "GET / HTTP/1.0\r\nHost: App-1.Apps.Example.Com\r\n\r\n").await;
         assert!(answered.starts_with("HTTP/1.0 200 "), "{answered}");
         assert!(answered.ends_with("served by the tenant\n"), "{answered}");
+    }
+
+    #[tokio::test]
+    async fn jwt_access_is_checked_before_dialling_an_upstream_for_every_alias() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::test_support::jwt::{claims, policy, token};
+        use protocol::JwtAlgorithm;
+
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = upstream.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let service = service_fn(|_: Request<Incoming>| async {
+                        Ok::<_, std::convert::Infallible>(say(StatusCode::OK, "from the guest\n"))
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let records = [instance_record(|record| {
+            record.host_port = Some(host_port);
+            record.hostnames.push(AppHostname {
+                hostname: Hostname::parse("custom.example.com").unwrap(),
+                kind: AppHostnameKind::Custom,
+            });
+        })];
+        let mut targets = renderable_routes(&records);
+        targets[0].access = Some(policy(JwtAlgorithm::EdDSA));
+        let router = Router::new(Arc::new(HostMetrics::new()), None);
+        router.apply(RouteTable::from_targets(&targets)).await;
+        let port = serving(router.clone()).await;
+
+        for hostname in ["app-1.apps.example.com", "custom.example.com"] {
+            for header in ["", "Cf-Access-Jwt-Assertion: invalid\r\n"] {
+                let answer = asked(
+                    port,
+                    &format!("GET / HTTP/1.0\r\nHost: {hostname}\r\n{header}\r\n"),
+                )
+                .await;
+                assert!(answer.starts_with("HTTP/1.0 403 "), "{answer}");
+            }
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        let signed = token(JwtAlgorithm::EdDSA, &claims());
+        let request = format!(
+            "GET / HTTP/1.0\r\nHost: custom.example.com\r\nCf-Access-Jwt-Assertion: {signed}\r\n\r\n"
+        );
+        assert!(asked(port, &request).await.ends_with("from the guest\n"));
+
+        targets[0].access.as_mut().unwrap().audiences = vec!["another-app".to_string()];
+        router.apply(RouteTable::from_targets(&targets)).await;
+        assert!(asked(port, &request).await.starts_with("HTTP/1.0 403 "));
+
+        targets[0].access.as_mut().unwrap().public_keys.clear();
+        router.apply(RouteTable::from_targets(&targets)).await;
+        assert!(asked(port, &request).await.starts_with("HTTP/1.0 503 "));
+
+        targets[0].access = None;
+        router.apply(RouteTable::from_targets(&targets)).await;
+        let request = "GET / HTTP/1.0\r\nHost: custom.example.com\r\n\r\n";
+        assert!(asked(port, request).await.ends_with("from the guest\n"));
     }
 
     #[tokio::test]

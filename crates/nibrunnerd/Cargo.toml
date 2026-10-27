@@ -84,6 +84,7 @@ mockall = { workspace = true, optional = true }
 tempfile.workspace = true
 xattr = "1"
 filetime = "0.2"
+jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto", "use_pem"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink.workspace = true

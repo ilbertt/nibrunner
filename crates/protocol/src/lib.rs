@@ -2,12 +2,14 @@
 
 #[macro_use]
 mod wire;
+mod access;
 mod control;
 mod cron;
 mod domain;
 #[cfg(feature = "schema")]
 pub mod schema;
 
+pub use access::*;
 pub use control::*;
 pub use cron::*;
 pub use domain::*;

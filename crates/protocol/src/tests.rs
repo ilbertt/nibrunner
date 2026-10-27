@@ -1156,3 +1156,23 @@ mod schema {
         }
     }
 }
+#[test]
+fn jwt_policies_preserve_their_settings_and_refuse_unknown_options() {
+    let policy = serde_json::json!({
+        "token": { "header": "Authorization", "format": "bearer" },
+        "issuer": "https://issuer.example.com",
+        "audiences": ["app-one"],
+        "algorithm": "RS256",
+        "publicKeys": ["a PEM public key"]
+    });
+    let parsed: crate::JwtAccessPolicy = serde_json::from_value(policy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), policy);
+    for (key, value) in [
+        ("algorithm", serde_json::json!("HS256")),
+        ("unknown", serde_json::json!(true)),
+    ] {
+        let mut invalid = policy.clone();
+        invalid[key] = value;
+        assert!(serde_json::from_value::<crate::JwtAccessPolicy>(invalid).is_err());
+    }
+}
