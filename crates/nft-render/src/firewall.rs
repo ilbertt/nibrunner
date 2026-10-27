@@ -228,6 +228,17 @@ fn forward_chain_v4(state: &FirewallState) -> Vec<String> {
         "ip daddr",
         &state.denied_egress_addresses_v4,
     ));
+    // Conntrack survives ruleset replacement. Refuse old inbound flows before the established
+    // accept, while leaving replies to connections the guest opened alone.
+    rules.extend(state.instances.iter().flat_map(|instance| {
+        let tap = &tap;
+        instance.ports.iter().filter(|port| !port.raw).map(move |port| {
+            format!(
+                "oifname {tap} ip daddr {} tcp dport {} ct direction original {DENY} with tcp reset comment \"HTTP through proxy only\"",
+                instance.guest_ipv4, port.guest_port
+            )
+        })
+    }));
     rules.extend([
         "ct state established,related accept".to_string(),
         format!("iifname {tap} ip daddr {INSTANCE_METADATA_ADDRESS_V4} {DENY} comment \"instance metadata endpoint\""),
@@ -290,7 +301,7 @@ fn nat_chains_v4(state: &FirewallState) -> Vec<String> {
     let mut prerouting = vec!["type nat hook prerouting priority dstnat; policy accept;".to_string()];
     prerouting.extend(state.instances.iter().flat_map(|instance| {
         let tap = tap.clone();
-        instance.ports.iter().map(move |port| {
+        instance.ports.iter().filter(|port| port.raw).map(move |port| {
             format!(
                 "iifname != {tap} {} {} dnat to {}:{}",
                 port.dport_match(),
@@ -521,8 +532,8 @@ mod tests {
     }
 
     #[test]
-    fn with_nothing_denied_by_name_the_established_accept_is_still_the_first_rule() {
-        let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
+    fn with_no_http_ports_or_denied_addresses_the_established_accept_is_still_the_first_rule() {
+        let ruleset = render_ruleset(&state(vec![], &[], &[]));
         for chain in [forward_chain(&ruleset), forward_chain(&v6_half(&ruleset))] {
             assert!(chain[0].starts_with("type filter hook forward"));
             assert_eq!(chain[1], "ct state established,related accept");
@@ -547,7 +558,7 @@ mod tests {
     #[test]
     fn nothing_but_the_forwarded_ports_are_dnatted_to_a_guest() {
         let ruleset = render_ruleset(&state(vec![instance()], &[], &[]));
-        assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 2);
+        assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 1);
         assert!(
             !ruleset.contains("udp"),
             "the HTTP port is the proxy's, and the proxy speaks tcp"
@@ -557,8 +568,7 @@ mod tests {
     #[test]
     fn a_raw_port_is_carried_whatever_arrives_on_it_and_the_http_port_is_not() {
         let ruleset = render_ruleset(&state(vec![with_ssh()], &[], &[]));
-        // Two chains dnat, prerouting for the world and output for the proxy's own loopback.
-        assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 4);
+        assert_eq!(ruleset.lines().filter(|l| l.contains("dnat to")).count(), 3);
         for chain in ["iifname != \"nbr*\"", "ip daddr 127.0.0.1"] {
             assert!(
                 ruleset.lines().map(str::trim).any(|l| l.starts_with(chain)
@@ -566,18 +576,37 @@ mod tests {
                     && l.ends_with("dnat to 10.201.0.2:22")),
                 "{chain} does not carry both transports to ssh:\n{ruleset}"
             );
-            assert!(
-                ruleset.lines().map(str::trim).any(|l| l.starts_with(chain)
-                    && l.contains("tcp dport 21000")
-                    && !l.contains("udp")
-                    && l.ends_with("dnat to 10.201.0.2:3000")),
-                "{chain} carries the HTTP port on something other than tcp alone:\n{ruleset}"
-            );
         }
+        let http: Vec<_> = ruleset
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("dnat to 10.201.0.2:3000"))
+            .collect();
+        assert_eq!(
+            http,
+            ["ip daddr 127.0.0.1 tcp dport 21000 dnat to 10.201.0.2:3000"]
+        );
         assert!(
             !ruleset.contains("21002"),
             "a slot reserves eight ports and forwards only what was named"
         );
+    }
+
+    #[test]
+    fn external_http_connections_are_rejected_even_if_they_are_already_established() {
+        let ruleset = render_ruleset(&state(vec![with_ssh()], &[], &[]));
+        let chain = forward_chain(&ruleset);
+        let guard = chain
+            .iter()
+            .position(|line| line.contains("HTTP through proxy only"))
+            .unwrap();
+        let established = chain
+            .iter()
+            .position(|line| line.starts_with("ct state established"))
+            .unwrap();
+        assert!(guard < established);
+        assert_eq!(chain[guard], "oifname \"nbr*\" ip daddr 10.201.0.2 tcp dport 3000 ct direction original reject with tcp reset comment \"HTTP through proxy only\"");
+        assert!(!chain.iter().any(|line| line.contains("tcp dport 22")));
     }
 
     #[test]
