@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.10.6] - 2026-10-27
+
+### Fixes
+
+- Prevent external access to internal HTTP ports (#254)
+
 ## [2026.10.5] - 2026-10-22
 
 ### Fixes
