@@ -17,6 +17,10 @@ A request for a sleeping app wakes it. If `desired.json` names a hostname on a h
 `[proxy.http]` section, the instance is reported `failed` with that reason. The
 [reference](/docs/reference/config) lists every key under `[proxy]`.
 
+An app's allocated HTTP host port is internal: only connections to it over loopback reach the
+guest. External HTTP requests must use the hostname proxy. Explicitly exposed raw ports are
+separate and do not pass through the HTTP proxy.
+
 ## Behind an edge
 
 The installer writes plain HTTP. Use this when something in front of the host terminates TLS:
