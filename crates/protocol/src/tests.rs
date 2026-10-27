@@ -233,6 +233,38 @@ fn a_desired_state_round_trips_with_its_wire_names() {
 }
 
 #[test]
+fn an_optional_jwt_policy_round_trips_through_desired_state_and_its_schema() {
+    let public: DesiredInstance = serde_json::from_value(instance_json()).unwrap();
+    assert_eq!(public.access, None);
+    assert!(serde_json::to_value(public).unwrap().get("access").is_none());
+
+    let policy = serde_json::json!({
+        "token": { "header": "Authorization", "format": "bearer" },
+        "issuer": "https://issuer.example.com",
+        "audiences": ["app-one"],
+        "algorithm": "RS256",
+        "publicKeys": ["a PEM public key"]
+    });
+    let mut document = desired_json();
+    document["instances"][0]["access"] = policy.clone();
+    let parsed: HostDesiredState = serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap()["instances"][0]["access"],
+        policy
+    );
+    let validator = jsonschema::validator_for(&crate::schema::desired_state().to_value()).unwrap();
+    assert!(validator.is_valid(&document));
+    for invalid in [
+        serde_json::json!(true),
+        serde_json::json!({ "issuer": "missing fields" }),
+    ] {
+        document["instances"][0]["access"] = invalid;
+        assert!(serde_json::from_value::<HostDesiredState>(document.clone()).is_err());
+        assert!(!validator.is_valid(&document));
+    }
+}
+
+#[test]
 fn a_volume_that_starts_empty_says_nothing_about_it() {
     let mut document = desired_json();
     document["volumes"][0]

@@ -1,0 +1,52 @@
+---
+title: Access policies
+description: Require a signed JWT before an HTTP request can reach or wake an app.
+---
+
+1. Configure your identity service or access proxy to issue signed JWTs for the app's audience.
+2. Add [`access`](/docs/reference/desired#desiredinstance-access) to the instance in `desired.json`:
+
+```json
+"access": {
+  "token": { "header": "Authorization", "format": "bearer" },
+  "issuer": "https://identity.example.com",
+  "audiences": ["internal-app"],
+  "algorithm": "RS256",
+  "publicKeys": ["-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"]
+}
+```
+
+3. Replace the example key with the issuer's complete PEM public key. Never supply a private key.
+4. Send requests with `Authorization: Bearer <JWT>`.
+
+| Setting | Meaning |
+| --- | --- |
+| [`token`](/docs/reference/desired#jwtaccesspolicy-token) | The header containing the token and its format: `raw` or `bearer`. |
+| [`issuer`](/docs/reference/desired#jwtaccesspolicy-issuer) | The exact expected `iss` claim. |
+| [`audiences`](/docs/reference/desired#jwtaccesspolicy-audiences) | At least one of these values must match the token's `aud` claim. |
+| [`algorithm`](/docs/reference/desired#jwtaccesspolicy-algorithm) | The signing algorithm: `RS256`, `ES256` or `EdDSA`. |
+| [`publicKeys`](/docs/reference/desired#jwtaccesspolicy-publicKeys) | One to eight PEM public keys for that algorithm. |
+
+The policy covers every platform and custom hostname of the app. A missing or invalid token
+receives `403` before the guest is contacted, so a rejected request cannot wake a sleeping app.
+Tokens must contain `iss`, `aud` and an unexpired `exp`. A supplied `nbf` must have passed.
+
+The issuer decides who receives tokens for the app. Your access proxy or client handles login
+and supplies the configured header. nibrunner verifies the token on each HTTP request, including
+the request that opens a WebSocket connection.
+
+## Change or remove a policy
+
+Edit `access` in desired state to change the policy. The host applies the change to new requests
+without replacing the deployment or restarting the guest. Remove `access` to allow requests
+without a token. Policy changes do not close connections that have already upgraded to WebSockets.
+
+The host keeps the policy across daemon restarts. A malformed policy refuses the new desired
+document and leaves the last accepted document in effect. To rotate a supplied key, publish the
+old and new public keys together, switch the issuer to the new signing key, then remove the old
+public key when its tokens no longer need to be accepted.
+
+<Callout title="HTTP only">
+  Access policies protect the [hostname proxy](/docs/guides/https). Explicitly exposed
+  [raw ports](/docs/guides/raw-ports) carry traffic without JWT verification.
+</Callout>

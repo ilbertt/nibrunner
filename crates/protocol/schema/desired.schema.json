@@ -212,6 +212,17 @@
     "DesiredInstance": {
       "type": "object",
       "properties": {
+        "access": {
+          "description": "Admission policy for every HTTP hostname. Absent, HTTP requests need no access token.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JwtAccessPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "activation": {
           "description": "What puts this instance to sleep and what tells the host it is ready. A `sleepWhen` other\nthan `never` is refused on anything but an `on-request` instance.",
           "anyOf": [
@@ -682,6 +693,72 @@
       "required": [
         "vcpuCount",
         "memoryMib"
+      ]
+    },
+    "JwtAccessPolicy": {
+      "type": "object",
+      "properties": {
+        "algorithm": {
+          "$ref": "#/$defs/JwtAlgorithm"
+        },
+        "audiences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "publicKeys": {
+          "description": "Public keys in PEM format, all for the configured algorithm.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "token": {
+          "$ref": "#/$defs/JwtTokenSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "token",
+        "issuer",
+        "audiences",
+        "algorithm",
+        "publicKeys"
+      ]
+    },
+    "JwtAlgorithm": {
+      "type": "string",
+      "enum": [
+        "RS256",
+        "ES256",
+        "EdDSA"
+      ]
+    },
+    "JwtTokenFormat": {
+      "type": "string",
+      "enum": [
+        "raw",
+        "bearer"
+      ]
+    },
+    "JwtTokenSource": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/JwtTokenFormat"
+        },
+        "header": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "header",
+        "format"
       ]
     },
     "MaxLifetimeMs": {

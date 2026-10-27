@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
+use crate::access::JwtAccessPolicy;
 use crate::domain::*;
 use crate::wire::*;
 
@@ -257,6 +258,9 @@ pub struct DesiredInstance {
     /// What the HTTP proxy routes to this app's `httpPort`. Empty for an app nothing outside needs
     /// to reach by name.
     pub hostnames: Vec<AppHostname>,
+    /// Admission policy for every HTTP hostname. Absent, HTTP requests need no access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<JwtAccessPolicy>,
 }
 
 impl DesiredInstance {
@@ -291,6 +295,8 @@ struct DesiredInstanceFields {
     layers: Vec<DesiredLayer>,
     config: AppConfig,
     hostnames: Vec<AppHostname>,
+    #[serde(default)]
+    access: Option<JwtAccessPolicy>,
 }
 
 impl TryFrom<DesiredInstanceFields> for DesiredInstance {
@@ -331,6 +337,7 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
             layers: fields.layers,
             config: fields.config,
             hostnames: fields.hostnames,
+            access: fields.access,
         })
     }
 }

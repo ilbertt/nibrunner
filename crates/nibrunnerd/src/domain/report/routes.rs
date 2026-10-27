@@ -23,7 +23,7 @@ pub fn renderable_routes(records: &[InstanceRecord]) -> Vec<RouteTarget> {
                 deployment_id: record.deployment_id.clone(),
                 hostnames: record.hostnames.clone(),
                 host_port: record.host_port?,
-                access: None,
+                access: record.access.clone(),
             })
         })
         .collect()
@@ -104,5 +104,22 @@ mod tests {
 
         records.clear();
         assert!(renderable_routes(&records).is_empty());
+    }
+
+    #[test]
+    fn a_restored_records_policy_is_kept_for_running_idle_and_stopped_apps() {
+        let policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        for state in [
+            InstanceState::Running,
+            InstanceState::Idle,
+            InstanceState::Stopped,
+        ] {
+            let record = instance_record(|record| {
+                record.access = Some(policy.clone());
+                record.state = state;
+            });
+            let routes = renderable_routes(&[record]);
+            assert_eq!(routes[0].access.as_ref(), Some(&policy));
+        }
     }
 }

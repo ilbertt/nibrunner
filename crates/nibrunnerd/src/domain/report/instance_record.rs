@@ -1,7 +1,7 @@
 use protocol::{
     AppHostname, AppId, DeploymentId, GuestPort, HealthCheck, HostPort, HttpPort, InstanceResources,
-    InstanceState, Ipv4Address, PortName, ReportedRestart, RestartPolicy, Sha256Digest, StateMessage,
-    Timestamp, VolumeId, DEFAULT_RESTART_POLICY,
+    InstanceState, Ipv4Address, JwtAccessPolicy, PortName, ReportedRestart, RestartPolicy, Sha256Digest,
+    StateMessage, Timestamp, VolumeId, DEFAULT_RESTART_POLICY,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,8 @@ pub struct InstanceRecord {
     pub deployment_id: DeploymentId,
     pub volume_id: VolumeId,
     pub hostnames: Vec<AppHostname>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<JwtAccessPolicy>,
     /// Absent for a record whose app never held a slot: a start refused before one was ever
     /// handed out, such as this host being laid out for fewer apps than it was asked to run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,6 +79,7 @@ pub struct RecordFields {
     pub deployment_id: DeploymentId,
     pub volume_id: VolumeId,
     pub hostnames: Vec<AppHostname>,
+    pub access: Option<JwtAccessPolicy>,
     pub host_port: Option<HostPort>,
     pub http_port: HttpPort,
     pub ports: Vec<RecordPort>,
@@ -96,6 +99,7 @@ impl InstanceRecord {
             deployment_id: fields.deployment_id,
             volume_id: fields.volume_id,
             hostnames: fields.hostnames,
+            access: fields.access,
             host_port: fields.host_port,
             http_port: fields.http_port,
             ports: fields.ports,
@@ -123,6 +127,7 @@ impl InstanceRecord {
         self.deployment_id = fields.deployment_id;
         self.volume_id = fields.volume_id;
         self.hostnames = fields.hostnames;
+        self.access = fields.access;
         self.host_port = fields.host_port;
         self.http_port = fields.http_port;
         self.ports = fields.ports;

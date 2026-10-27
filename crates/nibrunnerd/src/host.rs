@@ -141,6 +141,12 @@ impl Host {
                 snapshot.meters = meters;
                 snapshot.deleted_volumes = deleted;
                 if let Some(document) = accepted {
+                    // The accepted document can be newer than the last persisted instance pass.
+                    for wanted in &document.desired.instances {
+                        if let Some(record) = snapshot.records.get_mut(&wanted.app_id) {
+                            record.access = wanted.access.clone();
+                        }
+                    }
                     snapshot.accepted_revision = Some(document.desired.revision.clone());
                     snapshot.accepted_digest = Some(document.digest);
                 }
@@ -413,6 +419,27 @@ mod tests {
         let snapshot = host.state.snapshot().await;
         assert_eq!(snapshot.last_active_at_ms.get(&app_id()), Some(&77));
         assert!(snapshot.deleted_volumes.contains_key(&volume_id()));
+    }
+
+    #[tokio::test]
+    async fn a_restart_restores_a_newly_accepted_policy_before_any_routes_are_published() {
+        let pool = crate::domain::store::in_memory().await;
+        let repositories = Repositories::sqlite(pool);
+        let record = instance_record(|_| {});
+        repositories.instances.replace_all(&[record]).await.unwrap();
+        let policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        let document = accepted_document(desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.access = Some(policy.clone())
+            })];
+        }));
+        repositories.accepted_document.remember(&document).await.unwrap();
+        let host = test_host_with(repositories).await;
+        host.load().await;
+        let records = host.state.records().await;
+        assert_eq!(records[0].access.as_ref(), Some(&policy));
+        let routes = crate::domain::report::routes::renderable_routes(&records);
+        assert_eq!(routes[0].access.as_ref(), Some(&policy));
     }
 
     #[tokio::test]
