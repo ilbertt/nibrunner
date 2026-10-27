@@ -89,7 +89,6 @@ mod tests {
             "meters",
             "slot_cursor",
             "slots",
-            "state_data_migrations",
         ] {
             assert!(
                 tables.contains(&expected.to_string()),
@@ -182,7 +181,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(applied, [1, 2, 3]);
+        assert_eq!(applied, [1, 2]);
         assert!(after.cron.all().await.unwrap().is_empty());
         let registered = vec![protocol::CronTable {
             app_id: app_id(),
