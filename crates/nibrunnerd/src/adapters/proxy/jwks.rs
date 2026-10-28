@@ -95,6 +95,7 @@ impl JwksKeys {
 }
 
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    crate::install_crypto_provider();
     reqwest::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -397,6 +398,11 @@ mod tests {
         assert!(fetch(&client_builder().build().unwrap(), "http://127.0.0.1/keys")
             .await
             .is_err());
+    }
+
+    #[test]
+    fn the_jwks_client_can_start_before_any_tls_listener() {
+        assert!(client_builder().build().is_ok());
     }
 
     #[test]

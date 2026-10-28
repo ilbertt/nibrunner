@@ -90,7 +90,14 @@ async fn jwt_policy_updates_keep_the_vm_and_denied_requests_never_wake_it() {
     };
     protected.instance.access = AccessPolicy::Jwt(unavailable);
     host.deploy(std::slice::from_ref(&protected)).await;
-    until_http_status(&host, &app.hostname, &headers, 503).await;
+    until_http_status(&host, &app.hostname, &[], 503).await;
+    assert_eq!(
+        host.get_at_with_headers(host.proxy_address(), "custom.test", "/", &headers)
+            .await
+            .unwrap()
+            .status,
+        503
+    );
     assert_eq!(
         host.instance(&app.app_id).await.unwrap().state,
         InstanceState::Idle
