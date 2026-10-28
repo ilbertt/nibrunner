@@ -818,9 +818,30 @@ mod tests {
                 .await;
         });
         assert!(asked(port, &request).await.ends_with("from the guest\n"));
+        endpoint.respond(StatusCode::OK, serde_json::json!({"keys": []}).to_string());
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(301)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while router
+                .jwks
+                .get(&endpoint.url)
+                .await
+                .unwrap()
+                .get("current", jsonwebtoken::Algorithm::EdDSA)
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(asked(port, &request).await.starts_with("HTTP/1.0 403 "));
+        let fetched = endpoint.requests.load(Ordering::SeqCst);
+        assert!(fetched >= 2);
         router.apply(RouteTable::from_targets(&targets)).await;
         assert!(router.jwks.get(&endpoint.url).await.is_some());
-        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), fetched);
         refresh.abort();
         guest.abort();
     }
