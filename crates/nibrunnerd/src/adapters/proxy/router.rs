@@ -10,7 +10,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
-use protocol::{AppId, DeploymentId, HostPort};
+use protocol::{AccessPolicy, AppId, DeploymentId, HostPort};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::domain::metrics::{HostMetrics, Outcome};
@@ -54,11 +54,11 @@ impl RouteTable {
         Self {
             verifiers: targets
                 .iter()
-                .filter_map(|target| {
-                    target
-                        .access
-                        .as_ref()
-                        .map(|policy| (target.app_id.clone(), JwtVerifier::compile(policy).map(Arc::new)))
+                .filter_map(|target| match &target.access {
+                    AccessPolicy::Public => None,
+                    AccessPolicy::Jwt(policy) => {
+                        Some((target.app_id.clone(), JwtVerifier::compile(policy).map(Arc::new)))
+                    }
                 })
                 .collect(),
             by_hostname: targets
@@ -668,7 +668,8 @@ mod tests {
             });
         })];
         let mut targets = renderable_routes(&records);
-        targets[0].access = Some(policy(JwtAlgorithm::EdDSA));
+        let mut policy = policy(JwtAlgorithm::EdDSA);
+        targets[0].access = AccessPolicy::Jwt(policy.clone());
         let router = Router::new(Arc::new(HostMetrics::new()), None);
         router.apply(RouteTable::from_targets(&targets)).await;
         let port = serving(router.clone()).await;
@@ -690,15 +691,17 @@ mod tests {
         );
         assert!(asked(port, &request).await.ends_with("from the guest\n"));
 
-        targets[0].access.as_mut().unwrap().audiences = vec!["another-app".to_string()];
+        policy.audiences = vec!["another-app".to_string()];
+        targets[0].access = AccessPolicy::Jwt(policy.clone());
         router.apply(RouteTable::from_targets(&targets)).await;
         assert!(asked(port, &request).await.starts_with("HTTP/1.0 403 "));
 
-        targets[0].access.as_mut().unwrap().public_keys.clear();
+        policy.public_keys.clear();
+        targets[0].access = AccessPolicy::Jwt(policy);
         router.apply(RouteTable::from_targets(&targets)).await;
         assert!(asked(port, &request).await.starts_with("HTTP/1.0 503 "));
 
-        targets[0].access = None;
+        targets[0].access = AccessPolicy::Public;
         router.apply(RouteTable::from_targets(&targets)).await;
         let request = "GET / HTTP/1.0\r\nHost: custom.example.com\r\n\r\n";
         assert!(asked(port, request).await.ends_with("from the guest\n"));

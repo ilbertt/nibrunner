@@ -66,6 +66,7 @@ async fn sync_desired(host: &Host, desired: &HostDesiredState) {
         host.state
             .update_record(&wanted.app_id, |record| {
                 record.hostnames = wanted.hostnames.clone();
+                record.access = wanted.access.clone();
                 record.health_check = wanted.config.health_check.clone();
                 record.resources = wanted.config.resources;
                 record.restart_policy = wanted.config.restart_policy.clone();
@@ -213,6 +214,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
         .modify(|snapshot| snapshot.deferred_work = plan.has_deferred_work())
         .await;
     sync_desired(host, desired).await;
+    network::apply_routes(host).await;
 
     let prefetch = instances::prefetch_layers(host, &plan);
     let stops = apply_stops(host, &plan);
@@ -1169,6 +1171,33 @@ mod tests {
         assert!(record.on_request);
         assert!(record.desired_running);
         assert_eq!(record.hostnames, vec![app_hostname()]);
+    }
+
+    #[tokio::test]
+    async fn a_policy_can_be_added_changed_and_removed_without_restarting_the_app() {
+        let host = test_host().await;
+        host.state.put_record(instance_record(|_| {})).await;
+        let mut policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        let first = policy.clone();
+        policy.audiences = vec!["another-app".to_string()];
+        for access in [
+            protocol::AccessPolicy::Jwt(first),
+            protocol::AccessPolicy::Jwt(policy),
+            protocol::AccessPolicy::Public,
+        ] {
+            let desired = desired_state(|state| {
+                state.instances = vec![desired_instance(|instance| {
+                    instance.hostnames = vec![app_hostname()];
+                    instance.access = access.clone();
+                })];
+            });
+            sync_desired(&host, &desired).await;
+            let record = host.state.record(&app_id()).await.unwrap();
+            assert_eq!(record.access, access);
+            let routes = crate::domain::report::routes::renderable_routes(&[record]);
+            assert_eq!(routes[0].access, access);
+        }
+        assert!(host.vms.calls().is_empty());
     }
 
     #[tokio::test]

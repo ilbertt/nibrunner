@@ -60,6 +60,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - `unreachable_pub` warns: `pub` only what another crate reaches, `pub(crate)` otherwise.
 - JWT verification uses `jsonwebtoken` with its RustCrypto backend and asymmetric signing
   algorithms. Keep signature verification in the library.
+- Desired instances and persisted instance records declare a required tagged `AccessPolicy`
+  (`Public` or `Jwt`). Do not add defaults or nullable compatibility forms for `access`.
 - rustfmt: `max_width = 110`, imports and modules reordered. Do not fight it.
 - A proper noun in a doc comment that clippy takes for an identifier goes in `clippy.toml`'s
   `doc-valid-idents`, not in backticks.

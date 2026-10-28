@@ -157,6 +157,7 @@ pub fn desired_instance(edit: impl FnOnce(&mut DesiredInstance)) -> DesiredInsta
         layers: vec![layer(|_| {})],
         config: app_config(|_| {}),
         hostnames: vec![],
+        access: AccessPolicy::Public,
     };
     edit(&mut value);
     value
@@ -339,6 +340,7 @@ pub fn record_fields() -> RecordFields {
         deployment_id: deployment_id(),
         volume_id: volume_id(),
         hostnames: vec![app_hostname()],
+        access: AccessPolicy::Public,
         host_port: Some(slot.host_port),
         http_port: DEFAULT_HTTP_PORT,
         guest_ipv4: Some(slot.guest_ipv4),

@@ -135,6 +135,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reopening_an_existing_database_preserves_access_policies_and_public_apps() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        let pool = crate::domain::store::open(&path).await.unwrap();
+        let protected = instance_record(|record| {
+            record.access =
+                protocol::AccessPolicy::Jwt(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
+            record.state = InstanceState::Idle;
+        });
+        let public = record_of("app-2", InstanceState::Running);
+        let before = SqliteInstances::new(pool.clone());
+        before
+            .replace_all(&[protected.clone(), public.clone()])
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = crate::domain::store::open(&path).await.unwrap();
+        let after = SqliteInstances::new(pool);
+        assert_eq!(after.all().await.unwrap(), vec![protected, public]);
+    }
+
+    #[tokio::test]
     async fn a_host_that_has_written_nothing_reads_back_nothing() {
         assert!(repository().await.all().await.unwrap().is_empty());
     }

@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
+use crate::access::AccessPolicy;
 use crate::domain::*;
 use crate::wire::*;
 
@@ -257,6 +258,8 @@ pub struct DesiredInstance {
     /// What the HTTP proxy routes to this app's `httpPort`. Empty for an app nothing outside needs
     /// to reach by name.
     pub hostnames: Vec<AppHostname>,
+    /// The access policy for every HTTP hostname.
+    pub access: AccessPolicy,
 }
 
 impl DesiredInstance {
@@ -291,6 +294,7 @@ struct DesiredInstanceFields {
     layers: Vec<DesiredLayer>,
     config: AppConfig,
     hostnames: Vec<AppHostname>,
+    access: AccessPolicy,
 }
 
 impl TryFrom<DesiredInstanceFields> for DesiredInstance {
@@ -331,6 +335,7 @@ impl TryFrom<DesiredInstanceFields> for DesiredInstance {
             layers: fields.layers,
             config: fields.config,
             hostnames: fields.hostnames,
+            access: fields.access,
         })
     }
 }

@@ -21,6 +21,9 @@ An app's allocated HTTP host port is internal: only connections to it over loopb
 guest. External HTTP requests must use the hostname proxy. Explicitly exposed raw ports are
 separate and do not pass through the HTTP proxy.
 
+To require a signed token before an HTTP request can reach or wake the app, add an
+[access policy](/docs/guides/access).
+
 ## Behind an edge
 
 The installer writes plain HTTP. Use this when something in front of the host terminates TLS:

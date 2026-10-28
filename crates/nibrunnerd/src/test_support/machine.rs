@@ -259,6 +259,7 @@ impl RunningHost {
                 desired_state: DesiredInstanceState::Running,
                 idle_timeout_ms: None,
                 activation: None,
+                access: AccessPolicy::Public,
                 layers: vec![DesiredLayer::Executable {
                     object: StoredObject {
                         digest: self.tenant_digest.clone(),
@@ -395,8 +396,23 @@ impl RunningHost {
     /// never answer is one of the things being tested for, and a test that waited on it for ever
     /// would hang the whole suite instead of failing.
     pub async fn get_at(&self, address: SocketAddr, hostname: &str, path: &str) -> std::io::Result<Answer> {
+        self.get_at_with_headers(address, hostname, path, &[]).await
+    }
+
+    pub async fn get_at_with_headers(
+        &self,
+        address: SocketAddr,
+        hostname: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> std::io::Result<Answer> {
         tokio::time::timeout(ANSWER_DEADLINE, async {
-            let request = format!("GET {path} HTTP/1.1\r\nhost: {hostname}\r\nconnection: close\r\n\r\n");
+            let headers = headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}\r\n"))
+                .collect::<String>();
+            let request =
+                format!("GET {path} HTTP/1.1\r\nhost: {hostname}\r\n{headers}connection: close\r\n\r\n");
             let mut stream = tokio::net::TcpStream::connect(address).await?;
             stream.write_all(request.as_bytes()).await?;
             let mut held = Vec::new();

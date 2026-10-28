@@ -46,6 +46,62 @@
     "exports"
   ],
   "$defs": {
+    "AccessPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "public"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "algorithm": {
+              "$ref": "#/$defs/JwtAlgorithm"
+            },
+            "audiences": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "issuer": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "jwt"
+            },
+            "publicKeys": {
+              "description": "Public keys in PEM format, all for the configured algorithm.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "token": {
+              "$ref": "#/$defs/JwtTokenSource"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "token",
+            "issuer",
+            "audiences",
+            "algorithm",
+            "publicKeys"
+          ]
+        }
+      ]
+    },
     "ActivationPolicy": {
       "type": "object",
       "properties": {
@@ -212,6 +268,10 @@
     "DesiredInstance": {
       "type": "object",
       "properties": {
+        "access": {
+          "description": "The access policy for every HTTP hostname.",
+          "$ref": "#/$defs/AccessPolicy"
+        },
         "activation": {
           "description": "What puts this instance to sleep and what tells the host it is ready. A `sleepWhen` other\nthan `never` is refused on anything but an `on-request` instance.",
           "anyOf": [
@@ -293,7 +353,8 @@
         "desiredState",
         "layers",
         "config",
-        "hostnames"
+        "hostnames",
+        "access"
       ],
       "then": {
         "properties": {
@@ -682,6 +743,37 @@
       "required": [
         "vcpuCount",
         "memoryMib"
+      ]
+    },
+    "JwtAlgorithm": {
+      "type": "string",
+      "enum": [
+        "RS256",
+        "ES256",
+        "EdDSA"
+      ]
+    },
+    "JwtTokenFormat": {
+      "type": "string",
+      "enum": [
+        "raw",
+        "bearer"
+      ]
+    },
+    "JwtTokenSource": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/JwtTokenFormat"
+        },
+        "header": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "header",
+        "format"
       ]
     },
     "MaxLifetimeMs": {

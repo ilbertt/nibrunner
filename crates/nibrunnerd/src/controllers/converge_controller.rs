@@ -471,6 +471,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bad_policy_keeps_the_last_accepted_document_and_its_protection() {
+        let host = test_host().await;
+        let good = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.access = protocol::AccessPolicy::Jwt(crate::test_support::jwt::policy(
+                    protocol::JwtAlgorithm::EdDSA,
+                ));
+            })];
+        });
+        write_desired_state(&host.config.desired_state_file, &good);
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().times(1).returning(|_, _| ());
+        let controller = controller(&host, reconciler);
+        assert!(controller.converge_once().await);
+        let mut omitted = serde_json::to_value(&good).unwrap();
+        omitted["instances"][0].as_object_mut().unwrap().remove("access");
+        std::fs::write(
+            &host.config.desired_state_file,
+            serde_json::to_vec(&omitted).unwrap(),
+        )
+        .unwrap();
+        assert!(!controller.converge_once().await);
+        assert_eq!(host.cache.lock().await.latest(), Some(&good));
+        let mut bad = good.clone();
+        let mut invalid_policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        invalid_policy.public_keys.clear();
+        bad.instances[0].access = protocol::AccessPolicy::Jwt(invalid_policy);
+        write_desired_state(&host.config.desired_state_file, &bad);
+        assert!(!controller.converge_once().await);
+        assert_eq!(host.cache.lock().await.latest(), Some(&good));
+        assert_eq!(host.accepted_document().await.unwrap().desired, good);
+        assert!(host.state.snapshot().await.desired_refusal.is_some());
+    }
+
+    #[tokio::test]
     async fn a_host_that_was_never_given_a_document_has_nothing_cached_to_converge_on() {
         let host = test_host().await;
         let mut reconciler = MockReconcileService::new();

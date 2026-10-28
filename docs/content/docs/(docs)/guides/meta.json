@@ -8,6 +8,7 @@
     "cron-jobs",
     "health-checks",
     "https",
+    "access",
     "raw-ports",
     "logs-and-metrics",
     "file-listings",
