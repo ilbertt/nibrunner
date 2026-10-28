@@ -1,5 +1,17 @@
 # Changelog
 
+## [2026.10.7] - 2026-10-28
+
+### Features
+
+- Support configured JWKS URLs for JWT access policies (#258)
+- **Breaking:** Configure per-app JWT access policies (#257)
+- Verify JWT policies in the HTTP proxy (#255)
+
+### Documentation
+
+- Document Cloudflare Access setup (#259)
+
 ## [2026.10.6] - 2026-10-27
 
 ### Fixes
