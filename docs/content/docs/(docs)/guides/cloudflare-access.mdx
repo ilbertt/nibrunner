@@ -1,0 +1,87 @@
+---
+title: Cloudflare Access
+description: Choose who can reach an app through Cloudflare Access and verify its tokens at the origin.
+---
+
+## Prepare the hostname
+
+1. Add the hostname, such as `internal.example.com`, to the app's
+   [`hostnames`](/docs/reference/desired#desiredinstance-hostnames).
+2. Point a [proxied DNS record](https://developers.cloudflare.com/dns/proxy-status/) for that
+   hostname at the nibrunner host.
+3. Configure [TLS on the host](/docs/guides/https#tls-on-the-host), with a certificate covering
+   the hostname, and use Cloudflare's
+   [Full (strict) mode](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/).
+
+## Configure Cloudflare Access
+
+1. In Cloudflare One, open **Access controls > Applications** and
+   [create a self-hosted application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)
+   for `internal.example.com`, covering the whole hostname.
+2. Enable the login method your users will use.
+3. Attach an **Allow** policy selecting the emails or identity-provider groups that may enter.
+   Cloudflare's [policy guide](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/)
+   describes the available selectors. Users must match an Allow policy to enter.
+4. Open the application's **Additional settings** and copy its **Application Audience (AUD) Tag**.
+   Also note your team domain, such as `https://your-team.cloudflareaccess.com`.
+
+## Configure nibrunner
+
+Set [`access`](/docs/reference/desired#desiredinstance-access) on the existing instance in
+`desired.json`:
+
+```json
+"access": {
+  "kind": "jwt",
+  "token": { "header": "Cf-Access-Jwt-Assertion", "format": "raw" },
+  "issuer": "https://your-team.cloudflareaccess.com",
+  "audiences": ["YOUR_APP_AUD"],
+  "algorithm": "RS256",
+  "publicKeys": {
+    "url": "https://your-team.cloudflareaccess.com/cdn-cgi/access/certs"
+  }
+}
+```
+
+| Setting | Value |
+| --- | --- |
+| [`token`](/docs/reference/desired#jwt-token) | Cloudflare supplies the application token in `Cf-Access-Jwt-Assertion`, without a `Bearer` prefix. |
+| [`issuer`](/docs/reference/desired#jwt-issuer) | Replace `your-team` with your team name. Match the team domain exactly, without a trailing slash. |
+| [`audiences`](/docs/reference/desired#jwt-audiences) | Replace `YOUR_APP_AUD` with this application's AUD tag. |
+| [`algorithm`](/docs/reference/desired#jwt-algorithm) | `RS256`, the algorithm Cloudflare Access uses. |
+| [`publicKeys`](/docs/reference/desired#jwt-publicKeys) | Replace `your-team` in the JWKS URL with the same team name. |
+
+These values follow Cloudflare's
+[application-token validation instructions](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
+The host fetches keys in the background; [JWKS refresh and expiry](/docs/guides/access#use-a-jwks-endpoint)
+also apply here. Requests receive `503` until keys are available.
+
+<Callout title="Who can enter">
+  Cloudflare handles login and the policy selecting allowed users. After granting access, it
+  forwards a signed application token. nibrunner checks its signature, issuer, audience and
+  validity before forwarding the request or waking the app.
+</Callout>
+
+## Check access
+
+1. Open `https://internal.example.com` and sign in as an allowed user. The app should answer;
+   an authorized request wakes it if it is asleep.
+2. In a separate browser session, sign in as a user outside the Allow policy. Cloudflare should
+   deny access before the request reaches nibrunner.
+3. From a machine allowed to reach the origin, send a request directly to its proxy without a
+   token. Replace `203.0.113.10` with the host's public IP:
+
+```sh
+curl --resolve internal.example.com:443:203.0.113.10 \
+  --silent --show-error --output /dev/null --write-out '%{http_code}\n' \
+  https://internal.example.com/
+```
+
+If the origin certificate was issued by Cloudflare Origin CA, add
+`--cacert /path/to/origin-ca.pem` with the corresponding CA certificate. After JWKS keys have
+loaded, the origin should return `403`. Supplying an invalid `Cf-Access-Jwt-Assertion` must also
+return `403`. Refused requests cannot wake a sleeping app.
+
+The access policy covers every HTTP hostname of the app, including aliases outside Cloudflare.
+Use the Cloudflare hostname for login. Explicitly exposed [raw ports](/docs/guides/raw-ports)
+carry traffic without JWT verification.
