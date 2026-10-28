@@ -16,8 +16,16 @@ pub struct JwtAccessPolicy {
     pub issuer: String,
     pub audiences: Vec<String>,
     pub algorithm: JwtAlgorithm,
-    /// Public keys in PEM format, all for the configured algorithm.
-    pub public_keys: Vec<String>,
+    /// Supplied PEM public keys or an HTTPS JWKS endpoint.
+    pub public_keys: JwtPublicKeys,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged, deny_unknown_fields)]
+pub enum JwtPublicKeys {
+    Pem(Vec<String>),
+    Jwks { url: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

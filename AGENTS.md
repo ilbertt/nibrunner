@@ -60,6 +60,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - `unreachable_pub` warns: `pub` only what another crate reaches, `pub(crate)` otherwise.
 - JWT verification uses `jsonwebtoken` with its RustCrypto backend and asymmetric signing
   algorithms. Keep signature verification in the library.
+- JWKS keys refresh outside the HTTP request path, with bounded fetches and cache lifetimes.
+  Only the configured HTTPS endpoint supplies keys; JWT headers cannot choose a key URL.
 - Desired instances and persisted instance records declare a required tagged `AccessPolicy`
   (`Public` or `Jwt`). Do not add defaults or nullable compatibility forms for `access`.
 - rustfmt: `max_width = 110`, imports and modules reordered. Do not fight it.

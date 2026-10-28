@@ -36,7 +36,7 @@ To require a signed JWT:
 | [`issuer`](/docs/reference/desired#jwt-issuer) | The exact expected `iss` claim. |
 | [`audiences`](/docs/reference/desired#jwt-audiences) | At least one of these values must match the token's `aud` claim. |
 | [`algorithm`](/docs/reference/desired#jwt-algorithm) | The signing algorithm: `RS256`, `ES256` or `EdDSA`. |
-| [`publicKeys`](/docs/reference/desired#jwt-publicKeys) | One to eight PEM public keys for that algorithm. |
+| [`publicKeys`](/docs/reference/desired#jwt-publicKeys) | One to eight PEM public keys, or `{ "url": "https://…" }` for a JWKS endpoint. |
 
 The policy covers every platform and custom hostname of the app. A missing or invalid token
 receives `403` before the guest is contacted, so a rejected request cannot wake a sleeping app.
@@ -45,6 +45,28 @@ Tokens must contain `iss`, `aud` and an unexpired `exp`. A supplied `nbf` must h
 The issuer decides who receives tokens for the app. Your access proxy or client handles login
 and supplies the configured header. nibrunner verifies the token on each HTTP request, including
 the request that opens a WebSocket connection.
+
+## Use a JWKS endpoint
+
+To follow the issuer's signing-key rotation, replace the PEM array with its HTTPS JWKS URL:
+
+```json
+"publicKeys": { "url": "https://identity.example.com/.well-known/jwks.json" }
+```
+
+Keep the expected issuer, audiences and signing algorithm explicit. Tokens must include a `kid`
+that matches a signing key in the fetched set. A missing or unknown `kid` receives `403`.
+
+The host fetches keys in the background when the endpoint is configured, then every five minutes.
+Failed fetches retry every 30 seconds. Previously fetched keys remain usable for at most 15
+minutes after the last successful fetch. Until keys are available, or after they expire, requests
+receive `503` without contacting or waking the app. Requests never fetch keys themselves.
+
+The endpoint must use HTTPS with a trusted certificate. Redirects are refused. Each fetch has a
+10-second timeout and accepts at most 256 KiB containing up to 32 keys. Empty key sets revoke all
+keys. Unsupported key types and keys marked for another algorithm or for encryption are ignored.
+Malformed sets retain the previous keys until their original expiry. URLs in token headers do
+not affect the configured endpoint. The cache is held in memory and is fetched again on restart.
 
 ## Change or remove a policy
 

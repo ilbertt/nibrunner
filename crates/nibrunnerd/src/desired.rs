@@ -370,7 +370,7 @@ mod tests {
         write_desired_state(&path, &desired);
         assert_eq!(read_desired_state(&path).unwrap().unwrap().desired, desired);
         let mut invalid_policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
-        invalid_policy.public_keys = vec!["invalid".to_string()];
+        invalid_policy.public_keys = protocol::JwtPublicKeys::Pem(vec!["invalid".to_string()]);
         desired.instances[0].access = AccessPolicy::Jwt(invalid_policy);
         write_desired_state(&path, &desired);
         let error = read_desired_state(&path).unwrap_err().message();

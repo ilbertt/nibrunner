@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(host.cache.lock().await.latest(), Some(&good));
         let mut bad = good.clone();
         let mut invalid_policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
-        invalid_policy.public_keys.clear();
+        invalid_policy.public_keys = protocol::JwtPublicKeys::Pem(vec![]);
         bad.instances[0].access = protocol::AccessPolicy::Jwt(invalid_policy);
         write_desired_state(&host.config.desired_state_file, &bad);
         assert!(!controller.converge_once().await);
