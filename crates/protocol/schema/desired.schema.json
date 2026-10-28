@@ -80,11 +80,8 @@
               "const": "jwt"
             },
             "publicKeys": {
-              "description": "Public keys in PEM format, all for the configured algorithm.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "description": "Supplied PEM public keys or an HTTPS JWKS endpoint.",
+              "$ref": "#/$defs/JwtPublicKeys"
             },
             "token": {
               "$ref": "#/$defs/JwtTokenSource"
@@ -751,6 +748,28 @@
         "RS256",
         "ES256",
         "EdDSA"
+      ]
+    },
+    "JwtPublicKeys": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "url"
+          ]
+        }
       ]
     },
     "JwtTokenFormat": {

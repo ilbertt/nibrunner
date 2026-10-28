@@ -20,6 +20,7 @@ use crate::adapters::proxy::forward::{
     forward, hostname_of, note_the_hop, say, ProxyBody, Unreachable, Upstreams,
 };
 use crate::adapters::proxy::http_log::{HttpRequestLog, HttpRequestRecord};
+use crate::adapters::proxy::jwks::{self, JwksCache};
 use crate::adapters::proxy::jwt::{JwtVerifier, PolicyError};
 use crate::adapters::proxy::pem;
 use crate::domain::metrics::proxy::Handshake;
@@ -119,6 +120,8 @@ pub struct Router {
     metrics: Arc<HostMetrics>,
     http_log: Option<Arc<HttpRequestLog>>,
     concurrency: Option<super::concurrency::ConcurrencyLimiter>,
+    jwks: JwksCache,
+    jwks_changed: tokio::sync::Notify,
 }
 
 impl Router {
@@ -132,6 +135,8 @@ impl Router {
         limits: Option<crate::config::HttpConcurrency>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            jwks: JwksCache::default(),
+            jwks_changed: tokio::sync::Notify::new(),
             concurrency: limits.map(super::concurrency::ConcurrencyLimiter::new),
             routes: RwLock::new(Arc::new(RouteTable::default())),
             upstreams: Upstreams::default(),
@@ -155,6 +160,36 @@ impl Router {
             concurrency.keep_only(&table.apps());
         }
         *self.routes.write().await = Arc::new(table);
+        self.jwks_changed.notify_one();
+    }
+
+    pub(crate) async fn refresh_jwks(&self) {
+        let client = match jwks::client_builder().build() {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::error!(%error, "the JWT signing key client could not start");
+                return;
+            }
+        };
+        self.refresh_jwks_with(client).await;
+    }
+
+    async fn refresh_jwks_with(&self, client: reqwest::Client) {
+        loop {
+            let urls = self
+                .routes
+                .read()
+                .await
+                .verifiers
+                .values()
+                .filter_map(|verifier| verifier.as_ref().ok()?.jwks_url().map(str::to_owned))
+                .collect();
+            self.jwks.refresh(&client, urls).await;
+            tokio::select! {
+                _ = self.jwks_changed.notified() => {},
+                _ = tokio::time::sleep(jwks::RETRY_INTERVAL) => {},
+            }
+        }
     }
 
     pub async fn close_connections_to(&self, app_id: &AppId) {
@@ -245,8 +280,21 @@ impl Router {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "This app's access policy is invalid.\n",
             )),
-            Some(Ok(verifier)) if !verifier.permits(request.headers()) => {
-                Some((StatusCode::FORBIDDEN, "A valid access token is required.\n"))
+            Some(Ok(verifier)) => {
+                let keys = match verifier.jwks_url() {
+                    Some(url) => self.jwks.get(url).await,
+                    None => None,
+                };
+                if verifier.jwks_url().is_some() && keys.is_none() {
+                    Some((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "This app's access keys are unavailable.\n",
+                    ))
+                } else if !verifier.permits(request.headers(), keys.as_deref()) {
+                    Some((StatusCode::FORBIDDEN, "A valid access token is required.\n"))
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -696,7 +744,7 @@ mod tests {
         router.apply(RouteTable::from_targets(&targets)).await;
         assert!(asked(port, &request).await.starts_with("HTTP/1.0 403 "));
 
-        policy.public_keys.clear();
+        policy.public_keys = protocol::JwtPublicKeys::Pem(vec![]);
         targets[0].access = AccessPolicy::Jwt(policy);
         router.apply(RouteTable::from_targets(&targets)).await;
         assert!(asked(port, &request).await.starts_with("HTTP/1.0 503 "));
@@ -705,6 +753,76 @@ mod tests {
         router.apply(RouteTable::from_targets(&targets)).await;
         let request = "GET / HTTP/1.0\r\nHost: custom.example.com\r\n\r\n";
         assert!(asked(port, request).await.ends_with("from the guest\n"));
+    }
+
+    #[tokio::test]
+    async fn jwks_fetches_run_in_the_background_and_unavailable_or_invalid_keys_never_contact_the_guest() {
+        use crate::test_support::jwt::{claims, jwk, policy, token_with_kid, JwksEndpoint};
+        use protocol::{JwtAlgorithm, JwtPublicKeys};
+        use std::sync::atomic::Ordering;
+
+        let endpoint =
+            JwksEndpoint::new(serde_json::json!({"keys": [jwk(JwtAlgorithm::EdDSA, "current")]})).await;
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
+        let mut policy = policy(JwtAlgorithm::EdDSA);
+        policy.public_keys = JwtPublicKeys::Jwks {
+            url: endpoint.url.clone(),
+        };
+        let targets = renderable_routes(&[instance_record(|record| {
+            record.host_port = Some(host_port);
+            record.access = AccessPolicy::Jwt(policy.clone());
+        })]);
+        let router = Router::new(Arc::new(HostMetrics::new()), None);
+        router.apply(RouteTable::from_targets(&targets)).await;
+        let port = serving(router.clone()).await;
+        let signed = token_with_kid(JwtAlgorithm::EdDSA, &claims(), "current");
+        let request = format!(
+            "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\nCf-Access-Jwt-Assertion: {signed}\r\n\r\n"
+        );
+        assert!(asked(port, &request).await.starts_with("HTTP/1.0 503 "));
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 0);
+
+        let refresh = {
+            let router = router.clone();
+            let client = endpoint.client.clone();
+            tokio::spawn(async move { router.refresh_jwks_with(client).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while router.jwks.get(&endpoint.url).await.is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        for token in [
+            "invalid".to_string(),
+            token_with_kid(JwtAlgorithm::EdDSA, &claims(), "unknown"),
+        ] {
+            let request = format!(
+                "GET / HTTP/1.0\r\nHost: app-1.apps.example.com\r\nCf-Access-Jwt-Assertion: {token}\r\n\r\n"
+            );
+            assert!(asked(port, &request).await.starts_with("HTTP/1.0 403 "));
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept())
+            .await
+            .is_err());
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
+        let guest = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let service = service_fn(|_: Request<Incoming>| async {
+                Ok::<_, std::convert::Infallible>(say(StatusCode::OK, "from the guest\n"))
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+        assert!(asked(port, &request).await.ends_with("from the guest\n"));
+        router.apply(RouteTable::from_targets(&targets)).await;
+        assert!(router.jwks.get(&endpoint.url).await.is_some());
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
+        refresh.abort();
+        guest.abort();
     }
 
     #[tokio::test]

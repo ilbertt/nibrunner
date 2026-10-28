@@ -280,6 +280,8 @@ pub fn serve_proxy(host: &Arc<Host>) {
         return;
     };
     let router = host.router.clone();
+    let keys = router.clone();
+    tokio::spawn(async move { keys.refresh_jwks().await });
     let acceptor = host.tls.clone();
     let address = SocketAddr::new(http.listen_address, http.port);
     tokio::spawn(async move {

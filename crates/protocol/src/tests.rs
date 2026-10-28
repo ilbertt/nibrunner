@@ -191,6 +191,37 @@ fn instance_json() -> serde_json::Value {
     })
 }
 
+#[test]
+fn jwt_public_keys_are_supplied_pems_or_one_explicit_jwks_url() {
+    let validator = jsonschema::validator_for(&crate::schema::desired_state().to_value()).unwrap();
+    let mut document = desired_json();
+    document["instances"][0]["access"] = serde_json::json!({
+        "kind": "jwt",
+        "token": {"header": "Authorization", "format": "bearer"},
+        "issuer": "https://issuer.example.com",
+        "audiences": ["app-one"],
+        "algorithm": "RS256",
+        "publicKeys": {"url": "https://issuer.example.com/keys"}
+    });
+    assert!(validator.is_valid(&document));
+    let parsed: HostDesiredState = serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap()["instances"][0]["access"],
+        document["instances"][0]["access"]
+    );
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!("https://issuer.example.com/keys"),
+        serde_json::json!({}),
+        serde_json::json!({"url": "https://issuer.example.com/keys", "keys": []}),
+        serde_json::json!({"url": []}),
+    ] {
+        document["instances"][0]["access"]["publicKeys"] = invalid;
+        assert!(serde_json::from_value::<HostDesiredState>(document.clone()).is_err());
+        assert!(!validator.is_valid(&document));
+    }
+}
+
 fn desired_json() -> serde_json::Value {
     serde_json::json!({
         "hostId": "host-1",
