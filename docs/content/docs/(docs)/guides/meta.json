@@ -9,6 +9,7 @@
     "health-checks",
     "https",
     "access",
+    "cloudflare-access",
     "raw-ports",
     "logs-and-metrics",
     "file-listings",
