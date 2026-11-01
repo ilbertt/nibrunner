@@ -1,0 +1,527 @@
+{
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/sqlite-query.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SqliteQuery",
+  "type": "object",
+  "properties": {
+    "appId": {
+      "$ref": "#/$defs/AppId"
+    },
+    "deploymentId": {
+      "$ref": "#/$defs/DeploymentId"
+    },
+    "operation": {
+      "$ref": "#/$defs/SqliteOperation"
+    },
+    "sessionId": {
+      "$ref": "#/$defs/SqliteSessionId"
+    }
+  },
+  "required": [
+    "appId",
+    "deploymentId",
+    "sessionId",
+    "operation"
+  ],
+  "$defs": {
+    "AppId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "DeploymentId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "GuestPath": {
+      "description": "a guest path",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
+    },
+    "HranaBatch": {
+      "type": "object",
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HranaBatchStep"
+          }
+        }
+      },
+      "required": [
+        "steps"
+      ]
+    },
+    "HranaBatchCondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "step": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "required": [
+            "type",
+            "step"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "step": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "type",
+            "step"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cond": {
+              "$ref": "#/$defs/HranaBatchCondition"
+            },
+            "type": {
+              "type": "string",
+              "const": "not"
+            }
+          },
+          "required": [
+            "type",
+            "cond"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "conds": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/HranaBatchCondition"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "and"
+            }
+          },
+          "required": [
+            "type",
+            "conds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "conds": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/HranaBatchCondition"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "or"
+            }
+          },
+          "required": [
+            "type",
+            "conds"
+          ]
+        }
+      ]
+    },
+    "HranaBatchStep": {
+      "type": "object",
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HranaBatchCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stmt": {
+          "$ref": "#/$defs/HranaStatement"
+        }
+      },
+      "required": [
+        "stmt"
+      ]
+    },
+    "HranaNamedArg": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/HranaValue"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    },
+    "HranaPipelineRequest": {
+      "type": "object",
+      "properties": {
+        "baton": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HranaRequest"
+          }
+        }
+      },
+      "required": [
+        "requests"
+      ]
+    },
+    "HranaRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "stmt": {
+              "$ref": "#/$defs/HranaStatement"
+            },
+            "type": {
+              "type": "string",
+              "const": "execute"
+            }
+          },
+          "required": [
+            "type",
+            "stmt"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "batch": {
+              "$ref": "#/$defs/HranaBatch"
+            },
+            "type": {
+              "type": "string",
+              "const": "batch"
+            }
+          },
+          "required": [
+            "type",
+            "batch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sql": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "sql_id": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "describe"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sql": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "sql_id": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "sequence"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sql": {
+              "type": "string"
+            },
+            "sql_id": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "store_sql"
+            }
+          },
+          "required": [
+            "type",
+            "sql_id",
+            "sql"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sql_id": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "close_sql"
+            }
+          },
+          "required": [
+            "type",
+            "sql_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "close"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "HranaStatement": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HranaValue"
+          }
+        },
+        "named_args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HranaNamedArg"
+          }
+        },
+        "sql": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sql_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "want_rows": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "HranaValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "null"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "float"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "text"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "base64": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "blob"
+            }
+          },
+          "required": [
+            "type",
+            "base64"
+          ]
+        }
+      ]
+    },
+    "SqliteOperation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/GuestPath"
+            },
+            "root": {
+              "$ref": "#/$defs/GuestPath"
+            },
+            "type": {
+              "type": "string",
+              "const": "open"
+            }
+          },
+          "required": [
+            "type",
+            "root",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/HranaPipelineRequest"
+            },
+            "type": {
+              "type": "string",
+              "const": "pipeline"
+            }
+          },
+          "required": [
+            "type",
+            "body"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "close"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "SqliteSessionId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    }
+  }
+}

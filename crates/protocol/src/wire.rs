@@ -152,6 +152,7 @@ identifier!(HostId);
 identifier!(VolumeId);
 identifier!(CheckpointId);
 identifier!(ExportId);
+identifier!(SqliteSessionId);
 
 const SHA256_HEX_LENGTH: usize = 64;
 pub const SHA256_HEX_PATTERN: &str = "^[0-9a-f]{64}$";

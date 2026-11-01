@@ -1,0 +1,10 @@
+Hrana v2 wire declarations follow Turso's libSQL specifications at revision
+d6c75af6353bb1c34985399608e37cd272a35aa1:
+
+https://github.com/tursodatabase/libsql/blob/d6c75af6353bb1c34985399608e37cd272a35aa1/docs/HRANA_1_SPEC.md
+https://github.com/tursodatabase/libsql/blob/d6c75af6353bb1c34985399608e37cd272a35aa1/docs/HRANA_2_SPEC.md
+https://github.com/tursodatabase/libsql/blob/d6c75af6353bb1c34985399608e37cd272a35aa1/docs/HTTP_V2_SPEC.md
+
+The Rust types retain the upstream JSON field names and tags. Host deployment
+routing and read-only query limits belong to nibrunner. The upstream MIT
+license is included alongside this notice.

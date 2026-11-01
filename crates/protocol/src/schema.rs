@@ -1,7 +1,7 @@
 use schemars::generate::SchemaSettings;
 use schemars::{JsonSchema, Schema};
 
-use crate::{HostDesiredState, HostReportedState, TenantLogEvent};
+use crate::{HostDesiredState, HostReportedState, SqliteOutcome, SqliteQuery, TenantLogEvent};
 
 pub const SCHEMA_ID_BASE: &str =
     "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/";
@@ -9,6 +9,8 @@ pub const SCHEMA_ID_BASE: &str =
 pub const DESIRED_STATE_SCHEMA: &str = "desired.schema.json";
 pub const REPORTED_STATE_SCHEMA: &str = "reported.schema.json";
 pub const TENANT_LOG_SCHEMA: &str = "tenant-log.schema.json";
+pub const SQLITE_QUERY_SCHEMA: &str = "sqlite-query.schema.json";
+pub const SQLITE_OUTCOME_SCHEMA: &str = "sqlite-outcome.schema.json";
 
 /// The document a host converges on, as the JSON Schema of [`HostDesiredState`].
 pub fn desired_state() -> Schema {
@@ -21,11 +23,16 @@ pub fn reported_state() -> Schema {
 }
 
 /// Every schema this crate publishes, each under the filename its `$id` ends in.
-pub fn all() -> [(&'static str, Schema); 3] {
+pub fn all() -> [(&'static str, Schema); 5] {
     [
         (DESIRED_STATE_SCHEMA, desired_state()),
         (REPORTED_STATE_SCHEMA, reported_state()),
         (TENANT_LOG_SCHEMA, published::<TenantLogEvent>(TENANT_LOG_SCHEMA)),
+        (SQLITE_QUERY_SCHEMA, published::<SqliteQuery>(SQLITE_QUERY_SCHEMA)),
+        (
+            SQLITE_OUTCOME_SCHEMA,
+            published::<SqliteOutcome>(SQLITE_OUTCOME_SCHEMA),
+        ),
     ]
 }
 

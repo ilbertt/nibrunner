@@ -1,0 +1,474 @@
+{
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/sqlite-outcome.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SqliteOutcome",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "opened"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "closed"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/HranaPipelineResponse"
+        },
+        "status": {
+          "type": "string",
+          "const": "responded"
+        }
+      },
+      "required": [
+        "status",
+        "body"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "failed"
+        }
+      },
+      "required": [
+        "status",
+        "code",
+        "message"
+      ]
+    }
+  ],
+  "$defs": {
+    "HranaBatchResult": {
+      "type": "object",
+      "properties": {
+        "step_errors": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HranaError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "step_results": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HranaStatementResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "step_results",
+        "step_errors"
+      ]
+    },
+    "HranaColumn": {
+      "type": "object",
+      "properties": {
+        "decltype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "HranaDescribeColumn": {
+      "type": "object",
+      "properties": {
+        "decltype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "HranaDescribeResult": {
+      "type": "object",
+      "properties": {
+        "cols": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HranaDescribeColumn"
+          }
+        },
+        "is_explain": {
+          "type": "boolean"
+        },
+        "is_readonly": {
+          "type": "boolean"
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HranaParameter"
+          }
+        }
+      },
+      "required": [
+        "params",
+        "cols",
+        "is_explain",
+        "is_readonly"
+      ]
+    },
+    "HranaError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ]
+    },
+    "HranaParameter": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "HranaPipelineResponse": {
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baton": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HranaStreamResult"
+          }
+        }
+      },
+      "required": [
+        "results"
+      ]
+    },
+    "HranaResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "$ref": "#/$defs/HranaStatementResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "execute"
+            }
+          },
+          "required": [
+            "type",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "$ref": "#/$defs/HranaBatchResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "batch"
+            }
+          },
+          "required": [
+            "type",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "$ref": "#/$defs/HranaDescribeResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "describe"
+            }
+          },
+          "required": [
+            "type",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "sequence"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "store_sql"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "close_sql"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "close"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "HranaStatementResult": {
+      "type": "object",
+      "properties": {
+        "affected_row_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cols": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HranaColumn"
+          }
+        },
+        "last_insert_rowid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HranaValue"
+            }
+          }
+        }
+      },
+      "required": [
+        "cols",
+        "rows",
+        "affected_row_count"
+      ]
+    },
+    "HranaStreamResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "response": {
+              "$ref": "#/$defs/HranaResponse"
+            },
+            "type": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "required": [
+            "type",
+            "response"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/HranaError"
+            },
+            "type": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "type",
+            "error"
+          ]
+        }
+      ]
+    },
+    "HranaValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "null"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "float"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "text"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "base64": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "blob"
+            }
+          },
+          "required": [
+            "type",
+            "base64"
+          ]
+        }
+      ]
+    }
+  }
+}
