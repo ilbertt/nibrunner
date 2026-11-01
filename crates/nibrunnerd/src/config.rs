@@ -630,7 +630,7 @@ mod file {
     #[schemars(rename = "logs")]
     pub(super) struct Logs {
         /// Whole mebibytes, more than 0. The newest this many of an app's output, in two files:
-        /// `<appId>.log` becomes `<appId>.log.1` when it passes this, over the one before it, so
+        /// `<appId>.jsonl` becomes `<appId>.jsonl.1` when it passes this, over the one before it, so
         /// an app holds between one and two of these on disk however fast it writes. 256 is weeks
         /// of an app that logs a line per request, and about a minute of one that floods.
         #[schemars(range(min = 1))]

@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use nibrunnerd::test_support::machine::RunningHost;
-use protocol::{HealthCheck, InstanceState, Probe};
+use protocol::{HealthCheck, InstanceState, Probe, TenantLogBody, TenantLogEvent};
 
 const KEEP_BYTES: u64 = 256 * 1024;
 
@@ -78,14 +78,16 @@ const IMPATIENT: HealthCheck = HealthCheck::Tcp {
 };
 
 fn log_path(host: &RunningHost, app_id: &protocol::AppId) -> std::path::PathBuf {
-    host.host.config.logs_dir().join(format!("{app_id}.log"))
+    host.host.config.logs_dir().join(format!("{app_id}.jsonl"))
 }
 
-/// What the tenant wrote, without the header each record carries.
 fn lines_written(held: &str) -> Vec<u64> {
     held.lines()
-        .filter_map(|record| record.rsplit_once("line "))
-        .filter_map(|(_, number)| number.trim().parse().ok())
+        .filter_map(|record| serde_json::from_str::<TenantLogEvent>(record).ok())
+        .filter_map(|event| match event.body {
+            TenantLogBody::Data { text, .. } => text.strip_prefix("line ")?.parse().ok(),
+            _ => None,
+        })
         .collect()
 }
 
@@ -156,7 +158,7 @@ async fn a_tenants_output_stops_growing_where_this_host_says_it_keeps_it() {
     let directory = host.host.config.logs_dir();
     let waiting = Instant::now();
     loop {
-        let previous = directory.join(format!("{}.log.1", app.app_id));
+        let previous = directory.join(format!("{}.jsonl.1", app.app_id));
         if previous.exists() {
             break;
         }
@@ -170,7 +172,7 @@ async fn a_tenants_output_stops_growing_where_this_host_says_it_keeps_it() {
     }
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let output_prefix = format!("{}.log", app.app_id);
+    let output_prefix = format!("{}.jsonl", app.app_id);
     let mut kept = 0;
     let mut files = Vec::new();
     for entry in std::fs::read_dir(&directory)
@@ -186,7 +188,7 @@ async fn a_tenants_output_stops_growing_where_this_host_says_it_keeps_it() {
     files.sort();
     assert_eq!(
         files,
-        vec![format!("{}.log", app.app_id), format!("{}.log.1", app.app_id)],
+        vec![format!("{}.jsonl", app.app_id), format!("{}.jsonl.1", app.app_id)],
         "the output was kept in more places than the two this host cuts between"
     );
     assert!(

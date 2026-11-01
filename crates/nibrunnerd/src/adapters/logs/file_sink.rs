@@ -5,19 +5,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use guest_contract::control::GUEST_LOG_PREFIX;
 use protocol::AppId;
 
 use crate::json_store::make_directory;
-use crate::ports::{LogSink, TenantLogBody, TenantLogEvent};
+use crate::ports::{LogSink, TenantLogEvent};
 
 const LOG_DIR_MODE: u32 = 0o700;
 
-const GAP_MESSAGE: &str = "tenant output dropped by host buffering";
+fn previous_path(path: &Path) -> PathBuf {
+    let mut previous = path.as_os_str().to_owned();
+    previous.push(".1");
+    PathBuf::from(previous)
+}
 
 pub struct FileLogSink {
     directory: PathBuf,
-    /// Where `<appId>.log` is cut: past this, it becomes `<appId>.log.1` and a fresh one starts,
+    /// Where `<appId>.jsonl` is cut: past this, it becomes `<appId>.jsonl.1` and a fresh one starts,
     /// so an app has between one and two of these on disk however much it writes. The disk is
     /// the one every other tenant's volume cache and snapshots are on.
     keep_bytes_per_app: u64,
@@ -68,12 +71,12 @@ impl FileLogSink {
     }
 
     pub fn path_for(&self, app_id: &AppId) -> PathBuf {
-        self.directory.join(format!("{app_id}.log"))
+        self.directory.join(format!("{app_id}.jsonl"))
     }
 
-    /// What `<appId>.log` held before the last cut.
+    /// What `<appId>.jsonl` held before the last cut.
     pub fn previous_path_for(&self, app_id: &AppId) -> PathBuf {
-        self.directory.join(format!("{app_id}.log.1"))
+        previous_path(&self.path_for(app_id))
     }
 
     /// Everything this host kept for an app that is no longer on it, taken under the lock a
@@ -84,7 +87,16 @@ impl FileLogSink {
     pub fn discard(&self, app_id: &AppId) {
         let mut writers = self.writers.lock().expect("no panic holds the log writer lock");
         drop(writers.remove(app_id));
-        for path in [self.path_for(app_id), self.previous_path_for(app_id)] {
+        // Old hosts may still have text logs to remove when an app leaves.
+        for path in [
+            self.path_for(app_id),
+            self.directory.join(format!("{app_id}.log")),
+        ]
+        .into_iter()
+        .flat_map(|current| {
+            let previous = previous_path(&current);
+            [current, previous]
+        }) {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -96,7 +108,7 @@ impl FileLogSink {
     }
 
     /// The cut. The file is renamed over the previous one and the handle let go; the next line
-    /// opens a fresh `<appId>.log`, so the newest output is always at the path an operator tails.
+    /// opens a fresh `<appId>.jsonl`, so the newest output is always at the path an operator tails.
     fn rotate(&self, app_id: &AppId, mut full: AppLog) {
         if let Err(error) = full.flush() {
             tracing::warn!(%app_id, %error, "tenant output could not be flushed");
@@ -109,50 +121,6 @@ impl FileLogSink {
             Err(error) => {
                 tracing::warn!(%app_id, %error, "tenant output could not be rotated")
             }
-        }
-    }
-
-    /// One record per event: a header, then the line the tenant wrote or the gap in its place,
-    /// ended by the newline the receiver took off it.
-    fn render(event: &TenantLogEvent, out: &mut impl Write) -> std::io::Result<()> {
-        match &event.body {
-            TenantLogBody::Data { stream, text } => writeln!(
-                out,
-                "{} {} {}/{} {}",
-                event.observed_at,
-                stream.as_str(),
-                event.source_id,
-                event.sequence,
-                text
-            ),
-            TenantLogBody::CronData {
-                stream,
-                text,
-                job_id,
-                run_id,
-            } => writeln!(
-                out,
-                "{} {} {}/{} cronJobId={} cronRunId={} {}",
-                event.observed_at,
-                stream.as_str(),
-                event.source_id,
-                event.sequence,
-                job_id,
-                run_id,
-                text,
-            ),
-            TenantLogBody::Gap { dropped_bytes } => writeln!(
-                out,
-                "{} stderr {}/{} {GAP_MESSAGE}: {dropped_bytes} bytes",
-                event.observed_at, event.source_id, event.sequence
-            ),
-            // The line the guest printed on its console, where the tenant's own stderr would have
-            // put it had the tenant been alive to write one.
-            TenantLogBody::Restart(restart) => writeln!(
-                out,
-                "{} stderr {}/{} {GUEST_LOG_PREFIX}{}",
-                event.observed_at, event.source_id, event.sequence, restart.reason
-            ),
         }
     }
 }
@@ -184,7 +152,10 @@ impl LogSink for FileLogSink {
             let Some(log) = writers.get_mut(&event.app_id) else {
                 continue;
             };
-            if let Err(error) = Self::render(&event, log) {
+            let rendered = serde_json::to_writer(&mut *log, &event)
+                .map_err(std::io::Error::other)
+                .and_then(|()| log.write_all(b"\n"));
+            if let Err(error) = rendered {
                 tracing::warn!(app_id = %event.app_id, %error, "tenant output could not be written");
                 continue;
             }
@@ -223,7 +194,7 @@ impl Drop for FileLogSink {
 mod tests {
     use super::*;
     use crate::test_support::{app_id, deployment_id, observed_at, tenant_restart};
-    use protocol::TenantLogStream;
+    use protocol::{TenantLogBody, TenantLogStream};
 
     fn event(body: TenantLogBody, sequence: u64) -> TenantLogEvent {
         TenantLogEvent {
@@ -242,40 +213,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cron_output_carries_both_identities_without_changing_ordinary_output() {
+    async fn json_lines_preserve_every_event_identity_and_embedded_newline() {
         let directory = tempfile::tempdir().unwrap();
         let sink = unbounded(directory.path().join("logs"));
-        sink.publish(vec![
+        let events = vec![
+            event(
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stdout,
+                    text: "first\nsecond".into(),
+                },
+                0,
+            ),
             event(
                 TenantLogBody::CronData {
                     stream: TenantLogStream::Stderr,
                     text: "cron output".into(),
                     job_id: "cron-job".into(),
-                    run_id: "run-1".into(),
-                },
-                0,
-            ),
-            event(
-                TenantLogBody::Data {
-                    stream: TenantLogStream::Stdout,
-                    text: "ordinary output".into(),
+                    run_id: "cron-run".into(),
                 },
                 1,
             ),
-        ])
-        .await;
+            event(TenantLogBody::Gap { dropped_bytes: 1024 }, 2),
+            event(TenantLogBody::Restart(tenant_restart(|_| {})), 3),
+        ];
+        sink.publish(events.clone()).await;
         let written = std::fs::read_to_string(sink.path_for(&app_id())).unwrap();
-        let lines: Vec<_> = written.lines().collect();
-        assert!(lines[0].ends_with("stderr source-1/0 cronJobId=cron-job cronRunId=run-1 cron output"));
-        assert!(lines[1].ends_with("stdout source-1/1 ordinary output"));
-        assert!(!lines[1].contains("cronJobId="));
+        let recovered: Vec<TenantLogEvent> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(recovered, events);
+        assert!(sink.path_for(&app_id()).ends_with(format!("{}.jsonl", app_id())));
+        let line: serde_json::Value = serde_json::from_str(written.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(line["deploymentId"], deployment_id().as_str());
+        assert_eq!(line["kind"], "cron-data");
+        assert_eq!(line["jobId"], "cron-job");
+        assert_eq!(line["runId"], "cron-run");
+    }
+
+    #[tokio::test]
+    async fn json_rotation_keeps_complete_records_and_discard_removes_legacy_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let sink = FileLogSink::new(directory.path().join("logs"), 1);
+        let first = event(TenantLogBody::Gap { dropped_bytes: 1 }, 0);
+        sink.publish(vec![first.clone()]).await;
+        let written = std::fs::read_to_string(sink.previous_path_for(&app_id())).unwrap();
+        assert_eq!(serde_json::from_str::<TenantLogEvent>(&written).unwrap(), first);
+        assert!(!sink.path_for(&app_id()).exists());
+        let text = directory.path().join("logs").join(format!("{}.log", app_id()));
+        std::fs::write(&text, "old text output").unwrap();
+        std::fs::write(previous_path(&text), "older text output").unwrap();
+        sink.discard(&app_id());
+        assert!(!text.exists());
+        assert!(!previous_path(&text).exists());
+        assert!(!sink.previous_path_for(&app_id()).exists());
     }
 
     #[tokio::test]
     async fn output_lands_in_one_file_per_app_with_a_gap_in_its_place_in_the_stream() {
         let directory = tempfile::tempdir().unwrap();
         let sink = unbounded(directory.path().join("logs"));
-        sink.publish(vec![
+        let events = vec![
             event(
                 TenantLogBody::Data {
                     stream: TenantLogStream::Stdout,
@@ -291,13 +289,9 @@ mod tests {
                 },
                 2,
             ),
-        ])
-        .await;
-        let written = std::fs::read_to_string(sink.path_for(&app_id())).unwrap();
-        let lines: Vec<&str> = written.lines().collect();
-        assert!(lines[0].ends_with("stdout source-1/0 listening"));
-        assert!(lines[1].contains("dropped by host buffering: 4096 bytes"));
-        assert!(lines[2].ends_with("stderr source-1/2 warning"));
+        ];
+        sink.publish(events.clone()).await;
+        assert_eq!(events_in(&sink.path_for(&app_id())), events);
         sink.publish(vec![event(
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
@@ -357,52 +351,6 @@ mod tests {
             .contains("theirs"));
     }
 
-    fn rendered(event: &TenantLogEvent) -> String {
-        let mut out = Vec::new();
-        FileLogSink::render(event, &mut out).unwrap();
-        String::from_utf8(out).unwrap()
-    }
-
-    #[test]
-    fn a_gap_is_rendered_on_stderr_so_it_is_read_where_a_failure_would_be() {
-        let rendered = rendered(&event(TenantLogBody::Gap { dropped_bytes: 0 }, 9));
-        assert!(rendered.starts_with(observed_at().as_str()), "{rendered}");
-        assert!(rendered.contains("stderr source-1/9"), "{rendered}");
-        assert!(rendered.ends_with('\n'), "{rendered}");
-    }
-
-    #[test]
-    fn a_restart_is_written_as_the_line_the_guest_printed_for_it() {
-        let restart = tenant_restart(|_| {});
-        let rendered = rendered(&event(TenantLogBody::Restart(restart.clone()), 3));
-        assert_eq!(
-            rendered,
-            format!(
-                "{} stderr source-1/3 [nibrun] {}\n",
-                observed_at(),
-                restart.reason
-            )
-        );
-    }
-
-    #[test]
-    fn a_line_is_written_under_one_header_and_ended_by_the_sink() {
-        let rendered = rendered(&event(
-            TenantLogBody::Data {
-                stream: TenantLogStream::Stdout,
-                text: "  kept as it was, \r and all".into(),
-            },
-            0,
-        ));
-        assert_eq!(
-            rendered,
-            format!(
-                "{} stdout source-1/0   kept as it was, \r and all\n",
-                observed_at()
-            )
-        );
-    }
-
     #[tokio::test]
     async fn a_flood_of_lines_across_many_batches_all_land_in_order() {
         let directory = tempfile::tempdir().unwrap();
@@ -425,10 +373,23 @@ mod tests {
             sink.publish(batch).await;
         }
         let written = std::fs::read_to_string(sink.path_for(&app_id())).unwrap();
-        let lines: Vec<&str> = written.lines().collect();
+        let lines: Vec<TenantLogEvent> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(lines.len(), 10_000);
-        assert!(lines[0].ends_with("line 0"), "{}", lines[0]);
-        assert!(lines[9_999].ends_with("line 9999"), "{}", lines[9_999]);
+        for (sequence, entry) in lines.into_iter().enumerate() {
+            assert_eq!(
+                entry,
+                event(
+                    TenantLogBody::Data {
+                        stream: TenantLogStream::Stdout,
+                        text: format!("line {sequence}"),
+                    },
+                    sequence as u64
+                )
+            );
+        }
     }
 
     #[tokio::test]
@@ -447,7 +408,7 @@ mod tests {
 
         // Move the file out of the way. A sink that reopened the path per batch would make a new
         // one here; a sink that holds the handle open keeps writing to the same inode.
-        let moved = logs.join("app-1.log.moved");
+        let moved = logs.join("app-1.jsonl.moved");
         std::fs::rename(sink.path_for(&app_id()), &moved).unwrap();
         sink.publish(vec![event(
             TenantLogBody::Data {
@@ -485,7 +446,6 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("last words"));
     }
 
-    /// Lines of one width, so a cap is a whole number of them.
     fn line(sequence: u64) -> TenantLogEvent {
         event(
             TenantLogBody::Data {
@@ -497,14 +457,24 @@ mod tests {
     }
 
     fn line_bytes() -> u64 {
-        rendered(&line(0)).len() as u64
+        serde_json::to_vec(&line(0)).unwrap().len() as u64 + 1
     }
 
-    fn lines_in(path: &Path) -> Vec<String> {
+    fn events_in(path: &Path) -> Vec<TenantLogEvent> {
         std::fs::read_to_string(path)
             .unwrap_or_default()
             .lines()
-            .map(|line| line.rsplit(' ').next().unwrap().to_string())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn lines_in(path: &Path) -> Vec<String> {
+        events_in(path)
+            .into_iter()
+            .map(|event| match event.body {
+                TenantLogBody::Data { text, .. } => text.strip_prefix("line ").unwrap().to_string(),
+                other => panic!("{other:?}"),
+            })
             .collect()
     }
 
@@ -546,7 +516,7 @@ mod tests {
         for batch in (0..21).collect::<Vec<u64>>().chunks(3) {
             sink.publish(batch.iter().copied().map(line).collect()).await;
         }
-        assert_eq!(files_in(&logs), ["app-1.log", "app-1.log.1"]);
+        assert_eq!(files_in(&logs), ["app-1.jsonl", "app-1.jsonl.1"]);
         assert_eq!(lines_in(&sink.previous_path_for(&app_id())), ["018", "019"]);
         assert_eq!(lines_in(&sink.path_for(&app_id())), ["020"]);
     }
@@ -588,7 +558,7 @@ mod tests {
 
         sink.discard(&app_id());
 
-        assert_eq!(files_in(&logs), ["app-2.log", "app-2.log.1"]);
+        assert_eq!(files_in(&logs), ["app-2.jsonl", "app-2.jsonl.1"]);
     }
 
     #[tokio::test]
@@ -602,7 +572,7 @@ mod tests {
         sink.publish(vec![line(1)]).await;
 
         assert_eq!(lines_in(&sink.path_for(&app_id())), ["001"]);
-        assert_eq!(files_in(&logs), ["app-1.log"]);
+        assert_eq!(files_in(&logs), ["app-1.jsonl"]);
     }
 
     #[tokio::test]
@@ -618,7 +588,7 @@ mod tests {
         let logs = directory.path().join("logs");
         let sink = FileLogSink::new(logs.clone(), 2 * line_bytes());
         sink.publish(vec![line(0)]).await;
-        let moved = logs.join("app-1.log.moved");
+        let moved = logs.join("app-1.jsonl.moved");
         std::fs::rename(sink.path_for(&app_id()), &moved).unwrap();
 
         // The held-open handle takes the line that reaches the cap; the cut then finds nothing at
@@ -627,6 +597,6 @@ mod tests {
         sink.publish(vec![line(2)]).await;
         assert_eq!(lines_in(&moved), ["000", "001"]);
         assert_eq!(lines_in(&sink.path_for(&app_id())), ["002"]);
-        assert_eq!(files_in(&logs), ["app-1.log", "app-1.log.moved"]);
+        assert_eq!(files_in(&logs), ["app-1.jsonl", "app-1.jsonl.moved"]);
     }
 }

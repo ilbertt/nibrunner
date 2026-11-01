@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
 use protocol::{AppId, DeploymentId, DesiredInstance, DesiredLayer, ObjectKey, Sha256Digest, StoredObject};
+pub use protocol::{TenantLogBody, TenantLogEvent};
 
 use crate::adapters::vm::VmStatus;
 
@@ -265,38 +266,6 @@ pub struct PreparedPayload {
 #[async_trait]
 pub trait PayloadBuilder: Send + Sync {
     async fn prepare(&self, layers: &[DesiredLayer]) -> Result<PreparedPayload, ArtifactError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TenantLogEvent {
-    pub app_id: AppId,
-    pub deployment_id: DeploymentId,
-    pub source_id: String,
-    pub sequence: u64,
-    pub observed_at: protocol::Timestamp,
-    pub body: TenantLogBody,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TenantLogBody {
-    /// One line the tenant wrote, without the newline that ended it. A line the tenant left
-    /// open long enough, or was still writing when its stream closed, arrives as it stands.
-    Data {
-        stream: protocol::TenantLogStream,
-        text: String,
-    },
-    CronData {
-        stream: protocol::TenantLogStream,
-        text: String,
-        job_id: String,
-        run_id: String,
-    },
-    Gap {
-        dropped_bytes: u64,
-    },
-    /// The guest's supervisor restarted the tenant, in its place in the stream: after the
-    /// tenant's last words, before its first ones back.
-    Restart(protocol::TenantRestart),
 }
 
 /// Why a wake was refused, apart from want of memory: the word a counter uses, beside the

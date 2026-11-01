@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_line_lands_in_the_file_under_its_own_header_whichever_frames_it_straddled() {
+    async fn every_line_lands_as_one_json_record_whichever_frames_it_straddled() {
         let directory = tempfile::tempdir().unwrap();
         let socket_path = tenant_log_socket_path(directory.path());
         let sink = Arc::new(crate::adapters::logs::FileLogSink::new(
@@ -852,14 +852,17 @@ mod tests {
         .await;
         let written = std::fs::read_to_string(&path).unwrap();
         for (line, (sequence, number)) in written.lines().zip((0..).zip(1358..)) {
-            let [observed_at, stream, source, text]: [&str; 4] =
-                line.splitn(4, ' ').collect::<Vec<_>>().try_into().unwrap();
-            assert!(Timestamp::parse(observed_at).is_ok(), "{line}");
-            assert_eq!(stream, "stdout", "{line}");
-            assert!(source.ends_with(&format!("/{sequence}")), "{line}");
+            let event: TenantLogEvent = serde_json::from_str(line).unwrap();
+            assert_eq!(event.app_id, app_id());
+            assert_eq!(event.deployment_id, deployment_id());
+            assert_eq!(event.sequence, sequence);
+            assert!(!event.source_id.is_empty());
             assert_eq!(
-                text,
-                format!("line {number} of 100000 at 1789308052995"),
+                event.body,
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stdout,
+                    text: format!("line {number} of 100000 at 1789308052995"),
+                },
                 "{line}"
             );
         }

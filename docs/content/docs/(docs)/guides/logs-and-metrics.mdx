@@ -31,20 +31,19 @@ there are no registrations.
 
 ## Logs
 
-Each app's output goes to `<paths.state_dir>/logs/<appId>.log`, one line per line the program
-wrote:
+Each app's output goes to `<paths.state_dir>/logs/<appId>.jsonl`, one JSON record per event:
 
+```json
+{"appId":"app-1","deploymentId":"dep-1","sourceId":"session-1","sequence":42,"observedAt":"2026-09-16T10:41:07.318Z","kind":"data","stream":"stdout","text":"listening on :3000"}
 ```
-2026-09-16T10:41:07.318Z stdout 6f1c…/42 listening on :3000
-```
 
-The fields are: when the host received the line, the stream, the microVM's log session id and
-the line's sequence number in that session, then the line itself. If the host could not keep up,
-a line says how many bytes were dropped. If the program restarted inside the guest, a line on
-`stderr` says why.
+Each record preserves the app, deployment, source, sequence and observation time. Its `kind`
+identifies output, cron output, a buffering gap or a tenant restart. Embedded newlines remain
+inside one JSON record. The [tenant log reference](/docs/reference/tenant-log) lists every field
+from the generated schema. Clients parse these records to display or format the output.
 
-The host keeps the newest 256 MiB per app, in two files. When `<appId>.log` reaches the limit it
-is renamed to `<appId>.log.1`, replacing the previous one, and a new `<appId>.log` starts.
+The host keeps the newest 256 MiB per app, in two files. When `<appId>.jsonl` reaches the limit it
+is renamed to `<appId>.jsonl.1`, replacing the previous one, and a new `<appId>.jsonl` starts.
 `tail -F` follows across the rotation. An app that logs too much fills only its own share of the
 disk. `[logs]` in `config.toml` sets that share:
 

@@ -1,0 +1,12 @@
+---
+title: Tenant logs
+description: Every field of a tenant log event, from its JSON Schema.
+---
+
+Each line in `<paths.state_dir>/logs/<appId>.jsonl` is one event. All events identify the app,
+deployment and source, with a sequence number and the time the host observed them. The `kind`
+field identifies output, cron output, a buffering gap or a tenant restart.
+
+[Logs and metrics](/docs/guides/logs-and-metrics) covers retention and file rotation.
+
+<SchemaReference file="crates/protocol/schema/tenant-log.schema.json" />

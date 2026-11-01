@@ -181,14 +181,20 @@ function section({
 
 function body({ schema, name }: { schema: Schema; name: string }): RootContent[] {
   if (schema.oneOf) {
-    return variants(schema.oneOf);
+    return [
+      ...(schema.properties ? [propertiesTable({ schema, section: name })] : []),
+      ...variants(schema.oneOf),
+    ];
   }
   if (schema.enum) {
     const values = joined({ parts: schema.enum.map((value) => [literal(value)]), separator: ', ' });
     return [paragraph([text('One of '), ...values, text('.')])];
   }
   if (schema.properties) {
-    return [propertiesTable({ schema, section: name })];
+    return [
+      propertiesTable({ schema, section: name }),
+      ...(schema.$ref === undefined ? [] : [paragraph(phrase({ $ref: schema.$ref }))]),
+    ];
   }
   return [paragraph(phrase(schema))];
 }

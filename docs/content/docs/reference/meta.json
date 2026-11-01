@@ -2,5 +2,12 @@
   "title": "Reference",
   "icon": "Braces",
   "root": true,
-  "pages": ["config", "desired", "reported", "metrics", "filesystem"]
+  "pages": [
+    "config",
+    "desired",
+    "reported",
+    "tenant-log",
+    "metrics",
+    "filesystem"
+  ]
 }

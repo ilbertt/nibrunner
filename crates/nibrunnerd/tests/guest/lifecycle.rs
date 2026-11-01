@@ -369,7 +369,7 @@ async fn an_app_the_document_stopped_naming_leaves_nothing_behind() {
         .await
         .expect("a running app holds a slot");
     let volume_file = host.host.config.volumes_dir().join(app.volume_id.as_str());
-    let log_file = host.host.config.logs_dir().join(format!("{}.log", app.app_id));
+    let log_file = host.host.config.logs_dir().join(format!("{}.jsonl", app.app_id));
     assert!(volume_file.exists(), "the volume was never written");
 
     // Removing an app is two writes, and the first is what does the deleting: while the document

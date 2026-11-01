@@ -1,0 +1,207 @@
+{
+  "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/crates/protocol/schema/tenant-log.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TenantLogEvent",
+  "type": "object",
+  "properties": {
+    "appId": {
+      "$ref": "#/$defs/AppId"
+    },
+    "deploymentId": {
+      "$ref": "#/$defs/DeploymentId"
+    },
+    "observedAt": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "sequence": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "sourceId": {
+      "type": "string"
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "data"
+        },
+        "stream": {
+          "$ref": "#/$defs/TenantLogStream"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "stream",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "cron-data"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "stream": {
+          "$ref": "#/$defs/TenantLogStream"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "stream",
+        "text",
+        "jobId",
+        "runId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "droppedBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "kind": {
+          "type": "string",
+          "const": "gap"
+        }
+      },
+      "required": [
+        "kind",
+        "droppedBytes"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "restart"
+        }
+      },
+      "$ref": "#/$defs/TenantRestart",
+      "required": [
+        "kind"
+      ]
+    }
+  ],
+  "required": [
+    "appId",
+    "deploymentId",
+    "sourceId",
+    "sequence",
+    "observedAt"
+  ],
+  "$defs": {
+    "AppId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "DeploymentId": {
+      "description": "an identifier",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "StateMessage": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "TenantExit": {
+      "description": "How a tenant process ended: the code it exited with, or the signal that killed it.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "code"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "signal": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "signal"
+          ]
+        }
+      ]
+    },
+    "TenantLogStream": {
+      "type": "string",
+      "enum": [
+        "stdout",
+        "stderr"
+      ]
+    },
+    "TenantRestart": {
+      "description": "One restart of the tenant by the supervisor inside its guest, as the guest reported it. The\nhost never sees the process, so this is the whole of what it knows about why the tenant went\ndown and came back: which of the budget this restart was, how the tenant ended, the sentence\nthe guest printed for it, and how long it waited before starting the tenant again.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "description": "1 for the first restart since the tenant last stayed up long enough to earn its budget\nback, up to `budget`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "backoffMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "budget": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "exit": {
+          "$ref": "#/$defs/TenantExit"
+        },
+        "reason": {
+          "$ref": "#/$defs/StateMessage"
+        }
+      },
+      "required": [
+        "attempt",
+        "budget",
+        "exit",
+        "reason",
+        "backoffMs"
+      ]
+    },
+    "Timestamp": {
+      "description": "an ISO 8601 instant with an offset",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    }
+  }
+}
