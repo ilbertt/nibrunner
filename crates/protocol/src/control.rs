@@ -460,6 +460,8 @@ pub struct ReportedInstance {
     pub deployment_id: DeploymentId,
     pub state: InstanceState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_port: Option<HostPort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_ipv4: Option<Ipv4Address>,
@@ -493,6 +495,8 @@ pub struct ReportedVolume {
     pub app_id: AppId,
     pub state: VolumeState,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<FilesystemUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_prefix: Option<ObjectKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

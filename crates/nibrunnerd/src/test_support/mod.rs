@@ -212,6 +212,7 @@ pub fn desired_export(edit: impl FnOnce(&mut DesiredExport)) -> DesiredExport {
 
 pub fn reported_instance(edit: impl FnOnce(&mut ReportedInstance)) -> ReportedInstance {
     let mut value = ReportedInstance {
+        compute: None,
         app_id: app_id(),
         deployment_id: deployment_id(),
         state: InstanceState::Running,
@@ -255,6 +256,7 @@ pub fn reported_restart(edit: impl FnOnce(&mut ReportedRestart)) -> ReportedRest
 
 pub fn reported_volume(edit: impl FnOnce(&mut ReportedVolume)) -> ReportedVolume {
     let mut value = ReportedVolume {
+        usage: None,
         volume_id: volume_id(),
         app_id: app_id(),
         state: VolumeState::Ready,

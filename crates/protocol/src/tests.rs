@@ -538,6 +538,7 @@ fn identifiers_timestamps_and_addresses_are_checked() {
 #[test]
 fn a_report_omits_what_it_does_not_know() {
     let instance = ReportedInstance {
+        compute: None,
         app_id: AppId::parse("app-1").unwrap(),
         deployment_id: DeploymentId::parse("dep-1").unwrap(),
         state: InstanceState::Running,
@@ -904,6 +905,7 @@ mod schema {
                 firecracker: "1.12.0".into(),
             },
             volumes: vec![ReportedVolume {
+                usage: None,
                 volume_id: VolumeId::parse("vol-1").unwrap(),
                 app_id: AppId::parse("app-1").unwrap(),
                 state: VolumeState::Ready,
@@ -913,6 +915,7 @@ mod schema {
                 message: Some(StateMessage::new("mounted")),
             }],
             instances: vec![ReportedInstance {
+                compute: None,
                 app_id: AppId::parse("app-1").unwrap(),
                 deployment_id: DeploymentId::parse("dep-1").unwrap(),
                 state: InstanceState::Running,

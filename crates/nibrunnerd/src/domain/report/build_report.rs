@@ -7,6 +7,7 @@ use crate::domain::report::InstanceRecord;
 
 pub fn to_reported_instance(record: &InstanceRecord) -> ReportedInstance {
     ReportedInstance {
+        compute: None,
         app_id: record.app_id.clone(),
         deployment_id: record.deployment_id.clone(),
         state: record.state,

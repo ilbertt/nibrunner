@@ -70,6 +70,7 @@ pub fn to_reported_volume(observed: &ObservedVolume, last_refusal: Option<&State
         (false, _, None) => (VolumeState::Detached, None),
     };
     ReportedVolume {
+        usage: None,
         volume_id: observed.volume_id.clone(),
         app_id: observed.app_id.clone(),
         state,
@@ -192,6 +193,7 @@ async fn provision_volume(
     );
     let report = match provisioned {
         Ok(attached) => ReportedVolume {
+            usage: None,
             volume_id: attached.volume_id,
             app_id: desired.app_id.clone(),
             state: VolumeState::Ready,
@@ -208,6 +210,7 @@ async fn provision_volume(
                 tracing::error!(volume_id = %desired.volume_id, error = %error.message(), "volume provisioning failed");
             }
             ReportedVolume {
+                usage: None,
                 volume_id: desired.volume_id.clone(),
                 app_id: desired.app_id.clone(),
                 state: VolumeState::Failed,
@@ -248,6 +251,7 @@ async fn tear_down_volume(host: &Host, desired: &protocol::DesiredVolume) {
         Ok(()) => {
             give_back_slot(host, &desired.app_id).await;
             let report = ReportedVolume {
+                usage: None,
                 volume_id: desired.volume_id.clone(),
                 app_id: desired.app_id.clone(),
                 state: VolumeState::Deleted,

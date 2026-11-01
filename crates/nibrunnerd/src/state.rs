@@ -264,6 +264,7 @@ mod tests {
 
     fn reported(state: VolumeState) -> ReportedVolume {
         ReportedVolume {
+            usage: None,
             volume_id: volume_id(),
             app_id: app_id(),
             state,
@@ -363,6 +364,7 @@ mod tests {
     #[test]
     fn a_volume_only_one_side_knows_of_is_kept_rather_than_dropped_by_the_merge() {
         let elsewhere = ReportedVolume {
+            usage: None,
             volume_id: VolumeId::parse("vol-2").unwrap(),
             ..reported(VolumeState::Ready)
         };
