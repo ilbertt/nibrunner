@@ -536,8 +536,9 @@ fn identifiers_timestamps_and_addresses_are_checked() {
 }
 
 #[test]
-fn a_report_omits_what_it_does_not_know() {
+fn a_report_keeps_unknown_compute_null_and_omits_unknown_optional_details() {
     let instance = ReportedInstance {
+        compute: None,
         app_id: AppId::parse("app-1").unwrap(),
         deployment_id: DeploymentId::parse("dep-1").unwrap(),
         state: InstanceState::Running,
@@ -552,6 +553,7 @@ fn a_report_omits_what_it_does_not_know() {
         message: None,
     };
     let written = serde_json::to_value(&instance).unwrap();
+    assert_eq!(written.get("compute"), Some(&serde_json::Value::Null));
     assert_eq!(written["lastExitCode"], 0);
     assert!(written.get("startedAt").is_none());
     assert!(written.get("convergedAt").is_none());
@@ -566,11 +568,49 @@ fn a_report_written_before_a_tenant_had_ever_restarted_still_reads_back() {
         "appId": "app-1",
         "deploymentId": "dep-1",
         "state": "running",
-        "restartCount": 0
+        "restartCount": 0,
+        "compute": null
     });
     let read: ReportedInstance = serde_json::from_value(older).unwrap();
     assert_eq!(read.last_restart, None);
     assert_eq!(read.restart_count, 0);
+}
+
+#[test]
+fn usage_keys_are_required_and_unknown_readings_round_trip_as_null() {
+    let instance = serde_json::json!({
+        "appId": "app-1", "deploymentId": "dep-1", "state": "running", "restartCount": 0,
+        "compute": null
+    });
+    let read: ReportedInstance = serde_json::from_value(instance.clone()).unwrap();
+    assert!(read.compute.is_none());
+    assert_eq!(
+        serde_json::to_value(read).unwrap().get("compute"),
+        Some(&serde_json::Value::Null)
+    );
+    let mut missing = instance;
+    missing.as_object_mut().unwrap().remove("compute");
+    assert!(serde_json::from_value::<ReportedInstance>(missing)
+        .unwrap_err()
+        .to_string()
+        .contains("compute"));
+
+    let volume = serde_json::json!({
+        "appId": "app-1", "volumeId": "vol-1", "state": "ready", "sizeBytes": 4096,
+        "usage": null
+    });
+    let read: ReportedVolume = serde_json::from_value(volume.clone()).unwrap();
+    assert!(read.usage.is_none());
+    assert_eq!(
+        serde_json::to_value(read).unwrap().get("usage"),
+        Some(&serde_json::Value::Null)
+    );
+    let mut missing = volume;
+    missing.as_object_mut().unwrap().remove("usage");
+    assert!(serde_json::from_value::<ReportedVolume>(missing)
+        .unwrap_err()
+        .to_string()
+        .contains("usage"));
 }
 
 #[test]
@@ -904,6 +944,7 @@ mod schema {
                 firecracker: "1.12.0".into(),
             },
             volumes: vec![ReportedVolume {
+                usage: None,
                 volume_id: VolumeId::parse("vol-1").unwrap(),
                 app_id: AppId::parse("app-1").unwrap(),
                 state: VolumeState::Ready,
@@ -913,6 +954,7 @@ mod schema {
                 message: Some(StateMessage::new("mounted")),
             }],
             instances: vec![ReportedInstance {
+                compute: None,
                 app_id: AppId::parse("app-1").unwrap(),
                 deployment_id: DeploymentId::parse("dep-1").unwrap(),
                 state: InstanceState::Running,
@@ -1186,6 +1228,32 @@ mod schema {
         let document = reported_json();
         let errors: Vec<String> = validator.iter_errors(&document).map(|e| e.to_string()).collect();
         assert!(errors.is_empty(), "{errors:#?}");
+
+        let measured_at = Timestamp::parse("2026-08-03T10:00:00.000Z").unwrap();
+        let measured = with(
+            with(
+                document,
+                "/instances/0/compute",
+                serde_json::to_value(ComputeUsage {
+                    memory_total_bytes: 268_435_456,
+                    memory_used_bytes: 1024,
+                    cpu_share: Some(0.25),
+                    measured_at: measured_at.clone(),
+                })
+                .unwrap(),
+            ),
+            "/volumes/0/usage",
+            serde_json::to_value(FilesystemUsage {
+                total_bytes: 2000,
+                used_bytes: 500,
+                measured_at,
+            })
+            .unwrap(),
+        );
+        assert!(validator.is_valid(&measured));
+        let read: HostReportedState = serde_json::from_value(measured).unwrap();
+        assert!(read.instances[0].compute.is_some());
+        assert!(read.volumes[0].usage.is_some());
     }
 
     #[test]
@@ -1218,6 +1286,8 @@ mod schema {
             without(reported_json(), "/instances/0/lastRestart/reason"),
             with(reported_json(), "/volumes/0/state", serde_json::json!("lost")),
             without(reported_json(), "/capacity"),
+            without(reported_json(), "/instances/0/compute"),
+            without(reported_json(), "/volumes/0/usage"),
         ];
         for document in broken {
             assert!(

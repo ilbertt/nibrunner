@@ -26,7 +26,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     };
     let allocatable = allocatable_capacity(&capacity, &committed_resources(&records), space.available_bytes);
 
-    build_reported_state(ReportInputs {
+    let mut report = build_reported_state(ReportInputs {
         host_id: host_id_of(host).await,
         reported_at: now_timestamp(),
         state: if snapshot.converged {
@@ -44,7 +44,18 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
         accepted_digest: snapshot.accepted_digest.clone(),
         accepted_revision: snapshot.accepted_revision.clone(),
         message: snapshot.desired_refusal.clone(),
-    })
+    });
+    for instance in &mut report.instances {
+        instance.compute = (instance.state != protocol::InstanceState::Idle)
+            .then(|| snapshot.compute_usage.get(&instance.app_id).cloned())
+            .flatten();
+    }
+    for volume in &mut report.volumes {
+        volume.usage = (volume.state != protocol::VolumeState::Deleted)
+            .then(|| snapshot.volume_usage.get(&volume.app_id).cloned())
+            .flatten();
+    }
+    report
 }
 
 /// Whether a report says what the one before it said.
@@ -86,6 +97,49 @@ mod tests {
 
     fn versions() -> HostVersions {
         crate::domain::report::versions::compiled_versions("v1.16.1", "6.1.180-test")
+    }
+
+    #[tokio::test]
+    async fn guest_measurements_reach_reports_with_their_original_time_and_without_invented_zeros() {
+        let host = test_host().await;
+        host.state.put_record(instance_record(|_| {})).await;
+        host.state
+            .modify(|snapshot| snapshot.volume_reports = vec![reported_volume(|_| {})])
+            .await;
+        let report = build(&host, versions()).await;
+        assert!(report.instances[0].compute.is_none());
+        assert!(report.volumes[0].usage.is_none());
+
+        let compute = protocol::ComputeUsage {
+            memory_total_bytes: 268_435_456,
+            memory_used_bytes: 1024,
+            cpu_share: Some(0.25),
+            measured_at: observed_at(),
+        };
+        let usage = protocol::FilesystemUsage {
+            total_bytes: 2000,
+            used_bytes: 500,
+            measured_at: observed_at(),
+        };
+        host.state
+            .modify(|snapshot| {
+                snapshot.compute_usage.insert(app_id(), compute.clone());
+                snapshot.volume_usage.insert(app_id(), usage.clone());
+            })
+            .await;
+        let report = build(&host, versions()).await;
+        assert_eq!(report.instances[0].compute, Some(compute));
+        assert_eq!(report.volumes[0].usage, Some(usage));
+
+        host.state
+            .modify(|snapshot| {
+                snapshot.records.get_mut(&app_id()).unwrap().state = InstanceState::Idle;
+                snapshot.volume_reports[0].state = protocol::VolumeState::Deleted;
+            })
+            .await;
+        let report = build(&host, versions()).await;
+        assert!(report.instances[0].compute.is_none());
+        assert!(report.volumes[0].usage.is_none());
     }
 
     #[tokio::test]

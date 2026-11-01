@@ -38,6 +38,15 @@ impl SqliteDeletedVolumes {
     }
 }
 
+pub(crate) fn decode_stored_report(mut value: serde_json::Value) -> Option<ReportedVolume> {
+    // Existing deletion receipts predate usage measurements and must survive an upgrade.
+    value
+        .as_object_mut()?
+        .entry("usage")
+        .or_insert(serde_json::Value::Null);
+    serde_json::from_value(value).ok()
+}
+
 #[async_trait]
 impl DeletedVolumeRepository for SqliteDeletedVolumes {
     async fn all(&self) -> Result<BTreeMap<VolumeId, ReportedVolume>, StoreError> {
@@ -46,7 +55,7 @@ impl DeletedVolumeRepository for SqliteDeletedVolumes {
             .await?
             .into_values()
             .filter_map(|report| {
-                let report: ReportedVolume = serde_json::from_str(&report).ok()?;
+                let report = decode_stored_report(serde_json::from_str(&report).ok()?)?;
                 Some((report.volume_id.clone(), report))
             })
             .collect())
@@ -127,6 +136,22 @@ mod tests {
         let held = BTreeMap::from([(volume_id(), removed())]);
         deleted.replace_all(&held).await.unwrap();
         assert_eq!(deleted.all().await.unwrap(), held);
+    }
+
+    #[tokio::test]
+    async fn an_existing_deletion_receipt_without_usage_survives_an_upgrade() {
+        let pool = in_memory().await;
+        let expected = removed();
+        let mut value = serde_json::to_value(&expected).unwrap();
+        value.as_object_mut().unwrap().remove("usage");
+        sqlx::query("insert into deleted_volumes (volume_id, report) values (?, ?)")
+            .bind(expected.volume_id.as_str())
+            .bind(value.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let read = SqliteDeletedVolumes::new(pool).all().await.unwrap();
+        assert_eq!(read.get(&expected.volume_id), Some(&expected));
     }
 
     #[tokio::test]

@@ -459,6 +459,12 @@ pub struct ReportedInstance {
     pub app_id: AppId,
     pub deployment_id: DeploymentId,
     pub state: InstanceState,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "Option::<ComputeUsage>::json_schema")
+    )]
+    pub compute: Option<ComputeUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_port: Option<HostPort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -493,6 +499,12 @@ pub struct ReportedVolume {
     pub app_id: AppId,
     pub state: VolumeState,
     pub size_bytes: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "Option::<FilesystemUsage>::json_schema")
+    )]
+    pub usage: Option<FilesystemUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_prefix: Option<ObjectKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

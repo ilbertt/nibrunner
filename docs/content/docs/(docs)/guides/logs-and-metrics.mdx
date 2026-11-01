@@ -11,8 +11,10 @@ every volume, instance, checkpoint and export in `desired.json`, with a reason w
 needed: an instance that cannot start, a file the host rejected, an export that failed. It also
 holds what the host has and what is left of it, which is what decides whether another app fits.
 
-It holds no measurements. What an app is using and what it has used are on the metrics endpoint
-below.
+Instances carry their latest guest CPU and memory readings as `compute`; volumes carry their
+filesystem readings as `usage`. Both keys are required and are `null` when no measurement is
+available. Available readings keep their original `measuredAt` timestamp. Cumulative usage remains
+on the metrics endpoint below.
 
 ```bash
 jq '.instances[] | {appId, state, message}' /var/lib/nibrunner/reported.json
@@ -83,7 +85,7 @@ listen_address = "127.0.0.1"
 port = 9100
 ```
 
-This is the only place measurements are published. Every series is prefixed `nibrunner_`, and
+The endpoint also publishes cumulative usage. Every series is prefixed `nibrunner_`, and
 what follows names what is being measured: `app_` for one app, `host_` for the machine,
 `volume_`, `checkpoint_` and `export_` for what it holds, `proxy_` for the listener it is
 reached through, and `vm_` for an operation on a microVM. Anything labelled `app` is about one

@@ -1,4 +1,5 @@
 use crate::domain::store::StoreError;
+use crate::repositories::deleted_volumes_repository::decode_stored_report;
 use crate::repositories::Repositories;
 
 pub async fn import_documents(
@@ -26,10 +27,14 @@ pub async fn import_documents(
             .ok()
             .flatten(),
     );
-    let deleted: Vec<protocol::ReportedVolume> = crate::json_store::read_json(&config.deleted_volumes_file())
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let deleted: Vec<_> =
+        crate::json_store::read_json::<Vec<serde_json::Value>>(&config.deleted_volumes_file())
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(decode_stored_report)
+            .collect();
     let activity_entries: Vec<serde_json::Value> = crate::json_store::read_json(&config.activity_file())
         .ok()
         .flatten()
