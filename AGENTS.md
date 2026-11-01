@@ -25,6 +25,7 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
   requiring Docker or a registry client
 - `crates/guest-contract` — what host and guest agree on: drive order, kernel args, vsock ports,
   the frame codecs
+- `crates/sqlite` — bounded read-only SQLite execution for the guest, using the protocol's Hrana wire types
 - `crates/nft-render` — slot arithmetic, the nftables ruleset rendered whole, the parsers for what
   `nft` answers
 - `crates/nibrunnerd` — the daemon. `domain/` holds the logic and needs no kernel; `ports.rs`
