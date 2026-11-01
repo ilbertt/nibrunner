@@ -108,9 +108,10 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         .map_err(|error| StartupError::Unusable(error.to_string()))?;
     let cron_registration = crate::adapters::cron_registration::CronRegistrationReceiver::new(cron.clone());
     let logs = TenantLogReceiver::new();
-    let files = Arc::new(FileLogSink::new(
+    let files = Arc::new(FileLogSink::with_format(
         config.logs_dir(),
         config.logs.keep_bytes_per_app,
+        config.logs.format,
     ));
     let sink = Arc::new(RestartRecorder::new(state.clone(), files.clone()));
     let http_log =

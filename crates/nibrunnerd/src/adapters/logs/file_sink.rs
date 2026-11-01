@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use guest_contract::control::GUEST_LOG_PREFIX;
 use protocol::AppId;
 
+use crate::config::LogFormat;
 use crate::json_store::make_directory;
 use crate::ports::{LogSink, TenantLogBody, TenantLogEvent};
 
@@ -15,12 +16,19 @@ const LOG_DIR_MODE: u32 = 0o700;
 
 const GAP_MESSAGE: &str = "tenant output dropped by host buffering";
 
+fn previous_path(path: &Path) -> PathBuf {
+    let mut previous = path.as_os_str().to_owned();
+    previous.push(".1");
+    PathBuf::from(previous)
+}
+
 pub struct FileLogSink {
     directory: PathBuf,
     /// Where `<appId>.log` is cut: past this, it becomes `<appId>.log.1` and a fresh one starts,
     /// so an app has between one and two of these on disk however much it writes. The disk is
     /// the one every other tenant's volume cache and snapshots are on.
     keep_bytes_per_app: u64,
+    format: LogFormat,
     // One handle held open per app: a busy tenant's output is no longer paid for with an
     // open()/close() around every line, which is what capped the drain. Writes are buffered and
     // flushed once the batch the receiver handed us has drained, so a daemon crash loses nothing
@@ -60,20 +68,33 @@ impl Write for AppLog {
 
 impl FileLogSink {
     pub fn new(directory: PathBuf, keep_bytes_per_app: u64) -> Self {
+        Self::with_format(directory, keep_bytes_per_app, LogFormat::Text)
+    }
+
+    pub fn with_format(directory: PathBuf, keep_bytes_per_app: u64, format: LogFormat) -> Self {
         Self {
             directory,
             keep_bytes_per_app,
+            format,
             writers: Mutex::new(BTreeMap::new()),
         }
     }
 
     pub fn path_for(&self, app_id: &AppId) -> PathBuf {
-        self.directory.join(format!("{app_id}.log"))
+        self.path_with_format(app_id, self.format)
+    }
+
+    fn path_with_format(&self, app_id: &AppId, format: LogFormat) -> PathBuf {
+        let extension = match format {
+            LogFormat::Text => "log",
+            LogFormat::Json => "jsonl",
+        };
+        self.directory.join(format!("{app_id}.{extension}"))
     }
 
     /// What `<appId>.log` held before the last cut.
     pub fn previous_path_for(&self, app_id: &AppId) -> PathBuf {
-        self.directory.join(format!("{app_id}.log.1"))
+        previous_path(&self.path_for(app_id))
     }
 
     /// Everything this host kept for an app that is no longer on it, taken under the lock a
@@ -84,7 +105,11 @@ impl FileLogSink {
     pub fn discard(&self, app_id: &AppId) {
         let mut writers = self.writers.lock().expect("no panic holds the log writer lock");
         drop(writers.remove(app_id));
-        for path in [self.path_for(app_id), self.previous_path_for(app_id)] {
+        for path in [LogFormat::Text, LogFormat::Json].into_iter().flat_map(|format| {
+            let current = self.path_with_format(app_id, format);
+            let previous = previous_path(&current);
+            [current, previous]
+        }) {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -184,7 +209,13 @@ impl LogSink for FileLogSink {
             let Some(log) = writers.get_mut(&event.app_id) else {
                 continue;
             };
-            if let Err(error) = Self::render(&event, log) {
+            let rendered = match self.format {
+                LogFormat::Text => Self::render(&event, log),
+                LogFormat::Json => serde_json::to_writer(&mut *log, &event)
+                    .map_err(std::io::Error::other)
+                    .and_then(|()| log.write_all(b"\n")),
+            };
+            if let Err(error) = rendered {
                 tracing::warn!(app_id = %event.app_id, %error, "tenant output could not be written");
                 continue;
             }
@@ -239,6 +270,61 @@ mod tests {
     /// A sink with a cap no test here reaches.
     fn unbounded(logs: PathBuf) -> FileLogSink {
         FileLogSink::new(logs, u64::MAX)
+    }
+
+    #[tokio::test]
+    async fn json_lines_preserve_every_event_identity_and_embedded_newline() {
+        let directory = tempfile::tempdir().unwrap();
+        let sink = FileLogSink::with_format(directory.path().join("logs"), u64::MAX, LogFormat::Json);
+        let events = vec![
+            event(
+                TenantLogBody::Data {
+                    stream: TenantLogStream::Stdout,
+                    text: "first\nsecond".into(),
+                },
+                0,
+            ),
+            event(
+                TenantLogBody::CronData {
+                    stream: TenantLogStream::Stderr,
+                    text: "cron output".into(),
+                    job_id: "cron-job".into(),
+                    run_id: "cron-run".into(),
+                },
+                1,
+            ),
+            event(TenantLogBody::Gap { dropped_bytes: 1024 }, 2),
+            event(TenantLogBody::Restart(tenant_restart(|_| {})), 3),
+        ];
+        sink.publish(events.clone()).await;
+        let written = std::fs::read_to_string(sink.path_for(&app_id())).unwrap();
+        let recovered: Vec<TenantLogEvent> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(recovered, events);
+        assert!(sink.path_for(&app_id()).ends_with(format!("{}.jsonl", app_id())));
+        let line: serde_json::Value = serde_json::from_str(written.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(line["deploymentId"], deployment_id().as_str());
+        assert_eq!(line["kind"], "cron-data");
+        assert_eq!(line["jobId"], "cron-job");
+        assert_eq!(line["runId"], "cron-run");
+    }
+
+    #[tokio::test]
+    async fn json_rotation_keeps_complete_records_and_discard_removes_both_formats() {
+        let directory = tempfile::tempdir().unwrap();
+        let sink = FileLogSink::with_format(directory.path().join("logs"), 1, LogFormat::Json);
+        let first = event(TenantLogBody::Gap { dropped_bytes: 1 }, 0);
+        sink.publish(vec![first.clone()]).await;
+        let written = std::fs::read_to_string(sink.previous_path_for(&app_id())).unwrap();
+        assert_eq!(serde_json::from_str::<TenantLogEvent>(&written).unwrap(), first);
+        assert!(!sink.path_for(&app_id()).exists());
+        let text = sink.path_with_format(&app_id(), LogFormat::Text);
+        std::fs::write(&text, "old text output").unwrap();
+        sink.discard(&app_id());
+        assert!(!text.exists());
+        assert!(!sink.previous_path_for(&app_id()).exists());
     }
 
     #[tokio::test]

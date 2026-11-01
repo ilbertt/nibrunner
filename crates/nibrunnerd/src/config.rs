@@ -172,6 +172,14 @@ pub struct FilesystemConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogsConfig {
     pub keep_bytes_per_app: u64,
+    pub format: LogFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogFormat {
+    Text,
+    Json,
 }
 
 /// 256 MiB: weeks of an app that logs a line per request, and about a minute of the one that
@@ -180,6 +188,7 @@ impl Default for LogsConfig {
     fn default() -> Self {
         Self {
             keep_bytes_per_app: 256 * BYTES_PER_MEBIBYTE,
+            format: LogFormat::Text,
         }
     }
 }
@@ -585,6 +594,8 @@ mod file {
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "logs")]
     pub(super) struct Logs {
+        /// Text lines for operators, or JSON lines with deployment and stream identities.
+        pub(super) format: Option<super::LogFormat>,
         /// Whole mebibytes, more than 0. The newest this many of an app's output, in two files:
         /// `<appId>.log` becomes `<appId>.log.1` when it passes this, over the one before it, so
         /// an app holds between one and two of these on disk however fast it writes. 256 is weeks
@@ -1004,6 +1015,7 @@ impl HostConfig {
             }),
             max_concurrent_vm_starts: Some(self.max_concurrent_vm_starts),
             logs: Some(file::Logs {
+                format: Some(self.logs.format),
                 keep_mib_per_app: Some(self.logs.keep_bytes_per_app / BYTES_PER_MEBIBYTE),
             }),
         }
@@ -1190,6 +1202,7 @@ fn logs(document: Option<&file::Logs>) -> Result<LogsConfig, ConfigError> {
         return Err(ConfigError::invalid(field, "more than nothing"));
     }
     Ok(LogsConfig {
+        format: required("logs.format", document.format)?,
         keep_bytes_per_app: mebibytes
             .checked_mul(BYTES_PER_MEBIBYTE)
             .ok_or_else(|| ConfigError::invalid(field, "a size this machine could hold"))?,
@@ -1861,19 +1874,47 @@ denied_egress_addresses_v6 = []
         assert_eq!(silent.keep_bytes_per_app, 256 * 1024 * 1024);
 
         assert_eq!(
-            with("[logs]\nkeep_mib_per_app = 8\n").logs.keep_bytes_per_app,
+            with("[logs]\nformat = \"text\"\nkeep_mib_per_app = 8\n")
+                .logs
+                .keep_bytes_per_app,
             8 * 1024 * 1024
         );
 
         assert!(refused(&document(&[], "[logs]\n")).contains("logs.keep_mib_per_app"));
-        let nothing = refused(&document(&[], "[logs]\nkeep_mib_per_app = 0\n"));
+        let nothing = refused(&document(
+            &[],
+            "[logs]\nformat = \"text\"\nkeep_mib_per_app = 0\n",
+        ));
         assert!(nothing.contains("logs.keep_mib_per_app"), "{nothing}");
         assert!(nothing.contains("more than nothing"), "{nothing}");
-        assert!(
-            refused(&document(&[], "[logs]\nkeep_mib_per_app = 9223372036854775807\n"))
-                .contains("logs.keep_mib_per_app")
+        assert!(refused(&document(
+            &[],
+            "[logs]\nformat = \"text\"\nkeep_mib_per_app = 9223372036854775807\n"
+        ))
+        .contains("logs.keep_mib_per_app"));
+        assert!(refused(&document(
+            &[],
+            "[logs]\nformat = \"text\"\nkeep_mib_per_app = 256\nfiles = 3\n"
+        ))
+        .contains("files"));
+    }
+
+    #[test]
+    fn a_log_section_names_its_output_format_explicitly() {
+        assert_eq!(
+            with("[logs]\nformat = \"json\"\nkeep_mib_per_app = 8\n")
+                .logs
+                .format,
+            LogFormat::Json
         );
-        assert!(refused(&document(&[], "[logs]\nkeep_mib_per_app = 256\nfiles = 3\n")).contains("files"));
+        assert!(refused(&document(&[], "[logs]\nkeep_mib_per_app = 8\n")).contains("logs.format"));
+        assert!(matches!(
+            HostConfig::from_toml(&document(
+                &[],
+                "[logs]\nformat = \"other\"\nkeep_mib_per_app = 8\n"
+            )),
+            Err(ConfigError::Malformed { .. })
+        ));
     }
 
     #[test]
@@ -2083,7 +2124,7 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
             document(
                 &[],
                 &bound(
-                    "\n[proxy.http]\nport = 80\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n\n[logs]\nkeep_mib_per_app = 256\n"
+                    "\n[proxy.http]\nport = 80\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n\n[logs]\nformat = \"text\"\nkeep_mib_per_app = 256\n"
                 )
             )
         );
@@ -2221,6 +2262,7 @@ port = 9100
 listen_address = "127.0.0.1"
 
 [logs]
+format = "text"
 keep_mib_per_app = 64
 "#,
         ));
@@ -2369,8 +2411,8 @@ keep_mib_per_app = 64
                     "[metrics]\nport = 9100\n",
                     "[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\nroute = \"/metrics\"\n",
                     "[logs]\n",
-                    "[logs]\nkeep_mib_per_app = 0\n",
-                    "[logs]\nkeep_mib_per_app = 256\nfiles = 3\n",
+                    "[logs]\nformat = \"text\"\nkeep_mib_per_app = 0\n",
+                    "[logs]\nformat = \"text\"\nkeep_mib_per_app = 256\nfiles = 3\n",
                     "[proxy.http]\nport = 80\n\n[storage]\nbackend = \"zerofs\"\n",
                 ]
                 .into_iter()

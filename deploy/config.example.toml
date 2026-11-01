@@ -84,4 +84,5 @@ listen_address = "127.0.0.1"
 socket = "/run/nibrunner/filesystem.sock"
 
 [logs]
+format = "text"
 keep_mib_per_app = 256

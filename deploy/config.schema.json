@@ -72,6 +72,13 @@
     "network"
   ],
   "$defs": {
+    "LogFormat": {
+      "type": "string",
+      "enum": [
+        "text",
+        "json"
+      ]
+    },
     "artifacts": {
       "description": "One store, in S3 or on this disk.",
       "type": "object",
@@ -148,6 +155,10 @@
       "description": "How much of each app's output stays on disk, under `paths.state_dir/logs`. Nothing on the\nhost reads it back: it is there to be tailed.",
       "type": "object",
       "properties": {
+        "format": {
+          "description": "Text lines for operators, or JSON lines with deployment and stream identities.",
+          "$ref": "#/$defs/LogFormat"
+        },
         "keep_mib_per_app": {
           "description": "Whole mebibytes, more than 0. The newest this many of an app's output, in two files:\n`<appId>.log` becomes `<appId>.log.1` when it passes this, over the one before it, so\nan app holds between one and two of these on disk however fast it writes. 256 is weeks\nof an app that logs a line per request, and about a minute of one that floods.",
           "type": "integer",
@@ -157,6 +168,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "format",
         "keep_mib_per_app"
       ]
     },

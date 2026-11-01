@@ -47,8 +47,16 @@ disk. `[logs]` in `config.toml` sets that share:
 
 ```toml
 [logs]
+format = "text"
 keep_mib_per_app = 256
 ```
+
+Set `format = "json"` to write `<appId>.jsonl` and `<appId>.jsonl.1` instead. Each JSON line
+preserves the app, deployment, source, sequence and observation time, with a tagged `kind` for
+output, cron output, a buffering gap or a tenant restart. Embedded newlines remain inside one
+JSON record. The [published schema](https://github.com/ilbertt/nibrunner/blob/main/crates/protocol/schema/tenant-log.schema.json)
+is generated from the event types. A `[logs]` section must specify both settings; omitting the
+whole section keeps the default text format and retention.
 
 Both files go when `desired.json` stops naming the app. An app that is stopped, asleep, or being
 replaced by a new `deploymentId` is still named, so it keeps what it has written. Take a copy of
