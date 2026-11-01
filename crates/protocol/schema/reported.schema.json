@@ -41,6 +41,15 @@
         "$ref": "#/$defs/ReportedCheckpoint"
       }
     },
+    "cron": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/CronListing"
+      }
+    },
     "exports": {
       "type": "array",
       "items": {
@@ -91,6 +100,7 @@
     "capacity",
     "allocatable",
     "versions",
+    "cron",
     "volumes",
     "instances",
     "checkpoints",
@@ -145,6 +155,43 @@
         "memoryUsedBytes",
         "measuredAt"
       ]
+    },
+    "CronCommand": {
+      "type": "string",
+      "maxLength": 32768
+    },
+    "CronListing": {
+      "type": "object",
+      "properties": {
+        "appId": {
+          "$ref": "#/$defs/AppId"
+        },
+        "deploymentId": {
+          "$ref": "#/$defs/DeploymentId"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "jobs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RegisteredCronJob"
+          }
+        },
+        "timeZone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "appId",
+        "deploymentId",
+        "enabled",
+        "timeZone",
+        "jobs"
+      ]
+    },
+    "CronSchedule": {
+      "type": "string"
     },
     "DeploymentId": {
       "description": "an identifier",
@@ -279,6 +326,46 @@
       "type": "string",
       "maxLength": 1024,
       "minLength": 1
+    },
+    "RegisteredCronJob": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/CronCommand"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TenantEnvironment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "nextRunAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schedule": {
+          "$ref": "#/$defs/CronSchedule"
+        }
+      },
+      "required": [
+        "jobId",
+        "schedule",
+        "command",
+        "nextRunAt"
+      ]
     },
     "ReportedCheckpoint": {
       "type": "object",
@@ -610,6 +697,18 @@
       "type": "string",
       "maxLength": 512
     },
+    "TenantEnvironment": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/TenantValue"
+      },
+      "propertyNames": {
+        "not": {
+          "const": "__proto__"
+        },
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      }
+    },
     "TenantExit": {
       "description": "How a tenant process ended: the code it exited with, or the signal that killed it.",
       "oneOf": [
@@ -640,6 +739,11 @@
           ]
         }
       ]
+    },
+    "TenantValue": {
+      "description": "Only complete `${NAME}` references are filled in for NAME in NIBRUN_HOSTNAME, NIBRUN_HTTP_PORT. Bare names, incomplete references and other dollar signs remain literal; complete references to unknown `NIBRUN_` names are refused.",
+      "type": "string",
+      "maxLength": 32768
     },
     "Timestamp": {
       "description": "an ISO 8601 instant with an offset",

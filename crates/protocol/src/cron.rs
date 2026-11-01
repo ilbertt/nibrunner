@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AppId, DeploymentId, InvalidValue, SecretString, TenantEnvironment, REDACTED};
+use crate::{AppId, DeploymentId, InvalidValue, SecretString, TenantEnvironment, Timestamp, REDACTED};
 
 pub const MAX_CRONTAB_BYTES: usize = 65_536;
 pub const MAX_CRON_ENVIRONMENT_VARIABLES: usize = 256;
@@ -12,6 +12,7 @@ fn is_nonempty_line(value: &str) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct CronSchedule(String);
 
@@ -46,6 +47,7 @@ impl From<CronSchedule> for String {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "SecretString", into = "SecretString")]
 pub struct CronCommand(SecretString);
 
@@ -125,6 +127,7 @@ impl std::fmt::Debug for Crontab {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "CronJobFields", into = "CronJobFields")]
 pub struct CronJobDefinition {
     pub schedule: CronSchedule,
@@ -133,11 +136,38 @@ pub struct CronJobDefinition {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 struct CronJobFields {
     schedule: CronSchedule,
     command: CronCommand,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     environment: Option<TenantEnvironment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RegisteredCronJob {
+    pub job_id: String,
+    #[serde(flatten)]
+    pub definition: CronJobDefinition,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "Option::<Timestamp>::json_schema")
+    )]
+    pub next_run_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CronListing {
+    pub app_id: AppId,
+    pub deployment_id: DeploymentId,
+    pub enabled: bool,
+    pub time_zone: String,
+    pub jobs: Vec<RegisteredCronJob>,
 }
 
 impl TryFrom<CronJobFields> for CronJobDefinition {

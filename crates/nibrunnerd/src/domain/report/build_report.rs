@@ -41,6 +41,7 @@ pub struct ReportInputs<'a> {
 
 pub fn build_reported_state(inputs: ReportInputs<'_>) -> HostReportedState {
     HostReportedState {
+        cron: None,
         host_id: inputs.host_id,
         reported_at: inputs.reported_at,
         state: inputs.state,

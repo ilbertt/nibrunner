@@ -932,6 +932,7 @@ mod schema {
             cache_bytes: 1 << 40,
         };
         let state = HostReportedState {
+            cron: None,
             host_id: HostId::parse("host-1").unwrap(),
             reported_at: now.clone(),
             state: HostState::Ready,
@@ -1257,6 +1258,57 @@ mod schema {
     }
 
     #[test]
+    fn cron_distinguishes_an_unknown_registry_from_an_empty_one() {
+        let validator = validator(crate::schema::reported_state());
+        let unknown = reported_json();
+        assert_eq!(unknown.get("cron"), Some(&serde_json::Value::Null));
+        assert!(validator.is_valid(&unknown));
+        let read: HostReportedState = serde_json::from_value(unknown.clone()).unwrap();
+        assert_eq!(read.cron, None);
+
+        let empty = with(unknown, "/cron", serde_json::json!([]));
+        assert!(validator.is_valid(&empty));
+        let read: HostReportedState = serde_json::from_value(empty).unwrap();
+        assert_eq!(read.cron, Some(Vec::new()));
+        assert_eq!(
+            serde_json::to_value(read).unwrap().get("cron"),
+            Some(&serde_json::json!([]))
+        );
+    }
+
+    #[test]
+    fn a_reported_cron_job_requires_a_nullable_next_run_time() {
+        let validator = validator(crate::schema::reported_state());
+        for next_run in [
+            serde_json::Value::Null,
+            serde_json::json!("2026-08-03T10:05:00.000Z"),
+        ] {
+            let document = with(
+                reported_json(),
+                "/cron",
+                serde_json::json!([{
+                    "appId": "app-1", "deploymentId": "dep-1", "enabled": true, "timeZone": "UTC",
+                    "jobs": [{
+                        "jobId": "job-1", "schedule": "*/5 * * * *", "command": "true",
+                        "nextRunAt": next_run
+                    }]
+                }]),
+            );
+            assert!(validator.is_valid(&document));
+            let read: HostReportedState = serde_json::from_value(document.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(read)
+                    .unwrap()
+                    .pointer("/cron/0/jobs/0/nextRunAt"),
+                Some(&next_run)
+            );
+            let missing = without(document, "/cron/0/jobs/0/nextRunAt");
+            assert!(serde_json::from_value::<HostReportedState>(missing.clone()).is_err());
+            assert!(!validator.is_valid(&missing));
+        }
+    }
+
+    #[test]
     fn the_reported_state_schema_refuses_what_the_parser_refuses() {
         let validator = validator(crate::schema::reported_state());
         let broken = [
@@ -1288,6 +1340,7 @@ mod schema {
             without(reported_json(), "/capacity"),
             without(reported_json(), "/instances/0/compute"),
             without(reported_json(), "/volumes/0/usage"),
+            without(reported_json(), "/cron"),
         ];
         for document in broken {
             assert!(
