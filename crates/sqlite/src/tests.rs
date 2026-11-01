@@ -6,7 +6,7 @@ use protocol::{HranaNamedArg, HranaSql, HranaStatement, HranaValue};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-use crate::Database;
+use crate::{Database, Session};
 
 static ONE_DATABASE: Mutex<()> = Mutex::new(());
 
@@ -234,4 +234,108 @@ fn an_unbounded_query_hits_the_worker_deadline() {
     let sql = "WITH RECURSIVE t(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM t) SELECT sum(x) FROM t";
     let error = fixture.database.execute(sql, &statement(sql)).err().unwrap();
     assert_eq!(error.code, "SQLITE_INTERRUPT");
+}
+
+fn pipeline(session: &mut Session, body: Value) -> Value {
+    serde_json::to_value(session.pipeline(serde_json::from_value(body).unwrap()).unwrap()).unwrap()
+}
+
+#[test]
+fn hrana_streams_rotate_batons_and_reject_replays_before_dispatch() {
+    let fixture = fixture();
+    let mut session = Session::new(fixture.database);
+    let first = pipeline(
+        &mut session,
+        json!({"baton":null,"requests":[
+            {"type":"store_sql","sql_id":1,"sql":"SELECT 123"}
+        ]}),
+    );
+    let second = pipeline(
+        &mut session,
+        json!({"baton":first["baton"],"requests":[
+            {"type":"execute","stmt":{"sql_id":1}}, {"type":"close_sql","sql_id":1}
+        ]}),
+    );
+    assert_eq!(
+        second["results"][0]["response"]["result"]["rows"][0][0]["value"],
+        "123"
+    );
+    assert_ne!(first["baton"], second["baton"]);
+    let replay = json!({"baton":first["baton"],"requests":[
+        {"type":"store_sql","sql_id":1,"sql":"SELECT 999"}
+    ]});
+    assert!(session.pipeline(serde_json::from_value(replay).unwrap()).is_err());
+    let third = pipeline(
+        &mut session,
+        json!({"baton":second["baton"],"requests":[
+            {"type":"execute","stmt":{"sql_id":1}}
+        ]}),
+    );
+    assert_eq!(third["results"][0]["type"], "error");
+}
+
+#[test]
+fn batch_conditions_distinguish_success_failure_and_skipped_steps() {
+    let fixture = fixture();
+    let mut session = Session::new(fixture.database);
+    let result = pipeline(
+        &mut session,
+        json!({"requests":[{"type":"batch","batch":{"steps":[
+            {"stmt":{"sql":"SELECT 1"}},
+            {"condition":{"type":"ok","step":0},"stmt":{"sql":"SELECT 2"}},
+            {"condition":{"type":"error","step":0},"stmt":{"sql":"SELECT 3"}},
+            {"stmt":{"sql":"SELECT missing_column FROM items"}},
+            {"condition":{"type":"and","conds":[{"type":"ok","step":1},{"type":"error","step":3}]},"stmt":{"sql":"SELECT 5"}}
+        ]}}]}),
+    );
+    let batch = &result["results"][0]["response"]["result"];
+    assert_eq!(batch["step_results"].as_array().unwrap().len(), 5);
+    assert_eq!(batch["step_errors"].as_array().unwrap().len(), 5);
+    assert_eq!(batch["step_results"][0]["rows"][0][0]["value"], "1");
+    assert_eq!(batch["step_results"][1]["rows"][0][0]["value"], "2");
+    assert!(batch["step_results"][2].is_null());
+    assert!(batch["step_errors"][2].is_null());
+    assert!(batch["step_errors"][3].is_object());
+    assert_eq!(batch["step_results"][4]["rows"][0][0]["value"], "5");
+}
+
+#[test]
+fn hrana_describe_sequence_and_close_share_one_read_only_connection() {
+    let fixture = fixture();
+    let mut session = Session::new(fixture.database);
+    let result = pipeline(
+        &mut session,
+        json!({"requests":[
+            {"type":"describe","sql":"SELECT :parameter AS result"},
+            {"type":"sequence","sql":"BEGIN; SELECT count(*) FROM items; ROLLBACK"},
+            {"type":"close"}
+        ]}),
+    );
+    assert_eq!(
+        result["results"][0]["response"]["result"]["params"][0]["name"],
+        ":parameter"
+    );
+    assert_eq!(result["results"][1]["response"]["type"], "sequence");
+    assert_eq!(result["results"][2]["response"]["type"], "close");
+    assert_eq!(result["baton"], Value::Null);
+    assert!(session.is_closed());
+    assert!(session
+        .pipeline(serde_json::from_value(json!({"requests":[]})).unwrap())
+        .is_err());
+}
+
+#[test]
+fn invalid_batch_references_are_rejected_before_any_request_runs() {
+    let fixture = fixture();
+    let mut session = Session::new(fixture.database);
+    let bad = json!({"requests":[
+        {"type":"store_sql","sql_id":1,"sql":"SELECT 1"},
+        {"type":"batch","batch":{"steps":[{"condition":{"type":"ok","step":1},"stmt":{"sql":"SELECT 2"}}]}}
+    ]});
+    assert!(session.pipeline(serde_json::from_value(bad).unwrap()).is_err());
+    let result = pipeline(
+        &mut session,
+        json!({"requests":[{"type":"execute","stmt":{"sql_id":1}}]}),
+    );
+    assert_eq!(result["results"][0]["type"], "error");
 }
