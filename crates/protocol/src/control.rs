@@ -6,6 +6,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 use crate::access::AccessPolicy;
+use crate::cron::CronListing;
 use crate::domain::*;
 use crate::wire::*;
 
@@ -550,6 +551,8 @@ pub struct HostReportedState {
     /// What is left once every booted app is taken off.
     pub allocatable: HostCapacity,
     pub versions: HostVersions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<Vec<CronListing>>,
     pub volumes: Vec<ReportedVolume>,
     pub instances: Vec<ReportedInstance>,
     pub checkpoints: Vec<ReportedCheckpoint>,

@@ -55,6 +55,13 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
             .then(|| snapshot.volume_usage.get(&volume.app_id).cloned())
             .flatten();
     }
+    report.cron = match crate::domain::cron::listing::read(host, chrono::Utc::now()).await {
+        Ok(listings) => Some(listings),
+        Err(error) => {
+            tracing::warn!(%error, "cron registrations could not be reported");
+            None
+        }
+    };
     report
 }
 

@@ -520,6 +520,7 @@ pub(crate) mod tests {
 
     pub(crate) fn report() -> HostReportedState {
         HostReportedState {
+            cron: None,
             host_id: HostId::parse("host-1").unwrap(),
             reported_at: Timestamp::from_epoch_ms(0),
             state: HostState::Ready,

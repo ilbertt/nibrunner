@@ -21,6 +21,11 @@ jq '.instances[] | {appId, state, message}' /var/lib/nibrunner/reported.json
 
 The [reference](/docs/reference/reported) lists every field.
 
+`cron` lists the registered jobs for each current deployment, using the same job IDs and time
+zone as the scheduler. Sleeping apps keep their next run times. Stopped apps keep their jobs
+with `enabled: false` and no next run times. Reading these registrations never wakes a guest.
+If the registry could not be read, `cron` is absent rather than reporting an empty table.
+
 ## Logs
 
 Each app's output goes to `<paths.state_dir>/logs/<appId>.log`, one line per line the program

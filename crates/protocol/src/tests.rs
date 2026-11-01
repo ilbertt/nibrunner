@@ -893,6 +893,7 @@ mod schema {
             cache_bytes: 1 << 40,
         };
         let state = HostReportedState {
+            cron: None,
             host_id: HostId::parse("host-1").unwrap(),
             reported_at: now.clone(),
             state: HostState::Ready,
