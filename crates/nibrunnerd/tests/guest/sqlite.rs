@@ -2,8 +2,12 @@ use std::time::Duration;
 
 use nibrunnerd::domain::filesystem::reader::guest_vsock_path;
 use nibrunnerd::domain::sqlite::client::{GuestSqlite, GuestSqliteError};
+use nibrunnerd::domain::sqlite::sessions::SqliteSessions;
 use nibrunnerd::test_support::machine::{RunningHost, Tenant};
-use protocol::{GuestPath, HranaPipelineRequest, HranaPipelineResponse, InstanceState};
+use protocol::{
+    GuestPath, HranaPipelineRequest, HranaPipelineResponse, InstanceState, SqliteOperation, SqliteOutcome,
+    SqliteQuery, SqliteSessionId,
+};
 use sqlx::{Connection, Executor};
 
 async fn seeded(host: &RunningHost) -> Tenant {
@@ -142,5 +146,97 @@ async fn sqlite_worker_capacity_pressure_and_cancellation_leave_the_app_running(
     );
     assert_eq!(host.get(&app, "/remember").await.unwrap().body, "2");
     drop(client);
+    host.stop().await;
+}
+
+fn operation(app: &Tenant, operation: SqliteOperation) -> SqliteQuery {
+    SqliteQuery {
+        app_id: app.app_id.clone(),
+        deployment_id: app.instance.deployment_id.clone(),
+        session_id: SqliteSessionId::parse("database-session").unwrap(),
+        operation,
+    }
+}
+
+fn open() -> SqliteOperation {
+    SqliteOperation::Open {
+        root: GuestPath::parse("/app/data").unwrap(),
+        path: GuestPath::parse("/db.sqlite").unwrap(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_database_session_wakes_and_pins_its_app_and_expires_when_the_deployment_changes() {
+    let Some(host) = crate::host().await else { return };
+    let app = seeded(&host).await.on_request(60_000);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    host.let_sleep(&app).await;
+    let sessions = std::sync::Arc::new(SqliteSessions::default());
+    assert!(matches!(
+        sessions.query(&host.host, operation(&app, open())).await,
+        SqliteOutcome::Opened
+    ));
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert!(host.host.state.guest_busy(&app.app_id));
+    nibrunnerd::test_support::measured_quiet_since(
+        &host.host.state,
+        &app.app_id,
+        nibrunnerd::clock::now_ms() - 120_000,
+    )
+    .await;
+    nibrunnerd::domain::reconcile::idle::apply_sleep(&host.host).await;
+    assert_eq!(
+        host.instance(&app.app_id).await.unwrap().state,
+        InstanceState::Running
+    );
+    let replacement = app.clone().redeployed("sqlite-next");
+    host.deploy(std::slice::from_ref(&replacement)).await;
+    host.until("the new deployment to own the app", |report| {
+        report.instances.iter().any(|instance| {
+            instance.app_id == app.app_id
+                && instance.deployment_id == replacement.instance.deployment_id
+                && matches!(instance.state, InstanceState::Idle | InstanceState::Running)
+        })
+    })
+    .await;
+    assert!(!host.host.state.guest_busy(&app.app_id));
+    let body: HranaPipelineRequest = serde_json::from_value(
+        serde_json::json!({"requests":[{"type":"execute","stmt":{"sql":"SELECT value FROM kept"}}]}),
+    )
+    .unwrap();
+    assert!(matches!(
+        sessions
+            .query(
+                &host.host,
+                operation(&app, SqliteOperation::Pipeline { body: body.clone() })
+            )
+            .await,
+        SqliteOutcome::Failed { .. }
+    ));
+    assert!(matches!(
+        sessions.query(&host.host, operation(&replacement, open())).await,
+        SqliteOutcome::Opened
+    ));
+    let response = sessions
+        .query(
+            &host.host,
+            operation(&replacement, SqliteOperation::Pipeline { body }),
+        )
+        .await;
+    let SqliteOutcome::Responded { body } = response else {
+        panic!("the replacement reads its persistent database")
+    };
+    assert_eq!(
+        serde_json::to_value(body).unwrap()["results"][0]["response"]["result"]["rows"][0][0]["value"],
+        "9223372036854775807"
+    );
+    assert!(matches!(
+        sessions
+            .query(&host.host, operation(&replacement, SqliteOperation::Close))
+            .await,
+        SqliteOutcome::Closed
+    ));
+    assert!(!host.host.state.guest_busy(&app.app_id));
     host.stop().await;
 }

@@ -1,0 +1,29 @@
+---
+title: SQLite queries
+description: Read a running app's SQLite database through the private filesystem socket.
+---
+
+`POST /sqlite` on the [filesystem socket](/docs/guides/file-listings) opens, queries and closes
+read-only database sessions. The [socket reference](/docs/reference/filesystem) describes the
+request and response types, generated from the protocol.
+
+An open request names the app, its current deployment, a unique session ID, a persistent-volume
+root such as `/app/data`, and a database path relative to that root such as `/notes.sqlite`.
+The worker is confined to that root and runs as the tenant's user. The database must already
+exist. Live WAL databases are supported; writes, attached databases, extensions and filesystem
+functions are refused.
+
+Pipeline requests use Hrana v2. Pass the response's `baton` into the next pipeline on the same
+session. Integers remain decimal strings and blobs use base64. SQL is never retried. Closing a
+session also cancels a query in progress.
+
+Sessions wake sleeping apps and keep them awake while open. They expire after 30 idle seconds
+and are cancelled before a deployment stops or is replaced. A host allows 128 sessions, with at
+most four per app. Readers share the app's existing memory budget, have a combined 24 MiB guest
+limit and are preferred over the app when memory runs out. A guest without enough spare memory
+refuses a reader.
+
+Each pipeline has a five-second execution deadline. Requests and responses are limited to
+4 MiB, statements and individual values to 64 KiB, results to 1,000 rows and 256 columns,
+pipelines to 64 requests, and batches to 256 steps. A limit produces an error instead of a
+truncated result.

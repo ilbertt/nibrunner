@@ -1,20 +1,19 @@
 //! What a guest holds, listed for something else on this machine.
 //!
-//! A read surface, like the scrape page: it answers questions and takes no input, so "nothing may
-//! tell this daemon what to do except by writing that document" still holds of a daemon that now
-//! answers two connections. A listing does wake a sleeping app, because that is what any request
-//! reaching one does.
+//! Directory listings and read-only SQLite sessions wake sleeping apps without changing desired
+//! state. The private socket grants access to every app's files.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 use protocol::{AppId, GuestPath};
 
 use crate::domain::filesystem::client::GuestFilesystemError;
 use crate::domain::filesystem::reader;
+use crate::domain::sqlite::sessions::SqliteSessions;
 use crate::host::Host;
 use crate::ports::{WakeFailure, WakeRefusal};
 
@@ -25,6 +24,7 @@ const PATH_QUERY: &str = "path=";
 const USAGE: &str = "A listing is GET /apps/<appId>/files?path=<path>.";
 
 const SOCKET_MODE: u32 = 0o600;
+const SQLITE_ROUTE: &str = "/sqlite";
 
 /// The body every refusal is answered with.
 #[derive(Debug, serde::Serialize)]
@@ -233,7 +233,14 @@ async fn list(
     Ok(reader::list(host, app_id, path).await?)
 }
 
-async fn answer(host: &Arc<Host>, request: Request<Incoming>) -> Response<Full<bytes::Bytes>> {
+async fn answer(
+    host: &Arc<Host>,
+    sessions: &Arc<SqliteSessions>,
+    request: Request<Incoming>,
+) -> Response<Full<bytes::Bytes>> {
+    if request.uri().path() == SQLITE_ROUTE {
+        return answer_sqlite(host, sessions, request).await;
+    }
     let listed = match asked_for(&request) {
         Ok((app_id, path)) => list(host, &app_id, &path).await,
         Err(refusal) => Err(refusal),
@@ -250,6 +257,43 @@ async fn answer(host: &Arc<Host>, request: Request<Incoming>) -> Response<Full<b
             )
         }
     }
+}
+
+async fn answer_sqlite(
+    host: &Arc<Host>,
+    sessions: &Arc<SqliteSessions>,
+    request: Request<Incoming>,
+) -> Response<Full<bytes::Bytes>> {
+    if request.method() != Method::POST {
+        return rendered(
+            StatusCode::METHOD_NOT_ALLOWED,
+            &Refused {
+                message: "A SQLite query is POST /sqlite.".into(),
+            },
+        );
+    }
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Limited::new(request.into_body(), protocol::SQLITE_MAX_RPC_BYTES).collect(),
+    )
+    .await;
+    let Ok(Ok(body)) = body else {
+        return rendered(
+            StatusCode::BAD_REQUEST,
+            &Refused {
+                message: "The SQLite query body is invalid or too large.".into(),
+            },
+        );
+    };
+    let Ok(query) = serde_json::from_slice::<protocol::SqliteQuery>(&body.to_bytes()) else {
+        return rendered(
+            StatusCode::BAD_REQUEST,
+            &Refused {
+                message: "The SQLite query is malformed.".into(),
+            },
+        );
+    };
+    rendered(StatusCode::OK, &sessions.query(host, query).await)
 }
 
 fn rendered<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<Full<bytes::Bytes>> {
@@ -280,6 +324,7 @@ fn bind(socket_path: &Path) -> std::io::Result<tokio::net::UnixListener> {
 
 pub fn serve(host: &Arc<Host>, socket_path: PathBuf) {
     let host = host.clone();
+    let sessions = Arc::new(SqliteSessions::default());
     tokio::spawn(async move {
         let listener = match bind(&socket_path) {
             Ok(listener) => listener,
@@ -294,10 +339,12 @@ pub fn serve(host: &Arc<Host>, socket_path: PathBuf) {
                 continue;
             };
             let host = host.clone();
+            let sessions = sessions.clone();
             tokio::spawn(async move {
                 let service = hyper::service::service_fn(move |request| {
                     let host = host.clone();
-                    async move { Ok::<_, std::convert::Infallible>(answer(&host, request).await) }
+                    let sessions = sessions.clone();
+                    async move { Ok::<_, std::convert::Infallible>(answer(&host, &sessions, request).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
@@ -322,6 +369,8 @@ pub fn openapi() -> serde_json::Value {
         .into_generator();
     let listing = generator.subschema_for::<protocol::DirectoryListing>();
     let refused = generator.subschema_for::<Refused>();
+    let sqlite_query = generator.subschema_for::<protocol::SqliteQuery>();
+    let sqlite_outcome = generator.subschema_for::<protocol::SqliteOutcome>();
 
     let mut answers: BTreeMap<u16, Vec<&'static str>> = BTreeMap::new();
     for kind in RefusalKind::DECLARED {
@@ -347,6 +396,21 @@ pub fn openapi() -> serde_json::Value {
             "description": "What a guest holds, over the unix socket `[filesystem] socket` names.",
         },
         "paths": {
+            SQLITE_ROUTE: {
+                "post": {
+                    "summary": "Open, query or close a read-only SQLite session.",
+                    "description": "Sessions belong to one deployment, expire after 30 idle seconds, and close before a deployment stops or is replaced. Open supplies a persistent-volume root and a database path relative to that root. Pipeline carries Hrana v2 requests and never retries SQL.",
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": sqlite_query } },
+                    },
+                    "responses": {
+                        "200": body("The SQLite operation's outcome, including any refusal.", &sqlite_outcome),
+                        "400": body("The query is malformed, exceeds the body limit or took too long to arrive.", &refused),
+                        "405": body("The request was not a POST.", &refused),
+                    },
+                },
+            },
             format!("{APPS_PREFIX}{{appId}}{LISTING_SUFFIX}"): {
                 "get": {
                     "summary": "List a directory inside an app's guest.",
@@ -396,7 +460,7 @@ fn example_call() -> serde_json::Value {
 
 /// Bumped when this socket answers differently than it did, which no release has yet needed.
 #[cfg(feature = "schema")]
-const SOCKET_VERSION: &str = "1";
+const SOCKET_VERSION: &str = "2";
 
 #[cfg(feature = "schema")]
 const COMPONENT_SCHEMAS: &str = "#/components/schemas/";
@@ -621,6 +685,54 @@ mod tests {
         let (status, body) = asked_over(&socket_path, "/metrics").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body["message"].as_str().unwrap().contains("GET /apps/"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn sqlite_operations_use_the_existing_private_socket_and_validate_their_envelope() {
+        let host = test_host().await;
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("filesystem.sock");
+        serve(host.arc(), socket_path.clone());
+        while !socket_path.exists() {
+            tokio::task::yield_now().await;
+        }
+        let (status, _) = asked_over(&socket_path, SQLITE_ROUTE).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                .await
+                .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        for (body, expected) in [
+            (serde_json::json!({}), StatusCode::BAD_REQUEST),
+            (
+                serde_json::json!({"appId":"app-1","deploymentId":"dep-1","sessionId":"session-1","operation":{"type":"open","root":"/app/data","path":"/db.sqlite"}}),
+                StatusCode::OK,
+            ),
+        ] {
+            let response = sender
+                .send_request(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(SQLITE_ROUTE)
+                        .header("host", "localhost")
+                        .body(Full::new(bytes::Bytes::from(serde_json::to_vec(&body).unwrap())))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            if expected == StatusCode::OK {
+                assert!(matches!(
+                    serde_json::from_slice::<protocol::SqliteOutcome>(&bytes).unwrap(),
+                    protocol::SqliteOutcome::Failed { .. }
+                ));
+            }
+        }
     }
 
     /// One of every refusal this socket can build, so the catalogue the document is written from

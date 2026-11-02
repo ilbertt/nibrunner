@@ -13,6 +13,7 @@
     "raw-ports",
     "logs-and-metrics",
     "file-listings",
+    "sqlite",
     "host-capacity"
   ]
 }
