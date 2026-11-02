@@ -4,12 +4,10 @@ use std::time::{Duration, Instant};
 
 use guest_contract::paths;
 
-use crate::guest::{log, vsock};
+use crate::guest::{log, memory, vsock};
 
 const FREEZE_REQUEST: &str = "FREEZE";
 const FREEZE_HELD: &str = "OK";
-const TENANT_FREEZE: &str = "/sys/fs/cgroup/tenant/cgroup.freeze";
-const TENANT_EVENTS: &str = "/sys/fs/cgroup/tenant/cgroup.events";
 
 const MAX_HOLD: Duration = Duration::from_secs(900);
 
@@ -40,7 +38,7 @@ pub(crate) fn serve() -> ! {
     let mut frozen_until = None;
     loop {
         if frozen_until.is_some_and(|deadline| Instant::now() >= deadline)
-            && std::fs::write(TENANT_FREEZE, "0").is_ok()
+            && std::fs::write(memory::workload_file("cgroup.freeze"), "0").is_ok()
         {
             frozen_until = None;
             log("the host abandoned the tenant freeze; the tenant has been released");
@@ -75,7 +73,7 @@ fn answer(connection: OwnedFd, frozen_until: &mut Option<Instant>) {
             .write_all(if result.is_ok() { b"OK\n" } else { b"REFUSED\n" })
             .is_err()
             && result.is_ok()
-            && std::fs::write(TENANT_FREEZE, "0").is_ok()
+            && std::fs::write(memory::workload_file("cgroup.freeze"), "0").is_ok()
         {
             *frozen_until = None;
         }
@@ -124,13 +122,13 @@ fn answer(connection: OwnedFd, frozen_until: &mut Option<Instant>) {
 }
 
 fn freeze_tenant() -> std::io::Result<()> {
-    std::fs::write(TENANT_FREEZE, "1")?;
+    std::fs::write(memory::workload_file("cgroup.freeze"), "1")?;
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let events = match std::fs::read_to_string(TENANT_EVENTS) {
+        let events = match std::fs::read_to_string(memory::workload_file("cgroup.events")) {
             Ok(events) => events,
             Err(error) => {
-                let _ = std::fs::write(TENANT_FREEZE, "0");
+                let _ = std::fs::write(memory::workload_file("cgroup.freeze"), "0");
                 return Err(error);
             }
         };
@@ -138,7 +136,7 @@ fn freeze_tenant() -> std::io::Result<()> {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            std::fs::write(TENANT_FREEZE, "0")?;
+            std::fs::write(memory::workload_file("cgroup.freeze"), "0")?;
             return Err(std::io::Error::other("the tenant cgroup did not freeze"));
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -148,7 +146,7 @@ fn freeze_tenant() -> std::io::Result<()> {
 fn synchronize_clock(wire: &mut BufReader<std::fs::File>) -> std::io::Result<()> {
     let nanos = crate::clock_sync::host_time(wire)?;
     set_clock(nanos)?;
-    std::fs::write(TENANT_FREEZE, "0")?;
+    std::fs::write(memory::workload_file("cgroup.freeze"), "0")?;
     writeln!(
         wire.get_mut(),
         "{}",

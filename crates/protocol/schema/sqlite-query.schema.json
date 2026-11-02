@@ -157,8 +157,7 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "stmt": {
           "$ref": "#/$defs/HranaStatement"
@@ -190,8 +189,7 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "requests": {
           "type": "array",
@@ -245,16 +243,14 @@
               "type": [
                 "string",
                 "null"
-              ],
-              "default": null
+              ]
             },
             "sql_id": {
               "type": [
                 "integer",
                 "null"
               ],
-              "format": "int32",
-              "default": null
+              "format": "int32"
             },
             "type": {
               "type": "string",
@@ -272,16 +268,14 @@
               "type": [
                 "string",
                 "null"
-              ],
-              "default": null
+              ]
             },
             "sql_id": {
               "type": [
                 "integer",
                 "null"
               ],
-              "format": "int32",
-              "default": null
+              "format": "int32"
             },
             "type": {
               "type": "string",
@@ -349,14 +343,12 @@
       "properties": {
         "args": {
           "type": "array",
-          "default": [],
           "items": {
             "$ref": "#/$defs/HranaValue"
           }
         },
         "named_args": {
           "type": "array",
-          "default": [],
           "items": {
             "$ref": "#/$defs/HranaNamedArg"
           }
@@ -365,23 +357,20 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "sql_id": {
           "type": [
             "integer",
             "null"
           ],
-          "format": "int32",
-          "default": null
+          "format": "int32"
         },
         "want_rows": {
           "type": [
             "boolean",
             "null"
-          ],
-          "default": null
+          ]
         }
       }
     },

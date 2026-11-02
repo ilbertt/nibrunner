@@ -5,6 +5,8 @@ mod filesystem;
 mod logs;
 mod memory;
 mod mounts;
+mod service;
+mod sqlite;
 mod supervisor;
 mod vsock;
 

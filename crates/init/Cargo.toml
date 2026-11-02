@@ -14,6 +14,10 @@ protocol.workspace = true
 guest-contract.workspace = true
 libc.workspace = true
 thiserror.workspace = true
+sqlite.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+httparse.workspace = true
 nix = { version = "0.30", features = ["mount", "signal", "process", "fs", "socket", "user", "time", "poll"] }
 
 [dev-dependencies]

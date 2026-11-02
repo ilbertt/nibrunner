@@ -11,6 +11,7 @@ name = "guest_contract"
 path = "src/lib.rs"
 
 [dependencies]
+percent-encoding.workspace = true
 protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

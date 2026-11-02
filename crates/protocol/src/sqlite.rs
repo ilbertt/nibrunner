@@ -10,6 +10,7 @@ pub const SQLITE_MAX_PARAMETERS: usize = 256;
 pub const SQLITE_MAX_COLUMNS: usize = 256;
 pub const SQLITE_MAX_ROWS: usize = 1000;
 pub const SQLITE_MAX_BODY_BYTES: usize = 4_194_304;
+pub const SQLITE_MAX_RPC_BYTES: usize = SQLITE_MAX_BODY_BYTES + 16_384;
 pub const SQLITE_MAX_PIPELINE_REQUESTS: usize = 64;
 pub const SQLITE_MAX_BATCH_STEPS: usize = 256;
 pub const SQLITE_MAX_ERROR_BYTES: usize = 1024;
@@ -78,9 +79,9 @@ pub struct HranaNamedArg {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HranaSql {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sql: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sql_id: Option<i32>,
 }
 
@@ -89,11 +90,11 @@ pub struct HranaSql {
 pub struct HranaStatement {
     #[serde(flatten)]
     pub source: HranaSql,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<HranaValue>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_args: Vec<HranaNamedArg>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub want_rows: Option<bool>,
 }
 
@@ -111,7 +112,7 @@ pub enum HranaBatchCondition {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HranaBatchStep {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<HranaBatchCondition>,
     pub stmt: HranaStatement,
 }
@@ -153,7 +154,7 @@ pub enum HranaRequest {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HranaPipelineRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baton: Option<String>,
     pub requests: Vec<HranaRequest>,
 }
@@ -177,6 +178,7 @@ pub struct HranaStatementResult {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HranaError {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     pub message: String,
 }

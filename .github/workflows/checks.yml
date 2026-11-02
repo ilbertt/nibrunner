@@ -129,8 +129,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: cron
-            families: cron
+          - shard: cron+sqlite
+            families: cron sqlite
           - shard: sleep
             families: sleep
           - shard: idle+isolation+resources
@@ -165,7 +165,7 @@ jobs:
           path: |
             guest/rootfs.ext4
             guest/manifest.json
-          key: ${{ runner.os }}-guest-image-${{ hashFiles('guest/build-image.sh', 'guest/manifest.json', 'crates/init/**', 'crates/guest-contract/**') }}
+          key: ${{ runner.os }}-guest-image-${{ hashFiles('guest/build-image.sh', 'guest/manifest.json', 'crates/init/**', 'crates/guest-contract/**', 'crates/sqlite/**', 'crates/protocol/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build the guest image
         if: steps.guest-image.outputs.cache-hit != 'true'

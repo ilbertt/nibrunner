@@ -30,6 +30,8 @@ mod resources;
 #[cfg(target_os = "linux")]
 mod sleep;
 #[cfg(target_os = "linux")]
+mod sqlite;
+#[cfg(target_os = "linux")]
 mod tenant;
 #[cfg(target_os = "linux")]
 mod volumes;

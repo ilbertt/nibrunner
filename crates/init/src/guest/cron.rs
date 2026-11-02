@@ -1,154 +1,23 @@
 use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use guest_contract::cron_execution::{self, ExecutionFrame, ExecutionRequest, Rejection};
 use guest_contract::instance_env::InstanceConfig;
 use guest_contract::paths;
 use nix::sys::signal::{kill, killpg, SigSet, Signal};
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{ForkResult, Gid, Pid, Uid};
 
-use crate::guest::{log, memory, vsock};
+use crate::guest::service::ready;
+use crate::guest::{log, memory, service};
 
-const MAX_WORKERS: usize = 64;
 const POLL_MS: i32 = 100;
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_FAILURE_EXIT_CODE: i32 = 126;
-static STOPPING: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn stop_requested(_: libc::c_int) {
-    STOPPING.store(true, Ordering::Relaxed);
-}
-
-fn prepare_signals() -> nix::Result<()> {
-    STOPPING.store(false, Ordering::Relaxed);
-    let action = nix::sys::signal::SigAction::new(
-        nix::sys::signal::SigHandler::Handler(stop_requested),
-        nix::sys::signal::SaFlags::empty(),
-        SigSet::empty(),
-    );
-    unsafe { nix::sys::signal::sigaction(Signal::SIGTERM, &action)? };
-    let mut blocked = SigSet::empty();
-    blocked.add(Signal::SIGTERM);
-    blocked.thread_unblock()
-}
-
-pub(crate) fn start(config: &InstanceConfig, ceiling: &memory::Ceiling) -> Option<Pid> {
-    let parent = nix::unistd::getpid();
-    match unsafe { nix::unistd::fork() } {
-        Ok(ForkResult::Parent { child }) => Some(child),
-        Ok(ForkResult::Child) => {
-            if nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0)).is_err()
-                || unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } < 0
-                || nix::unistd::getppid() != parent
-                || prepare_signals().is_err()
-            {
-                unsafe { libc::_exit(1) }
-            }
-            serve(config, ceiling);
-            unsafe { libc::_exit(0) }
-        }
-        Err(error) => {
-            log(&format!("the cron channel could not be started: {error}"));
-            None
-        }
-    }
-}
-
-pub(crate) fn stop(pid: Pid) {
-    let _ = kill(pid, Signal::SIGTERM);
-    wait_for(pid);
-}
-
-fn wait_for(pid: Pid) {
-    while matches!(waitpid(pid, None), Err(nix::errno::Errno::EINTR)) {}
-}
-
-fn serve(config: &InstanceConfig, ceiling: &memory::Ceiling) {
-    let Ok(listener) = vsock::listener(guest_contract::vsock::CRON_EXECUTION_PORT) else {
-        log("the cron execution port could not be opened");
-        return;
-    };
-    let _ = nix::fcntl::fcntl(
-        &listener,
-        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
-    );
-    let mut workers = std::collections::BTreeSet::new();
-    while !STOPPING.load(Ordering::Relaxed) {
-        while let Ok(WaitStatus::Exited(pid, _) | WaitStatus::Signaled(pid, _, _)) =
-            waitpid(None, Some(WaitPidFlag::WNOHANG))
-        {
-            workers.remove(&pid);
-        }
-        if !ready(listener.as_raw_fd(), libc::POLLIN, POLL_MS).unwrap_or(false) {
-            continue;
-        }
-        let Ok(connection) = vsock::accept_from_host(&listener) else {
-            continue;
-        };
-        let _ = nix::fcntl::fcntl(
-            &connection,
-            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-        );
-        if workers.len() >= MAX_WORKERS {
-            let _ = send_reply(connection.as_raw_fd(), &ExecutionFrame::Rejected(Rejection::Busy));
-            continue;
-        }
-        let mut blocked = SigSet::empty();
-        blocked.add(Signal::SIGTERM);
-        let _ = blocked.thread_block();
-        let parent = nix::unistd::getpid();
-        match unsafe { nix::unistd::fork() } {
-            Ok(ForkResult::Parent { child }) => {
-                workers.insert(child);
-            }
-            Ok(ForkResult::Child) => {
-                drop(listener);
-                if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } < 0
-                    || nix::unistd::getppid() != parent
-                    || prepare_signals().is_err()
-                {
-                    unsafe { libc::_exit(1) }
-                }
-                answer(connection.as_raw_fd(), config, ceiling);
-                unsafe { libc::_exit(0) }
-            }
-            Err(_) => {
-                let _ = send_reply(
-                    connection.as_raw_fd(),
-                    &ExecutionFrame::Rejected(Rejection::SpawnFailed),
-                );
-            }
-        }
-        let _ = blocked.thread_unblock();
-    }
-    for pid in &workers {
-        let _ = kill(*pid, Signal::SIGTERM);
-    }
-    for pid in workers {
-        wait_for(pid);
-    }
-}
-
-fn ready(fd: RawFd, events: i16, timeout_ms: i32) -> io::Result<bool> {
-    let mut watched = libc::pollfd {
-        fd,
-        events,
-        revents: 0,
-    };
-    let count = unsafe { libc::poll(&mut watched, 1, timeout_ms) };
-    if count < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(count > 0)
-}
-
 fn transfer(fd: RawFd, bytes: &mut [u8], sending: bool, deadline: Instant) -> io::Result<()> {
     let mut position = 0;
-    while position < bytes.len() && !STOPPING.load(Ordering::Relaxed) {
+    while position < bytes.len() && !service::stopping() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(io::ErrorKind::TimedOut.into());
@@ -191,7 +60,7 @@ fn transfer(fd: RawFd, bytes: &mut [u8], sending: bool, deadline: Instant) -> io
         }
         position += count as usize;
     }
-    if STOPPING.load(Ordering::Relaxed) {
+    if service::stopping() {
         return Err(io::ErrorKind::Interrupted.into());
     }
     Ok(())
@@ -224,7 +93,11 @@ fn read_request(fd: RawFd) -> io::Result<ExecutionRequest> {
     cron_execution::decode_request(header, &body).map_err(io::Error::other)
 }
 
-fn answer(fd: RawFd, config: &InstanceConfig, ceiling: &memory::Ceiling) {
+pub(super) fn refuse(fd: RawFd, reason: Rejection) {
+    let _ = send_reply(fd, &ExecutionFrame::Rejected(reason));
+}
+
+pub(super) fn answer(fd: RawFd, config: &InstanceConfig, ceiling: &memory::Ceiling) {
     let Ok(request) = read_request(fd) else {
         let _ = send_reply(fd, &ExecutionFrame::Rejected(Rejection::Malformed));
         return;
@@ -257,7 +130,7 @@ struct CommandExit {
 
 impl CommandProcess {
     fn forward(&mut self, connection: RawFd) -> io::Result<()> {
-        while !STOPPING.load(Ordering::Relaxed) {
+        while !service::stopping() {
             if !self.exited {
                 let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
                 if unsafe {
@@ -472,6 +345,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use super::*;

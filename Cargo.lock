@@ -1960,6 +1960,7 @@ name = "nibrunner-guest-contract"
 version = "2026.10.7"
 dependencies = [
  "nibrunner-protocol",
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror",
@@ -1969,10 +1970,14 @@ dependencies = [
 name = "nibrunner-init"
 version = "2026.10.7"
 dependencies = [
+ "httparse",
  "libc",
  "nibrunner-guest-contract",
  "nibrunner-protocol",
+ "nibrunner-sqlite",
  "nix 0.30.1",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
