@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.11.0] - 2026-11-02
+
+### Fixes
+
+- **guest:** Update kernel and Debian base image (#272)
+
 ## [2026.10.7] - 2026-10-28
 
 ### Features
