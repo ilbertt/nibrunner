@@ -2,31 +2,33 @@
   "artifacts": [
     {
       "name": "vmlinux",
-      "bytes": 44490520,
-      "sha256": "b6ada6ce51628084d1ba1d8b0b9b7a9785d183ab34e3824cf408b274a86ef221"
+      "bytes": 44514032,
+      "sha256": "4714cd50377219269f5d8525e0abef452448b883d921d3aa791364bf6995804e"
     },
     {
       "name": "kernel.config",
-      "bytes": 92056,
-      "sha256": "f86ae4bc9a348efee41dcb402d1b96eeda8ebe13d292a2ff79b31a256ce0ddac"
+      "bytes": 92028,
+      "sha256": "d66bad025f8145c0ea232b4a9674315933275afa0076a6913b8ed158263ae87f"
     }
   ],
   "inputs": {
-    "kernel_version": "6.1.180",
-    "kernel_sha256": "4f0e601759b55cfc4d0bf4990859b93bc74fb915cde532284f0765b77ca0f86a",
+    "kernel_version": "6.1.191",
+    "kernel_sha256": "02f15b77d213e15607923832ef9382e2414ea90df6c007f15a910e139645c35d",
     "firecracker_ref": "v1.16.1",
     "firecracker_commit": "2038188f145fb81b8d098147a10e9d9f392fd22f",
     "firecracker_config_sha256": "adbc70ab5e89213ba00594b12d25e09bdf8bb1ed3c252d7449326bb14c22963b",
-    "debian_image": "debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd",
-    "debian_snapshot": "20260714T000000Z",
+    "debian_image": "debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4",
+    "debian_snapshot": "20261101T000000Z",
     "source_date_epoch": 1783987200,
     "rootfs_uuid": "6e696272-756e-4e65-b200-000000000001",
     "rootfs_hash_seed": "6e696272-756e-4e65-b200-000000000002",
     "rootfs_packages": {
-      "ca-certificates": "20250419",
-      "libc6": "2.41-12+deb13u3",
+      "ca-certificates": "20250419+deb13u1",
+      "libc6": "2.41-12+deb13u4",
       "libgcc-s1": "14.2.0-19",
       "libstdc++6": "14.2.0-19"
-    }
+    },
+    "kernel_builder_image": "debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd",
+    "kernel_debian_snapshot": "20261031T000000Z"
   }
 }

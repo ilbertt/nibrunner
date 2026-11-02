@@ -159,6 +159,11 @@ Firecracker release it pins and embeds Firecracker and its matching jailer; set 
 `NIBRUNNER_JAILER_BINARY` to matching release binaries to build without fetching. `just guest-image` builds `guest/rootfs.ext4` and needs Linux, root, docker and
 e2fsprogs.
 
+The guest manifest records the kernel builder image and archive snapshot separately from the
+rootfs pins: refreshing the Debian base must not rewrite the provenance of an already-built
+kernel. Kernel upgrades preserve the enabled settings embedded in the previous `vmlinux`.
+The rootfs build applies the pinned Debian security archive and records installed library versions.
+
 ## Releases
 
 Run `prepare-release` on GitHub to open a release PR from `main`. `git-cliff`, pinned to a minor version in

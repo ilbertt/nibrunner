@@ -35,13 +35,19 @@ cat > "$work/Dockerfile" <<DOCKER
 FROM $base
 RUN printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/$snapshot/ trixie main\n' \
       > /etc/apt/sources.list \
+ && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/$snapshot/ trixie-security main\n' \
+      >> /etc/apt/sources.list \
  && rm -f /etc/apt/sources.list.d/*.sources \
  && apt-get -o Acquire::Check-Valid-Until=false update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends ca-certificates \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc /usr/share/man /usr/share/locale
 DOCKER
 docker build --platform linux/amd64 -t nibrunner-guest:build "$work" >/dev/null
+
+docker run --rm --platform linux/amd64 --network none nibrunner-guest:build \
+    dpkg-query -W -f='${Package}=${Version}\n' > "$work/packages"
 
 container=$(docker create --platform linux/amd64 nibrunner-guest:build /bin/true)
 mkdir -p "$work/rootfs"
@@ -70,12 +76,16 @@ truncate -s $(( (content * 3 / 2 + 8 * 1024 * 1024) / 1048576 * 1048576 )) "$her
 SOURCE_DATE_EPOCH=$epoch mke2fs -t ext4 -F -q -m 0 -U "$uuid" -E "root_owner=0:0,hash_seed=$seed" \
     -d "$work/rootfs" "$here/rootfs.ext4"
 
-python3 - "$here" "$init" "$here/$(basename "$0")" <<'PY'
+python3 - "$here" "$init" "$here/$(basename "$0")" "$work/packages" <<'PY'
 import hashlib, json, pathlib, sys
-guest, init, recipe = map(pathlib.Path, sys.argv[1:])
+guest, init, recipe, packages = map(pathlib.Path, sys.argv[1:])
 sha256 = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
 manifest = json.loads((guest / "manifest.json").read_text())
 manifest["inputs"]["init_sha256"] = sha256(init)
+installed = dict(line.split("=", 1) for line in packages.read_text().splitlines())
+manifest["inputs"]["rootfs_packages"] = {
+    name: installed[name] for name in manifest["inputs"]["rootfs_packages"]
+}
 # A digest of what the build read, not of what it wrote: the daemon compares versions to decide
 # whether a snapshot was taken on the image it is about to restore into, so two images that boot
 # differently must not share one, and two builds of the same inputs may.
