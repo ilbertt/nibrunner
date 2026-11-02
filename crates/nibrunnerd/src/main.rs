@@ -189,7 +189,7 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
     shutdown().await;
     reloading.abort();
     tracing::info!("nibrunnerd stopping; every microVM on this host keeps running");
-    host.cron_runs.shutdown().await;
+    host.deployment_tasks.shutdown().await;
     for task in running {
         task.abort();
     }

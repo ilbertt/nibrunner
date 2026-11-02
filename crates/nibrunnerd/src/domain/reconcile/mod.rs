@@ -207,7 +207,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
         .filter(|instance| instance.desired_state != DesiredInstanceState::Stopped)
         .map(|instance| (instance.app_id.clone(), instance.deployment_id.clone()))
         .collect::<Vec<_>>();
-    host.cron_runs.synchronize(&enabled).await;
+    host.deployment_tasks.synchronize(&enabled).await;
     let observed = observe(host, desired).await;
     let plan = plan_reconcile(desired, &observed);
     host.state
@@ -235,7 +235,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
     converge::observe(host, crate::clock::now_ms()).await;
     host.persist().await;
 
-    host.cron_runs.synchronize(&enabled).await;
+    host.deployment_tasks.synchronize(&enabled).await;
     host.state.modify(|snapshot| snapshot.converged = true).await;
     host.state.signal_report();
 }

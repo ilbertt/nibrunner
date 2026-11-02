@@ -9,12 +9,12 @@ use tokio::task::JoinSet;
 use crate::adapters::cron_execution::GuestCronExecution;
 use crate::controllers::Controller;
 use crate::domain::cron::registry::{CronRegistry, CronRegistryError};
-use crate::domain::cron::runs::CronRunLease;
 use crate::domain::cron::schedule::InvalidCronSchedule;
 use crate::domain::cron::scheduler::{CronScheduler, ScheduledRun};
+use crate::domain::deployment_tasks::DeploymentTaskLease;
 use crate::domain::filesystem::reader::guest_vsock_path;
 use crate::host::Host;
-use crate::state::CronActivity;
+use crate::state::GuestActivity;
 
 const CRON_RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -94,7 +94,11 @@ impl CronController {
             else {
                 continue;
             };
-            let Some(lease) = self.host.cron_runs.start(&run.key.app_id, &run.key.deployment_id) else {
+            let Some(lease) = self
+                .host
+                .deployment_tasks
+                .start(&run.key.app_id, &run.key.deployment_id)
+            else {
                 continue;
             };
             let host = self.host.clone();
@@ -134,7 +138,7 @@ impl CronController {
         registry: &CronRegistry,
         run: &ScheduledRun,
         expected: Option<&CronTable>,
-    ) -> Option<CronActivity> {
+    ) -> Option<GuestActivity> {
         let (activity, needs_wake) = {
             let _transition = host.state.transition(&run.key.app_id).await;
             if !Self::current(host, run).await
@@ -158,7 +162,7 @@ impl CronController {
                 return None;
             }
             (
-                host.state.cron_activity(&run.key.app_id),
+                host.state.guest_activity(&run.key.app_id),
                 record.state == InstanceState::Idle,
             )
         };
@@ -193,7 +197,7 @@ impl CronController {
         host: Arc<Host>,
         registry: Arc<CronRegistry>,
         run: ScheduledRun,
-        mut lease: CronRunLease,
+        mut lease: DeploymentTaskLease,
         expected: Option<CronTable>,
     ) {
         let activity = tokio::select! {
@@ -221,7 +225,10 @@ impl CronController {
 
     #[cfg(test)]
     async fn dispatch(host: Arc<Host>, registry: Arc<CronRegistry>, run: ScheduledRun) {
-        let Some(lease) = host.cron_runs.start(&run.key.app_id, &run.key.deployment_id) else {
+        let Some(lease) = host
+            .deployment_tasks
+            .start(&run.key.app_id, &run.key.deployment_id)
+        else {
             return;
         };
         Self::execute_owned(host, registry, run, lease, None).await;
@@ -313,7 +320,9 @@ mod tests {
             )
             .await
             .unwrap();
-        host.cron_runs.synchronize(&[(app_id(), deployment_id())]).await;
+        host.deployment_tasks
+            .synchronize(&[(app_id(), deployment_id())])
+            .await;
         host
     }
 
@@ -376,7 +385,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(host.state.cron_running(&app_id()));
+        assert!(host.state.guest_busy(&app_id()));
         let transition = tokio::time::timeout(Duration::from_secs(1), host.state.transition(&app_id()))
             .await
             .unwrap();
@@ -392,13 +401,13 @@ mod tests {
                 instance.desired_state = DesiredInstanceState::Stopped
             })]
         }));
-        host.cron_runs.synchronize(&[]).await;
+        host.deployment_tasks.synchronize(&[]).await;
         tokio::time::timeout(Duration::from_secs(5), guest)
             .await
             .unwrap()
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while host.state.cron_running(&app_id()) {
+            while host.state.guest_busy(&app_id()) {
                 tokio::task::yield_now().await;
             }
         })
@@ -420,7 +429,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Waker for WakeChecksPin {
         async fn wake(&self, app_id: &protocol::AppId) -> Result<(), WakeRefusal> {
-            assert!(self.state.cron_running(app_id));
+            assert!(self.state.guest_busy(app_id));
             let _transition = self.state.transition(app_id).await;
             self.state
                 .update_record(app_id, |record| {
@@ -435,7 +444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cron_activity_is_pinned_before_a_wake_and_released_after_execution_failure() {
+    async fn guest_activity_is_pinned_before_a_wake_and_released_after_execution_failure() {
         let mut host = named_host().await;
         host.cache.lock().await.accept(desired_state(|state| {
             state.instances = vec![desired_instance(|instance| {
@@ -462,7 +471,7 @@ mod tests {
         .await
         .unwrap();
         assert!(called.load(Ordering::SeqCst));
-        assert!(!host.state.cron_running(&app_id()));
+        assert!(!host.state.guest_busy(&app_id()));
     }
 
     #[tokio::test]
@@ -473,7 +482,7 @@ mod tests {
             .await
             .unwrap();
         CronController::dispatch(host.arc().clone(), host.cron.clone(), run()).await;
-        assert!(!host.state.cron_running(&app_id()));
+        assert!(!host.state.guest_busy(&app_id()));
         assert!(host.state.snapshot().await.last_active_at_ms.is_empty());
     }
 
@@ -529,12 +538,12 @@ mod tests {
                 .unwrap();
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(host.state.cron_running(&app_id()));
+        assert!(host.state.guest_busy(&app_id()));
         assert!(!dispatch.is_finished());
         finish.send(()).unwrap();
         guest.await.unwrap();
         dispatch.await.unwrap();
-        assert!(!host.state.cron_running(&app_id()));
+        assert!(!host.state.guest_busy(&app_id()));
     }
 
     struct WaitingWake {
@@ -570,19 +579,19 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), waker.ready.notified())
             .await
             .unwrap();
-        assert!(host.state.cron_running(&app_id()));
-        tokio::time::timeout(Duration::from_secs(5), host.cron_runs.stop(&app_id()))
+        assert!(host.state.guest_busy(&app_id()));
+        tokio::time::timeout(Duration::from_secs(5), host.deployment_tasks.stop(&app_id()))
             .await
             .unwrap();
         dispatch.await.unwrap();
-        assert!(!host.state.cron_running(&app_id()));
+        assert!(!host.state.guest_busy(&app_id()));
     }
 
     #[tokio::test]
     async fn stopping_the_owner_cancels_a_run_waiting_for_the_transition_lock() {
         let host = named_host().await;
         let transition = host.state.transition(&app_id()).await;
-        let lease = host.cron_runs.start(&app_id(), &deployment_id()).unwrap();
+        let lease = host.deployment_tasks.start(&app_id(), &deployment_id()).unwrap();
         let dispatch = tokio::spawn(CronController::execute_owned(
             host.arc().clone(),
             host.cron.clone(),
@@ -590,11 +599,11 @@ mod tests {
             lease,
             None,
         ));
-        tokio::time::timeout(Duration::from_secs(5), host.cron_runs.stop(&app_id()))
+        tokio::time::timeout(Duration::from_secs(5), host.deployment_tasks.stop(&app_id()))
             .await
             .unwrap();
         dispatch.await.unwrap();
-        assert!(!host.state.cron_running(&app_id()));
+        assert!(!host.state.guest_busy(&app_id()));
         drop(transition);
     }
 
@@ -650,9 +659,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let lease = host.cron_runs.start(&app_id(), &deployment_id()).unwrap();
+        let lease = host.deployment_tasks.start(&app_id(), &deployment_id()).unwrap();
         CronController::execute_owned(host.arc().clone(), host.cron.clone(), run(), lease, Some(table)).await;
-        assert!(!host.state.cron_running(&app_id()));
+        assert!(!host.state.guest_busy(&app_id()));
         assert!(host.state.snapshot().await.last_active_at_ms.is_empty());
     }
 

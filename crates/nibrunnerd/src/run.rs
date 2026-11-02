@@ -201,7 +201,7 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
 
     let host = Arc::new(Host {
         cron,
-        cron_runs: Arc::new(crate::domain::cron::runs::CronRuns::default()),
+        deployment_tasks: Arc::new(crate::domain::deployment_tasks::DeploymentTasks::default()),
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
         guest_image_version,
         state,

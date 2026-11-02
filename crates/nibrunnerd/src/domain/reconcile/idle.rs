@@ -278,7 +278,7 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bo
     // Another sleep or wake may finish while this pass waits, invalidating the decision that
     // selected the app for the batch. Eligibility and the snapshot therefore share the lock.
     let _transition = host.state.transition(app_id).await;
-    if host.state.cron_running(app_id) {
+    if host.state.guest_busy(app_id) {
         return false;
     }
     let now = crate::clock::now_ms();
@@ -375,7 +375,7 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) -> usize {
         .records
         .values()
         .filter_map(|record| {
-            if host.state.cron_running(&record.app_id) {
+            if host.state.guest_busy(&record.app_id) {
                 return None;
             }
             let policy = policies.get(&record.app_id)?;
@@ -783,7 +783,7 @@ mod sleep_tests {
     }
 
     #[tokio::test]
-    async fn a_sleep_waiting_for_the_transition_leaves_an_app_with_a_cron_running_up() {
+    async fn a_sleep_waiting_for_the_transition_leaves_an_app_with_a_guest_busy_up() {
         let host = on_request_host(None).await;
         last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
         let id = app_id();
@@ -792,7 +792,7 @@ mod sleep_tests {
         let sleep = let_sleep(&host, &id, &policy);
         tokio::pin!(sleep);
         assert!(futures::poll!(sleep.as_mut()).is_pending());
-        let command = host.state.cron_activity(&id);
+        let command = host.state.guest_activity(&id);
         drop(transition);
         assert!(!sleep.await);
         assert!(host.vms.calls().is_empty());
@@ -804,7 +804,7 @@ mod sleep_tests {
     async fn an_active_cron_is_left_out_of_the_idle_sleep_pass() {
         let host = on_request_host(None).await;
         last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
-        let _command = host.state.cron_activity(&app_id());
+        let _command = host.state.guest_activity(&app_id());
         assert_eq!(apply_sleep(host.arc()).await, 0);
         assert!(host.vms.calls().is_empty());
     }

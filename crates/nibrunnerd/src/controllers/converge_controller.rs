@@ -141,7 +141,7 @@ impl ConvergeController {
             .filter(|instance| instance.desired_state != protocol::DesiredInstanceState::Stopped)
             .map(|instance| (instance.app_id.clone(), instance.deployment_id.clone()))
             .collect::<Vec<_>>();
-        self.host.cron_runs.synchronize(&enabled).await;
+        self.host.deployment_tasks.synchronize(&enabled).await;
         Ok(changes)
     }
 }
@@ -184,10 +184,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_replacement_releases_the_desired_cache_while_draining_old_cron_runs() {
+    async fn a_replacement_releases_the_desired_cache_while_draining_old_deployment_tasks() {
         let host = test_host().await;
-        host.cron_runs.synchronize(&[(app_id(), deployment_id())]).await;
-        let mut run = host.cron_runs.start(&app_id(), &deployment_id()).unwrap();
+        host.deployment_tasks
+            .synchronize(&[(app_id(), deployment_id())])
+            .await;
+        let mut run = host.deployment_tasks.start(&app_id(), &deployment_id()).unwrap();
         let desired = desired_state(|state| {
             state.instances = vec![desired_instance(|instance| {
                 instance.deployment_id = protocol::DeploymentId::parse("dep-2").unwrap()
@@ -205,7 +207,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(host.cache.try_lock().unwrap().latest(), Some(&desired));
-        assert!(host.cron_runs.start(&app_id(), &deployment_id()).is_none());
+        assert!(host.deployment_tasks.start(&app_id(), &deployment_id()).is_none());
         drop(run);
         assert!(tokio::time::timeout(std::time::Duration::from_secs(5), accepting)
             .await

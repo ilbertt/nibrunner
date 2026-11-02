@@ -65,7 +65,7 @@ impl LifecycleController {
     }
 
     pub async fn stop(&self) {
-        self.host.cron_runs.shutdown().await;
+        self.host.deployment_tasks.shutdown().await;
         self.host.persist().await;
         HostReporter::new(self.host.clone(), self.versions.clone())
             .publish()

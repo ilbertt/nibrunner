@@ -1,6 +1,7 @@
 pub mod activation;
 pub mod backoff;
 pub mod cron;
+pub mod deployment_tasks;
 pub mod exports;
 pub mod filesystem;
 pub mod guest_line;

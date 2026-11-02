@@ -9,23 +9,23 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     value.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-struct ActiveRuns {
+struct ActiveTasks {
     accepting: bool,
     next_id: u64,
     cancellations: BTreeMap<u64, watch::Sender<bool>>,
 }
 
-struct DeploymentRuns {
+struct DeploymentOwner {
     deployment_id: DeploymentId,
-    active: Mutex<ActiveRuns>,
+    active: Mutex<ActiveTasks>,
     completed: Notify,
 }
 
-impl DeploymentRuns {
+impl DeploymentOwner {
     fn new(deployment_id: DeploymentId) -> Self {
         Self {
             deployment_id,
-            active: Mutex::new(ActiveRuns {
+            active: Mutex::new(ActiveTasks {
                 accepting: true,
                 next_id: 0,
                 cancellations: BTreeMap::new(),
@@ -34,7 +34,7 @@ impl DeploymentRuns {
         }
     }
 
-    fn start(self: &Arc<Self>) -> Option<CronRunLease> {
+    fn start(self: &Arc<Self>) -> Option<DeploymentTaskLease> {
         let mut active = lock(&self.active);
         if !active.accepting {
             return None;
@@ -43,7 +43,7 @@ impl DeploymentRuns {
         active.next_id += 1;
         let (cancel, cancelled) = watch::channel(false);
         active.cancellations.insert(id, cancel);
-        Some(CronRunLease {
+        Some(DeploymentTaskLease {
             owner: self.clone(),
             id,
             cancelled,
@@ -72,14 +72,14 @@ impl DeploymentRuns {
 }
 
 #[derive(Default)]
-pub struct CronRuns {
-    owners: Mutex<BTreeMap<AppId, Arc<DeploymentRuns>>>,
+pub struct DeploymentTasks {
+    owners: Mutex<BTreeMap<AppId, Arc<DeploymentOwner>>>,
     mutation: tokio::sync::Mutex<()>,
     stopping: AtomicBool,
 }
 
-impl CronRuns {
-    pub fn start(&self, app_id: &AppId, deployment_id: &DeploymentId) -> Option<CronRunLease> {
+impl DeploymentTasks {
+    pub fn start(&self, app_id: &AppId, deployment_id: &DeploymentId) -> Option<DeploymentTaskLease> {
         let owners = lock(&self.owners);
         if self.stopping.load(Ordering::Acquire) {
             return None;
@@ -125,7 +125,7 @@ impl CronRuns {
         for (app_id, deployment_id) in deployments {
             owners
                 .entry(app_id.clone())
-                .or_insert_with(|| Arc::new(DeploymentRuns::new(deployment_id.clone())));
+                .or_insert_with(|| Arc::new(DeploymentOwner::new(deployment_id.clone())));
         }
     }
 
@@ -160,13 +160,17 @@ impl CronRuns {
     }
 }
 
-pub struct CronRunLease {
-    owner: Arc<DeploymentRuns>,
+pub struct DeploymentTaskLease {
+    owner: Arc<DeploymentOwner>,
     id: u64,
     cancelled: watch::Receiver<bool>,
 }
 
-impl CronRunLease {
+impl DeploymentTaskLease {
+    pub fn cancellation(&self) -> watch::Receiver<bool> {
+        self.cancelled.clone()
+    }
+
     pub async fn cancelled(&mut self) {
         loop {
             if *self.cancelled.borrow_and_update() {
@@ -179,7 +183,7 @@ impl CronRunLease {
     }
 }
 
-impl Drop for CronRunLease {
+impl Drop for DeploymentTaskLease {
     fn drop(&mut self) {
         lock(&self.owner.active).cancellations.remove(&self.id);
         self.owner.completed.notify_waiters();
@@ -194,7 +198,7 @@ mod tests {
 
     #[tokio::test]
     async fn runs_may_overlap_and_the_same_deployment_keeps_them_owned() {
-        let runs = CronRuns::default();
+        let runs = DeploymentTasks::default();
         runs.synchronize(&[(app_id(), deployment_id())]).await;
         let mut first = runs.start(&app_id(), &deployment_id()).unwrap();
         let mut second = runs.start(&app_id(), &deployment_id()).unwrap();
@@ -211,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_replacement_waits_for_old_runs_to_finish_before_accepting_new_runs() {
-        let runs = Arc::new(CronRuns::default());
+        let runs = Arc::new(DeploymentTasks::default());
         runs.synchronize(&[(app_id(), deployment_id())]).await;
         let mut first = runs.start(&app_id(), &deployment_id()).unwrap();
         let mut second = runs.start(&app_id(), &deployment_id()).unwrap();
@@ -234,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn suspending_an_app_cancels_and_drains_every_run_and_blocks_new_runs() {
-        let runs = Arc::new(CronRuns::default());
+        let runs = Arc::new(DeploymentTasks::default());
         runs.synchronize(&[(app_id(), deployment_id())]).await;
         let mut lease = runs.start(&app_id(), &deployment_id()).unwrap();
         let stopping = tokio::spawn({
@@ -252,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_interrupted_replacement_keeps_old_runs_owned_until_they_are_drained() {
-        let runs = Arc::new(CronRuns::default());
+        let runs = Arc::new(DeploymentTasks::default());
         runs.synchronize(&[(app_id(), deployment_id())]).await;
         let mut lease = runs.start(&app_id(), &deployment_id()).unwrap();
         let next = DeploymentId::parse("dep-2").unwrap();
@@ -278,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_drains_runs_and_later_synchronization_cannot_reopen_their_owners() {
-        let runs = Arc::new(CronRuns::default());
+        let runs = Arc::new(DeploymentTasks::default());
         runs.synchronize(&[(app_id(), deployment_id())]).await;
         let mut lease = runs.start(&app_id(), &deployment_id()).unwrap();
         let stopping = tokio::spawn({
