@@ -529,10 +529,7 @@ mod tests {
         config.artifact_store_url = "s3://nibrunner-artifacts/artifacts".to_string();
 
         let said = next_steps(&config, &config_file, Origin::Operator);
-        assert!(
-            said.contains("1. set AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY in"),
-            "{said}"
-        );
+        assert!(said.contains("1. set AWS_REGION in"), "{said}");
         assert!(said.contains("2. nibrunnerd start"), "{said}");
         assert!(!said.contains("edit"), "{said}");
 

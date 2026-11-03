@@ -58,8 +58,8 @@ shows every section filled in.
 
 ## Secrets
 
-`config.toml` holds no secrets. Object-store credentials and the ZeroFS encryption password go in
-`/etc/nibrunner/host.env`. `install` creates that file with every variable named and empty.
+`config.toml` holds no secrets. Optional static object-store credentials and the ZeroFS encryption password go in
+`/etc/nibrunner/host.env`. `install` creates that file with every variable named. S3 credentials resolve through the default provider chain, including EC2 instance roles; static access keys are optional and must be supplied together.
 `nibrunnerd start` refuses to run while a variable the configuration needs is still empty.
 
 ## Ports

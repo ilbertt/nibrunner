@@ -35,11 +35,11 @@ pub fn of(config: &HostConfig) -> Vec<Secret> {
         },
         Secret {
             name: ACCESS_KEY_VARIABLE,
-            needed: remote,
+            needed: false,
         },
         Secret {
             name: SECRET_KEY_VARIABLE,
-            needed: remote,
+            needed: false,
         },
     ]
 }
@@ -49,11 +49,22 @@ pub fn missing(config: &HostConfig, file: &Path) -> Vec<&'static str> {
     let set = std::fs::read_to_string(file)
         .map(|text| set_in(&text))
         .unwrap_or_default();
-    of(config)
+    let mut missing: Vec<&'static str> = of(config)
         .into_iter()
         .filter(|secret| secret.needed && !set.contains(secret.name))
         .map(|secret| secret.name)
-        .collect()
+        .collect();
+    if reaches_an_object_store(config) {
+        match (
+            set.contains(ACCESS_KEY_VARIABLE),
+            set.contains(SECRET_KEY_VARIABLE),
+        ) {
+            (true, false) => missing.push(SECRET_KEY_VARIABLE),
+            (false, true) => missing.push(ACCESS_KEY_VARIABLE),
+            _ => {}
+        }
+    }
+    missing
 }
 
 /// Read the way systemd reads an `EnvironmentFile=`: one `KEY=value` a line, `#` a comment, a
@@ -115,7 +126,8 @@ fn render(config: &HostConfig) -> String {
          # Every tenant disk on this host is encrypted under this. Losing it loses every one of them,\n\
          # so it is permanent for the life of the bucket. volumes.backend = \"zerofs\" needs it.\n\
          {}\n\
-         # A store_url or storage_url that is s3:// needs these.\n\
+         # S3 needs a region. Credentials use the default chain; leave static keys unset to use\n\
+         # an instance role or another configured credential provider.\n\
          {}{}{}",
         line(PASSWORD_VARIABLE),
         line(REGION_VARIABLE),
@@ -210,30 +222,25 @@ mod tests {
     }
 
     #[test]
-    fn a_local_file_host_whose_artifacts_are_in_a_bucket_needs_the_credential_and_no_password() {
+    fn an_s3_artifact_store_needs_a_region_and_allows_ambient_credentials() {
         let mut config = local();
         config.artifact_store_url = "s3://nibrunner-artifacts/artifacts".to_string();
         let secrets = of(&config);
+        assert_eq!(names(&secrets, true), [REGION_VARIABLE]);
         assert_eq!(
-            names(&secrets, true),
-            [REGION_VARIABLE, ACCESS_KEY_VARIABLE, SECRET_KEY_VARIABLE]
+            names(&secrets, false),
+            [PASSWORD_VARIABLE, ACCESS_KEY_VARIABLE, SECRET_KEY_VARIABLE]
         );
-        assert_eq!(names(&secrets, false), [PASSWORD_VARIABLE]);
         let written = render(&config);
-        assert!(written.contains("\nAWS_ACCESS_KEY_ID=\n"), "{written}");
+        assert!(written.contains("\n# AWS_ACCESS_KEY_ID=\n"), "{written}");
         assert!(written.contains("\n# ZEROFS_ENCRYPTION_PASSWORD=\n"), "{written}");
     }
 
     #[test]
-    fn a_zerofs_host_in_a_bucket_needs_all_four() {
+    fn a_zerofs_host_needs_a_password_and_region_but_not_static_credentials() {
         assert_eq!(
             names(&of(&zerofs_in_a_bucket()), true),
-            [
-                PASSWORD_VARIABLE,
-                REGION_VARIABLE,
-                ACCESS_KEY_VARIABLE,
-                SECRET_KEY_VARIABLE
-            ]
+            [PASSWORD_VARIABLE, REGION_VARIABLE]
         );
     }
 
@@ -275,12 +282,7 @@ mod tests {
 
         assert_eq!(
             missing(&config, &path),
-            [
-                PASSWORD_VARIABLE,
-                REGION_VARIABLE,
-                ACCESS_KEY_VARIABLE,
-                SECRET_KEY_VARIABLE
-            ],
+            [PASSWORD_VARIABLE, REGION_VARIABLE],
             "a file that is not there sets nothing"
         );
 
@@ -289,10 +291,23 @@ mod tests {
             "ZEROFS_ENCRYPTION_PASSWORD=hunter2\nAWS_REGION=eu-west-2\nAWS_ACCESS_KEY_ID=\n",
         )
         .unwrap();
-        assert_eq!(
-            missing(&config, &path),
-            [ACCESS_KEY_VARIABLE, SECRET_KEY_VARIABLE]
-        );
+        assert!(missing(&config, &path).is_empty());
         assert!(missing(&local(), &path).is_empty());
+    }
+    #[test]
+    fn explicit_static_credentials_must_be_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("host.env");
+        let config = zerofs_in_a_bucket();
+        let base = "ZEROFS_ENCRYPTION_PASSWORD=test-password\nAWS_REGION=eu-central-1\n";
+        for (credentials, expected) in [
+            ("", None),
+            ("AWS_ACCESS_KEY_ID=access\n", Some(SECRET_KEY_VARIABLE)),
+            ("AWS_SECRET_ACCESS_KEY=secret\n", Some(ACCESS_KEY_VARIABLE)),
+            ("AWS_ACCESS_KEY_ID=access\nAWS_SECRET_ACCESS_KEY=secret\n", None),
+        ] {
+            std::fs::write(&path, format!("{base}{credentials}")).unwrap();
+            assert_eq!(missing(&config, &path), expected.into_iter().collect::<Vec<_>>());
+        }
     }
 }
