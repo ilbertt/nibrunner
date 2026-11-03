@@ -37,7 +37,7 @@ fn main() -> std::process::ExitCode {
         Some(Command::Install { force, release }) => {
             runtime.block_on(lay_out(config, force, release, origin))
         }
-        Some(Command::Start { force }) => runtime.block_on(bring_up(config, force)),
+        Some(Command::Start { force, release }) => runtime.block_on(bring_up(config, force, release)),
     }
 }
 
@@ -62,9 +62,13 @@ async fn lay_out(
 }
 
 /// The layout again, so an edited `config.toml` is what comes up, then systemd.
-async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
+async fn bring_up(
+    config: HostConfig,
+    force: bool,
+    release: Option<std::path::PathBuf>,
+) -> std::process::ExitCode {
     let config_file = HostConfig::configured_file();
-    let laid = match install::run(&config, &config_file, force, None).await {
+    let laid = match install::run(&config, &config_file, force, release.as_deref()).await {
         Ok(laid) => laid,
         Err(error) => {
             eprintln!("{}", error.message());

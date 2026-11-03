@@ -29,6 +29,12 @@ pub(super) enum Command {
     Start {
         #[arg(long, help = "Replace files these commands did not write")]
         force: bool,
+        #[arg(
+            long = "from",
+            value_name = "DIR",
+            help = "Take the guest image from an unpacked release, verifying its digests"
+        )]
+        release: Option<PathBuf>,
     },
 }
 
@@ -60,13 +66,15 @@ mod tests {
 
     #[test]
     fn a_release_flag_with_nothing_after_it_is_refused_rather_than_taken_as_none() {
-        let refused = parse(&["install", "--from"]).unwrap_err();
-        assert_eq!(refused.exit_code(), 2);
-        assert!(refused.to_string().contains("--from"), "{refused}");
+        for verb in ["install", "start"] {
+            let refused = parse(&[verb, "--from"]).unwrap_err();
+            assert_eq!(refused.exit_code(), 2);
+            assert!(refused.to_string().contains("--from"), "{refused}");
+        }
     }
 
     #[test]
-    fn both_commands_take_force_and_only_install_takes_a_release() {
+    fn both_commands_take_force_and_an_optional_release() {
         assert!(matches!(
             parse(&["install"]),
             Ok(Some(Command::Install {
@@ -83,15 +91,24 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["start"]),
-            Ok(Some(Command::Start { force: false }))
+            Ok(Some(Command::Start {
+                force: false,
+                release: None
+            }))
         ));
         assert!(matches!(
             parse(&["start", "--force"]),
-            Ok(Some(Command::Start { force: true }))
+            Ok(Some(Command::Start {
+                force: true,
+                release: None
+            }))
         ));
-        let refused = parse(&["start", "--from", "/tmp/release"]).unwrap_err();
-        assert_eq!(refused.kind(), ErrorKind::UnknownArgument);
-        assert!(refused.to_string().contains("--from"), "{refused}");
+        let Some(Command::Start { release, force }) = parse(&["start", "--from", "/tmp/release"]).unwrap()
+        else {
+            panic!("start accepts a verified release");
+        };
+        assert_eq!(release.as_deref(), Some(std::path::Path::new("/tmp/release")));
+        assert!(!force);
     }
 
     #[test]

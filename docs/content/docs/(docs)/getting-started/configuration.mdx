@@ -12,6 +12,9 @@ and every `nibrunnerd start` reads it. The [reference](/docs/reference/config) l
 2. Put any secret the new configuration needs in `/etc/nibrunner/host.env`.
 3. Run `nibrunnerd start`.
 
+For an unpacked release, `nibrunnerd start --from /path/to/release` verifies and installs its guest
+image as part of the same startup operation.
+
 `start` validates the whole file before doing anything, regenerates the files `install` wrote,
 and restarts only the units whose configuration changed. If the file is invalid, the error names
 the key and the reason.
