@@ -21,8 +21,8 @@ For workloads that must not trust each other, apply these requirements before de
 These are host preparation requirements. They do not establish that a CPU is free of hardware
 vulnerabilities. Follow [Firecracker's production host guidance](https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md)
 and the [Linux hardware vulnerability documentation](https://docs.kernel.org/admin-guide/hw-vuln/index.html)
-for the CPU in use. Installation and daemon startup require the kernel to report inactive
-SMT. KSM preparation remains the operator's responsibility.
+for the CPU in use. Installation and daemon startup require inactive SMT and KSM with no
+retained shared pages. A kernel without KSM support meets the KSM requirement.
 
 ## Host SMT
 
@@ -47,6 +47,8 @@ memory, disk and ports; it does not measure CPU throughput.
 
 KSM can deduplicate identical anonymous memory pages. Sharing pages between workloads enables
 side channels. Disable services that enable KSM and keep it disabled across reboots.
+Installation and daemon startup refuse `run = 1`, retained shared pages, or status that
+cannot be verified. Both `run = 0` and `run = 2` are accepted when `pages_shared` is zero.
 
 Stopping KSM with `run = 0` retains already merged pages. Unmerging them with `run = 2` can
 increase memory usage enough to trigger the OOM killer. Schedule this change with enough
@@ -68,5 +70,7 @@ Before upgrading to a version that enforces inactive SMT, verify `smt/active` re
 An unsuccessful daemon restart leaves routing and wake functionality unavailable even if
 existing VMM processes remain alive. A VPS with unavailable SMT status cannot satisfy this
 check; verify its compatibility before upgrading.
+Also verify KSM is stopped and has no retained shared pages before upgrading to a version
+that enforces the KSM requirement.
 Keep host settings persistent: a startup check cannot prevent a host administrator from
 changing them after apps have started.

@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
+mod ksm;
+
 const CPU_DIRECTORY: &str = "/sys/devices/system/cpu";
+const KSM_DIRECTORY: &str = "/sys/kernel/mm/ksm";
 const SECURITY_DOCS: &str = "https://nibrunner.dev/docs/guides/host-security";
 
 #[derive(Debug, thiserror::Error)]
@@ -9,10 +12,17 @@ pub(crate) enum SecurityError {
     SmtActive,
     #[error("host SMT status could not be verified from {path}: {reason}; see {SECURITY_DOCS}#host-smt")]
     SmtUnknown { path: PathBuf, reason: String },
+    #[error("host KSM is active; disable it and unmerge retained pages before starting nibrunner; see {SECURITY_DOCS}#kernel-samepage-merging")]
+    KsmActive,
+    #[error("host KSM retains {pages} shared pages; unmerge them before starting nibrunner; see {SECURITY_DOCS}#kernel-samepage-merging")]
+    KsmShared { pages: u64 },
+    #[error("host KSM status could not be verified from {path}: {reason}; see {SECURITY_DOCS}#kernel-samepage-merging")]
+    KsmUnknown { path: PathBuf, reason: String },
 }
 
 pub(crate) fn check() -> Result<(), SecurityError> {
-    check_smt(Path::new(CPU_DIRECTORY))
+    check_smt(Path::new(CPU_DIRECTORY))?;
+    ksm::check(Path::new(KSM_DIRECTORY))
 }
 
 fn check_smt(cpu_directory: &Path) -> Result<(), SecurityError> {

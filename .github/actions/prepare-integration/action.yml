@@ -29,6 +29,15 @@ runs:
         fi
         test "$(cat "$smt_directory/active")" = 0
 
+    - name: Disable kernel samepage merging
+      shell: bash
+      run: |
+        ksm_directory=/sys/kernel/mm/ksm
+        if [[ -d "$ksm_directory" ]]; then
+          echo 2 | sudo tee "$ksm_directory/run"
+          test "$(cat "$ksm_directory/pages_shared")" = 0
+        fi
+
     - name: Install integration tools
       shell: bash
       run: sudo apt-get install -y nftables iproute2 iptables xfsprogs fdisk udev
