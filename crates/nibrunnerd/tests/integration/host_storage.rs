@@ -126,6 +126,8 @@ fn host_storage_initializes_blank_devices_and_preserves_existing_filesystems_acr
         assert_eq!(checkpoint.uid(), 0);
         disk.unmount();
         run(Command::new("losetup").arg("--detach").arg(&disk.device));
+        // Loop detachment is lazy; udev can still hold the device open after losetup returns.
+        run(Command::new("udevadm").args(["settle", "--timeout=10"]));
         let replacement = disk.directory.path().join("replacement.img");
         File::create(&replacement)
             .unwrap()

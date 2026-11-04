@@ -31,4 +31,4 @@ runs:
 
     - name: Install integration tools
       shell: bash
-      run: sudo apt-get install -y nftables iproute2 iptables xfsprogs fdisk
+      run: sudo apt-get install -y nftables iproute2 iptables xfsprogs fdisk udev
