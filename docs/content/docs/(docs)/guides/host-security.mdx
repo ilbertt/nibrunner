@@ -55,6 +55,22 @@ increase memory usage enough to trigger the OOM killer. Schedule this change wit
 free memory, or stop workloads first, and verify that `pages_shared` reaches zero. See the
 [Linux KSM documentation](https://docs.kernel.org/admin-guide/mm/ksm.html).
 
+## CPU vulnerability reports
+
+At daemon startup, nibrunner logs each assessment from
+`/sys/devices/system/cpu/vulnerabilities/` with its kernel-provided name and description.
+Reports that say vulnerable, unknown or use an unrecognised format produce warnings.
+Missing or unreadable assessments also produce warnings. Partial mitigations that still
+report vulnerability produce warnings even when their description starts with `Mitigation:`.
+
+These reports are informational and do not block startup. They do not replace the SMT and
+KSM requirements or certify that a host is secure. Follow the distribution and CPU vendor's
+guidance for each assessment. To read the startup reports:
+
+```bash
+journalctl -u nibrunnerd -b
+```
+
 ## Nested virtualisation
 
 A VPS needs nested virtualisation to expose `/dev/kvm`. Its CPU topology and mitigation

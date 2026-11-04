@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 mod ksm;
+mod vulnerabilities;
 
 const CPU_DIRECTORY: &str = "/sys/devices/system/cpu";
 const KSM_DIRECTORY: &str = "/sys/kernel/mm/ksm";
@@ -23,6 +24,10 @@ pub(crate) enum SecurityError {
 pub(crate) fn check() -> Result<(), SecurityError> {
     check_smt(Path::new(CPU_DIRECTORY))?;
     ksm::check(Path::new(KSM_DIRECTORY))
+}
+
+pub(crate) fn report_cpu_vulnerabilities() {
+    vulnerabilities::report(&Path::new(CPU_DIRECTORY).join("vulnerabilities"));
 }
 
 fn check_smt(cpu_directory: &Path) -> Result<(), SecurityError> {
