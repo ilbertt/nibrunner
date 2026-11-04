@@ -1,5 +1,34 @@
 # Changelog
 
+## [2026.11.1] - 2026-11-04
+
+### Features
+
+- Report host CPU vulnerability status at startup (#286)
+- **proxy:** Redirect the configured fallback hostname (#289)
+- Reject hosts with active kernel samepage merging (#285)
+- **Breaking:** Require host SMT to be disabled (#284)
+- Publish structured tenant log records (#263)
+- Report deployment cron registrations (#262)
+- Initialize and mount configured host storage (#280)
+- Include guest usage measurements in host reports (#261)
+
+### Fixes
+
+- **ci:** Elevate only integration test executables (#288)
+- Reject snapshots from outdated guest images (#287)
+- **start:** Bind applied inputs to service activations (#282)
+- **start:** Persist unapplied service changes across invocations (#279)
+- **install:** Allow default AWS credential providers (#274)
+
+### Refactoring
+
+- **config:** Name the fallback hostname origin_host (#290)
+
+### Documentation
+
+- Document host requirements for workload isolation (#283)
+
 ## [2026.11.0] - 2026-11-02
 
 ### Fixes
