@@ -17,7 +17,7 @@ use crate::install::{secrets, SYSTEMD_DIR};
 
 mod inputs;
 
-use inputs::Inputs;
+use inputs::{Inputs, InvocationId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -113,12 +113,12 @@ fn activate(
     restart_zerofs: bool,
     systemd: &impl ServiceControl,
 ) -> Result<Vec<(&'static str, Outcome)>, StartError> {
-    if !restart_zerofs
-        && plan.iter().any(|service| {
-            service.unit == ZEROFS_UNIT && service.inputs.pending && systemd.is_active(ZEROFS_UNIT)
-        })
-    {
-        return Err(zerofs_restart_requires_permission());
+    if !restart_zerofs {
+        for service in plan.iter().filter(|service| service.unit == ZEROFS_UNIT) {
+            if systemd.is_active(ZEROFS_UNIT) && service.inputs.pending(systemd.invocation_id(ZEROFS_UNIT)?) {
+                return Err(zerofs_restart_requires_permission());
+            }
+        }
     }
     must(systemd, &["daemon-reload"])?;
     let mut enable = vec!["enable"];
@@ -130,22 +130,35 @@ fn activate(
     for service in plan {
         let unit = service.unit;
         let was_active = systemd.is_active(unit);
-        let pending = service.inputs.pending || (unit == MOUNT_UNIT && restart_mount);
+        let invocation = systemd.invocation_id(unit)?;
+        let pending = service.inputs.pending(invocation) || (unit == MOUNT_UNIT && restart_mount);
         if unit == ZEROFS_UNIT && pending && was_active && !restart_zerofs {
             return Err(zerofs_restart_requires_permission());
         }
         if unit != DAEMON_UNIT && was_active && !pending {
-            units.push((unit, Outcome::Running));
+            units.push(Activation {
+                unit,
+                outcome: Outcome::Running,
+                invocation,
+            });
             continue;
         }
-        if unit == DAEMON_UNIT && was_active && !service.inputs.pending {
+        if unit == DAEMON_UNIT && was_active && !pending {
             match systemd.reload(config)? {
                 Some(crate::reload::Applied::Unchanged) => {
-                    units.push((unit, Outcome::Running));
+                    units.push(Activation {
+                        unit,
+                        outcome: Outcome::Running,
+                        invocation,
+                    });
                     continue;
                 }
                 Some(crate::reload::Applied::Grown) => {
-                    units.push((unit, Outcome::Reloaded));
+                    units.push(Activation {
+                        unit,
+                        outcome: Outcome::Reloaded,
+                        invocation,
+                    });
                     continue;
                 }
                 None => {}
@@ -169,32 +182,62 @@ fn activate(
             true => Outcome::Running,
             false => Outcome::Failed,
         };
-        units.push((unit, outcome));
+        let invocation = if outcome == Outcome::Failed {
+            None
+        } else {
+            Some(systemd.invocation_id(unit)?.ok_or_else(|| {
+                StartError::Systemd(format!(
+                    "{unit}'s running activation has no invocation ID; its service inputs remain unverified"
+                ))
+            })?)
+        };
+        units.push(Activation {
+            unit,
+            outcome,
+            invocation,
+        });
         if outcome == Outcome::Failed {
             break;
         }
     }
     // `Type=exec` calls a unit started the moment it execs, and one that exits right after is
     // read as started by the check above — and as auto-restarting by this one, once the units
-    // after it have taken their time coming up.
-    for (unit, outcome) in &mut units {
-        if *outcome != Outcome::Failed && !systemd.is_active(unit) {
-            *outcome = Outcome::Failed;
+    // after it have taken their time coming up. An automatic restart can already be active
+    // again, but its new invocation cannot inherit the earlier activation's receipt.
+    for activation in &mut units {
+        if activation.outcome != Outcome::Failed
+            && (!systemd.is_active(activation.unit)
+                || activation.invocation.is_none()
+                || systemd.invocation_id(activation.unit)? != activation.invocation)
+        {
+            activation.outcome = Outcome::Failed;
         }
     }
-    for (service, (_, outcome)) in plan.iter().zip(&units) {
-        if *outcome == Outcome::Failed {
-            service.inputs.invalidate()?;
+    for (service, activation) in plan.iter().zip(&units) {
+        if let Some(invocation) = activation
+            .invocation
+            .filter(|_| activation.outcome != Outcome::Failed)
+        {
+            service.inputs.applied(invocation)?;
         } else {
-            service.inputs.applied()?;
+            service.inputs.invalidate()?;
         }
     }
-    Ok(units)
+    Ok(units
+        .into_iter()
+        .map(|activation| (activation.unit, activation.outcome))
+        .collect())
+}
+
+struct Activation {
+    unit: &'static str,
+    outcome: Outcome,
+    invocation: Option<InvocationId>,
 }
 
 fn zerofs_restart_requires_permission() -> StartError {
     StartError::Unstartable(format!(
-        "  {ZEROFS_UNIT} has unapplied or unrecorded service inputs. Restarting ZeroFS disconnects every guest disk. Stop the guests that use it, then run `nibrunnerd start --restart-zerofs`"
+        "  {ZEROFS_UNIT} has unapplied or unverified service inputs. Restarting ZeroFS disconnects every guest disk. Stop the guests that use it, then run `nibrunnerd start --restart-zerofs`"
     ))
 }
 
@@ -365,6 +408,7 @@ fn must(systemd: &impl ServiceControl, arguments: &[&str]) -> Result<(), StartEr
 trait ServiceControl {
     fn command(&self, arguments: &[&str]) -> Result<bool, StartError>;
     fn is_active(&self, unit: &str) -> bool;
+    fn invocation_id(&self, unit: &str) -> Result<Option<InvocationId>, StartError>;
     fn reload(&self, config: &HostConfig) -> Result<Option<crate::reload::Applied>, StartError>;
 }
 
@@ -377,6 +421,23 @@ impl ServiceControl for Systemd {
 
     fn is_active(&self, unit: &str) -> bool {
         is_active(unit)
+    }
+
+    fn invocation_id(&self, unit: &str) -> Result<Option<InvocationId>, StartError> {
+        let output = Command::new("systemctl")
+            .args(["show", "--property=InvocationID", "--value", unit])
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(|error| {
+                StartError::Systemd(format!("{unit}'s invocation ID could not be read: {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(StartError::Systemd(format!(
+                "{unit}'s invocation ID could not be read"
+            )));
+        }
+        Ok(InvocationId::parse(&String::from_utf8_lossy(&output.stdout)))
     }
 
     fn reload(&self, config: &HostConfig) -> Result<Option<crate::reload::Applied>, StartError> {
@@ -433,17 +494,43 @@ mod tests {
     use crate::test_support::zerofs_settings;
 
     use std::cell::{Cell, RefCell};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use crate::install::{render, write_generated, Laid};
 
     #[derive(Default)]
     struct FakeSystemd {
         active: RefCell<BTreeSet<String>>,
+        invocations: RefCell<BTreeMap<String, InvocationId>>,
+        directory: Option<PathBuf>,
         commands: RefCell<Vec<Vec<String>>>,
         fail: Cell<Option<&'static str>>,
         interrupt: Cell<Option<&'static str>>,
         exit_after: Cell<Option<&'static str>>,
+        unidentified: Cell<Option<&'static str>>,
+        unreadable: Cell<Option<&'static str>>,
+        restart_on_mount: Cell<bool>,
+    }
+
+    impl FakeSystemd {
+        fn under(root: &Path) -> Self {
+            Self {
+                directory: Some(root.join("fake-systemd")),
+                ..Self::default()
+            }
+        }
+
+        fn restarted(&self, unit: &str) {
+            self.active.borrow_mut().insert(unit.to_string());
+            let shown = uuid::Uuid::new_v4().simple().to_string();
+            self.invocations
+                .borrow_mut()
+                .insert(unit.to_string(), InvocationId::parse(&shown).unwrap());
+            if let Some(directory) = &self.directory {
+                std::fs::create_dir_all(directory).unwrap();
+                std::fs::write(directory.join(unit), shown).unwrap();
+            }
+        }
     }
 
     impl ServiceControl for FakeSystemd {
@@ -453,7 +540,12 @@ mod tests {
                 .push(arguments.iter().map(|arg| (*arg).to_string()).collect());
             if matches!(arguments[0], "start" | "restart") {
                 let unit = arguments[1];
-                self.active.borrow_mut().insert(unit.to_string());
+                if arguments[0] == "restart" || !self.is_active(unit) {
+                    self.restarted(unit);
+                }
+                if unit == MOUNT_UNIT && self.restart_on_mount.replace(false) {
+                    self.restarted(ZEROFS_UNIT);
+                }
                 if self.exit_after.get() == Some(unit) {
                     std::process::exit(77);
                 }
@@ -469,6 +561,21 @@ mod tests {
 
         fn is_active(&self, unit: &str) -> bool {
             self.active.borrow().contains(unit)
+        }
+
+        fn invocation_id(&self, unit: &str) -> Result<Option<InvocationId>, StartError> {
+            if self.unreadable.get() == Some(unit) {
+                return Err(StartError::Systemd("invocation ID could not be read".to_string()));
+            }
+            if self.unidentified.get() == Some(unit) {
+                return Ok(None);
+            }
+            if let Some(directory) = &self.directory {
+                return Ok(std::fs::read_to_string(directory.join(unit))
+                    .ok()
+                    .and_then(|shown| InvocationId::parse(&shown)));
+            }
+            Ok(self.invocations.borrow().get(unit).copied())
         }
 
         fn reload(&self, _: &HostConfig) -> Result<Option<crate::reload::Applied>, StartError> {
@@ -552,8 +659,15 @@ mod tests {
             activate(&self.config, &self.plan(), restart_zerofs, systemd)
         }
 
-        fn pending(&self) -> Vec<bool> {
-            self.plan().iter().map(|service| service.inputs.pending).collect()
+        fn pending(&self, systemd: &FakeSystemd) -> Vec<bool> {
+            self.plan()
+                .iter()
+                .map(|service| {
+                    service
+                        .inputs
+                        .pending(systemd.invocation_id(service.unit).unwrap())
+                })
+                .collect()
         }
 
         fn invocation(&self) -> Command {
@@ -610,7 +724,7 @@ mod tests {
         };
         let config = HostConfig::from_file(&root.join("config.toml")).unwrap();
         let plan = plan(&config, &root.join("systemd"), &root.join("nibrunnerd")).unwrap();
-        let systemd = FakeSystemd::default();
+        let systemd = FakeSystemd::under(&root);
         if std::env::var_os("NIBRUNNER_START_TEST_INTERRUPT").is_some() {
             systemd.exit_after.set(Some(ZEROFS_UNIT));
         }
@@ -640,7 +754,8 @@ mod tests {
             .status;
         assert_eq!(status.code(), Some(77));
         assert!(host.install().done.is_empty());
-        assert_eq!(host.pending(), [true, true, false]);
+        let systemd = FakeSystemd::under(host.directory.path());
+        assert_eq!(host.pending(&systemd), [true, true, false]);
         host.invoke_start("restarted");
         host.invoke_start("running");
     }
@@ -653,7 +768,7 @@ mod tests {
         systemd.active.borrow_mut().insert(ZEROFS_UNIT.to_string());
         assert!(host.start(&systemd, false).is_err());
         assert!(systemd.commands.borrow().is_empty());
-        assert_eq!(host.pending(), [true, true, true]);
+        assert_eq!(host.pending(&systemd), [true, true, true]);
     }
 
     #[test]
@@ -680,9 +795,9 @@ mod tests {
         let error = host.start(&systemd, false).unwrap_err();
         assert!(error.to_string().contains("--restart-zerofs"), "{error}");
         assert!(systemd.commands.borrow().is_empty());
-        assert_eq!(host.pending(), [true, true, false]);
+        assert_eq!(host.pending(&systemd), [true, true, false]);
         host.start(&systemd, true).unwrap();
-        assert_eq!(host.pending(), [false, false, false]);
+        assert_eq!(host.pending(&systemd), [false, false, false]);
     }
 
     #[test]
@@ -695,10 +810,10 @@ mod tests {
         host.install();
         systemd.interrupt.set(Some(MOUNT_UNIT));
         assert!(host.start(&systemd, true).is_err());
-        assert_eq!(host.pending(), [true, true, false]);
+        assert_eq!(host.pending(&systemd), [true, true, false]);
         systemd.interrupt.set(None);
         host.start(&systemd, true).unwrap();
-        assert_eq!(host.pending(), [false, false, false]);
+        assert_eq!(host.pending(&systemd), [false, false, false]);
     }
 
     #[test]
@@ -713,13 +828,13 @@ mod tests {
         systemd.fail.set(Some(ZEROFS_UNIT));
         let outcomes = host.start(&systemd, true).unwrap();
         assert_eq!(outcomes, [(ZEROFS_UNIT, Outcome::Failed)]);
-        assert_eq!(host.pending(), [true, true, false]);
+        assert_eq!(host.pending(&systemd), [true, true, false]);
         host.config = old;
         host.install();
-        assert_eq!(host.pending(), [true, true, false]);
+        assert_eq!(host.pending(&systemd), [true, true, false]);
         systemd.fail.set(None);
         host.start(&systemd, true).unwrap();
-        assert_eq!(host.pending(), [false, false, false]);
+        assert_eq!(host.pending(&systemd), [false, false, false]);
     }
 
     #[test]
@@ -735,7 +850,7 @@ mod tests {
             host.directory.path().join("systemd").join(ZEROFS_UNIT),
         ] {
             std::fs::write(&path, "changed").unwrap();
-            assert_eq!(host.pending(), [true, true, false]);
+            assert_eq!(host.pending(&systemd), [true, true, false]);
             host.start(&systemd, true).unwrap();
         }
     }
@@ -747,7 +862,7 @@ mod tests {
         let systemd = FakeSystemd::default();
         host.start(&systemd, false).unwrap();
         std::fs::write(host.directory.path().join("systemd").join(MOUNT_UNIT), "changed").unwrap();
-        assert_eq!(host.pending(), [false, true, false]);
+        assert_eq!(host.pending(&systemd), [false, true, false]);
         let outcomes = host.start(&systemd, false).unwrap();
         assert_eq!(outcomes[0].1, Outcome::Running);
         assert_eq!(outcomes[1].1, Outcome::Restarted);
@@ -756,7 +871,7 @@ mod tests {
             "changed",
         )
         .unwrap();
-        assert_eq!(host.pending(), [false, false, true]);
+        assert_eq!(host.pending(&systemd), [false, false, true]);
         let outcomes = host.start(&systemd, false).unwrap();
         assert_eq!(outcomes[0].1, Outcome::Running);
         assert_eq!(outcomes[2].1, Outcome::Restarted);
@@ -782,6 +897,165 @@ mod tests {
             host.start(&systemd, false).unwrap(),
             [(DAEMON_UNIT, Outcome::Restarted)]
         );
+    }
+
+    #[test]
+    fn rolling_back_after_an_external_restart_requires_explicit_zerofs_restart() {
+        let mut host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        let original = host.config.clone();
+        host.change_cache();
+        host.install();
+        systemd.command(&["restart", ZEROFS_UNIT]).unwrap();
+        host.config = original;
+        host.install();
+        assert_eq!(host.pending(&systemd), [true, false, false]);
+        systemd.commands.borrow_mut().clear();
+        let error = host.start(&systemd, false).unwrap_err();
+        assert!(error.to_string().contains("--restart-zerofs"), "{error}");
+        assert!(systemd.commands.borrow().is_empty());
+        let outcomes = host.start(&systemd, true).unwrap();
+        assert_eq!(outcomes[0].1, Outcome::Restarted);
+        assert_eq!(outcomes[1].1, Outcome::Restarted);
+        assert_eq!(host.pending(&systemd), [false, false, false]);
+        assert!(host
+            .start(&systemd, false)
+            .unwrap()
+            .iter()
+            .all(|(_, outcome)| *outcome == Outcome::Running));
+    }
+
+    #[test]
+    fn a_new_start_process_detects_rollback_after_an_external_restart() {
+        let mut host = HostFiles::new();
+        host.install();
+        host.invoke_start("restarted");
+        let original = host.config.clone();
+        host.change_cache();
+        host.install();
+        FakeSystemd::under(host.directory.path())
+            .command(&["restart", ZEROFS_UNIT])
+            .unwrap();
+        host.config = original;
+        host.install();
+        host.invoke_start("restarted");
+        host.invoke_start("running");
+    }
+
+    #[test]
+    fn receipts_from_before_a_reboot_cannot_certify_the_new_services() {
+        let mut host = HostFiles::new();
+        host.install();
+        host.start(&FakeSystemd::default(), false).unwrap();
+        let original = host.config.clone();
+        host.change_cache();
+        host.install();
+        let systemd = FakeSystemd::default();
+        for unit in [ZEROFS_UNIT, MOUNT_UNIT, DAEMON_UNIT] {
+            systemd.restarted(unit);
+        }
+        host.config = original;
+        host.install();
+        assert_eq!(host.pending(&systemd), [true, true, true]);
+        assert!(host.start(&systemd, false).is_err());
+        host.start(&systemd, true).unwrap();
+        assert_eq!(host.pending(&systemd), [false, false, false]);
+    }
+
+    #[test]
+    fn mount_and_daemon_restarts_cannot_reuse_the_previous_activations_receipts() {
+        for (unit, index) in [(MOUNT_UNIT, 1), (DAEMON_UNIT, 2)] {
+            let host = HostFiles::new();
+            host.install();
+            let systemd = FakeSystemd::default();
+            host.start(&systemd, false).unwrap();
+            systemd.command(&["restart", unit]).unwrap();
+            assert!(host.pending(&systemd)[index]);
+            let outcomes = host.start(&systemd, false).unwrap();
+            assert_eq!(outcomes[0].1, Outcome::Running);
+            assert_eq!(outcomes[index].1, Outcome::Restarted);
+            assert_eq!(host.pending(&systemd), [false, false, false]);
+        }
+    }
+
+    #[test]
+    fn missing_or_unreadable_invocation_ids_do_not_allow_an_unverified_zerofs_to_keep_running() {
+        let host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        systemd.commands.borrow_mut().clear();
+        systemd.unidentified.set(Some(ZEROFS_UNIT));
+        assert!(host.pending(&systemd)[0]);
+        let error = host.start(&systemd, false).unwrap_err();
+        assert!(error.to_string().contains("--restart-zerofs"), "{error}");
+        systemd.unidentified.set(None);
+        systemd.unreadable.set(Some(ZEROFS_UNIT));
+        assert!(host.start(&systemd, false).is_err());
+        assert!(systemd.commands.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_activation_without_an_invocation_id_remains_pending() {
+        let host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        systemd.unidentified.set(Some(ZEROFS_UNIT));
+        let error = host.start(&systemd, false).unwrap_err();
+        assert!(error.to_string().contains("no invocation ID"), "{error}");
+        systemd.unidentified.set(None);
+        assert!(host.pending(&systemd)[0]);
+        assert!(host.start(&systemd, false).is_err());
+        host.start(&systemd, true).unwrap();
+        assert_eq!(host.pending(&systemd), [false, false, false]);
+    }
+
+    #[test]
+    fn a_service_restarted_while_another_unit_activates_is_not_certified() {
+        let host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        std::fs::write(host.directory.path().join("systemd").join(MOUNT_UNIT), "changed").unwrap();
+        systemd.restart_on_mount.set(true);
+        let outcomes = host.start(&systemd, false).unwrap();
+        assert_eq!(outcomes[0].1, Outcome::Failed);
+        assert!(host.pending(&systemd)[0]);
+        assert!(host.start(&systemd, false).is_err());
+        host.start(&systemd, true).unwrap();
+        assert_eq!(host.pending(&systemd), [false, false, false]);
+    }
+
+    #[test]
+    fn a_content_only_receipt_cannot_certify_the_current_activation() {
+        let host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        let receipt = inputs::receipt(&host.config.state_dir, ZEROFS_UNIT);
+        let original = std::fs::read_to_string(&receipt).unwrap();
+        std::fs::write(&receipt, original.lines().next().unwrap()).unwrap();
+        assert!(host.start(&systemd, false).is_err());
+        host.start(&systemd, true).unwrap();
+        assert_eq!(host.pending(&systemd), [false, false, false]);
+    }
+
+    #[test]
+    fn systemd_invocation_ids_must_be_nonzero_hexadecimal_ids() {
+        let id = "9d52c9bc345e4a26b1c0e4f4ea5d2a0b";
+        assert_eq!(InvocationId::parse(id), InvocationId::parse(&format!("{id}\n")));
+        assert_eq!(InvocationId::parse(id), InvocationId::parse(&id.to_uppercase()));
+        assert!(InvocationId::parse(id).is_some());
+        for shown in [
+            "",
+            "00000000000000000000000000000000",
+            "invalid",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        ] {
+            assert!(InvocationId::parse(shown).is_none(), "{shown}");
+        }
     }
 
     #[test]

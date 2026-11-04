@@ -20,10 +20,14 @@ Applied service inputs are recorded under [`paths.state_dir`](/docs/reference/co
 interrupted or failed `start`, leaves changes pending until activation succeeds. Repeating
 `start` with no pending changes leaves services running.
 
+A reboot or a restart outside `start` makes the previous activation receipt unverified, even
+if the installed files match it. Receipts from older versions that did not identify the service
+activation are also unverified.
+
 If a running ZeroFS needs new service inputs, `start` refuses to restart it automatically:
 that disconnects every guest disk. Stop the guests that use it, then run
 `nibrunnerd start --restart-zerofs`. The same acknowledgement is required on an existing
-ZeroFS host whose applied inputs have not yet been recorded. `--force` only permits replacing
+ZeroFS host whose running inputs cannot be verified. `--force` only permits replacing
 files; it does not permit a ZeroFS restart.
 
 ## Validation rules

@@ -84,9 +84,10 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
   deployment cancels and drains active runs before the guest stops. Registry notifications and
   the next due time drive scheduling, without polling or catching up missed runs.
 - `start` compares installed service inputs with successful activation receipts under
-  `paths.state_dir/applied-services`. Preserve pending changes through separate `install` and
-  `start` invocations and failed or interrupted activation. A running ZeroFS with pending or
-  unrecorded inputs requires `start --restart-zerofs`, because its restart disconnects guest disks.
+  `paths.state_dir/applied-services`. Receipts bind file fingerprints to systemd's `InvocationID`;
+  confirm that activation is still running before recording success. Preserve pending changes through
+  separate `install` and `start` invocations and failed or interrupted activation. A running ZeroFS with
+  pending or unverified inputs requires `start --restart-zerofs`, because its restart disconnects guest disks.
 - OCI registry pulls use `oci-client` over HTTPS with anonymous registry authentication. Desired
   layers use `kind: "oci"` with exactly one of `objectKey` (archive) or `repository` (registry),
   pinned by digest; image startup defaults do not override `config.command`.
