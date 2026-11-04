@@ -349,7 +349,7 @@ pub fn ready(config: &HostConfig) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn mount_unit_name(storage: &HostStorage) -> String {
+pub(crate) fn mount_unit_name(storage: &HostStorage) -> String {
     path_unit(&storage.mount_point, "mount")
 }
 
@@ -513,7 +513,6 @@ pub(crate) fn remove_unused_dependencies(
 fn remove_generated(path: &Path, laid: &mut super::Laid) -> Result<(), InstallError> {
     if std::fs::read_to_string(path).is_ok_and(|text| text.starts_with(render::GENERATED_MARKER)) {
         std::fs::remove_file(path).map_err(io_error)?;
-        laid.changed(path);
         laid.did(format!("{} removed", path.display()));
     }
     Ok(())
@@ -683,7 +682,7 @@ mod tests {
         remove_generated(&generated, &mut laid).unwrap();
         remove_generated(&generated, &mut laid).unwrap();
         remove_generated(&unmanaged, &mut laid).unwrap();
-        assert_eq!(laid.written, [generated]);
+        assert_eq!(laid.done, [format!("{} removed", generated.display())]);
         assert!(unmanaged.exists());
     }
 
