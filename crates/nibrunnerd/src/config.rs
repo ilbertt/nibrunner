@@ -573,11 +573,11 @@ mod file {
         /// An exact lowercase DNS hostname, without a scheme, port or wildcard.
         #[schemars(pattern(protocol::HOSTNAME_PATTERN))]
         #[schemars(length(max = protocol::MAX_HOSTNAME_LENGTH))]
-        pub(super) domain: Option<String>,
+        pub(super) domain: String,
         /// An absolute HTTP or HTTPS URL without credentials. Its hostname must differ from domain.
         /// Incoming paths and queries are not appended. Changes require `nibrunnerd start`.
         #[schemars(pattern(r"^[Hh][Tt][Tt][Pp][Ss]?://"))]
-        pub(super) redirect: Option<String>,
+        pub(super) redirect: String,
     }
 
     /// One certificate for the whole host — there is no SNI selection, so a wildcard in practice —
@@ -1079,8 +1079,8 @@ impl HostConfig {
             proxy: (self.proxy != ProxyConfig::default()).then(|| file::Proxy {
                 http: self.proxy.http.as_ref().map(|http| file::Http {
                     fallback: http.fallback.as_ref().map(|fallback| file::Fallback {
-                        domain: Some(fallback.domain.to_string()),
-                        redirect: Some(fallback.redirect.to_string()),
+                        domain: fallback.domain.to_string(),
+                        redirect: fallback.redirect.to_string(),
                     }),
                     concurrency: http.concurrency.clone(),
                     listen_address: Some(http.listen_address.to_string()),
@@ -1246,15 +1246,14 @@ fn bind_address(field: &str, value: &Option<String>) -> Result<IpAddr, ConfigErr
 }
 
 fn http_fallback(document: &file::Fallback) -> Result<HttpFallback, ConfigError> {
-    let domain = protocol::Hostname::parse(required_str("proxy.http.fallback.domain", &document.domain)?)
-        .map_err(|_| {
-            ConfigError::invalid(
-                "proxy.http.fallback.domain",
-                "a lowercase DNS hostname without a scheme, port or wildcard",
-            )
-        })?;
+    let domain = protocol::Hostname::parse(document.domain.as_str()).map_err(|_| {
+        ConfigError::invalid(
+            "proxy.http.fallback.domain",
+            "a lowercase DNS hostname without a scheme, port or wildcard",
+        )
+    })?;
     let field = "proxy.http.fallback.redirect";
-    let value = required_str(field, &document.redirect)?;
+    let value = document.redirect.as_str();
     let invalid = || {
         ConfigError::invalid(
             field,
@@ -1602,7 +1601,8 @@ mod tests {
     #[test]
     fn a_fallback_is_absent_or_has_both_a_domain_and_a_redirect() {
         let starter = HostConfig::starter(1);
-        assert!(starter.proxy.http.as_ref().unwrap().fallback.is_none());
+        let parsed = HostConfig::from_toml(&starter.to_toml()).unwrap();
+        assert!(parsed.proxy.http.as_ref().unwrap().fallback.is_none());
         let document = fallback_document(
             "fallback.example.com",
             "https://www.example.com/welcome?from=host#start",
@@ -1617,6 +1617,13 @@ mod tests {
         assert_eq!(HostConfig::from_toml(&config.to_toml()).unwrap(), config);
 
         let validator = jsonschema::validator_for(&HostConfig::schema().to_value()).unwrap();
+        let starter_json =
+            serde_json::to_value(toml::from_str::<toml::Value>(&starter.to_toml()).unwrap()).unwrap();
+        assert!(validator.is_valid(&starter_json));
+        let empty = format!("{}\n[proxy.http.fallback]\n", starter.to_toml());
+        assert!(HostConfig::from_toml(&empty).is_err());
+        let empty_json = serde_json::to_value(toml::from_str::<toml::Value>(&empty).unwrap()).unwrap();
+        assert!(!validator.is_valid(&empty_json));
         let json = serde_json::to_value(toml::from_str::<toml::Value>(&document).unwrap()).unwrap();
         assert!(validator.is_valid(&json));
         for field in ["domain", "redirect"] {
@@ -1627,9 +1634,7 @@ mod tests {
                 .join("\n");
             let error = HostConfig::from_toml(&incomplete).unwrap_err();
             assert!(
-                error
-                    .to_string()
-                    .contains(&format!("proxy.http.fallback.{field}")),
+                error.to_string().contains(&format!("missing field `{field}`")),
                 "{error}"
             );
             let json = serde_json::to_value(toml::from_str::<toml::Value>(&incomplete).unwrap()).unwrap();
