@@ -1,0 +1,34 @@
+name: Prepare integration host
+description: Prepare the tools, devices and host security required by integration tests
+
+inputs:
+  shared-cache-key:
+    description: A name for jobs that build the same thing to share one cargo cache under. Empty keys the cache by job.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/prepare
+      with:
+        cache: enabled
+        prepare-for-build: enabled
+        shared-cache-key: ${{ inputs.shared-cache-key }}
+
+    - name: Check the machine can host
+      shell: bash
+      run: ls -l /dev/net/tun /dev/kvm
+
+    - name: Disable host SMT
+      shell: bash
+      run: |
+        smt_directory=/sys/devices/system/cpu/smt
+        if [[ "$(cat "$smt_directory/active")" == 1 ]]; then
+          echo forceoff | sudo tee "$smt_directory/control"
+        fi
+        test "$(cat "$smt_directory/active")" = 0
+
+    - name: Install integration tools
+      shell: bash
+      run: sudo apt-get install -y nftables iproute2 iptables xfsprogs fdisk

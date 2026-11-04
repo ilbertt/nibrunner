@@ -86,19 +86,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ./.github/actions/prepare
-        with:
-          cache: enabled
-          prepare-for-build: enabled
-
-      - name: Check the machine can host
-        run: ls -l /dev/net/tun /dev/kvm
-
-      - name: Prepare host security
-        run: sudo bash .github/scripts/prepare-host-security.sh
-
-      - name: Install integration tools
-        run: sudo apt-get install -y nftables xfsprogs fdisk
+      - uses: ./.github/actions/prepare-integration
 
       - name: Build the integration tests
         run: just integration --build-only
@@ -144,22 +132,11 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ./.github/actions/prepare
+      - uses: ./.github/actions/prepare-integration
         with:
-          cache: enabled
-          prepare-for-build: enabled
           # Every shard builds the same test binary, so they share one cache rather than warming
           # one each.
           shared-cache-key: integration-guest
-
-      - name: Check the machine can host
-        run: ls -l /dev/net/tun /dev/kvm
-
-      - name: Prepare host security
-        run: sudo bash .github/scripts/prepare-host-security.sh
-
-      - name: Install guest networking tools
-        run: sudo apt-get install -y nftables iproute2 iptables
 
       # The image is not checked in and every shard needs the same one, so it is built once for
       # whatever the pins and the guest's own code say and then restored. Keyed on the manifest as
