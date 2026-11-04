@@ -469,6 +469,7 @@ async fn test_host_over(
     // app is refused on a host that does neither.
     config.proxy = crate::config::ProxyConfig {
         http: Some(crate::config::HttpListener {
+            fallback: None,
             concurrency: None,
             listen_address: std::net::Ipv4Addr::LOCALHOST.into(),
             port: 8080,

@@ -1376,6 +1376,7 @@ mod tests {
         std::fs::write(&certificate, A_CERTIFICATE).unwrap();
         let mut config = HostConfig::under(Path::new("/srv/nibrunner"));
         config.proxy.http = Some(HttpListener {
+            fallback: None,
             concurrency: None,
             listen_address: "0.0.0.0".parse().unwrap(),
             port: 443,

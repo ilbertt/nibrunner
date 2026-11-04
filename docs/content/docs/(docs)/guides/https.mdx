@@ -35,6 +35,30 @@ listen_address = "0.0.0.0"
 port = 80
 ```
 
+## Fallback hostname
+
+Reserve a hostname for a redirect with
+[`[proxy.http.fallback]`](/docs/reference/config#proxyhttpfallback):
+
+```toml
+[proxy.http.fallback]
+domain = "fallback.apps.example.com"
+redirect = "https://www.example.com/"
+```
+
+Requests for [`domain`](/docs/reference/config#proxyhttpfallback-domain) receive a `307`
+temporary redirect to [`redirect`](/docs/reference/config#proxyhttpfallback-redirect), without
+reaching or waking an app. The target is the exact configured URL; incoming paths and queries
+are not appended. It must be an absolute HTTP or HTTPS URL without credentials, on a different
+hostname to avoid a redirect loop.
+
+The hostname is reserved even if an app declares it. Other platform and custom hostnames keep
+their normal routing. With Cloudflare for SaaS, customer requests retain their own `Host`
+header, so this redirect handles direct visits to the fallback name.
+
+Omit the section to keep unknown hostnames returning `404`. After changing it, run
+`nibrunnerd start` to apply the new configuration.
+
 ## TLS on the host
 
 Add `[proxy.http.tls]` with a PEM certificate and key:

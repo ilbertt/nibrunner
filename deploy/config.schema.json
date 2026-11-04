@@ -306,12 +306,16 @@
       "additionalProperties": false
     },
     "proxy.http": {
-      "description": "The one HTTP listener, where the edge reaches it. One per host: nothing here redirects, so a\nplain port beside a TLS one would serve every app both ways forever.",
+      "description": "The one HTTP listener, where the edge reaches it. One per host: there is no HTTP-to-HTTPS\nupgrade, so a plain port beside a TLS one would serve every app both ways forever.",
       "type": "object",
       "properties": {
         "concurrency": {
           "description": "Absent preserves unlimited concurrent HTTP requests. Changes require `nibrunnerd start`.",
           "$ref": "#/$defs/proxy.http.concurrency"
+        },
+        "fallback": {
+          "description": "Reserve a hostname for a temporary redirect without reaching or waking an app.",
+          "$ref": "#/$defs/proxy.http.fallback"
         },
         "listen_address": {
           "description": "An IP address to bind.",
@@ -358,6 +362,27 @@
       "required": [
         "host_concurrent",
         "app_concurrent"
+      ]
+    },
+    "proxy.http.fallback": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "description": "An exact lowercase DNS hostname, without a scheme, port or wildcard.",
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+        },
+        "redirect": {
+          "description": "An absolute HTTP or HTTPS URL without credentials. Its hostname must differ from domain.\nIncoming paths and queries are not appended. Changes require `nibrunnerd start`.",
+          "type": "string",
+          "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "domain",
+        "redirect"
       ]
     },
     "proxy.http.tls": {
