@@ -21,7 +21,8 @@ For workloads that must not trust each other, apply these requirements before de
 These are host preparation requirements. They do not establish that a CPU is free of hardware
 vulnerabilities. Follow [Firecracker's production host guidance](https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md)
 and the [Linux hardware vulnerability documentation](https://docs.kernel.org/admin-guide/hw-vuln/index.html)
-for the CPU in use. nibrunner does not currently enforce the SMT or KSM requirements.
+for the CPU in use. Installation and daemon startup require the kernel to report inactive
+SMT. KSM preparation remains the operator's responsibility.
 
 ## Host SMT
 
@@ -31,6 +32,9 @@ exploit some CPU vulnerabilities to observe data processed on its sibling thread
 Disable SMT in the machine's firmware or through the distribution's persistent kernel boot
 configuration, then verify the running kernel's `smt/active` value. Keep it disabled while
 apps run. An absent or unreadable status file does not establish that SMT is disabled.
+Installation and daemon startup refuse active, missing, unreadable or unknown SMT status
+before mounting storage, adopting existing VMs or starting new ones. Hosts without active
+SMT siblings report `0`, including hardware without SMT support.
 
 The guest machine configuration's `smt: false` describes virtual CPU topology. It does not
 disable SMT on the host. CPU quotas do not reserve physical cores or prevent sibling sharing.
@@ -60,5 +64,9 @@ meets the workloads' requirements; guest-local SMT settings cannot enforce that 
 
 Check host settings before upgrading or restarting nibrunner. Host security changes can
 require a reboot, affect other services on the same machine and change usable capacity.
+Before upgrading to a version that enforces inactive SMT, verify `smt/active` reports `0`.
+An unsuccessful daemon restart leaves routing and wake functionality unavailable even if
+existing VMM processes remain alive. A VPS with unavailable SMT status cannot satisfy this
+check; verify its compatibility before upgrading.
 Keep host settings persistent: a startup check cannot prevent a host administrator from
 changing them after apps have started.

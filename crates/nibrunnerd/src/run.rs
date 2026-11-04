@@ -39,6 +39,7 @@ pub enum StartupError {
 }
 
 pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
+    crate::host_security::check().map_err(|error| StartupError::Unusable(error.to_string()))?;
     crate::install::storage::check(&config).map_err(|error| StartupError::Unusable(error.message()))?;
     for directory in [&config.state_dir, &config.runtime_dir, &config.snapshot_dir] {
         crate::json_store::make_directory(directory, 0o700).map_err(|error| {

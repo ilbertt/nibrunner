@@ -94,6 +94,13 @@ jobs:
       - name: Check the machine can host
         run: ls -l /dev/net/tun /dev/kvm
 
+      - name: Disable host SMT
+        run: |
+          if [ "$(cat /sys/devices/system/cpu/smt/active)" = 1 ]; then
+            echo forceoff | sudo tee /sys/devices/system/cpu/smt/control
+          fi
+          test "$(cat /sys/devices/system/cpu/smt/active)" = 0
+
       - name: Install integration tools
         run: sudo apt-get install -y nftables xfsprogs fdisk
 
@@ -151,6 +158,13 @@ jobs:
 
       - name: Check the machine can host
         run: ls -l /dev/net/tun /dev/kvm
+
+      - name: Disable host SMT
+        run: |
+          if [ "$(cat /sys/devices/system/cpu/smt/active)" = 1 ]; then
+            echo forceoff | sudo tee /sys/devices/system/cpu/smt/control
+          fi
+          test "$(cat /sys/devices/system/cpu/smt/active)" = 0
 
       - name: Install guest networking tools
         run: sudo apt-get install -y nftables iproute2 iptables

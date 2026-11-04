@@ -87,6 +87,7 @@ pub async fn run(
     force: bool,
     release: Option<&Path>,
 ) -> Result<Laid, InstallError> {
+    crate::host_security::check().map_err(|error| InstallError::Refused(error.to_string()))?;
     let mut laid = Laid::default();
     storage::ensure_mounted(config)?;
     storage::check(config)?;
