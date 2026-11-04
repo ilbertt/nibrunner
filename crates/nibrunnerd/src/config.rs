@@ -127,7 +127,7 @@ pub struct HttpListener {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpFallback {
-    pub domain: protocol::Hostname,
+    pub origin_host: protocol::Hostname,
     pub redirect: reqwest::Url,
 }
 
@@ -570,11 +570,12 @@ mod file {
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "proxy.http.fallback")]
     pub(super) struct Fallback {
-        /// An exact lowercase DNS hostname, without a scheme, port or wildcard.
+        /// Exact lowercase DNS hostname matched against the request's Host header, without a
+        /// scheme, port or wildcard.
         #[schemars(pattern(protocol::HOSTNAME_PATTERN))]
         #[schemars(length(max = protocol::MAX_HOSTNAME_LENGTH))]
-        pub(super) domain: String,
-        /// An absolute HTTP or HTTPS URL without credentials. Its hostname must differ from domain.
+        pub(super) origin_host: String,
+        /// An absolute HTTP or HTTPS URL without credentials. Its hostname must differ from `origin_host`.
         /// Incoming paths and queries are not appended. Changes require `nibrunnerd start`.
         #[schemars(pattern(r"^[Hh][Tt][Tt][Pp][Ss]?://"))]
         pub(super) redirect: String,
@@ -963,7 +964,7 @@ impl HostConfig {
             proxy: ProxyConfig {
                 http: Some(HttpListener {
                     fallback: Some(HttpFallback {
-                        domain: protocol::Hostname::parse("fallback.apps.example.com")
+                        origin_host: protocol::Hostname::parse("fallback.apps.example.com")
                             .expect("the example fallback is a valid hostname"),
                         redirect: reqwest::Url::parse("https://www.example.com/")
                             .expect("the example redirect is a valid URL"),
@@ -1079,7 +1080,7 @@ impl HostConfig {
             proxy: (self.proxy != ProxyConfig::default()).then(|| file::Proxy {
                 http: self.proxy.http.as_ref().map(|http| file::Http {
                     fallback: http.fallback.as_ref().map(|fallback| file::Fallback {
-                        domain: fallback.domain.to_string(),
+                        origin_host: fallback.origin_host.to_string(),
                         redirect: fallback.redirect.to_string(),
                     }),
                     concurrency: http.concurrency.clone(),
@@ -1246,9 +1247,9 @@ fn bind_address(field: &str, value: &Option<String>) -> Result<IpAddr, ConfigErr
 }
 
 fn http_fallback(document: &file::Fallback) -> Result<HttpFallback, ConfigError> {
-    let domain = protocol::Hostname::parse(document.domain.as_str()).map_err(|_| {
+    let origin_host = protocol::Hostname::parse(document.origin_host.as_str()).map_err(|_| {
         ConfigError::invalid(
-            "proxy.http.fallback.domain",
+            "proxy.http.fallback.origin_host",
             "a lowercase DNS hostname without a scheme, port or wildcard",
         )
     })?;
@@ -1271,16 +1272,19 @@ fn http_fallback(document: &file::Fallback) -> Result<HttpFallback, ConfigError>
     {
         return Err(invalid());
     }
-    if redirect
-        .host_str()
-        .is_some_and(|host| host.trim_end_matches('.').eq_ignore_ascii_case(domain.as_str()))
-    {
+    if redirect.host_str().is_some_and(|host| {
+        host.trim_end_matches('.')
+            .eq_ignore_ascii_case(origin_host.as_str())
+    }) {
         return Err(ConfigError::invalid(
             field,
             "a URL on a different hostname to avoid a redirect loop",
         ));
     }
-    Ok(HttpFallback { domain, redirect })
+    Ok(HttpFallback {
+        origin_host,
+        redirect,
+    })
 }
 
 fn proxy(document: Option<&file::Proxy>, max_apps: u32) -> Result<ProxyConfig, ConfigError> {
@@ -1591,15 +1595,15 @@ fn storage_prefix(field: &str, value: &str) -> Result<String, ConfigError> {
 mod tests {
     use super::*;
 
-    fn fallback_document(domain: &str, redirect: &str) -> String {
+    fn fallback_document(origin_host: &str, redirect: &str) -> String {
         format!(
-            "{}\n[proxy.http.fallback]\ndomain = {domain:?}\nredirect = {redirect:?}\n",
+            "{}\n[proxy.http.fallback]\norigin_host = {origin_host:?}\nredirect = {redirect:?}\n",
             HostConfig::starter(1).to_toml()
         )
     }
 
     #[test]
-    fn a_fallback_is_absent_or_has_both_a_domain_and_a_redirect() {
+    fn a_fallback_is_absent_or_has_both_an_origin_host_and_a_redirect() {
         let starter = HostConfig::starter(1);
         let parsed = HostConfig::from_toml(&starter.to_toml()).unwrap();
         assert!(parsed.proxy.http.as_ref().unwrap().fallback.is_none());
@@ -1609,7 +1613,7 @@ mod tests {
         );
         let config = HostConfig::from_toml(&document).unwrap();
         let fallback = config.proxy.http.as_ref().unwrap().fallback.as_ref().unwrap();
-        assert_eq!(fallback.domain.as_str(), "fallback.example.com");
+        assert_eq!(fallback.origin_host.as_str(), "fallback.example.com");
         assert_eq!(
             fallback.redirect.as_str(),
             "https://www.example.com/welcome?from=host#start"
@@ -1626,7 +1630,11 @@ mod tests {
         assert!(!validator.is_valid(&empty_json));
         let json = serde_json::to_value(toml::from_str::<toml::Value>(&document).unwrap()).unwrap();
         assert!(validator.is_valid(&json));
-        for field in ["domain", "redirect"] {
+        let old_property = document.replace("origin_host =", "domain =");
+        assert!(HostConfig::from_toml(&old_property).is_err());
+        let old_json = serde_json::to_value(toml::from_str::<toml::Value>(&old_property).unwrap()).unwrap();
+        assert!(!validator.is_valid(&old_json));
+        for field in ["origin_host", "redirect"] {
             let incomplete = document
                 .lines()
                 .filter(|line| !line.starts_with(&format!("{field} =")))
@@ -1643,18 +1651,18 @@ mod tests {
     }
 
     #[test]
-    fn fallback_domains_are_exact_hostnames_and_redirects_are_safe_absolute_urls() {
-        for domain in [
+    fn fallback_origin_hosts_are_exact_hostnames_and_redirects_are_safe_absolute_urls() {
+        for origin_host in [
             "",
             "*.example.com",
             "Fallback.Example.Com",
             "fallback.example.com:8080",
             "https://fallback.example.com",
         ] {
-            let error =
-                HostConfig::from_toml(&fallback_document(domain, "https://www.example.com/")).unwrap_err();
+            let error = HostConfig::from_toml(&fallback_document(origin_host, "https://www.example.com/"))
+                .unwrap_err();
             assert!(
-                error.to_string().contains("proxy.http.fallback.domain"),
+                error.to_string().contains("proxy.http.fallback.origin_host"),
                 "{error}"
             );
         }

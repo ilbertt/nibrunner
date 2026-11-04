@@ -257,7 +257,7 @@ impl Router {
         if let Some(fallback) = self
             .fallback
             .as_ref()
-            .filter(|fallback| hostname == fallback.domain.as_str())
+            .filter(|fallback| hostname == fallback.origin_host.as_str())
         {
             let mut response = say(StatusCode::TEMPORARY_REDIRECT, "");
             response.headers_mut().insert(
@@ -644,12 +644,12 @@ mod tests {
         answer
     }
 
-    const FALLBACK_DOMAIN: &str = "fallback.apps.example.com";
+    const FALLBACK_ORIGIN_HOST: &str = "fallback.apps.example.com";
     const FALLBACK_REDIRECT: &str = "https://www.example.com/welcome?from=host#start";
 
-    fn fallback_router(domain: &str) -> Arc<Router> {
+    fn fallback_router(origin_host: &str) -> Arc<Router> {
         let document = format!(
-            "{}\n[proxy.http.fallback]\ndomain = {domain:?}\nredirect = {FALLBACK_REDIRECT:?}\n",
+            "{}\n[proxy.http.fallback]\norigin_host = {origin_host:?}\nredirect = {FALLBACK_REDIRECT:?}\n",
             crate::config::HostConfig::starter(1).to_toml()
         );
         let config = crate::config::HostConfig::from_toml(&document).unwrap();
@@ -658,9 +658,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_fallback_redirects_to_its_configured_url_without_an_app() {
-        let port = serving(fallback_router(FALLBACK_DOMAIN)).await;
+        let port = serving(fallback_router(FALLBACK_ORIGIN_HOST)).await;
         for host in [
-            FALLBACK_DOMAIN,
+            FALLBACK_ORIGIN_HOST,
             "FALLBACK.APPS.EXAMPLE.COM",
             "fallback.apps.example.com:8080",
         ] {
@@ -681,22 +681,22 @@ mod tests {
 
     #[tokio::test]
     async fn the_fallback_is_reserved_even_if_an_app_claims_its_hostname() {
-        let domain = app_hostname().hostname.to_string();
-        let router = fallback_router(&domain);
+        let origin_host = app_hostname().hostname.to_string();
+        let router = fallback_router(&origin_host);
         routed_at(&router, HostPort::new(1).unwrap()).await;
         let port = serving(router.clone()).await;
-        let response = asked_for(port, &domain).await;
+        let response = asked_for(port, &origin_host).await;
         assert!(response.starts_with("HTTP/1.0 307 "), "{response}");
         let app_id = instance_record(|_| {}).app_id;
         assert_eq!(router.metrics.proxy.of(&app_id).request_count, 0);
         router.apply(RouteTable::default()).await;
-        let response = asked_for(port, &domain).await;
+        let response = asked_for(port, &origin_host).await;
         assert!(response.starts_with("HTTP/1.0 307 "), "{response}");
     }
 
     #[tokio::test]
     async fn a_fallback_does_not_capture_customer_hostnames_or_similar_names() {
-        let router = fallback_router(FALLBACK_DOMAIN);
+        let router = fallback_router(FALLBACK_ORIGIN_HOST);
         let upstream = answering_with(StatusCode::OK).await;
         let record = instance_record(|record| {
             record.host_port = Some(upstream);
@@ -727,20 +727,20 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_redirects_still_require_a_host_and_a_matching_tls_server_name() {
-        let router = fallback_router(FALLBACK_DOMAIN);
+        let router = fallback_router(FALLBACK_ORIGIN_HOST);
         let port = serving_as(router, arriving(Some("another.example.com"), true)).await;
-        let response = asked_for(port, FALLBACK_DOMAIN).await;
+        let response = asked_for(port, FALLBACK_ORIGIN_HOST).await;
         assert!(response.starts_with("HTTP/1.0 421 "), "{response}");
         assert!(!response.contains("\r\nlocation:"), "{response}");
         let response = asked(port, "GET / HTTP/1.0\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.0 400 "), "{response}");
 
         let port = serving_as(
-            fallback_router(FALLBACK_DOMAIN),
-            arriving(Some(FALLBACK_DOMAIN), true),
+            fallback_router(FALLBACK_ORIGIN_HOST),
+            arriving(Some(FALLBACK_ORIGIN_HOST), true),
         )
         .await;
-        let response = asked_for(port, FALLBACK_DOMAIN).await;
+        let response = asked_for(port, FALLBACK_ORIGIN_HOST).await;
         assert!(response.starts_with("HTTP/1.0 307 "), "{response}");
     }
 

@@ -367,21 +367,21 @@
     "proxy.http.fallback": {
       "type": "object",
       "properties": {
-        "domain": {
-          "description": "An exact lowercase DNS hostname, without a scheme, port or wildcard.",
+        "origin_host": {
+          "description": "Exact lowercase DNS hostname matched against the request's Host header, without a\nscheme, port or wildcard.",
           "type": "string",
           "maxLength": 253,
           "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
         },
         "redirect": {
-          "description": "An absolute HTTP or HTTPS URL without credentials. Its hostname must differ from domain.\nIncoming paths and queries are not appended. Changes require `nibrunnerd start`.",
+          "description": "An absolute HTTP or HTTPS URL without credentials. Its hostname must differ from `origin_host`.\nIncoming paths and queries are not appended. Changes require `nibrunnerd start`.",
           "type": "string",
           "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"
         }
       },
       "additionalProperties": false,
       "required": [
-        "domain",
+        "origin_host",
         "redirect"
       ]
     },

@@ -42,11 +42,11 @@ Reserve a hostname for a redirect with
 
 ```toml
 [proxy.http.fallback]
-domain = "fallback.apps.example.com"
+origin_host = "fallback.apps.example.com"
 redirect = "https://www.example.com/"
 ```
 
-Requests for [`domain`](/docs/reference/config#proxyhttpfallback-domain) receive a `307`
+Requests for [`origin_host`](/docs/reference/config#proxyhttpfallback-origin_host) receive a `307`
 temporary redirect to [`redirect`](/docs/reference/config#proxyhttpfallback-redirect), without
 reaching or waking an app. The target is the exact configured URL; incoming paths and queries
 are not appended. It must be an absolute HTTP or HTTPS URL without credentials, on a different

@@ -78,7 +78,7 @@ host_concurrent = 128
 app_concurrent = 16
 
 [proxy.http.fallback]
-domain = "fallback.apps.example.com"
+origin_host = "fallback.apps.example.com"
 redirect = "https://www.example.com/"
 
 [proxy.raw]
