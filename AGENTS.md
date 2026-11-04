@@ -235,6 +235,9 @@ file to reflect it.
 PR workflows cancel superseded runs of the same workflow for the same pull request to save Actions
 minutes. Runs on `main` remain independent.
 
+Integration jobs build as the runner account and use Cargo's target runner to elevate only test
+executables. Pass the required runtime environment explicitly; Ubuntu 26.04's sudo ignores `-E`.
+
 Work goes on a branch and lands on `main` through a pull request, squash-merged with the pull
 request's title as the commit subject — so the title is a Conventional Commit (`feat:`, `fix:`,
 `docs:`, `chore:`, …), and so is every commit on the branch. Never push to `main` directly.
