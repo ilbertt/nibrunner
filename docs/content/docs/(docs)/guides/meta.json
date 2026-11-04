@@ -14,6 +14,7 @@
     "logs-and-metrics",
     "file-listings",
     "host-capacity",
-    "host-storage"
+    "host-storage",
+    "host-security"
   ]
 }
