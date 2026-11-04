@@ -7,23 +7,43 @@ use crate::json_store::{self, StoreError};
 
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct InvocationId(uuid::Uuid);
+
+impl InvocationId {
+    pub(super) fn parse(shown: &str) -> Option<Self> {
+        let shown = shown.trim();
+        if shown.len() != uuid::fmt::Simple::LENGTH {
+            return None;
+        }
+        uuid::Uuid::parse_str(shown)
+            .ok()
+            .filter(|id| !id.is_nil())
+            .map(Self)
+    }
+}
+
 pub(super) struct Inputs {
     paths: Vec<PathBuf>,
     fingerprint: String,
     receipt: PathBuf,
-    pub(super) pending: bool,
+    applied: Option<String>,
 }
 
 impl Inputs {
     pub(super) fn read(paths: Vec<PathBuf>, receipt: PathBuf) -> Result<Self, StoreError> {
         let fingerprint = fingerprint(&paths)?;
-        let pending = json_store::read_text(&receipt)?.as_ref() != Some(&fingerprint);
+        let applied = json_store::read_text(&receipt)?;
         Ok(Self {
             paths,
             fingerprint,
             receipt,
-            pending,
+            applied,
         })
+    }
+
+    pub(super) fn pending(&self, invocation: Option<InvocationId>) -> bool {
+        invocation.is_none_or(|id| self.applied.as_ref() != Some(&self.record(id)))
     }
 
     pub(super) fn invalidate(&self) -> Result<(), StoreError> {
@@ -37,14 +57,18 @@ impl Inputs {
         }
     }
 
-    pub(super) fn applied(&self) -> Result<(), StoreError> {
+    pub(super) fn applied(&self, invocation: InvocationId) -> Result<(), StoreError> {
         if fingerprint(&self.paths)? != self.fingerprint {
             return Err(StoreError::Unwritable {
                 path: self.receipt.clone(),
                 source: std::io::Error::other("service inputs changed during activation; run start again"),
             });
         }
-        json_store::write_text(&self.receipt, &self.fingerprint, 0o600)
+        json_store::write_text(&self.receipt, &self.record(invocation), 0o600)
+    }
+
+    fn record(&self, invocation: InvocationId) -> String {
+        format!("{}\n{}", self.fingerprint, invocation.0.simple())
     }
 }
 
