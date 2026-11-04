@@ -3,7 +3,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
+use nix::errno::Errno;
 use nix::fcntl::{Flock, FlockArg};
 use serde::Deserialize;
 
@@ -13,6 +15,9 @@ use crate::config::{HostConfig, HostStorage};
 pub(crate) const PREPARE_UNIT: &str = "nibrunner-storage-prepare.service";
 pub(crate) const READY_UNIT: &str = "nibrunner-storage.service";
 pub(crate) const DROP_IN: &str = "host-storage.conf";
+
+const DEVICE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const DEVICE_LOCK_RETRY: Duration = Duration::from_millis(25);
 
 fn refused(reason: impl Into<String>) -> InstallError {
     InstallError::Refused(format!("host storage is unavailable: {}", reason.into()))
@@ -192,6 +197,26 @@ struct Prepared {
     mounted: bool,
 }
 
+fn lock_device(mut file: File, device: &Path, deadline: Instant) -> Result<Flock<File>, InstallError> {
+    loop {
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(locked) => return Ok(locked),
+            Err((returned, error)) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if error != Errno::EWOULDBLOCK || remaining.is_zero() {
+                    return Err(refused(format!(
+                        "{} could not be locked: {error}",
+                        device.display()
+                    )));
+                }
+                // udev holds shared locks while probing newly formatted or reattached devices.
+                file = returned;
+                std::thread::sleep(DEVICE_LOCK_RETRY.min(remaining));
+            }
+        }
+    }
+}
+
 fn prepare_device(storage: &HostStorage) -> Result<Prepared, InstallError> {
     no_symlinks(&storage.mount_point)?;
     let device = std::fs::canonicalize(&storage.device).map_err(|error| {
@@ -206,8 +231,7 @@ fn prepare_device(storage: &HostStorage) -> Result<Prepared, InstallError> {
         .open(&device)
         .map_err(io_error)?;
     let number = device_number(&file)?;
-    let mut file = Flock::lock(file, FlockArg::LockExclusiveNonblock)
-        .map_err(|(_, error)| refused(format!("{} could not be locked: {error}", device.display())))?;
+    let mut file = lock_device(file, &device, Instant::now() + DEVICE_LOCK_TIMEOUT)?;
     let devices = json(
         Command::new("lsblk")
             .args(["--json", "--paths", "--output", "NAME,TYPE,RO"])
@@ -524,6 +548,36 @@ mod tests {
 
     fn storage() -> HostStorage {
         HostConfig::example().host_storage.unwrap()
+    }
+
+    #[test]
+    fn a_temporary_shared_probe_lock_delays_preparation_until_it_is_released() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let shared = Flock::lock(file.reopen().unwrap(), FlockArg::LockShared).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(shared);
+        });
+        let locked = lock_device(
+            file.reopen().unwrap(),
+            file.path(),
+            Instant::now() + Duration::from_secs(2),
+        );
+        release.join().unwrap();
+        assert!(locked.is_ok());
+    }
+
+    #[test]
+    fn a_device_that_stays_locked_is_refused_when_the_deadline_expires() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let _shared = Flock::lock(file.reopen().unwrap(), FlockArg::LockShared).unwrap();
+        let refused = lock_device(
+            file.reopen().unwrap(),
+            file.path(),
+            Instant::now() + Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(refused.to_string().contains("could not be locked"));
     }
 
     #[test]

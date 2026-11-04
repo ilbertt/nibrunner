@@ -787,7 +787,7 @@ mod tests {
             .iter()
             .any(|command| matches!(command[0].as_str(), "start" | "restart")));
         std::fs::write(host.directory.path().join("nibrunnerd"), "upgraded daemon").unwrap();
-        assert_eq!(host.pending(), [true, false, false, true]);
+        assert_eq!(host.pending(&systemd), [true, false, false, true]);
         systemd.commands.borrow_mut().clear();
         assert_eq!(
             host.start(&systemd, false).unwrap(),
@@ -803,7 +803,7 @@ mod tests {
             .borrow()
             .iter()
             .any(|command| command[0] == "restart" && command[1] != DAEMON_UNIT));
-        assert_eq!(host.pending(), [false, false, false, false]);
+        assert_eq!(host.pending(&systemd), [false, false, false, false]);
     }
 
     #[test]
@@ -821,7 +821,7 @@ mod tests {
         let mut body = std::fs::read_to_string(&dependency).unwrap();
         body.push_str("\nTimeoutStartSec=90\n");
         std::fs::write(&dependency, body).unwrap();
-        assert_eq!(host.pending(), [false, true, true, false]);
+        assert_eq!(host.pending(&systemd), [false, true, true, false]);
         systemd.commands.borrow_mut().clear();
         assert!(host
             .start(&systemd, false)
@@ -835,7 +835,7 @@ mod tests {
         );
         host.config.host_storage = None;
         std::fs::remove_file(dependency).unwrap();
-        assert_eq!(host.pending(), [true, true, true]);
+        assert_eq!(host.pending(&systemd), [true, true, true]);
         assert!(host.start(&systemd, false).is_err());
     }
 
@@ -850,7 +850,7 @@ mod tests {
             host.start(&systemd, false).unwrap(),
             [(READY_UNIT, Outcome::Failed)]
         );
-        assert_eq!(host.pending(), [true, true, true, true]);
+        assert_eq!(host.pending(&systemd), [true, true, true, true]);
         assert!(!systemd
             .commands
             .borrow()
