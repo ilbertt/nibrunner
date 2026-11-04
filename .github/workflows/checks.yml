@@ -94,8 +94,8 @@ jobs:
       - name: Check the machine can host
         run: ls -l /dev/net/tun /dev/kvm
 
-      - name: Install nftables
-        run: sudo apt-get install -y nftables
+      - name: Install integration tools
+        run: sudo apt-get install -y nftables xfsprogs fdisk
 
       - name: Build the integration tests
         run: just integration --build-only

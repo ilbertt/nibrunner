@@ -1,0 +1,77 @@
+---
+title: Host storage
+description: Initialize and mount an explicit device for snapshots and ZeroFS caches.
+---
+
+1. Choose a whole block device by a stable path. Check it with `lsblk -f`.
+2. Add [`[host_storage]`](/docs/reference/config#hostconfig-host_storage) to `config.toml`:
+
+```toml
+[host_storage]
+device = "/dev/disk/by-id/nvme-instance-store"
+mount_point = "/data"
+filesystem = "xfs"
+```
+
+3. Set [`paths.snapshot_dir`](/docs/reference/config#paths-snapshot_dir) beneath the mount point,
+   such as `/data/nibrunner-vm`. With ZeroFS, also set
+   [`volumes.zerofs.cache_dir`](/docs/reference/config#volumeszerofs-cache_dir) and
+   [`volumes.zerofs.checkpoint_cache_dir`](/docs/reference/config#volumeszerofs-checkpoint_cache_dir)
+   beneath it, in separate directories.
+4. Run `nibrunnerd start` as root.
+
+The device path above is a placeholder: supply the device on your host. nibrunner does not
+discover instance stores or select disks by cloud provider. Omit `[host_storage]` to keep
+managing mounts yourself.
+
+## What happens
+
+| Device or mount | Result |
+| --- | --- |
+| No filesystem signatures and every byte is zero | Format with the configured filesystem, then mount. |
+| Existing matching `ext4` or `xfs` filesystem | Mount without formatting; preserve its contents. |
+| Other signatures, partition tables, partitions, RAID, LVM, child devices or read-only devices | Refuse startup. |
+| Unrecognized nonzero data | Refuse startup without formatting. |
+| Device mounted elsewhere, wrong device at the mount point, nested mounts or a read-only mount | Refuse startup. |
+| Unmounted, nonempty mount point or symlinked storage paths | Refuse startup without hiding or moving files. |
+
+`filesystem` is required and accepts `ext4` or `xfs`. An existing filesystem must match it.
+`--force` never authorizes reformatting. Initializing a blank device reads its entire contents
+first, which can take several minutes on a large disk.
+
+Install `util-linux`, `mount`, and the filesystem's tools (`e2fsprogs` or `xfsprogs`); the release
+installer includes them. The managed device and mount point must use normalized absolute paths
+with letters, digits, `/`, `_`, `.`, `:` or `-`. The mount point cannot be `/`.
+
+## Boot and repeated starts
+
+Installation mounts storage before writing any host directories. At boot, systemd prepares the
+device, mounts it, and creates directories before starting the daemon or ZeroFS. A replacement
+blank ephemeral device is initialized through the same checks. Neither service starts if the
+mount is unavailable, and both are stopped if systemd observes the mount going away. Starting the
+daemon directly also checks the mount before creating directories.
+
+The mount point is traversable (`0755`). Snapshot and checkpoint-cache directories belong to
+root (`0700`); the live cache belongs to the `zerofs` account (`0700`). Existing contents are not
+recursively changed. Repeated starts reuse the mounted filesystem and restore directory ownership
+and permissions.
+
+<Callout title="Ephemeral storage">
+Keep the host database and configuration on persistent storage. A replacement device has no
+previous snapshots or caches. Durable tenant volumes require the
+[ZeroFS backend](/docs/guides/volumes#zerofs) and its object store.
+</Callout>
+
+## Replace a custom initializer
+
+1. Disable the old disk-initialization unit and remove its dependency drop-ins. Leave the
+   existing filesystem mounted.
+2. Configure the same device, mount point and filesystem in `[host_storage]`.
+3. Run `nibrunnerd start`.
+
+An existing matching mount is reused. If files were written beneath the mount point on the root
+filesystem, move them aside yourself while the device is unmounted; startup refuses to hide them.
+
+To return to manual mounting, arrange the replacement boot dependencies, remove `[host_storage]`,
+and run `nibrunnerd start`. The generated storage units and dependencies are removed; the filesystem stays
+mounted.

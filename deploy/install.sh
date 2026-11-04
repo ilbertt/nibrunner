@@ -20,7 +20,7 @@ BINARY=/usr/local/bin/nibrunnerd
 # The superset of both volume backends. Which one this host wants is in a configuration that need
 # not exist yet, and nbd-client and fuse3 are a few hundred kilobytes on a host that turns out not
 # to want them.
-PACKAGES="nftables e2fsprogs nbd-client fuse3 kmod passwd curl ca-certificates"
+PACKAGES="nftables e2fsprogs xfsprogs util-linux mount nbd-client fuse3 kmod passwd curl ca-certificates"
 
 say() { printf '\n\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }

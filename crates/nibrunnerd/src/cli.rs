@@ -14,7 +14,7 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
-    #[command(about = "Lay out the guest image, kernel settings, ZeroFS and units without starting them")]
+    #[command(about = "Lay out the host, including configured storage, without starting its services")]
     Install {
         #[arg(long, help = "Replace files these commands did not write")]
         force: bool,
@@ -30,6 +30,21 @@ pub(super) enum Command {
         #[arg(long, help = "Replace files these commands did not write")]
         force: bool,
     },
+    #[command(about = "Prepare or verify explicitly configured host storage; used by systemd")]
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum StorageCommand {
+    #[command(about = "Initialize only blank storage and prepare its mount point")]
+    Prepare,
+    #[command(about = "Verify the storage mount and create its directories")]
+    Ready,
+    #[command(about = "Verify that configured storage is mounted")]
+    Check,
 }
 
 #[cfg(test)]
@@ -132,6 +147,10 @@ mod tests {
             vec!["start", "--help"],
             vec!["help", "install"],
             vec!["help", "start"],
+            vec!["storage", "--help"],
+            vec!["storage", "prepare", "--help"],
+            vec!["storage", "ready", "--help"],
+            vec!["storage", "check", "--help"],
         ] {
             let help = parse(&arguments).unwrap_err();
             assert_eq!(help.kind(), ErrorKind::DisplayHelp);

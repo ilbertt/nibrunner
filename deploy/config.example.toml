@@ -19,6 +19,11 @@ max_concurrent_vm_starts = 2
 max_jobs_per_app = 10
 time_zone = "UTC"
 
+[host_storage]
+device = "/dev/disk/by-id/nvme-instance-store"
+mount_point = "/data"
+filesystem = "xfs"
+
 [paths]
 state_dir = "/var/lib/nibrunner"
 runtime_dir = "/run/nibrunner"

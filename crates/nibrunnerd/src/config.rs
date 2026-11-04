@@ -195,6 +195,29 @@ pub struct CronConfig {
     pub time_zone: chrono_tz::Tz,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageFilesystem {
+    Ext4,
+    Xfs,
+}
+
+impl StorageFilesystem {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ext4 => "ext4",
+            Self::Xfs => "xfs",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostStorage {
+    pub device: PathBuf,
+    pub mount_point: PathBuf,
+    pub filesystem: StorageFilesystem,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConfig {
     pub max_concurrent_vm_starts: std::num::NonZeroU16,
@@ -204,6 +227,7 @@ pub struct HostConfig {
     /// nothing holds a copy of it.
     pub max_apps: u32,
     pub cron: CronConfig,
+    pub host_storage: Option<HostStorage>,
     pub state_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub snapshot_dir: PathBuf,
@@ -308,6 +332,10 @@ mod file {
         pub(super) max_concurrent_vm_starts: Option<std::num::NonZeroU16>,
         /// Cron registration and scheduling policy for every app on this host.
         pub(super) cron: Option<Cron>,
+        /// Explicitly managed whole-device storage for snapshots and ZeroFS caches. Absent leaves
+        /// mounting to the operator. Only an entirely zeroed device is initialized.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) host_storage: Option<Storage>,
         /// Where this host keeps what is its own.
         pub(super) paths: Option<Paths>,
         /// Where the layers a document names come from.
@@ -342,6 +370,22 @@ mod file {
         /// IANA time zone for every cron schedule, such as UTC or Europe/Zurich.
         #[schemars(length(min = 1))]
         pub(super) time_zone: Option<String>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[schemars(rename = "host_storage")]
+    pub(super) struct Storage {
+        /// An explicit whole block device under /dev, preferably a stable /dev/disk/by-id name.
+        /// Partitions, RAID, LVM, read-only devices and devices with children are refused.
+        #[schemars(pattern("^/dev/"))]
+        pub(super) device: Option<String>,
+        /// An absolute, normalized path other than /. Snapshots and both ZeroFS caches must be
+        /// beneath it. Existing unmounted contents and symlinks are refused.
+        #[schemars(pattern(ABSOLUTE_PATH))]
+        pub(super) mount_point: Option<String>,
+        /// Filesystem for a blank device. Existing filesystems must match and are never reformatted.
+        pub(super) filesystem: Option<super::StorageFilesystem>,
     }
 
     /// Every one an absolute path, and every one this host's alone.
@@ -716,13 +760,24 @@ impl HostConfig {
         let filesystem = filesystem(document.filesystem.as_ref())?;
         let logs = logs(document.logs.as_ref())?;
 
-        Ok(Self {
+        let config = Self {
             max_concurrent_vm_starts: required(
                 "max_concurrent_vm_starts",
                 document.max_concurrent_vm_starts,
             )?,
             max_apps,
             cron,
+            host_storage: document
+                .host_storage
+                .as_ref()
+                .map(|storage| {
+                    Ok::<_, ConfigError>(HostStorage {
+                        device: path_key("host_storage.device", &storage.device)?,
+                        mount_point: path_key("host_storage.mount_point", &storage.mount_point)?,
+                        filesystem: required("host_storage.filesystem", storage.filesystem)?,
+                    })
+                })
+                .transpose()?,
             snapshot_dir: path_key("paths.snapshot_dir", &paths.snapshot_dir)?,
             guest_image_dir: path_key("paths.guest_image_dir", &paths.guest_image_dir)?,
             firecracker_dir: runtime_dir.join("firecracker"),
@@ -764,7 +819,9 @@ impl HostConfig {
             export_staging_dir: path_key("exports.staging_dir", &exports.staging_dir)?,
             state_dir,
             runtime_dir,
-        })
+        };
+        validate_host_storage(&config)?;
+        Ok(config)
     }
 
     /// The starting point, laid out where a Linux distribution would put it: volumes as files on
@@ -803,6 +860,7 @@ impl HostConfig {
 
     fn laid_out(state_dir: PathBuf, runtime_dir: PathBuf, guest_image_dir: PathBuf) -> Self {
         Self {
+            host_storage: None,
             max_apps: 1000,
             cron: CronConfig {
                 max_jobs_per_app: 10,
@@ -841,6 +899,11 @@ impl HostConfig {
     /// but the newest would otherwise be exactly what nobody noticed.
     pub fn example() -> Self {
         Self {
+            host_storage: Some(HostStorage {
+                device: PathBuf::from("/dev/disk/by-id/nvme-instance-store"),
+                mount_point: PathBuf::from("/data"),
+                filesystem: StorageFilesystem::Xfs,
+            }),
             max_apps: 1000,
             cron: CronConfig {
                 max_jobs_per_app: 10,
@@ -933,6 +996,11 @@ impl HostConfig {
     fn to_document(&self) -> file::ConfigFile {
         let text = |path: &std::path::Path| Some(path.display().to_string());
         file::ConfigFile {
+            host_storage: self.host_storage.as_ref().map(|storage| file::Storage {
+                device: text(&storage.device),
+                mount_point: text(&storage.mount_point),
+                filesystem: Some(storage.filesystem),
+            }),
             max_apps: Some(self.max_apps),
             cron: Some(file::Cron {
                 max_jobs_per_app: Some(self.cron.max_jobs_per_app),
@@ -1045,6 +1113,94 @@ fn without_null(schema: &mut schemars::Schema) {
     for (key, value) in only {
         object.entry(key).or_insert(value);
     }
+}
+
+fn validate_host_storage(config: &HostConfig) -> Result<(), ConfigError> {
+    let Some(storage) = &config.host_storage else {
+        return Ok(());
+    };
+    for (field, path) in [
+        ("host_storage.device", &storage.device),
+        ("host_storage.mount_point", &storage.mount_point),
+    ] {
+        let text = path.to_string_lossy();
+        if !text.starts_with('/')
+            || text
+                .split('/')
+                .skip(1)
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || !text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"/_.:-".contains(&byte))
+        {
+            return Err(ConfigError::invalid(
+                field,
+                "a normalized absolute path using letters, digits, /, _, ., : or -",
+            ));
+        }
+    }
+    if !storage.device.starts_with("/dev") || storage.device == std::path::Path::new("/dev") {
+        return Err(ConfigError::invalid(
+            "host_storage.device",
+            "a block device under /dev",
+        ));
+    }
+    let mut directories = vec![("paths.snapshot_dir", &config.snapshot_dir)];
+    if let Some(settings) = config.volumes.zerofs() {
+        if settings.mount_path.starts_with(&storage.mount_point) {
+            return Err(ConfigError::invalid(
+                "volumes.zerofs.mount_path",
+                "outside host_storage.mount_point, which cannot contain nested mounts",
+            ));
+        }
+        if [
+            &config.state_dir,
+            &config.guest_image_dir,
+            &config.export_staging_dir,
+        ]
+        .iter()
+        .any(|directory| settings.cache_dir.starts_with(directory))
+        {
+            return Err(ConfigError::invalid(
+                "volumes.zerofs.cache_dir",
+                "outside private root-owned host directories so the zerofs account can reach it",
+            ));
+        }
+        directories.extend([
+            ("volumes.zerofs.cache_dir", &settings.cache_dir),
+            (
+                "volumes.zerofs.checkpoint_cache_dir",
+                &settings.checkpoint_cache_dir,
+            ),
+        ]);
+    }
+    for (field, path) in &directories {
+        let relative = path.strip_prefix(&storage.mount_point).ok();
+        if relative.is_none_or(|relative| {
+            relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        }) {
+            return Err(ConfigError::invalid(
+                field,
+                "a directory beneath host_storage.mount_point without . or .. segments",
+            ));
+        }
+    }
+    for (index, (_, path)) in directories.iter().enumerate() {
+        if directories
+            .iter()
+            .skip(index + 1)
+            .any(|(_, other)| path.starts_with(other) || other.starts_with(path))
+        {
+            return Err(ConfigError::invalid(
+                "host_storage",
+                "separate snapshot and cache directories that do not contain each other",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn bind_address(field: &str, value: &Option<String>) -> Result<IpAddr, ConfigError> {
@@ -1360,6 +1516,57 @@ fn storage_prefix(field: &str, value: &str) -> Result<String, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_storage_is_optional_but_every_present_setting_is_required() {
+        let config = HostConfig::example();
+        let text = config.to_toml();
+        assert_eq!(HostConfig::from_toml(&text).unwrap(), config);
+        for line in [
+            "device = \"/dev/disk/by-id/nvme-instance-store\"\n",
+            "mount_point = \"/data\"\n",
+            "filesystem = \"xfs\"\n",
+        ] {
+            let error = HostConfig::from_toml(&text.replace(line, "")).unwrap_err();
+            assert!(error.to_string().contains("host_storage."), "{error}");
+        }
+        let starter = HostConfig::starter(1);
+        assert!(HostConfig::from_toml(&starter.to_toml())
+            .unwrap()
+            .host_storage
+            .is_none());
+    }
+
+    #[test]
+    fn managed_storage_refuses_ambiguous_paths_and_unprotected_or_overlapping_caches() {
+        for (field, value) in [
+            ("device", "\"/tmp/disk\""),
+            ("device", "\"/dev/../dev/sda\""),
+            ("mount_point", "\"/\""),
+            ("mount_point", "\"/data/../other\""),
+            ("mount_point", "\"/data with spaces\""),
+            ("filesystem", "\"btrfs\""),
+            ("snapshot_dir", "\"/var/snapshots\""),
+            ("snapshot_dir", "\"/data\""),
+            ("snapshot_dir", "\"/data/../snapshots\""),
+            ("cache_dir", "\"/data/nibrunner-vm/cache\""),
+            ("checkpoint_cache_dir", "\"/data/zerofs\""),
+            ("mount_path", "\"/data/zerofs-mount\""),
+        ] {
+            let mut document: toml::Value = toml::from_str(&HostConfig::example().to_toml()).unwrap();
+            let section = match field {
+                "device" | "mount_point" | "filesystem" => &mut document["host_storage"],
+                "snapshot_dir" => &mut document["paths"],
+                _ => &mut document["volumes"]["zerofs"],
+            };
+            section[field] =
+                toml::from_str::<toml::Value>(&format!("value = {value}")).unwrap()["value"].clone();
+            assert!(
+                HostConfig::from_toml(&toml::to_string(&document).unwrap()).is_err(),
+                "{field} = {value}"
+            );
+        }
+    }
     use std::path::Path;
 
     /// The smallest document this daemon accepts. Every key it reads is in here, because there is

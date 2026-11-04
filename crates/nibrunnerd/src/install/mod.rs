@@ -16,6 +16,7 @@ pub mod prerequisites;
 pub mod render;
 pub mod secrets;
 pub mod service_user;
+pub mod storage;
 pub mod zerofs;
 
 use std::path::{Path, PathBuf};
@@ -94,6 +95,8 @@ pub async fn run(
     release: Option<&Path>,
 ) -> Result<Laid, InstallError> {
     let mut laid = Laid::default();
+    storage::ensure_mounted(config)?;
+    storage::check(config)?;
 
     // Before the checks rather than after them, because the guest image is one of the things they
     // refuse a host for — and a release was named precisely so this host would not have to have it
@@ -127,12 +130,6 @@ pub async fn run(
     }
     kernel::apply(config, &mut laid)?;
 
-    for directory in directories(config) {
-        make_directory(&directory, DIRECTORY_MODE).map_err(|error| {
-            InstallError::Refused(format!("{} could not be made: {error}", directory.display()))
-        })?;
-    }
-
     if jailer_identities::ensure(config.max_apps)? {
         let identities = jailer_identities::read(config.max_apps)?;
         laid.did(format!(
@@ -145,16 +142,6 @@ pub async fn run(
         if let service_user::Made::Created = service_user::ensure(service_user::ZEROFS_USER)? {
             laid.did(format!("{} account created", service_user::ZEROFS_USER));
         }
-        // The cache is the one thing the live server writes that systemd does not create for it,
-        // so it is the one thing whose ownership has to be handed over.
-        let owner = service_user::ids(service_user::ZEROFS_USER).ok_or_else(|| {
-            InstallError::Refused(format!(
-                "the {} account could not be read",
-                service_user::ZEROFS_USER
-            ))
-        })?;
-        service_user::own(&settings.cache_dir, owner)?;
-
         if !zerofs::installed(&settings.binary) {
             laid.did(format!("fetching zerofs {}", zerofs::VERSION));
             zerofs::fetch(&settings.binary).await?;
@@ -187,6 +174,9 @@ pub async fn run(
         )?;
     }
 
+    make_directories(config)?;
+    storage::remove_unused_dependencies(config, &mut laid)?;
+
     if let Ok(binary) = std::env::current_exe() {
         write_generated(
             &unit_path(render::DAEMON_UNIT),
@@ -194,6 +184,9 @@ pub async fn run(
             force,
             &mut laid,
         )?;
+        for (path, rendered) in storage::files(config, config_file, &binary) {
+            write_generated(&path, &rendered, force, &mut laid)?;
+        }
     }
     write_generated(
         &unit_path(render::DAEMON_DROP_IN),
@@ -299,6 +292,48 @@ fn directories(config: &HostConfig) -> Vec<PathBuf> {
         directories.push(settings.mount_path.clone());
     }
     directories
+}
+
+fn make_directories(config: &HostConfig) -> Result<(), InstallError> {
+    storage::check(config)?;
+    let cache = config
+        .volumes
+        .zerofs()
+        .map(|settings| {
+            service_user::ids(service_user::ZEROFS_USER)
+                .ok_or_else(|| {
+                    InstallError::Refused(format!(
+                        "the {} account could not be read",
+                        service_user::ZEROFS_USER
+                    ))
+                })
+                .map(|owner| (&settings.cache_dir, owner))
+        })
+        .transpose()?;
+    if let Some(storage) = &config.host_storage {
+        make_directory(&storage.mount_point, PUBLIC_DIRECTORY_MODE).map_err(|error| {
+            InstallError::Refused(format!(
+                "{} could not be prepared: {error}",
+                storage.mount_point.display()
+            ))
+        })?;
+        service_user::own(&storage.mount_point, (0, 0))?;
+    }
+    for directory in directories(config) {
+        make_directory(&directory, DIRECTORY_MODE).map_err(|error| {
+            InstallError::Refused(format!("{} could not be made: {error}", directory.display()))
+        })?;
+        if let Some((_, owner)) = cache.filter(|(cache_dir, _)| **cache_dir == directory) {
+            service_user::own(&directory, owner)?;
+        } else if config
+            .host_storage
+            .as_ref()
+            .is_some_and(|storage| directory.starts_with(&storage.mount_point))
+        {
+            service_user::own(&directory, (0, 0))?;
+        }
+    }
+    Ok(())
 }
 
 /// What this command cannot put right: a machine without hardware virtualisation, a tool it does

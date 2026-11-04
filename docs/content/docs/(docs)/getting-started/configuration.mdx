@@ -22,7 +22,9 @@ the key and the reason.
   is an error that names the key.
 - **Unknown keys are errors.** A typo is reported as an unknown key, not as a missing one.
 - **Only whole sections are optional.** `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]` and
-  `[logs]` can be omitted. If present, they must be complete.
+  `[logs]` can be omitted. If present, they must be complete. Optional
+  [`[host_storage]`](/docs/guides/host-storage) initializes and mounts an explicitly selected
+  device before the host starts.
 
 Example errors:
 

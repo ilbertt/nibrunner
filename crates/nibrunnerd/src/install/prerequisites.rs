@@ -36,6 +36,15 @@ pub fn check(config: &HostConfig) -> Vec<Check> {
     }
     checks.push(binary("useradd", "install the passwd package"));
     checks.push(binary("getent", "install the libc-bin package"));
+    if let Some(storage) = &config.host_storage {
+        for tool in ["lsblk", "wipefs", "findmnt", "mount"] {
+            checks.push(binary(tool, "install the util-linux and mount packages"));
+        }
+        checks.push(binary(
+            &format!("mkfs.{}", storage.filesystem.as_str()),
+            "install the e2fsprogs or xfsprogs package for host_storage.filesystem",
+        ));
+    }
     // What sets this host's kernel settings, which `install` does rather than asks for.
     checks.push(binary("modprobe", "install the kmod package"));
 

@@ -83,6 +83,10 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - Cron runs may overlap. Editing a crontab reschedules future runs; stopping or replacing its
   deployment cancels and drains active runs before the guest stops. Registry notifications and
   the next due time drive scheduling, without polling or catching up missed runs.
+- Optional `[host_storage]` names a whole device, mount point and filesystem explicitly. Only
+  entirely zeroed devices without signatures may be formatted, without force flags. Existing
+  matching filesystems are preserved. Mount and verify storage before creating host directories;
+  systemd orders the daemon and ZeroFS after the mount and directory preparation.
 - OCI registry pulls use `oci-client` over HTTPS with anonymous registry authentication. Desired
   layers use `kind: "oci"` with exactly one of `objectKey` (archive) or `repository` (registry),
   pinned by digest; image startup defaults do not override `config.command`.

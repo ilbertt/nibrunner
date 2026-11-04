@@ -1,5 +1,5 @@
-//! `nibrunnerd start`: the host `install` laid out, asked of systemd. Everything before this point
-//! writes files; this is the one place that asks for them to be run, and it asks only after
+//! `nibrunnerd start`: the host `install` laid out, asked of systemd. Installation has already
+//! mounted configured storage; this asks for the services to run, and it asks only after
 //! checking what a start would otherwise find out too late and say from too far away — a secret
 //! still empty in `host.env`, a certificate the configuration names that is not there or that
 //! holds fewer certificates than it marks. With those checked, a start that fails is one the
@@ -88,7 +88,11 @@ pub fn run(config: &HostConfig, environment_file: &Path, laid: &Laid) -> Result<
 
     let plan = plan(config, laid);
     let mut enable = vec!["enable"];
-    enable.extend(plan.iter().map(|(unit, _)| *unit));
+    enable.extend(
+        plan.iter()
+            .map(|(unit, _)| *unit)
+            .filter(|unit| *unit != crate::install::storage::READY_UNIT),
+    );
     must(&enable)?;
 
     let mut units = Vec::new();
@@ -189,12 +193,16 @@ fn wall_clock_of(since_boot: Duration, now_since_boot: Duration, now: SystemTime
 /// its restart drops every NBD device under every live guest, and the mount goes with it.
 fn plan(config: &HostConfig, laid: &Laid) -> Vec<(&'static str, bool)> {
     let mut plan = Vec::new();
+    if config.host_storage.is_some() {
+        plan.push((crate::install::storage::READY_UNIT, false));
+    }
     if let Some(settings) = config.volumes.zerofs() {
         let rewritten = |paths: &[PathBuf]| laid.written.iter().any(|path| paths.contains(path));
         let zerofs = rewritten(&[
             settings.binary.clone(),
             settings.config_file.clone(),
             unit_path(ZEROFS_UNIT),
+            unit_path(&format!("{ZEROFS_UNIT}.d/{}", crate::install::storage::DROP_IN)),
         ]);
         let mount = zerofs || rewritten(&[unit_path(MOUNT_UNIT)]);
         plan.push((ZEROFS_UNIT, zerofs));
@@ -367,6 +375,20 @@ mod tests {
     fn a_local_file_host_has_one_unit_with_a_restart_fallback() {
         let plan = plan(&HostConfig::under(Path::new("/srv/nibrunner")), &Laid::default());
         assert_eq!(plan, [(DAEMON_UNIT, true)]);
+    }
+
+    #[test]
+    fn storage_is_started_first_and_a_repeated_start_does_not_stop_its_consumers() {
+        let config = HostConfig::example();
+        assert_eq!(
+            plan(&config, &Laid::default()),
+            [
+                (crate::install::storage::READY_UNIT, false),
+                (ZEROFS_UNIT, false),
+                (MOUNT_UNIT, false),
+                (DAEMON_UNIT, true),
+            ]
+        );
     }
 
     #[test]

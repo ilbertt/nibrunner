@@ -21,6 +21,10 @@
       "description": "Absent is a host nothing can ask about a guest's files.",
       "$ref": "#/$defs/filesystem"
     },
+    "host_storage": {
+      "description": "Explicitly managed whole-device storage for snapshots and ZeroFS caches. Absent leaves\nmounting to the operator. Only an entirely zeroed device is initialized.",
+      "$ref": "#/$defs/host_storage"
+    },
     "logs": {
       "description": "Absent keeps the newest 256 MiB of each app's output.",
       "$ref": "#/$defs/logs"
@@ -72,6 +76,13 @@
     "network"
   ],
   "$defs": {
+    "StorageFilesystem": {
+      "type": "string",
+      "enum": [
+        "ext4",
+        "xfs"
+      ]
+    },
     "artifacts": {
       "description": "One store, in S3 or on this disk.",
       "type": "object",
@@ -142,6 +153,31 @@
       "additionalProperties": false,
       "required": [
         "socket"
+      ]
+    },
+    "host_storage": {
+      "type": "object",
+      "properties": {
+        "device": {
+          "description": "An explicit whole block device under /dev, preferably a stable /dev/disk/by-id name.\nPartitions, RAID, LVM, read-only devices and devices with children are refused.",
+          "type": "string",
+          "pattern": "^/dev/"
+        },
+        "filesystem": {
+          "description": "Filesystem for a blank device. Existing filesystems must match and are never reformatted.",
+          "$ref": "#/$defs/StorageFilesystem"
+        },
+        "mount_point": {
+          "description": "An absolute, normalized path other than /. Snapshots and both ZeroFS caches must be\nbeneath it. Existing unmounted contents and symlinks are refused.",
+          "type": "string",
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "device",
+        "mount_point",
+        "filesystem"
       ]
     },
     "logs": {

@@ -39,6 +39,7 @@ pub enum StartupError {
 }
 
 pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
+    crate::install::storage::check(&config).map_err(|error| StartupError::Unusable(error.message()))?;
     for directory in [&config.state_dir, &config.runtime_dir, &config.snapshot_dir] {
         crate::json_store::make_directory(directory, 0o700).map_err(|error| {
             StartupError::Config(format!("{} could not be made: {error}", directory.display()))
@@ -393,6 +394,24 @@ mod tests {
     use crate::services::reconcile_service::HostReconciler;
     use crate::test_support::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn an_unavailable_storage_mount_refuses_daemon_startup_before_any_directories_are_created() {
+        use crate::config::{HostConfig, HostStorage, StorageFilesystem};
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::under(directory.path());
+        config.snapshot_dir = directory.path().join("data/snapshots");
+        config.host_storage = Some(HostStorage {
+            device: "/dev/nibrunner-missing-device".into(),
+            mount_point: directory.path().join("data"),
+            filesystem: StorageFilesystem::Ext4,
+        });
+        let state = config.state_dir.clone();
+        let snapshots = config.snapshot_dir.clone();
+        assert!(super::build_host(config).await.is_err());
+        assert!(!state.exists());
+        assert!(!snapshots.exists());
+    }
 
     #[tokio::test]
     async fn a_document_written_to_the_watched_file_is_converged_on() {

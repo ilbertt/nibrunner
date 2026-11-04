@@ -32,7 +32,9 @@ The script:
 
 `nibrunnerd install` sets up the host from `/etc/nibrunner/config.toml`. If the file does not
 exist, it writes one: volumes as files on the local disk, plain HTTP on port 80, no object store,
-and `max_apps` set to what it measured the machine can hold. It does not start anything.
+and `max_apps` set to what it measured the machine can hold. It does not start the daemon or
+ZeroFS. When [`[host_storage]`](/docs/guides/host-storage) is configured, it initializes and mounts
+that storage before creating host directories.
 
 The matching Firecracker jailer is bundled in `nibrunnerd`. Installation creates the locked
 `nibrunner-jailer` system account and reserves the host identities used by each app's VMM.

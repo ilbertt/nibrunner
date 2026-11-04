@@ -8,6 +8,9 @@ use nibrunnerd::test_support::mocks;
 #[path = "integration/remote_oci.rs"]
 mod remote_oci;
 
+#[path = "integration/host_storage.rs"]
+mod host_storage;
+
 fn enabled() -> bool {
     std::env::var("NIBRUNNER_INTEGRATION").is_ok_and(|value| value == "1")
 }
