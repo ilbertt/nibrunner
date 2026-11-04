@@ -1,0 +1,64 @@
+---
+title: Host security
+description: Prepare a host to isolate mutually untrusted apps.
+---
+
+Each app runs in a separate Firecracker microVM. The jailer gives its VMM a filesystem
+boundary and a non-root host identity. CPU and memory cgroups limit resource consumption.
+These boundaries depend on the host kernel, CPU firmware and host configuration.
+
+## Prepare the host
+
+For workloads that must not trust each other, apply these requirements before deploying apps:
+
+| Requirement | Check |
+| --- | --- |
+| Host SMT disabled | `cat /sys/devices/system/cpu/smt/active` reports `0`. |
+| Kernel samepage merging disabled, with no retained shared pages | Inspect `/sys/kernel/mm/ksm/run` and `/sys/kernel/mm/ksm/pages_shared`. A kernel without KSM support also meets this requirement. |
+| Current host kernel and CPU microcode | Follow the distribution's security advisories and reboot when required. |
+| Current guest kernel and Firecracker | Upgrade nibrunner and its guest image; redeploy apps to replace existing VMMs and guest kernels. |
+
+These are host preparation requirements. They do not establish that a CPU is free of hardware
+vulnerabilities. Follow [Firecracker's production host guidance](https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md)
+and the [Linux hardware vulnerability documentation](https://docs.kernel.org/admin-guide/hw-vuln/index.html)
+for the CPU in use. nibrunner does not currently enforce the SMT or KSM requirements.
+
+## Host SMT
+
+Simultaneous multithreading lets logical CPUs share one physical core. A hostile workload can
+exploit some CPU vulnerabilities to observe data processed on its sibling thread.
+
+Disable SMT in the machine's firmware or through the distribution's persistent kernel boot
+configuration, then verify the running kernel's `smt/active` value. Keep it disabled while
+apps run. An absent or unreadable status file does not establish that SMT is disabled.
+
+The guest machine configuration's `smt: false` describes virtual CPU topology. It does not
+disable SMT on the host. CPU quotas do not reserve physical cores or prevent sibling sharing.
+
+Disabling SMT can reduce aggregate CPU throughput. Measure the apps' throughput and latency
+before sizing a production host. The [capacity estimate](/docs/guides/host-capacity) considers
+memory, disk and ports; it does not measure CPU throughput.
+
+## Kernel samepage merging
+
+KSM can deduplicate identical anonymous memory pages. Sharing pages between workloads enables
+side channels. Disable services that enable KSM and keep it disabled across reboots.
+
+Stopping KSM with `run = 0` retains already merged pages. Unmerging them with `run = 2` can
+increase memory usage enough to trigger the OOM killer. Schedule this change with enough
+free memory, or stop workloads first, and verify that `pages_shared` reaches zero. See the
+[Linux KSM documentation](https://docs.kernel.org/admin-guide/mm/ksm.html).
+
+## Nested virtualisation
+
+A VPS needs nested virtualisation to expose `/dev/kvm`. Its CPU topology and mitigation
+reports describe the virtual hardware presented by the provider. They cannot establish which
+other workloads share the underlying physical cores. Use a provider whose isolation policy
+meets the workloads' requirements; guest-local SMT settings cannot enforce that policy.
+
+## Upgrade planning
+
+Check host settings before upgrading or restarting nibrunner. Host security changes can
+require a reboot, affect other services on the same machine and change usable capacity.
+Keep host settings persistent: a startup check cannot prevent a host administrator from
+changing them after apps have started.
