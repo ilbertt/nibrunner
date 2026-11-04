@@ -100,7 +100,8 @@ app and nothing else, which is what to filter on for a per-app dashboard. They c
 - The state of each instance, volume, checkpoint and export, one-hot encoded.
 - How long a converge, a sleep and a wake took, by phase.
 - The proxy's requests by outcome. `served` is any answer the app gave, whatever its status.
-  `unreachable` is the 502 the proxy writes when the app did not answer at all.
+  `unreachable` is the 502 the proxy writes when the app did not answer at all. `redirected`
+  counts fallback-hostname redirects, without charging those requests to an app.
 - Each app's requests by status class, and the proxy's TLS handshakes.
 - Each app's CPU, memory, disk and network, both what it is using now and what it has used.
 - The host's slots, memory and capacity.

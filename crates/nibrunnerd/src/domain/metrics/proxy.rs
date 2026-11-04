@@ -18,6 +18,7 @@ const BUCKET_BOUNDS_SECONDS: [f64; 13] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Served,
+    Redirected,
     Unreachable,
     NoSuchHost,
     WrongHost,
@@ -28,6 +29,7 @@ impl Outcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Outcome::Served => "served",
+            Outcome::Redirected => "redirected",
             Outcome::Unreachable => "unreachable",
             Outcome::NoSuchHost => "no_such_host",
             Outcome::WrongHost => "wrong_host",
@@ -39,8 +41,9 @@ impl Outcome {
 // What this proxy decided, which is all it can honestly claim: a 502 or a 503 travelling back
 // through it was the upstream's answer and is counted as served, because serving it is what
 // happened. The one 502 that is not is the one the proxy wrote itself because nothing answered.
-pub const OUTCOMES: [Outcome; 5] = [
+pub const OUTCOMES: [Outcome; 6] = [
     Outcome::Served,
+    Outcome::Redirected,
     Outcome::Unreachable,
     Outcome::NoSuchHost,
     Outcome::WrongHost,

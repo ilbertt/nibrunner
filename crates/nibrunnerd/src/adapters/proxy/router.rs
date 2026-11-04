@@ -115,6 +115,7 @@ pub struct Arrival {
 }
 
 pub struct Router {
+    fallback: Option<crate::config::HttpFallback>,
     routes: RwLock<Arc<RouteTable>>,
     upstreams: Upstreams,
     metrics: Arc<HostMetrics>,
@@ -126,15 +127,17 @@ pub struct Router {
 
 impl Router {
     pub fn new(metrics: Arc<HostMetrics>, http_log: Option<Arc<HttpRequestLog>>) -> Arc<Self> {
-        Self::with_concurrency(metrics, http_log, None)
+        Self::with_http_config(metrics, http_log, None)
     }
 
-    pub fn with_concurrency(
+    pub fn with_http_config(
         metrics: Arc<HostMetrics>,
         http_log: Option<Arc<HttpRequestLog>>,
-        limits: Option<crate::config::HttpConcurrency>,
+        http: Option<&crate::config::HttpListener>,
     ) -> Arc<Self> {
+        let limits = http.and_then(|http| http.concurrency.clone());
         Arc::new(Self {
+            fallback: http.and_then(|http| http.fallback.clone()),
             jwks: JwksCache::default(),
             jwks_changed: tokio::sync::Notify::new(),
             concurrency: limits.map(super::concurrency::ConcurrencyLimiter::new),
@@ -250,6 +253,22 @@ impl Router {
                 Outcome::WrongHost,
                 None,
             );
+        }
+        if let Some(fallback) = self
+            .fallback
+            .as_ref()
+            .filter(|fallback| hostname == fallback.domain.as_str())
+        {
+            let mut response = say(StatusCode::TEMPORARY_REDIRECT, "");
+            response.headers_mut().insert(
+                hyper::header::LOCATION,
+                fallback
+                    .redirect
+                    .as_str()
+                    .parse()
+                    .expect("a validated redirect URL is a valid Location header"),
+            );
+            return (response, Outcome::Redirected, None);
         }
         let (route, logging, access) = {
             let routes = self.routes.read().await;
@@ -623,6 +642,106 @@ mod tests {
         .expect("the proxy closes the connection it answered on")
         .unwrap();
         answer
+    }
+
+    const FALLBACK_DOMAIN: &str = "fallback.apps.example.com";
+    const FALLBACK_REDIRECT: &str = "https://www.example.com/welcome?from=host#start";
+
+    fn fallback_router(domain: &str) -> Arc<Router> {
+        let document = format!(
+            "{}\n[proxy.http.fallback]\ndomain = {domain:?}\nredirect = {FALLBACK_REDIRECT:?}\n",
+            crate::config::HostConfig::starter(1).to_toml()
+        );
+        let config = crate::config::HostConfig::from_toml(&document).unwrap();
+        Router::with_http_config(Arc::new(HostMetrics::new()), None, config.proxy.http.as_ref())
+    }
+
+    #[tokio::test]
+    async fn the_fallback_redirects_to_its_configured_url_without_an_app() {
+        let port = serving(fallback_router(FALLBACK_DOMAIN)).await;
+        for host in [
+            FALLBACK_DOMAIN,
+            "FALLBACK.APPS.EXAMPLE.COM",
+            "fallback.apps.example.com:8080",
+        ] {
+            let response = asked(
+                port,
+                &format!("GET /ignored?redirect=untrusted HTTP/1.0\r\nHost: {host}\r\n\r\n"),
+            )
+            .await;
+            assert!(response.starts_with("HTTP/1.0 307 "), "{response}");
+            assert!(
+                response.contains(&format!("location: {FALLBACK_REDIRECT}\r\n")),
+                "{response}"
+            );
+            assert!(response.contains("cache-control: no-store\r\n"), "{response}");
+            assert!(response.ends_with("\r\n\r\n"), "{response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fallback_is_reserved_even_if_an_app_claims_its_hostname() {
+        let domain = app_hostname().hostname.to_string();
+        let router = fallback_router(&domain);
+        routed_at(&router, HostPort::new(1).unwrap()).await;
+        let port = serving(router.clone()).await;
+        let response = asked_for(port, &domain).await;
+        assert!(response.starts_with("HTTP/1.0 307 "), "{response}");
+        let app_id = instance_record(|_| {}).app_id;
+        assert_eq!(router.metrics.proxy.of(&app_id).request_count, 0);
+        router.apply(RouteTable::default()).await;
+        let response = asked_for(port, &domain).await;
+        assert!(response.starts_with("HTTP/1.0 307 "), "{response}");
+    }
+
+    #[tokio::test]
+    async fn a_fallback_does_not_capture_customer_hostnames_or_similar_names() {
+        let router = fallback_router(FALLBACK_DOMAIN);
+        let upstream = answering_with(StatusCode::OK).await;
+        let record = instance_record(|record| {
+            record.host_port = Some(upstream);
+            record.hostnames.push(AppHostname {
+                hostname: Hostname::parse("shop.customer.example").unwrap(),
+                kind: AppHostnameKind::Custom,
+            });
+        });
+        router
+            .apply(RouteTable::from_targets(&renderable_routes(&[record])))
+            .await;
+        let port = serving(router).await;
+        let response = asked(
+            port,
+            "GET / HTTP/1.0\r\nHost: shop.customer.example\r\nX-Forwarded-Host: fallback.apps.example.com\r\n\r\n",
+        ).await;
+        assert!(response.starts_with("HTTP/1.0 200 "), "{response}");
+        assert!(!response.contains("\r\nlocation:"), "{response}");
+        for host in [
+            "unknown.example.com",
+            "www.fallback.apps.example.com",
+            "fallback.apps.example.com.attacker.example",
+        ] {
+            let response = asked_for(port, host).await;
+            assert!(response.starts_with("HTTP/1.0 404 "), "{response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_redirects_still_require_a_host_and_a_matching_tls_server_name() {
+        let router = fallback_router(FALLBACK_DOMAIN);
+        let port = serving_as(router, arriving(Some("another.example.com"), true)).await;
+        let response = asked_for(port, FALLBACK_DOMAIN).await;
+        assert!(response.starts_with("HTTP/1.0 421 "), "{response}");
+        assert!(!response.contains("\r\nlocation:"), "{response}");
+        let response = asked(port, "GET / HTTP/1.0\r\n\r\n").await;
+        assert!(response.starts_with("HTTP/1.0 400 "), "{response}");
+
+        let port = serving_as(
+            fallback_router(FALLBACK_DOMAIN),
+            arriving(Some(FALLBACK_DOMAIN), true),
+        )
+        .await;
+        let response = asked_for(port, FALLBACK_DOMAIN).await;
+        assert!(response.starts_with("HTTP/1.0 307 "), "{response}");
     }
 
     #[tokio::test]
@@ -1264,14 +1383,12 @@ mod tests {
     }
 
     fn limited_router(metrics: Arc<HostMetrics>, host: u16, app: u16) -> Arc<Router> {
-        Router::with_concurrency(
-            metrics,
-            None,
-            Some(crate::config::HttpConcurrency {
-                host_concurrent: host.try_into().unwrap(),
-                app_concurrent: app.try_into().unwrap(),
-            }),
-        )
+        let mut http = crate::config::HostConfig::starter(1).proxy.http.unwrap();
+        http.concurrency = Some(crate::config::HttpConcurrency {
+            host_concurrent: host.try_into().unwrap(),
+            app_concurrent: app.try_into().unwrap(),
+        });
+        Router::with_http_config(metrics, None, Some(&http))
     }
 
     async fn answering_before_the_upload_ends() -> (HostPort, tokio::sync::oneshot::Receiver<Vec<u8>>) {

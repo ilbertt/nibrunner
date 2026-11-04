@@ -113,15 +113,22 @@ pub struct ProxyConfig {
 ///
 /// One per host and one per guest: a guest's hostname resolves to this host, and this is what
 /// carries it to the one port that guest answers HTTP on. One rather than a plain port beside a
-/// TLS port, because nothing here redirects — two would serve every app unencrypted and encrypted
+/// TLS port, because there is no HTTP-to-HTTPS upgrade — two would serve every app unencrypted and encrypted
 /// at once, forever, with nothing moving a visitor from the first to the second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpListener {
+    pub fallback: Option<HttpFallback>,
     pub concurrency: Option<HttpConcurrency>,
     pub listen_address: IpAddr,
     pub port: u16,
     /// Absent serves plain HTTP, which is what a host behind an edge that terminates TLS wants.
     pub tls: Option<TlsMaterial>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpFallback {
+    pub domain: protocol::Hostname,
+    pub redirect: reqwest::Url,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -536,8 +543,8 @@ mod file {
         pub(super) raw: Option<Raw>,
     }
 
-    /// The one HTTP listener, where the edge reaches it. One per host: nothing here redirects, so a
-    /// plain port beside a TLS one would serve every app both ways forever.
+    /// The one HTTP listener, where the edge reaches it. One per host: there is no HTTP-to-HTTPS
+    /// upgrade, so a plain port beside a TLS one would serve every app both ways forever.
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "proxy.http")]
@@ -554,6 +561,23 @@ mod file {
         /// Absent preserves unlimited concurrent HTTP requests. Changes require `nibrunnerd start`.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) concurrency: Option<super::HttpConcurrency>,
+        /// Reserve a hostname for a temporary redirect without reaching or waking an app.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) fallback: Option<Fallback>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[schemars(rename = "proxy.http.fallback")]
+    pub(super) struct Fallback {
+        /// An exact lowercase DNS hostname, without a scheme, port or wildcard.
+        #[schemars(pattern(protocol::HOSTNAME_PATTERN))]
+        #[schemars(length(max = protocol::MAX_HOSTNAME_LENGTH))]
+        pub(super) domain: String,
+        /// An absolute HTTP or HTTPS URL without credentials. Its hostname must differ from domain.
+        /// Incoming paths and queries are not appended. Changes require `nibrunnerd start`.
+        #[schemars(pattern(r"^[Hh][Tt][Tt][Pp][Ss]?://"))]
+        pub(super) redirect: String,
     }
 
     /// One certificate for the whole host — there is no SNI selection, so a wildcard in practice —
@@ -840,6 +864,7 @@ impl HostConfig {
         );
         starter.max_apps = max_apps;
         starter.proxy.http = Some(HttpListener {
+            fallback: None,
             concurrency: None,
             listen_address: IpAddr::from([0, 0, 0, 0]),
             port: 80,
@@ -937,6 +962,12 @@ impl HostConfig {
             denied_egress_addresses_v6: vec![],
             proxy: ProxyConfig {
                 http: Some(HttpListener {
+                    fallback: Some(HttpFallback {
+                        domain: protocol::Hostname::parse("fallback.apps.example.com")
+                            .expect("the example fallback is a valid hostname"),
+                        redirect: reqwest::Url::parse("https://www.example.com/")
+                            .expect("the example redirect is a valid URL"),
+                    }),
                     concurrency: Some(HttpConcurrency {
                         host_concurrent: std::num::NonZeroU16::new(128).expect("positive limit"),
                         app_concurrent: std::num::NonZeroU16::new(16).expect("positive limit"),
@@ -1047,6 +1078,10 @@ impl HostConfig {
             // Left out rather than written as an empty `[proxy]`: both read back the same.
             proxy: (self.proxy != ProxyConfig::default()).then(|| file::Proxy {
                 http: self.proxy.http.as_ref().map(|http| file::Http {
+                    fallback: http.fallback.as_ref().map(|fallback| file::Fallback {
+                        domain: fallback.domain.to_string(),
+                        redirect: fallback.redirect.to_string(),
+                    }),
                     concurrency: http.concurrency.clone(),
                     listen_address: Some(http.listen_address.to_string()),
                     port: Some(http.port),
@@ -1210,6 +1245,44 @@ fn bind_address(field: &str, value: &Option<String>) -> Result<IpAddr, ConfigErr
         .map_err(|_| ConfigError::invalid(field, "an IP address to bind"))
 }
 
+fn http_fallback(document: &file::Fallback) -> Result<HttpFallback, ConfigError> {
+    let domain = protocol::Hostname::parse(document.domain.as_str()).map_err(|_| {
+        ConfigError::invalid(
+            "proxy.http.fallback.domain",
+            "a lowercase DNS hostname without a scheme, port or wildcard",
+        )
+    })?;
+    let field = "proxy.http.fallback.redirect";
+    let value = document.redirect.as_str();
+    let invalid = || {
+        ConfigError::invalid(
+            field,
+            "an absolute HTTP or HTTPS URL without credentials or control characters",
+        )
+    };
+    let redirect = reqwest::Url::parse(value).map_err(|_| invalid())?;
+    if !matches!(redirect.scheme(), "http" | "https")
+        || !redirect.has_host()
+        || !redirect.username().is_empty()
+        || redirect.password().is_some()
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+        || redirect.as_str().parse::<hyper::header::HeaderValue>().is_err()
+    {
+        return Err(invalid());
+    }
+    if redirect
+        .host_str()
+        .is_some_and(|host| host.trim_end_matches('.').eq_ignore_ascii_case(domain.as_str()))
+    {
+        return Err(ConfigError::invalid(
+            field,
+            "a URL on a different hostname to avoid a redirect loop",
+        ));
+    }
+    Ok(HttpFallback { domain, redirect })
+}
+
 fn proxy(document: Option<&file::Proxy>, max_apps: u32) -> Result<ProxyConfig, ConfigError> {
     let Some(document) = document else {
         return Ok(ProxyConfig::default());
@@ -1219,6 +1292,7 @@ fn proxy(document: Option<&file::Proxy>, max_apps: u32) -> Result<ProxyConfig, C
         .as_ref()
         .map(|http| {
             Ok::<_, ConfigError>(HttpListener {
+                fallback: http.fallback.as_ref().map(http_fallback).transpose()?,
                 concurrency: http.concurrency.clone(),
                 listen_address: bind_address("proxy.http.listen_address", &http.listen_address)?,
                 port: listener(
@@ -1516,6 +1590,112 @@ fn storage_prefix(field: &str, value: &str) -> Result<String, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fallback_document(domain: &str, redirect: &str) -> String {
+        format!(
+            "{}\n[proxy.http.fallback]\ndomain = {domain:?}\nredirect = {redirect:?}\n",
+            HostConfig::starter(1).to_toml()
+        )
+    }
+
+    #[test]
+    fn a_fallback_is_absent_or_has_both_a_domain_and_a_redirect() {
+        let starter = HostConfig::starter(1);
+        let parsed = HostConfig::from_toml(&starter.to_toml()).unwrap();
+        assert!(parsed.proxy.http.as_ref().unwrap().fallback.is_none());
+        let document = fallback_document(
+            "fallback.example.com",
+            "https://www.example.com/welcome?from=host#start",
+        );
+        let config = HostConfig::from_toml(&document).unwrap();
+        let fallback = config.proxy.http.as_ref().unwrap().fallback.as_ref().unwrap();
+        assert_eq!(fallback.domain.as_str(), "fallback.example.com");
+        assert_eq!(
+            fallback.redirect.as_str(),
+            "https://www.example.com/welcome?from=host#start"
+        );
+        assert_eq!(HostConfig::from_toml(&config.to_toml()).unwrap(), config);
+
+        let validator = jsonschema::validator_for(&HostConfig::schema().to_value()).unwrap();
+        let starter_json =
+            serde_json::to_value(toml::from_str::<toml::Value>(&starter.to_toml()).unwrap()).unwrap();
+        assert!(validator.is_valid(&starter_json));
+        let empty = format!("{}\n[proxy.http.fallback]\n", starter.to_toml());
+        assert!(HostConfig::from_toml(&empty).is_err());
+        let empty_json = serde_json::to_value(toml::from_str::<toml::Value>(&empty).unwrap()).unwrap();
+        assert!(!validator.is_valid(&empty_json));
+        let json = serde_json::to_value(toml::from_str::<toml::Value>(&document).unwrap()).unwrap();
+        assert!(validator.is_valid(&json));
+        for field in ["domain", "redirect"] {
+            let incomplete = document
+                .lines()
+                .filter(|line| !line.starts_with(&format!("{field} =")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let error = HostConfig::from_toml(&incomplete).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!("missing field `{field}`")),
+                "{error}"
+            );
+            let json = serde_json::to_value(toml::from_str::<toml::Value>(&incomplete).unwrap()).unwrap();
+            assert!(!validator.is_valid(&json));
+        }
+    }
+
+    #[test]
+    fn fallback_domains_are_exact_hostnames_and_redirects_are_safe_absolute_urls() {
+        for domain in [
+            "",
+            "*.example.com",
+            "Fallback.Example.Com",
+            "fallback.example.com:8080",
+            "https://fallback.example.com",
+        ] {
+            let error =
+                HostConfig::from_toml(&fallback_document(domain, "https://www.example.com/")).unwrap_err();
+            assert!(
+                error.to_string().contains("proxy.http.fallback.domain"),
+                "{error}"
+            );
+        }
+        for redirect in [
+            "",
+            "/welcome",
+            "//www.example.com/",
+            "javascript:alert(1)",
+            "ftp://www.example.com/",
+            "https://user:password@www.example.com/",
+            "https://www.example.com/\r\nx-injected: yes",
+            " https://www.example.com/",
+            "https://fallback.example.com/elsewhere",
+            "https://FALLBACK.EXAMPLE.COM:8443/",
+            "http://fallback.example.com./",
+        ] {
+            let error =
+                HostConfig::from_toml(&fallback_document("fallback.example.com", redirect)).unwrap_err();
+            assert!(
+                error.to_string().contains("proxy.http.fallback.redirect"),
+                "{redirect}: {error}"
+            );
+        }
+        let validator = jsonschema::validator_for(&HostConfig::schema().to_value()).unwrap();
+        for redirect in ["http://localhost:3000/", "HTTPS://www.example.com/welcome"] {
+            let document = fallback_document("fallback.example.com", redirect);
+            assert!(HostConfig::from_toml(&document).is_ok());
+            let json = serde_json::to_value(toml::from_str::<toml::Value>(&document).unwrap()).unwrap();
+            assert!(validator.is_valid(&json));
+        }
+        let overlong = format!("{}example", "a.".repeat(protocol::MAX_HOSTNAME_LENGTH / 2));
+        let document = fallback_document(&overlong, "https://www.example.com/");
+        assert!(HostConfig::from_toml(&document).is_err());
+        let json = serde_json::to_value(toml::from_str::<toml::Value>(&document).unwrap()).unwrap();
+        assert!(!validator.is_valid(&json));
+        let unknown = format!(
+            "{}unexpected = true\n",
+            fallback_document("fallback.example.com", "https://www.example.com/")
+        );
+        assert!(HostConfig::from_toml(&unknown).is_err());
+    }
 
     #[test]
     fn managed_storage_is_optional_but_every_present_setting_is_required() {
@@ -2441,6 +2621,7 @@ keep_mib_per_app = 64
         assert_eq!(
             config.proxy.http,
             Some(HttpListener {
+                fallback: None,
                 concurrency: None,
                 listen_address: IpAddr::from([0, 0, 0, 0]),
                 port: 443,

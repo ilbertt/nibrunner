@@ -274,7 +274,7 @@ fn is_dns_label(value: &str) -> bool {
 
 validated_string!(DnsLabel, "label", "a DNS label", is_dns_label, { "pattern": DNS_LABEL_PATTERN });
 
-const MAX_HOSTNAME_LENGTH: usize = 253;
+pub const MAX_HOSTNAME_LENGTH: usize = 253;
 pub const HOSTNAME_PATTERN: &str =
     r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$";
 

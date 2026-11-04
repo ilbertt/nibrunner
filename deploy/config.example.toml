@@ -77,6 +77,10 @@ certificate = "/etc/nibrunner/tls/origin-pull-ca.pem"
 host_concurrent = 128
 app_concurrent = 16
 
+[proxy.http.fallback]
+domain = "fallback.apps.example.com"
+redirect = "https://www.example.com/"
+
 [proxy.raw]
 listen_address = "10.0.5.18"
 max_ports_per_guest = 1

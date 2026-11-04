@@ -103,7 +103,7 @@ integration build-only="" *args:
 # `just guest-image` first — and the tenant they boot, which this builds.
 [arg("build-only", long, value="--no-run", help="Build the tests without running them.")]
 integration-guest build-only="" *args:
-    cargo build -p nibrunner-test-tenant --target x86_64-unknown-linux-musl --release
+    {{cargo-musl}} -p nibrunner-test-tenant --target x86_64-unknown-linux-musl --release
     NIBRUNNER_INTEGRATION=1 NIBRUNNER_TEST_TENANT="${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/test-tenant" cargo test -p nibrunnerd --test integration-guest {{build-only}} {{args}} -- --test-threads 1 --nocapture
 
 # Rust and the docs site both; `just fmt --check` refuses instead of rewriting. Biome runs from the
