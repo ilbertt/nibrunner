@@ -50,12 +50,10 @@ impl InstallError {
 }
 
 /// What one run changed, said as it happens — a fetch or a hash takes long enough that silence
-/// reads as a hang — and kept, so `start` knows which unit read something that changed. What was
-/// found already right is not in here.
+/// reads as a hang. What was found already right is not in here.
 #[derive(Debug, Default)]
 pub struct Laid {
     pub done: Vec<String>,
-    pub written: Vec<PathBuf>,
     /// What this host holds against the `max_apps` it is laid out for: measured rather than
     /// changed, so beside `done` rather than in it, and printed after it.
     pub measured: Option<String>,
@@ -68,13 +66,8 @@ impl Laid {
         self.done.push(what);
     }
 
-    fn changed(&mut self, path: &Path) {
-        self.written.push(path.to_path_buf());
-    }
-
     fn wrote(&mut self, path: &Path) {
         self.did(format!("{} written", path.display()));
-        self.changed(path);
     }
 }
 
@@ -158,7 +151,6 @@ pub async fn run(
         if !zerofs::installed(&settings.binary) {
             laid.did(format!("fetching zerofs {}", zerofs::VERSION));
             zerofs::fetch(&settings.binary).await?;
-            laid.changed(&settings.binary);
         }
 
         write_generated(
@@ -326,7 +318,12 @@ fn refuse_unready(config: &HostConfig, verified: Option<String>) -> Result<Strin
 
 /// A file this command wrote is one it may write again. A file without its marker was written by
 /// somebody, and replacing it is their decision rather than one a re-run makes for them.
-fn write_generated(path: &Path, rendered: &str, force: bool, laid: &mut Laid) -> Result<(), InstallError> {
+pub(crate) fn write_generated(
+    path: &Path,
+    rendered: &str,
+    force: bool,
+    laid: &mut Laid,
+) -> Result<(), InstallError> {
     match std::fs::read_to_string(path) {
         Ok(existing) if existing == rendered => return Ok(()),
         Ok(existing) if !existing.starts_with(render::GENERATED_MARKER) && !force => {
@@ -471,9 +468,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# theirs\n");
     }
 
-    // Re-running is how a host is brought up to a new release, so it has to be readable as having
-    // done nothing when there was nothing to do — and `start` restarts what read a file in
-    // `written`, so a file that did not change must not be in it.
     #[test]
     fn a_rerun_that_changes_nothing_records_nothing() {
         let directory = tempfile::tempdir().unwrap();
@@ -484,7 +478,6 @@ mod tests {
         write_generated(&path, &rendered, false, &mut laid).unwrap();
         assert_eq!(laid.done.len(), 1, "{:?}", laid.done);
         assert!(laid.done[0].ends_with("written"), "{:?}", laid.done);
-        assert_eq!(laid.written, [path]);
     }
 
     #[test]

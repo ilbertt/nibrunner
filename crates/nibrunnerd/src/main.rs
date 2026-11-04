@@ -37,7 +37,10 @@ fn main() -> std::process::ExitCode {
         Some(Command::Install { force, release }) => {
             runtime.block_on(lay_out(config, force, release, origin))
         }
-        Some(Command::Start { force }) => runtime.block_on(bring_up(config, force)),
+        Some(Command::Start {
+            force,
+            restart_zerofs,
+        }) => runtime.block_on(bring_up(config, force, restart_zerofs)),
     }
 }
 
@@ -62,7 +65,7 @@ async fn lay_out(
 }
 
 /// The layout again, so an edited `config.toml` is what comes up, then systemd.
-async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
+async fn bring_up(config: HostConfig, force: bool, restart_zerofs: bool) -> std::process::ExitCode {
     let config_file = HostConfig::configured_file();
     let laid = match install::run(&config, &config_file, force, None).await {
         Ok(laid) => laid,
@@ -72,7 +75,7 @@ async fn bring_up(config: HostConfig, force: bool) -> std::process::ExitCode {
         }
     };
     print_laid(&laid);
-    let report = match start::run(&config, &install::environment_file(&config_file), &laid) {
+    let report = match start::run(&config, &install::environment_file(&config_file), restart_zerofs) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("{error}");

@@ -13,7 +13,11 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::adapters::proxy::pem::read_certificates;
 use crate::config::HostConfig;
 use crate::install::render::{DAEMON_UNIT, MOUNT_UNIT, ZEROFS_UNIT};
-use crate::install::{secrets, unit_path, Laid};
+use crate::install::{secrets, SYSTEMD_DIR};
+
+mod inputs;
+
+use inputs::Inputs;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -21,6 +25,8 @@ pub enum StartError {
     Unstartable(String),
     #[error("{0}")]
     Systemd(String),
+    #[error(transparent)]
+    Inputs(#[from] crate::json_store::StoreError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,53 +88,12 @@ impl Report {
     }
 }
 
-pub fn run(config: &HostConfig, environment_file: &Path, laid: &Laid) -> Result<Report, StartError> {
+pub fn run(config: &HostConfig, environment_file: &Path, restart_zerofs: bool) -> Result<Report, StartError> {
     refuse_unstartable(config, environment_file)?;
-    must(&["daemon-reload"])?;
-
-    let plan = plan(config, laid);
-    let mut enable = vec!["enable"];
-    enable.extend(plan.iter().map(|(unit, _)| *unit));
-    must(&enable)?;
-
-    let mut units = Vec::new();
-    for (unit, restart) in plan {
-        let was_active = is_active(unit);
-        if unit == DAEMON_UNIT && was_active && permits_reload(laid) {
-            match crate::reload::request(config).map_err(|error| {
-                StartError::Systemd(format!(
-                    "the running host could not confirm its configuration: {error}"
-                ))
-            })? {
-                Some(crate::reload::Applied::Unchanged) => {
-                    units.push((unit, Outcome::Running));
-                    continue;
-                }
-                Some(crate::reload::Applied::Grown) => {
-                    units.push((unit, Outcome::Reloaded));
-                    continue;
-                }
-                None => {}
-            }
-        }
-        let verb = if restart { "restart" } else { "start" };
-        let outcome = match systemctl(&[verb, unit])? {
-            true if !is_active(unit) => Outcome::Failed,
-            true if !was_active => Outcome::Started,
-            true if restart => Outcome::Restarted,
-            true => Outcome::Running,
-            false => Outcome::Failed,
-        };
-        units.push((unit, outcome));
-    }
-    // `Type=exec` calls a unit started the moment it execs, and one that exits right after is
-    // read as started by the check above — and as auto-restarting by this one, once the units
-    // after it have taken their time coming up.
-    for (unit, outcome) in &mut units {
-        if *outcome != Outcome::Failed && !is_active(unit) {
-            *outcome = Outcome::Failed;
-        }
-    }
+    let binary = std::env::current_exe()
+        .map_err(|error| StartError::Systemd(format!("the daemon executable could not be found: {error}")))?;
+    let plan = plan(config, Path::new(SYSTEMD_DIR), &binary)?;
+    let units = activate(config, &plan, restart_zerofs, &Systemd)?;
     let kept_credentials = zerofs_kept_its_credentials(&units, || {
         let edited = std::fs::metadata(environment_file).ok()?.modified().ok()?;
         Some((edited, active_since(ZEROFS_UNIT)?))
@@ -140,6 +105,97 @@ pub fn run(config: &HostConfig, environment_file: &Path, laid: &Laid) -> Result<
         units,
         kept_credentials,
     })
+}
+
+fn activate(
+    config: &HostConfig,
+    plan: &[Service],
+    restart_zerofs: bool,
+    systemd: &impl ServiceControl,
+) -> Result<Vec<(&'static str, Outcome)>, StartError> {
+    if !restart_zerofs
+        && plan.iter().any(|service| {
+            service.unit == ZEROFS_UNIT && service.inputs.pending && systemd.is_active(ZEROFS_UNIT)
+        })
+    {
+        return Err(zerofs_restart_requires_permission());
+    }
+    must(systemd, &["daemon-reload"])?;
+    let mut enable = vec!["enable"];
+    enable.extend(plan.iter().map(|service| service.unit));
+    must(systemd, &enable)?;
+
+    let mut units = Vec::new();
+    let mut restart_mount = false;
+    for service in plan {
+        let unit = service.unit;
+        let was_active = systemd.is_active(unit);
+        let pending = service.inputs.pending || (unit == MOUNT_UNIT && restart_mount);
+        if unit == ZEROFS_UNIT && pending && was_active && !restart_zerofs {
+            return Err(zerofs_restart_requires_permission());
+        }
+        if unit != DAEMON_UNIT && was_active && !pending {
+            units.push((unit, Outcome::Running));
+            continue;
+        }
+        if unit == DAEMON_UNIT && was_active && !service.inputs.pending {
+            match systemd.reload(config)? {
+                Some(crate::reload::Applied::Unchanged) => {
+                    units.push((unit, Outcome::Running));
+                    continue;
+                }
+                Some(crate::reload::Applied::Grown) => {
+                    units.push((unit, Outcome::Reloaded));
+                    continue;
+                }
+                None => {}
+            }
+        }
+        let restart = pending || unit == DAEMON_UNIT;
+        // A failed or interrupted activation may already have replaced the process, even if
+        // the operator subsequently restores the previous files.
+        service.inputs.invalidate()?;
+        if unit == ZEROFS_UNIT {
+            restart_mount = true;
+            for mount in plan.iter().filter(|service| service.unit == MOUNT_UNIT) {
+                mount.inputs.invalidate()?;
+            }
+        }
+        let verb = if restart { "restart" } else { "start" };
+        let outcome = match systemd.command(&[verb, unit])? {
+            true if !systemd.is_active(unit) => Outcome::Failed,
+            true if !was_active => Outcome::Started,
+            true if restart => Outcome::Restarted,
+            true => Outcome::Running,
+            false => Outcome::Failed,
+        };
+        units.push((unit, outcome));
+        if outcome == Outcome::Failed {
+            break;
+        }
+    }
+    // `Type=exec` calls a unit started the moment it execs, and one that exits right after is
+    // read as started by the check above — and as auto-restarting by this one, once the units
+    // after it have taken their time coming up.
+    for (unit, outcome) in &mut units {
+        if *outcome != Outcome::Failed && !systemd.is_active(unit) {
+            *outcome = Outcome::Failed;
+        }
+    }
+    for (service, (_, outcome)) in plan.iter().zip(&units) {
+        if *outcome == Outcome::Failed {
+            service.inputs.invalidate()?;
+        } else {
+            service.inputs.applied()?;
+        }
+    }
+    Ok(units)
+}
+
+fn zerofs_restart_requires_permission() -> StartError {
+    StartError::Unstartable(format!(
+        "  {ZEROFS_UNIT} has unapplied or unrecorded service inputs. Restarting ZeroFS disconnects every guest disk. Stop the guests that use it, then run `nibrunnerd start --restart-zerofs`"
+    ))
 }
 
 /// Whether ZeroFS was left running on an environment file edited after it came up. Only a unit
@@ -183,31 +239,40 @@ fn wall_clock_of(since_boot: Duration, now_since_boot: Duration, now: SystemTime
     now.checked_sub(now_since_boot.checked_sub(since_boot)?)
 }
 
-/// Which units this host has, in the order they come up, and whether each is restarted or merely
-/// started. The daemon falls back to a restart when it cannot apply the configuration in place.
-/// ZeroFS only when something it reads changed:
-/// its restart drops every NBD device under every live guest, and the mount goes with it.
-fn plan(config: &HostConfig, laid: &Laid) -> Vec<(&'static str, bool)> {
-    let mut plan = Vec::new();
-    if let Some(settings) = config.volumes.zerofs() {
-        let rewritten = |paths: &[PathBuf]| laid.written.iter().any(|path| paths.contains(path));
-        let zerofs = rewritten(&[
-            settings.binary.clone(),
-            settings.config_file.clone(),
-            unit_path(ZEROFS_UNIT),
-        ]);
-        let mount = zerofs || rewritten(&[unit_path(MOUNT_UNIT)]);
-        plan.push((ZEROFS_UNIT, zerofs));
-        plan.push((MOUNT_UNIT, mount));
-    }
-    plan.push((DAEMON_UNIT, true));
-    plan
+struct Service {
+    unit: &'static str,
+    inputs: Inputs,
 }
 
-fn permits_reload(laid: &Laid) -> bool {
-    laid.written
-        .iter()
-        .all(|path| path == Path::new(crate::install::kernel::SYSCTL_FILE))
+fn plan(config: &HostConfig, systemd_dir: &Path, binary: &Path) -> Result<Vec<Service>, StartError> {
+    let mut plan = Vec::new();
+    let service = |unit, paths| {
+        Ok::<_, StartError>(Service {
+            unit,
+            inputs: Inputs::read(paths, inputs::receipt(&config.state_dir, unit))?,
+        })
+    };
+    if let Some(settings) = config.volumes.zerofs() {
+        let zerofs = vec![
+            settings.binary.clone(),
+            settings.config_file.clone(),
+            systemd_dir.join(ZEROFS_UNIT),
+        ];
+        plan.push(service(ZEROFS_UNIT, zerofs.clone())?);
+        let mut mount = zerofs;
+        mount.push(systemd_dir.join(MOUNT_UNIT));
+        plan.push(service(MOUNT_UNIT, mount)?);
+    }
+    let mut daemon = vec![
+        binary.to_path_buf(),
+        systemd_dir.join(DAEMON_UNIT),
+        systemd_dir.join(crate::install::render::DAEMON_DROP_IN),
+    ];
+    if let Some(settings) = config.volumes.zerofs() {
+        daemon.push(settings.checkpoint_config_file.clone());
+    }
+    plan.push(service(DAEMON_UNIT, daemon)?);
+    Ok(plan)
 }
 
 fn refuse_unstartable(config: &HostConfig, environment_file: &Path) -> Result<(), StartError> {
@@ -287,14 +352,40 @@ fn tls_material(config: &HostConfig) -> Vec<(&'static str, &Path, Holds)> {
 /// which is a thing to be told about rather than waited on.
 const SYSTEMCTL_DEADLINE: Duration = Duration::from_secs(300);
 
-fn must(arguments: &[&str]) -> Result<(), StartError> {
-    if systemctl(arguments)? {
+fn must(systemd: &impl ServiceControl, arguments: &[&str]) -> Result<(), StartError> {
+    if systemd.command(arguments)? {
         return Ok(());
     }
     Err(StartError::Systemd(format!(
         "systemctl {} failed",
         arguments.join(" ")
     )))
+}
+
+trait ServiceControl {
+    fn command(&self, arguments: &[&str]) -> Result<bool, StartError>;
+    fn is_active(&self, unit: &str) -> bool;
+    fn reload(&self, config: &HostConfig) -> Result<Option<crate::reload::Applied>, StartError>;
+}
+
+struct Systemd;
+
+impl ServiceControl for Systemd {
+    fn command(&self, arguments: &[&str]) -> Result<bool, StartError> {
+        systemctl(arguments)
+    }
+
+    fn is_active(&self, unit: &str) -> bool {
+        is_active(unit)
+    }
+
+    fn reload(&self, config: &HostConfig) -> Result<Option<crate::reload::Applied>, StartError> {
+        crate::reload::request(config).map_err(|error| {
+            StartError::Systemd(format!(
+                "the running host could not confirm its configuration: {error}"
+            ))
+        })
+    }
 }
 
 /// Said before it is run, so a call that blocks is seen blocking on the command it is. systemd's
@@ -341,79 +432,355 @@ mod tests {
     use crate::config::{HttpListener, TlsMaterial, VolumeBackend};
     use crate::test_support::zerofs_settings;
 
-    fn zerofs_host() -> HostConfig {
-        let mut config = HostConfig::under(Path::new("/srv/nibrunner"));
-        config.volumes = VolumeBackend::Zerofs(Box::new(zerofs_settings(|_| {})));
-        config
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeSet;
+
+    use crate::install::{render, write_generated, Laid};
+
+    #[derive(Default)]
+    struct FakeSystemd {
+        active: RefCell<BTreeSet<String>>,
+        commands: RefCell<Vec<Vec<String>>>,
+        fail: Cell<Option<&'static str>>,
+        interrupt: Cell<Option<&'static str>>,
+        exit_after: Cell<Option<&'static str>>,
     }
 
-    fn written(paths: &[PathBuf]) -> Laid {
-        Laid {
-            written: paths.to_vec(),
-            ..Laid::default()
+    impl ServiceControl for FakeSystemd {
+        fn command(&self, arguments: &[&str]) -> Result<bool, StartError> {
+            self.commands
+                .borrow_mut()
+                .push(arguments.iter().map(|arg| (*arg).to_string()).collect());
+            if matches!(arguments[0], "start" | "restart") {
+                let unit = arguments[1];
+                self.active.borrow_mut().insert(unit.to_string());
+                if self.exit_after.get() == Some(unit) {
+                    std::process::exit(77);
+                }
+                if self.interrupt.get() == Some(unit) {
+                    return Err(StartError::Systemd("activation interrupted".to_string()));
+                }
+                if self.fail.get() == Some(unit) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+
+        fn is_active(&self, unit: &str) -> bool {
+            self.active.borrow().contains(unit)
+        }
+
+        fn reload(&self, _: &HostConfig) -> Result<Option<crate::reload::Applied>, StartError> {
+            Ok(Some(crate::reload::Applied::Unchanged))
         }
     }
 
-    #[test]
-    fn applied_kernel_settings_allow_reload_but_rewritten_service_files_do_not() {
-        assert!(permits_reload(&written(&[])));
-        assert!(permits_reload(&written(&[PathBuf::from(
-            crate::install::kernel::SYSCTL_FILE
-        )])));
-        assert!(!permits_reload(&written(&[unit_path(DAEMON_UNIT)])));
+    struct HostFiles {
+        directory: tempfile::TempDir,
+        config: HostConfig,
     }
 
-    #[test]
-    fn a_local_file_host_has_one_unit_with_a_restart_fallback() {
-        let plan = plan(&HostConfig::under(Path::new("/srv/nibrunner")), &Laid::default());
-        assert_eq!(plan, [(DAEMON_UNIT, true)]);
-    }
+    impl HostFiles {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let mut config = HostConfig::under(root);
+            config.volumes = VolumeBackend::Zerofs(Box::new(zerofs_settings(|settings| {
+                settings.binary = root.join("zerofs");
+                settings.config_file = root.join("zerofs.toml");
+                settings.checkpoint_config_file = root.join("checkpoint.toml");
+            })));
+            std::fs::write(root.join("zerofs"), "zerofs binary").unwrap();
+            std::fs::write(root.join("nibrunnerd"), "daemon binary").unwrap();
+            Self { directory, config }
+        }
 
-    #[test]
-    fn zerofs_is_left_running_when_nothing_it_reads_changed() {
-        let plan = plan(
-            &zerofs_host(),
-            &written(&[unit_path("nibrunnerd.service.d/install.conf")]),
-        );
-        assert_eq!(
-            plan,
-            [(ZEROFS_UNIT, false), (MOUNT_UNIT, false), (DAEMON_UNIT, true)]
-        );
-    }
+        fn install(&self) -> Laid {
+            let root = self.directory.path();
+            let file = root.join("config.toml");
+            std::fs::write(&file, self.config.to_toml()).unwrap();
+            let environment = crate::install::environment_file(&file);
+            let binary = root.join("nibrunnerd");
+            let mut files = vec![
+                (DAEMON_UNIT.to_string(), render::daemon_unit(&file, &binary)),
+                (
+                    render::DAEMON_DROP_IN.to_string(),
+                    render::daemon_drop_in(&self.config, &file, &environment),
+                ),
+            ];
+            let mut laid = Laid::default();
+            if let Some(settings) = self.config.volumes.zerofs() {
+                write_generated(
+                    &settings.config_file,
+                    &render::zerofs_config(settings, &file, &environment),
+                    false,
+                    &mut laid,
+                )
+                .unwrap();
+                write_generated(
+                    &settings.checkpoint_config_file,
+                    &render::checkpoint_config(settings, &file),
+                    false,
+                    &mut laid,
+                )
+                .unwrap();
+                files.extend([
+                    (
+                        ZEROFS_UNIT.to_string(),
+                        render::zerofs_unit(settings, &file, &environment),
+                    ),
+                    (MOUNT_UNIT.to_string(), render::mount_unit(settings, &file)),
+                ]);
+            }
+            for (unit, body) in files {
+                write_generated(&root.join("systemd").join(unit), &body, false, &mut laid).unwrap();
+            }
+            laid
+        }
 
-    // Its config, its unit and its binary are what it reads on the way up. A restart drops every
-    // device under every guest, so each is named rather than "anything at all changed".
-    #[test]
-    fn zerofs_is_restarted_when_what_it_reads_was_rewritten_and_the_mount_follows() {
-        let config = zerofs_host();
-        let settings = config.volumes.zerofs().unwrap();
-        for changed in [
-            settings.config_file.clone(),
-            settings.binary.clone(),
-            unit_path(ZEROFS_UNIT),
-        ] {
-            let plan = plan(&config, &written(std::slice::from_ref(&changed)));
-            assert_eq!(
-                plan,
-                [(ZEROFS_UNIT, true), (MOUNT_UNIT, true), (DAEMON_UNIT, true)],
-                "{}",
-                changed.display()
+        fn plan(&self) -> Vec<Service> {
+            let root = self.directory.path();
+            plan(&self.config, &root.join("systemd"), &root.join("nibrunnerd")).unwrap()
+        }
+
+        fn start(
+            &self,
+            systemd: &FakeSystemd,
+            restart_zerofs: bool,
+        ) -> Result<Vec<(&'static str, Outcome)>, StartError> {
+            activate(&self.config, &self.plan(), restart_zerofs, systemd)
+        }
+
+        fn pending(&self) -> Vec<bool> {
+            self.plan().iter().map(|service| service.inputs.pending).collect()
+        }
+
+        fn invocation(&self) -> Command {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "start::tests::a_start_invocation_reads_only_persisted_inputs",
+                    "--nocapture",
+                ])
+                .env("NIBRUNNER_START_TEST_ROOT", self.directory.path());
+            command
+        }
+
+        fn invoke_start(&self, expected: &str) {
+            let output = self
+                .invocation()
+                .env("NIBRUNNER_START_TEST_OUTCOME", expected)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
         }
-        // Read by the checkpoint servers the daemon spawns, never by the live server.
-        let plan = plan(
-            &config,
-            &written(std::slice::from_ref(&settings.checkpoint_config_file)),
-        );
-        assert_eq!(plan[0], (ZEROFS_UNIT, false));
+
+        fn change_cache(&mut self) {
+            let VolumeBackend::Zerofs(settings) = &mut self.config.volumes else {
+                panic!("ZeroFS host")
+            };
+            settings.cache_disk_mib += 1024;
+        }
     }
 
     #[test]
-    fn the_mount_alone_is_restarted_when_only_its_unit_changed() {
-        let plan = plan(&zerofs_host(), &written(&[unit_path(MOUNT_UNIT)]));
+    fn separate_install_and_start_processes_apply_pending_inputs_once() {
+        let mut host = HostFiles::new();
+        host.install();
+        host.invoke_start("restarted");
+        host.invoke_start("running");
+        host.change_cache();
+        host.install();
+        assert!(host.install().done.is_empty());
+        host.invoke_start("restarted");
+        host.invoke_start("running");
+    }
+
+    #[test]
+    fn a_start_invocation_reads_only_persisted_inputs() {
+        let Some(root) = std::env::var_os("NIBRUNNER_START_TEST_ROOT").map(PathBuf::from) else {
+            return;
+        };
+        let config = HostConfig::from_file(&root.join("config.toml")).unwrap();
+        let plan = plan(&config, &root.join("systemd"), &root.join("nibrunnerd")).unwrap();
+        let systemd = FakeSystemd::default();
+        if std::env::var_os("NIBRUNNER_START_TEST_INTERRUPT").is_some() {
+            systemd.exit_after.set(Some(ZEROFS_UNIT));
+        }
+        systemd
+            .active
+            .borrow_mut()
+            .extend([ZEROFS_UNIT, MOUNT_UNIT, DAEMON_UNIT].map(str::to_string));
+        let outcomes = activate(&config, &plan, true, &systemd).unwrap();
         assert_eq!(
-            plan,
-            [(ZEROFS_UNIT, false), (MOUNT_UNIT, true), (DAEMON_UNIT, true)]
+            outcomes[0].1.said(),
+            std::env::var("NIBRUNNER_START_TEST_OUTCOME").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_process_interrupted_after_restarting_zerofs_leaves_work_for_the_next_process() {
+        let mut host = HostFiles::new();
+        host.install();
+        host.invoke_start("restarted");
+        host.change_cache();
+        host.install();
+        let status = host
+            .invocation()
+            .env("NIBRUNNER_START_TEST_INTERRUPT", "1")
+            .output()
+            .unwrap()
+            .status;
+        assert_eq!(status.code(), Some(77));
+        assert!(host.install().done.is_empty());
+        assert_eq!(host.pending(), [true, true, false]);
+        host.invoke_start("restarted");
+        host.invoke_start("running");
+    }
+
+    #[test]
+    fn an_active_host_without_receipts_is_not_assumed_to_have_applied_its_files() {
+        let host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        systemd.active.borrow_mut().insert(ZEROFS_UNIT.to_string());
+        assert!(host.start(&systemd, false).is_err());
+        assert!(systemd.commands.borrow().is_empty());
+        assert_eq!(host.pending(), [true, true, true]);
+    }
+
+    #[test]
+    fn starting_a_stopped_zerofs_also_refreshes_an_active_mount() {
+        let host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        systemd.active.borrow_mut().remove(ZEROFS_UNIT);
+        let outcomes = host.start(&systemd, false).unwrap();
+        assert_eq!(outcomes[0].1, Outcome::Started);
+        assert_eq!(outcomes[1].1, Outcome::Restarted);
+    }
+
+    #[test]
+    fn unapplied_zerofs_inputs_require_explicit_restart_permission_on_an_active_host() {
+        let mut host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        host.change_cache();
+        host.install();
+        systemd.commands.borrow_mut().clear();
+        let error = host.start(&systemd, false).unwrap_err();
+        assert!(error.to_string().contains("--restart-zerofs"), "{error}");
+        assert!(systemd.commands.borrow().is_empty());
+        assert_eq!(host.pending(), [true, true, false]);
+        host.start(&systemd, true).unwrap();
+        assert_eq!(host.pending(), [false, false, false]);
+    }
+
+    #[test]
+    fn an_interrupted_activation_does_not_acknowledge_the_new_inputs() {
+        let mut host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        host.change_cache();
+        host.install();
+        systemd.interrupt.set(Some(MOUNT_UNIT));
+        assert!(host.start(&systemd, true).is_err());
+        assert_eq!(host.pending(), [true, true, false]);
+        systemd.interrupt.set(None);
+        host.start(&systemd, true).unwrap();
+        assert_eq!(host.pending(), [false, false, false]);
+    }
+
+    #[test]
+    fn a_failed_restart_remains_pending_even_if_the_old_files_are_restored() {
+        let mut host = HostFiles::new();
+        host.install();
+        let old = host.config.clone();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        host.change_cache();
+        host.install();
+        systemd.fail.set(Some(ZEROFS_UNIT));
+        let outcomes = host.start(&systemd, true).unwrap();
+        assert_eq!(outcomes, [(ZEROFS_UNIT, Outcome::Failed)]);
+        assert_eq!(host.pending(), [true, true, false]);
+        host.config = old;
+        host.install();
+        assert_eq!(host.pending(), [true, true, false]);
+        systemd.fail.set(None);
+        host.start(&systemd, true).unwrap();
+        assert_eq!(host.pending(), [false, false, false]);
+    }
+
+    #[test]
+    fn each_changed_zerofs_input_also_leaves_the_mount_pending() {
+        let host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        let settings = host.config.volumes.zerofs().unwrap();
+        for path in [
+            settings.binary.clone(),
+            settings.config_file.clone(),
+            host.directory.path().join("systemd").join(ZEROFS_UNIT),
+        ] {
+            std::fs::write(&path, "changed").unwrap();
+            assert_eq!(host.pending(), [true, true, false]);
+            host.start(&systemd, true).unwrap();
+        }
+    }
+
+    #[test]
+    fn mount_and_checkpoint_changes_only_restart_their_own_consumers() {
+        let host = HostFiles::new();
+        host.install();
+        let systemd = FakeSystemd::default();
+        host.start(&systemd, false).unwrap();
+        std::fs::write(host.directory.path().join("systemd").join(MOUNT_UNIT), "changed").unwrap();
+        assert_eq!(host.pending(), [false, true, false]);
+        let outcomes = host.start(&systemd, false).unwrap();
+        assert_eq!(outcomes[0].1, Outcome::Running);
+        assert_eq!(outcomes[1].1, Outcome::Restarted);
+        std::fs::write(
+            &host.config.volumes.zerofs().unwrap().checkpoint_config_file,
+            "changed",
+        )
+        .unwrap();
+        assert_eq!(host.pending(), [false, false, true]);
+        let outcomes = host.start(&systemd, false).unwrap();
+        assert_eq!(outcomes[0].1, Outcome::Running);
+        assert_eq!(outcomes[2].1, Outcome::Restarted);
+    }
+
+    #[test]
+    fn a_local_file_host_can_reload_after_an_unchanged_separate_install() {
+        let mut host = HostFiles::new();
+        host.config.volumes = VolumeBackend::LocalFile;
+        host.install();
+        let systemd = FakeSystemd::default();
+        assert_eq!(
+            host.start(&systemd, false).unwrap(),
+            [(DAEMON_UNIT, Outcome::Started)]
+        );
+        assert!(host.install().done.is_empty());
+        assert_eq!(
+            host.start(&systemd, false).unwrap(),
+            [(DAEMON_UNIT, Outcome::Running)]
+        );
+        std::fs::write(host.directory.path().join("systemd").join(DAEMON_UNIT), "changed").unwrap();
+        assert_eq!(
+            host.start(&systemd, false).unwrap(),
+            [(DAEMON_UNIT, Outcome::Restarted)]
         );
     }
 
@@ -533,7 +900,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let environment_file = directory.path().join("host.env");
         std::fs::write(&environment_file, "ZEROFS_ENCRYPTION_PASSWORD=\n").unwrap();
-        let mut config = zerofs_host();
+        let mut config = HostFiles::new().config;
         config.artifact_store_url = "s3://nibrunner-artifacts/artifacts".to_string();
 
         let error = refuse_unstartable(&config, &environment_file).unwrap_err();

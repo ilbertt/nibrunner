@@ -80,3 +80,7 @@ journalctl -u nibrunnerd -f
 After updating `nibrunnerd`, run `nibrunnerd install`, then `nibrunnerd start`. Existing microVMs
 keep serving until stopped or redeployed. Redeploy apps to move their next boot into a jail.
 Waking a snapshot from a direct launch cold boots the app while preserving its volume.
+
+On a running ZeroFS host, pending or previously unrecorded service inputs require an explicit
+restart. Follow the [configuration steps](/docs/getting-started/configuration#changing-it)
+before running `nibrunnerd start --restart-zerofs`; the restart disconnects guest disks.

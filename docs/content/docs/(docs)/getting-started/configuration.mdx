@@ -16,6 +16,16 @@ and every `nibrunnerd start` reads it. The [reference](/docs/reference/config) l
 and restarts only the units whose configuration changed. If the file is invalid, the error names
 the key and the reason.
 
+Applied service inputs are recorded under [`paths.state_dir`](/docs/reference/config#paths-state_dir). A separate `install`, or an
+interrupted or failed `start`, leaves changes pending until activation succeeds. Repeating
+`start` with no pending changes leaves services running.
+
+If a running ZeroFS needs new service inputs, `start` refuses to restart it automatically:
+that disconnects every guest disk. Stop the guests that use it, then run
+`nibrunnerd start --restart-zerofs`. The same acknowledgement is required on an existing
+ZeroFS host whose applied inputs have not yet been recorded. `--force` only permits replacing
+files; it does not permit a ZeroFS restart.
+
 ## Validation rules
 
 - **No key has a default.** If a section is present, every key in it must be set. A missing key

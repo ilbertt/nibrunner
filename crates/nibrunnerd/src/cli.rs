@@ -29,6 +29,11 @@ pub(super) enum Command {
     Start {
         #[arg(long, help = "Replace files these commands did not write")]
         force: bool,
+        #[arg(
+            long,
+            help = "Allow applying pending ZeroFS changes by restarting it, disconnecting every guest disk"
+        )]
+        restart_zerofs: bool,
     },
 }
 
@@ -83,15 +88,43 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["start"]),
-            Ok(Some(Command::Start { force: false }))
+            Ok(Some(Command::Start {
+                force: false,
+                restart_zerofs: false
+            }))
         ));
         assert!(matches!(
             parse(&["start", "--force"]),
-            Ok(Some(Command::Start { force: true }))
+            Ok(Some(Command::Start {
+                force: true,
+                restart_zerofs: false
+            }))
         ));
         let refused = parse(&["start", "--from", "/tmp/release"]).unwrap_err();
         assert_eq!(refused.kind(), ErrorKind::UnknownArgument);
         assert!(refused.to_string().contains("--from"), "{refused}");
+    }
+
+    #[test]
+    fn restarting_zerofs_requires_its_own_start_flag() {
+        assert!(matches!(
+            parse(&["start", "--restart-zerofs"]),
+            Ok(Some(Command::Start {
+                force: false,
+                restart_zerofs: true
+            }))
+        ));
+        assert!(matches!(
+            parse(&["start", "--force", "--restart-zerofs"]),
+            Ok(Some(Command::Start {
+                force: true,
+                restart_zerofs: true
+            }))
+        ));
+        assert_eq!(
+            parse(&["install", "--restart-zerofs"]).unwrap_err().kind(),
+            ErrorKind::UnknownArgument
+        );
     }
 
     #[test]
