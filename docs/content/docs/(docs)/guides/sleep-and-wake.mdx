@@ -65,9 +65,13 @@ Before resuming a restored app, the host sets the guest's wall clock to the curr
 The app stays frozen until that succeeds. If the guest cannot synchronize its clock, the host
 starts it from cold instead.
 
-Guests started before a host and guest-image upgrade keep running. If their init does not
-support the freeze protocol, the host refuses sleep and retries after its normal backoff.
-Redeploy the app to start it with the new guest image.
+Guests started before a host and guest-image upgrade keep running. Their snapshots retain the
+image version they booted with. On the next wake, a snapshot from a different or unknown guest
+image is discarded and the app starts from cold with the installed image. Files on its volume
+survive, but in-memory state does not.
+
+If an older guest's init does not support the freeze protocol, the host refuses sleep and retries
+after its normal backoff. Redeploy the app to start it with the new guest image.
 
 The host commits a snapshot only after its state, memory and integrity record have been synced
 to disk. It verifies both files' sizes and SHA-256 hashes before restoring. A missing, damaged or

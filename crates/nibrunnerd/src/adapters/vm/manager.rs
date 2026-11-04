@@ -81,9 +81,19 @@ impl VmManager {
     fn current_stamp(&self, request: &SuspendRequest) -> SnapshotStamp {
         SnapshotStamp {
             deployment_id: request.deployment_id.clone(),
-            guest_image_version: self.guest_image_version.clone(),
+            guest_image_version: Some(self.guest_image_version.clone()),
             host_boot_id: self.processes.boot_id().to_string(),
             slot: request.slot.slot,
+        }
+    }
+
+    fn sleep_stamp(&self, request: &SuspendRequest) -> SnapshotStamp {
+        SnapshotStamp {
+            guest_image_version: self
+                .processes
+                .read_record(&request.app_id)
+                .and_then(|record| record.guest_image_version),
+            ..self.current_stamp(request)
         }
     }
 
@@ -462,7 +472,14 @@ impl Vmm for VmManager {
         let starting = std::time::Instant::now();
         let started = self
             .processes
-            .spawn(&app_id, &self.firecracker, &self.jailer, &prepared.jail, true)
+            .spawn(
+                &app_id,
+                &self.firecracker,
+                &self.jailer,
+                &prepared.jail,
+                true,
+                &self.guest_image_version,
+            )
             .await;
         if let Err(error) = started {
             self.cron_registration.detach(&app_id).await;
@@ -499,7 +516,7 @@ impl Vmm for VmManager {
             .await
             .map_err(|reason| VmError::SleepRefused { reason })?;
         let paths = snapshot_paths(&self.snapshot_dir, &request.app_id);
-        let stamp = self.current_stamp(&request);
+        let stamp = self.sleep_stamp(&request);
         let api = self.api(&request.app_id);
 
         self.discard_snapshot(&request.app_id);
@@ -576,6 +593,14 @@ impl Vmm for VmManager {
             });
         }
 
+        // Older daemons stamped the installed image even when a guest survived an image upgrade.
+        if let Some(reason) =
+            super::snapshot::drift_from(&self.sleep_stamp(&request), &self.current_stamp(&request))
+        {
+            self.discard_snapshot(&request.app_id);
+            return Err(VmError::SnapshotUnusable { reason });
+        }
+
         let _ = std::fs::remove_file(&paths.stamp_path);
         let jail = self.prepare_jail(&request.app_id).await?;
         self.readopt(&request.app_id).await?;
@@ -602,7 +627,14 @@ impl Vmm for VmManager {
         let memory_path = PathBuf::from("/snapshots/memory");
         let started = self
             .processes
-            .spawn(&request.app_id, &self.firecracker, &self.jailer, &jail, false)
+            .spawn(
+                &request.app_id,
+                &self.firecracker,
+                &self.jailer,
+                &jail,
+                false,
+                &self.guest_image_version,
+            )
             .await
             .map_err(|error| VmError::Host(error.to_string()));
         let outcome = match started {
@@ -887,6 +919,15 @@ mod tests {
         server.await.unwrap();
         assert!(fixture.manager.admit_start().is_ok());
         assert!(fixture.manager.processes.status(&app_id()).active);
+        assert_eq!(
+            fixture
+                .manager
+                .processes
+                .read_record(&app_id())
+                .unwrap()
+                .guest_image_version,
+            Some(fixture.manager.guest_image_version.clone())
+        );
         fixture.manager.processes.stop(&app_id()).await;
     }
 
@@ -1076,6 +1117,7 @@ mod tests {
                 &fixture.manager.jailer,
                 &super::super::jailer::Jail::for_testing(working_dir.clone()),
                 false,
+                &fixture.manager.guest_image_version,
             )
             .await
             .unwrap();
@@ -1346,7 +1388,7 @@ mod tests {
             &paths.stamp_path,
             &SnapshotStamp {
                 deployment_id: deployment_id(),
-                guest_image_version: "an-older-image".into(),
+                guest_image_version: Some("an-older-image".into()),
                 host_boot_id: fixture.manager.processes.boot_id().to_string(),
                 slot: 0,
             },
@@ -1619,6 +1661,7 @@ mod tests {
                 pid: std::process::id() as i32,
                 host_boot_id: fixture.manager.processes.boot_id().into(),
                 started_at_ms: 0,
+                guest_image_version: None,
                 exit_code: None,
                 signal: None,
                 stop_requested: false,
@@ -1658,6 +1701,7 @@ mod tests {
                 pid: std::process::id() as i32,
                 host_boot_id: fixture.manager.processes.boot_id().into(),
                 started_at_ms: 0,
+                guest_image_version: None,
                 exit_code: None,
                 signal: None,
                 stop_requested: false,
@@ -1747,7 +1791,7 @@ mod tests {
             &paths.stamp_path,
             &SnapshotStamp {
                 deployment_id: deployment_id(),
-                guest_image_version: fixture.manager.guest_image_version.clone(),
+                guest_image_version: Some(fixture.manager.guest_image_version.clone()),
                 host_boot_id: fixture.manager.processes.boot_id().to_string(),
                 slot: 0,
             },
@@ -1894,6 +1938,7 @@ mod tests {
                 pid: 1,
                 host_boot_id: fixture.manager.processes.boot_id().into(),
                 started_at_ms: 0,
+                guest_image_version: None,
                 exit_code: Some(0),
                 signal: None,
                 stop_requested: true,
@@ -1906,6 +1951,54 @@ mod tests {
         assert!(refused.message().contains("legacy VMM without a jail"));
         assert_eq!(fixture.manager.processes.read_record(&app_id()).unwrap().pid, 1);
         assert!(!paths.directory.exists());
+    }
+
+    #[tokio::test]
+    async fn an_old_snapshot_stamp_cannot_vouch_for_a_guests_boot_image() {
+        for (boot_image, reason) in [
+            (None, "guest image is unknown"),
+            (Some("an-older-image"), "guest image has changed"),
+        ] {
+            let fixture = fixture();
+            let request = suspend_request();
+            let paths = snapshot_paths(&fixture.manager.snapshot_dir, &app_id());
+            let staged = StagedSnapshot::create(&fixture.manager.snapshot_dir).unwrap();
+            std::fs::write(&staged.paths.state_path, b"state").unwrap();
+            std::fs::write(&staged.paths.memory_path, b"memory").unwrap();
+            staged
+                .publish(&paths, fixture.manager.current_stamp(&request))
+                .unwrap();
+            fixture
+                .manager
+                .processes
+                .write_record(&crate::adapters::vm::process::VmRecord {
+                    app_id: app_id(),
+                    pid: -1,
+                    host_boot_id: fixture.manager.processes.boot_id().into(),
+                    started_at_ms: 0,
+                    guest_image_version: boot_image.map(str::to_string),
+                    exit_code: Some(0),
+                    signal: None,
+                    stop_requested: true,
+                    jail_root: Some(fixture.manager.working_dir_for(&app_id())),
+                    jail_uid: None,
+                })
+                .unwrap();
+
+            assert_eq!(
+                fixture
+                    .manager
+                    .sleep_stamp(&request)
+                    .guest_image_version
+                    .as_deref(),
+                boot_image
+            );
+            let error = fixture.manager.wake(request).await.unwrap_err();
+            assert!(matches!(error, VmError::SnapshotUnusable { .. }), "{error}");
+            assert!(error.message().contains(reason), "{error}");
+            assert_eq!(fixture.manager.processes.read_record(&app_id()).unwrap().pid, -1);
+            assert!(!paths.directory.exists());
+        }
     }
 
     #[tokio::test]

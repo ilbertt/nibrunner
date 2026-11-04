@@ -193,6 +193,64 @@ async fn a_corrupt_snapshot_cold_boots_the_app_and_still_answers_the_request() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_guest_from_an_older_or_unknown_image_cold_boots_on_its_next_wake() {
+    use nibrunnerd::adapters::vm::process::VmProcesses;
+    use nibrunnerd::adapters::vm::snapshot::{snapshot_paths, SnapshotStamp};
+
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let processes = VmProcesses::new(host.host.config.runtime_dir.clone());
+    for (number, boot_image) in [(1, Some("an-older-image")), (2, None)] {
+        let app = host.tenant(number).on_request(IDLE_TIMEOUT_MS);
+        host.deploy(std::slice::from_ref(&app)).await;
+        host.until_state(&app.app_id, InstanceState::Running).await;
+        assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
+        assert_eq!(host.get(&app, "/remember").await.unwrap().body, "2");
+        assert_eq!(
+            host.get(&app, "/write?path=kept&body=durable")
+                .await
+                .unwrap()
+                .status,
+            200
+        );
+        let mut record = processes.read_record(&app.app_id).unwrap();
+        record.guest_image_version = boot_image.map(str::to_string);
+        processes.write_record(&record).unwrap();
+
+        host.let_sleep(&app).await;
+        let paths = snapshot_paths(&host.host.config.snapshot_dir, &app.app_id);
+        let stamp: SnapshotStamp = nibrunnerd::json_store::read_json(&paths.stamp_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stamp.guest_image_version.as_deref(), boot_image);
+        let [restored_before, cold_before, _] = host.host.metrics.sleep_wake.of(&app.app_id).wakes;
+
+        let answer = host.get(&app, "/remember").await.expect("the cold boot answers");
+        assert_eq!(answer.status, 200, "{answer:?}");
+        assert_eq!(answer.body, "1", "the old guest's memory was restored");
+        assert_eq!(host.get(&app, "/read?path=kept").await.unwrap().body, "durable");
+        let [restored_after, cold_after, _] = host.host.metrics.sleep_wake.of(&app.app_id).wakes;
+        assert_eq!(restored_after, restored_before);
+        assert_eq!(cold_after, cold_before + 1);
+        assert!(!paths.directory.exists());
+        let replacement = processes.read_record(&app.app_id).unwrap();
+        assert_eq!(
+            replacement.guest_image_version,
+            Some(host.host.guest_image_version.clone())
+        );
+
+        host.until_state(&app.app_id, InstanceState::Running).await;
+        host.let_sleep(&app).await;
+        assert_eq!(host.get(&app, "/remember").await.unwrap().body, "2");
+        let [restored, cold, _] = host.host.metrics.sleep_wake.of(&app.app_id).wakes;
+        assert_eq!(restored, restored_after + 1);
+        assert_eq!(cold, cold_after);
+    }
+    host.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_restored_tenant_answers_with_current_host_time_and_keeps_its_memory() {
     const SNAPSHOT_HOLD: Duration = Duration::from_secs(3);
     const MAX_CLOCK_ERROR: Duration = Duration::from_secs(1);

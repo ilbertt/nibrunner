@@ -38,7 +38,7 @@ pub(crate) fn publish_snapshot_file(source: &Path, destination: &Path) -> std::i
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotStamp {
     pub deployment_id: DeploymentId,
-    pub guest_image_version: String,
+    pub guest_image_version: Option<String>,
     pub host_boot_id: String,
     pub slot: u32,
 }
@@ -46,6 +46,9 @@ pub struct SnapshotStamp {
 fn drift_reason(stored: &SnapshotStamp, expected: &SnapshotStamp) -> Option<&'static str> {
     if stored.deployment_id != expected.deployment_id {
         return Some("the app has been deployed again since");
+    }
+    if stored.guest_image_version.is_none() {
+        return Some("the snapshot's guest image is unknown");
     }
     if stored.guest_image_version != expected.guest_image_version {
         return Some("the guest image has changed");
@@ -447,7 +450,7 @@ mod tests {
     fn stamp() -> SnapshotStamp {
         SnapshotStamp {
             deployment_id: deployment_id(),
-            guest_image_version: "6.1.180-98db6df338f0".into(),
+            guest_image_version: Some("6.1.180-98db6df338f0".into()),
             host_boot_id: "b6b8f0d2-0000-4000-8000-000000000001".into(),
             slot: 7,
         }
@@ -473,12 +476,19 @@ mod tests {
             .unwrap()
             .contains("deployed again"));
         let newer_image = SnapshotStamp {
-            guest_image_version: "6.1.181-x".into(),
+            guest_image_version: Some("6.1.181-x".into()),
             ..stamp()
         };
         assert!(drift_from(&newer_image, &stamp())
             .unwrap()
             .contains("guest image"));
+        let unknown_image = SnapshotStamp {
+            guest_image_version: None,
+            ..stamp()
+        };
+        assert!(drift_from(&unknown_image, &stamp())
+            .unwrap()
+            .contains("guest image is unknown"));
         let rebooted = SnapshotStamp {
             host_boot_id: "another".into(),
             ..stamp()
@@ -746,7 +756,7 @@ mod tests {
     fn the_first_reason_a_snapshot_drifted_is_the_one_the_operator_is_told() {
         let everything_moved = SnapshotStamp {
             deployment_id: DeploymentId::parse("dep-2").unwrap(),
-            guest_image_version: "another".into(),
+            guest_image_version: Some("another".into()),
             host_boot_id: "another".into(),
             slot: 8,
         };
@@ -907,7 +917,7 @@ mod tests {
         let this_boot = stamp().host_boot_id;
         let drifted = serde_json::to_string(&SnapshotStamp {
             deployment_id: DeploymentId::parse("dep-2").unwrap(),
-            guest_image_version: "older".into(),
+            guest_image_version: Some("older".into()),
             slot: 8,
             ..stamp()
         })

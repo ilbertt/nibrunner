@@ -99,6 +99,9 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
   Installation reserves the locked nibrunner-jailer account's subordinate UID/GID ranges; startup
   validates them. There is no jailer configuration or direct-launch fallback. Existing direct
   VMMs may be readopted during an upgrade, but their snapshots cold boot when woken.
+- Snapshot image versions come from the VMM's persisted launch record, including after a daemon
+  upgrade. Never stamp a readopted guest with the newly installed image. Wake discards snapshots
+  whose image is different or unknown and cold boots against the app's existing volume.
 - VM cgroup v2 CPU and memory limits come from the staged Firecracker machine configuration on
   both boot and restore, without a separate host budget. Memory adds 64 MiB plus 12.5% for VMM
   and kernel overhead. A paused VMM gets one guest RAM of temporary snapshot headroom; failed

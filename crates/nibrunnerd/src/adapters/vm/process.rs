@@ -58,6 +58,8 @@ pub struct VmRecord {
     pub host_boot_id: String,
     pub started_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_image_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     /// The signal the process died under, when it did not exit with a code of its own. Beside
     /// `exit_code` rather than folded into it so a record an earlier daemon wrote still reads.
@@ -192,6 +194,7 @@ impl VmProcesses {
         jailer: &super::jailer::Jailer,
         jail: &super::jailer::Jail,
         boot: bool,
+        guest_image_version: &str,
     ) -> std::io::Result<VmRecord> {
         make_directory(&self.runtime_dir, RUNTIME_DIR_MODE)?;
         let api_socket = self.api_socket(app_id);
@@ -225,7 +228,7 @@ impl VmProcesses {
             command.arg("--config-file").arg("/firecracker.json");
         }
         jail.configure_command(&mut command)?;
-        self.launch(app_id, command, jail).await
+        self.launch(app_id, command, jail, guest_image_version).await
     }
 
     #[cfg(test)]
@@ -238,8 +241,15 @@ impl VmProcesses {
     ) -> std::io::Result<VmRecord> {
         let jail = super::jailer::Jail::for_testing(working_dir.into());
         let jailer = super::jailer::Jailer::for_testing(binary.into());
-        self.spawn(app_id, binary, &jailer, &jail, config_file.is_some())
-            .await
+        self.spawn(
+            app_id,
+            binary,
+            &jailer,
+            &jail,
+            config_file.is_some(),
+            "test-image",
+        )
+        .await
     }
 
     async fn launch(
@@ -247,6 +257,7 @@ impl VmProcesses {
         app_id: &AppId,
         mut command: tokio::process::Command,
         jail: &super::jailer::Jail,
+        guest_image_version: &str,
     ) -> std::io::Result<VmRecord> {
         let working_dir = &jail.root;
         let console = std::fs::File::create(self.console_path(app_id))?;
@@ -295,6 +306,7 @@ impl VmProcesses {
             pid,
             host_boot_id: self.boot_id.clone(),
             started_at_ms: crate::clock::now_ms(),
+            guest_image_version: Some(guest_image_version.to_string()),
             exit_code: None,
             signal: None,
             stop_requested: false,
@@ -395,6 +407,7 @@ mod tests {
                 pid: std::process::id() as i32,
                 host_boot_id: "an-earlier-boot".into(),
                 started_at_ms: 0,
+                guest_image_version: None,
                 exit_code: None,
                 signal: None,
                 stop_requested: false,
@@ -419,6 +432,7 @@ mod tests {
                 pid: std::process::id() as i32,
                 host_boot_id: "boot-1".into(),
                 started_at_ms: 0,
+                guest_image_version: None,
                 exit_code: None,
                 signal: None,
                 stop_requested: false,
@@ -441,6 +455,7 @@ mod tests {
             pid: 1,
             host_boot_id: "boot-1".into(),
             started_at_ms: 0,
+            guest_image_version: None,
             exit_code: Some(1),
             signal: None,
             stop_requested: false,
@@ -495,6 +510,7 @@ mod tests {
         let record: VmRecord = serde_json::from_value(written).unwrap();
         assert_eq!(record.exit(), Some(VmExit::Code(137)));
         assert_eq!(record.signal, None);
+        assert_eq!(record.guest_image_version, None);
     }
 
     #[test]
@@ -529,6 +545,7 @@ mod tests {
                 pid: 1,
                 host_boot_id: "boot-1".into(),
                 started_at_ms: 0,
+                guest_image_version: None,
                 exit_code: Some(0),
                 signal: None,
                 stop_requested: true,
@@ -618,6 +635,7 @@ mod tests {
             .unwrap();
         assert_eq!(record.app_id, app_id());
         assert_eq!(record.host_boot_id, "boot-1");
+        assert_eq!(record.guest_image_version.as_deref(), Some("test-image"));
         assert_eq!(record.exit_code, None);
         assert!(!record.stop_requested);
         assert_eq!(record.jail_root, Some(working_dir.clone()));
@@ -635,6 +653,11 @@ mod tests {
         assert!(settled.loaded);
         assert!(!settled.active);
         assert!(!settled.failed, "an exit of 0 is not a failure");
+        let readopted = VmProcesses::new(directory.path().to_path_buf());
+        assert_eq!(
+            readopted.read_record(&app_id()).unwrap().guest_image_version,
+            record.guest_image_version
+        );
         let console = std::fs::read_to_string(processes.console_path(&app_id())).unwrap();
         for argument in [
             "--id",
@@ -722,6 +745,7 @@ mod tests {
                 pid: -1,
                 host_boot_id: "boot-1".into(),
                 started_at_ms: 0,
+                guest_image_version: None,
                 exit_code: None,
                 signal: None,
                 stop_requested: false,
