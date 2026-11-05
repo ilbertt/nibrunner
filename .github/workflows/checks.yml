@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   codestyle:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,7 +26,7 @@ jobs:
         run: just fmt --check
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,7 +40,7 @@ jobs:
         run: just lint
 
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,7 +55,7 @@ jobs:
 
   # Every file in the tree that is written from the code rather than by hand.
   generated:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,7 +81,7 @@ jobs:
         run: just check-openapi
 
   integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -111,7 +111,7 @@ jobs:
   # will not let a document set under a minute, and everything else together is the third.
   integration-guest:
     name: integration-guest (${{ matrix.shard }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # A guest that never answers is a test failure, not a job that runs until GitHub stops it.
     timeout-minutes: 15
     strategy:
@@ -170,7 +170,7 @@ jobs:
     if: always()
     name: checks:required
     needs: [codestyle, lint, tests, generated, integration, integration-guest]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Check all jobs passed
         run: |
