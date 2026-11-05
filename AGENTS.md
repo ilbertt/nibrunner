@@ -94,7 +94,8 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
   pending or unverified inputs requires `start --restart-zerofs`, because its restart disconnects guest disks.
 - OCI registry pulls use `oci-client` over HTTPS with anonymous registry authentication. Desired
   layers use `kind: "oci"` with exactly one of `objectKey` (archive) or `repository` (registry),
-  pinned by digest; image startup defaults do not override `config.command`.
+  pinned by digest; image startup defaults do not override `config.command`. Retry transient
+  registry transport and HTTP failures within the pull deadline; never retry integrity or policy failures.
 - Every VMM cold boot and snapshot restore uses the matching embedded Firecracker jailer.
   Installation reserves the locked nibrunner-jailer account's subordinate UID/GID ranges; startup
   validates them. There is no jailer configuration or direct-launch fallback. Existing direct
@@ -240,6 +241,10 @@ minutes. Runs on `main` remain independent.
 
 Integration jobs build as the runner account and use Cargo's target runner to elevate only test
 executables. Pass the required runtime environment explicitly; Ubuntu 26.04's sudo ignores `-E`.
+Kernel and microVM jobs use `ubuntu-24.04` explicitly, log host details and verify KVM can create a
+VM. Change that release deliberately after validating the guest suite; do not use `ubuntu-latest`.
+Cargo cache namespaces include `ImageOS`, so runner releases cannot reuse each other's native libraries.
+Failed VM initialization retains a bounded console tail in the error before cleanup removes its files.
 
 Work goes on a branch and lands on `main` through a pull request, squash-merged with the pull
 request's title as the commit subject — so the title is a Conventional Commit (`feat:`, `fix:`,

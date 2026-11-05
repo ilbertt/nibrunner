@@ -1,10 +1,11 @@
 #![cfg(target_os = "linux")]
 
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use nibrunnerd::config::{HostConfig, HostStorage, StorageFilesystem, VolumeBackend};
 use nibrunnerd::install::{service_user, storage};
@@ -55,6 +56,27 @@ impl Disk {
     fn unmount(&self) {
         run(Command::new("umount").arg(&self.mount_point));
     }
+
+    fn detach(&self) {
+        run(Command::new("losetup").arg("--detach").arg(&self.device));
+        let backing_file = Path::new("/sys/class/block")
+            .join(self.device.file_name().unwrap())
+            .join("loop/backing_file");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Loop detachment is lazy; an empty udev queue does not prove the last opener has closed.
+        loop {
+            match std::fs::read_to_string(&backing_file) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => panic!("{}: {error}", backing_file.display()),
+                Ok(backing) => assert!(
+                    Instant::now() < deadline,
+                    "{} is still attached to {backing}",
+                    self.device.display()
+                ),
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
 }
 
 impl Drop for Disk {
@@ -62,6 +84,30 @@ impl Drop for Disk {
         let _ = Command::new("umount").arg(&self.mount_point).output();
         let _ = Command::new("losetup").arg("--detach").arg(&self.device).output();
     }
+}
+
+#[test]
+fn a_loop_device_can_be_replaced_after_a_probe_delays_its_detachment() {
+    if !super::enabled() {
+        return;
+    }
+    let disk = Disk::blank();
+    let held = File::open(&disk.device).unwrap();
+    let probe = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        drop(held);
+    });
+    disk.detach();
+    let replacement = disk.directory.path().join("replacement.img");
+    let mut file = File::create(&replacement).unwrap();
+    file.set_len(512 * 1024 * 1024).unwrap();
+    file.write_all(b"replacement").unwrap();
+    file.sync_all().unwrap();
+    run(Command::new("losetup").arg(&disk.device).arg(&replacement));
+    probe.join().unwrap();
+    let mut bytes = [0; 11];
+    File::open(&disk.device).unwrap().read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"replacement");
 }
 
 #[test]
@@ -125,9 +171,7 @@ fn host_storage_initializes_blank_devices_and_preserves_existing_filesystems_acr
         assert_eq!(snapshots.uid(), 0);
         assert_eq!(checkpoint.uid(), 0);
         disk.unmount();
-        run(Command::new("losetup").arg("--detach").arg(&disk.device));
-        // Loop detachment is lazy; udev can still hold the device open after losetup returns.
-        run(Command::new("udevadm").args(["settle", "--timeout=10"]));
+        disk.detach();
         let replacement = disk.directory.path().join("replacement.img");
         File::create(&replacement)
             .unwrap()

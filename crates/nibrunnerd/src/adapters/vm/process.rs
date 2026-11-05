@@ -1,3 +1,4 @@
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -13,6 +14,7 @@ pub const FIRECRACKER_VERSION: &str = env!("NIBRUNNER_FIRECRACKER_VERSION");
 
 const RUNTIME_DIR_MODE: u32 = 0o700;
 const EXECUTABLE_MODE: u32 = 0o755;
+const CONSOLE_TAIL_BYTES: u64 = 16 * 1024;
 
 pub fn carries_firecracker() -> bool {
     option_env!("NIBRUNNER_FIRECRACKER_EMBEDDED").is_some()
@@ -137,6 +139,15 @@ impl VmProcesses {
 
     pub fn console_path(&self, app_id: &AppId) -> PathBuf {
         self.runtime_dir.join(format!("vm-{app_id}.console"))
+    }
+
+    pub(super) fn console_tail(&self, app_id: &AppId) -> std::io::Result<String> {
+        let mut file = std::fs::File::open(self.console_path(app_id))?;
+        let start = file.metadata()?.len().saturating_sub(CONSOLE_TAIL_BYTES);
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        file.take(CONSOLE_TAIL_BYTES).read_to_end(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
 
     pub fn read_record(&self, app_id: &AppId) -> Option<VmRecord> {
@@ -558,6 +569,20 @@ mod tests {
         assert!(processes.read_record(&app_id()).is_none());
         assert!(!processes.console_path(&app_id()).exists());
         processes.forget(&app_id());
+    }
+
+    #[test]
+    fn a_console_tail_is_bounded_and_keeps_the_final_failure_even_after_invalid_utf8() {
+        let directory = tempfile::tempdir().unwrap();
+        let processes = processes(directory.path());
+        let mut console = vec![b'x'; CONSOLE_TAIL_BYTES as usize];
+        console.extend_from_slice(b"\xff\nKVM_CREATE_VM failed\n");
+        std::fs::write(processes.console_path(&app_id()), &console).unwrap();
+        let tail = processes.console_tail(&app_id()).unwrap();
+        assert!(tail.ends_with("KVM_CREATE_VM failed"));
+        assert!(tail.contains('\u{fffd}'));
+        assert!(tail.len() <= CONSOLE_TAIL_BYTES as usize + 2);
+        assert!(!tail.starts_with(&"x".repeat(CONSOLE_TAIL_BYTES as usize)));
     }
 
     #[test]
