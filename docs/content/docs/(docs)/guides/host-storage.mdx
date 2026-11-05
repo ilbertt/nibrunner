@@ -28,16 +28,17 @@ managing mounts yourself.
 
 | Device or mount | Result |
 | --- | --- |
-| No filesystem signatures and every byte is zero | Format with the configured filesystem, then mount. |
+| No filesystem signatures | Format with the configured filesystem, then mount. |
 | Existing matching `ext4` or `xfs` filesystem | Mount without formatting; preserve its contents. |
 | Other signatures, partition tables, partitions, RAID, LVM, child devices or read-only devices | Refuse startup. |
-| Unrecognized nonzero data | Refuse startup without formatting. |
 | Device mounted elsewhere, wrong device at the mount point, nested mounts or a read-only mount | Refuse startup. |
 | Unmounted, nonempty mount point or symlinked storage paths | Refuse startup without hiding or moving files. |
 
 `filesystem` is required and accepts `ext4` or `xfs`. An existing filesystem must match it.
-`--force` never authorizes reformatting. Initializing a blank device reads its entire contents
-first, which can take several minutes on a large disk.
+Configuring `[host_storage]` authorizes initialization when no signatures are detected, including
+discarding unrecognized raw contents. Use a dedicated device. Cryptographically erased disks can
+contain nonzero bytes, so initialization does not require a zero-filled device.
+`--force` never authorizes reformatting an existing filesystem.
 
 Install `util-linux`, `mount`, and the filesystem's tools (`e2fsprogs` or `xfsprogs`); the release
 installer includes them. The managed device and mount point must use normalized absolute paths

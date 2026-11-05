@@ -83,9 +83,9 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
 - Cron runs may overlap. Editing a crontab reschedules future runs; stopping or replacing its
   deployment cancels and drains active runs before the guest stops. Registry notifications and
   the next due time drive scheduling, without polling or catching up missed runs.
-- Optional `[host_storage]` names a whole device, mount point and filesystem explicitly. Only
-  entirely zeroed devices without signatures may be formatted, without force flags. Existing
-  matching filesystems are preserved. Mount and verify storage before creating host directories;
+- Optional `[host_storage]` names a whole device, mount point and filesystem explicitly. Devices
+  without filesystem signatures may be formatted, without force flags, even when bytes are nonzero.
+  Existing matching filesystems are preserved. Mount and verify storage before creating host directories;
   systemd orders the daemon and ZeroFS after the mount and directory preparation.
 - `start` compares installed service inputs with successful activation receipts under
   `paths.state_dir/applied-services`. Receipts bind file fingerprints to systemd's `InvocationID`;

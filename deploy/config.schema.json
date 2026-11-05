@@ -22,7 +22,7 @@
       "$ref": "#/$defs/filesystem"
     },
     "host_storage": {
-      "description": "Explicitly managed whole-device storage for snapshots and ZeroFS caches. Absent leaves\nmounting to the operator. Only an entirely zeroed device is initialized.",
+      "description": "Explicitly managed whole-device storage for snapshots and ZeroFS caches. Absent leaves\nmounting to the operator. Devices without filesystem signatures are initialized,\ndiscarding any unrecognized raw contents.",
       "$ref": "#/$defs/host_storage"
     },
     "logs": {
@@ -164,7 +164,7 @@
           "pattern": "^/dev/"
         },
         "filesystem": {
-          "description": "Filesystem for a blank device. Existing filesystems must match and are never reformatted.",
+          "description": "Filesystem to create when no signatures are found. Existing filesystems must match\nand are never reformatted.",
           "$ref": "#/$defs/StorageFilesystem"
         },
         "mount_point": {

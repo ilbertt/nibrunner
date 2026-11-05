@@ -152,21 +152,50 @@ fn host_storage_initializes_blank_devices_and_preserves_existing_filesystems_acr
 }
 
 #[test]
-fn host_storage_refuses_unknown_data_partition_tables_and_mismatched_filesystems_without_writing() {
+fn host_storage_initializes_nonzero_devices_without_signatures_and_reuses_their_filesystems() {
     if !super::enabled() {
         return;
     }
-    let disk = Disk::blank();
-    let mut file = File::options().write(true).open(&disk.device).unwrap();
-    file.seek(SeekFrom::Start(400 * 1024 * 1024)).unwrap();
-    file.write_all(b"unrecognized data").unwrap();
-    file.sync_all().unwrap();
-    let config = disk.config(StorageFilesystem::Ext4);
-    assert!(storage::ensure_mounted(&config)
-        .unwrap_err()
-        .to_string()
-        .contains("contains data"));
-    assert!(!disk.mount_point.exists());
+    for filesystem in [StorageFilesystem::Ext4, StorageFilesystem::Xfs] {
+        let disk = Disk::blank();
+        let mut file = File::options().write(true).open(&disk.device).unwrap();
+        let data: Vec<u8> = (1..=255).cycle().take(65536).collect();
+        for offset in [0, 1024 * 1024, 400 * 1024 * 1024] {
+            file.seek(SeekFrom::Start(offset)).unwrap();
+            file.write_all(&data).unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+        let signatures = run(Command::new("wipefs")
+            .args(["--no-act", "--noheadings", "--output", "TYPE"])
+            .arg(&disk.device));
+        assert!(signatures.is_empty(), "{signatures}");
+        let config = disk.config(filesystem);
+        storage::ensure_mounted(&config).unwrap();
+        std::fs::write(disk.mount_point.join("preserved"), "existing data").unwrap();
+        let uuid = run(Command::new("blkid")
+            .args(["--probe", "--output", "value", "--match-tag", "UUID"])
+            .arg(&disk.device));
+        disk.unmount();
+        storage::ensure_mounted(&config).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(disk.mount_point.join("preserved")).unwrap(),
+            "existing data"
+        );
+        assert_eq!(
+            run(Command::new("blkid")
+                .args(["--probe", "--output", "value", "--match-tag", "UUID"])
+                .arg(&disk.device)),
+            uuid
+        );
+    }
+}
+
+#[test]
+fn host_storage_refuses_partition_tables_and_mismatched_filesystems_without_writing() {
+    if !super::enabled() {
+        return;
+    }
     let disk = Disk::blank();
     run(Command::new("mkswap").arg(&disk.device));
     assert!(storage::ensure_mounted(&disk.config(StorageFilesystem::Ext4))

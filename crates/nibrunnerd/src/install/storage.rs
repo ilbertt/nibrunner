@@ -1,5 +1,4 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -177,19 +176,6 @@ fn device_number(file: &File) -> Result<String, InstallError> {
     ))
 }
 
-fn zeroed(reader: &mut impl Read) -> Result<bool, std::io::Error> {
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            return Ok(true);
-        }
-        if buffer[..read].iter().any(|byte| *byte != 0) {
-            return Ok(false);
-        }
-    }
-}
-
 struct Prepared {
     _device: Flock<File>,
     path: PathBuf,
@@ -231,7 +217,7 @@ fn prepare_device(storage: &HostStorage) -> Result<Prepared, InstallError> {
         .open(&device)
         .map_err(io_error)?;
     let number = device_number(&file)?;
-    let mut file = lock_device(file, &device, Instant::now() + DEVICE_LOCK_TIMEOUT)?;
+    let file = lock_device(file, &device, Instant::now() + DEVICE_LOCK_TIMEOUT)?;
     let devices = json(
         Command::new("lsblk")
             .args(["--json", "--paths", "--output", "NAME,TYPE,RO"])
@@ -261,17 +247,6 @@ fn prepare_device(storage: &HostStorage) -> Result<Prepared, InstallError> {
     if !has_filesystem(&signatures, storage)? {
         if is_mounted {
             return Err(refused("a mounted device has no filesystem signature"));
-        }
-        println!(
-            "  checking {} is entirely zeroed before initialization",
-            device.display()
-        );
-        file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-        if !zeroed(&mut *file).map_err(io_error)? {
-            return Err(refused(format!(
-                "{} contains data without a supported filesystem; nothing was formatted",
-                device.display()
-            )));
         }
         println!(
             "  initializing {} as {}",
@@ -616,14 +591,6 @@ mod tests {
             let signatures = serde_json::from_str(signatures).unwrap();
             assert_eq!(has_filesystem(&signatures, &storage()).ok(), expected);
         }
-    }
-
-    #[test]
-    fn data_anywhere_on_an_unrecognized_device_prevents_initialization() {
-        let mut bytes = vec![0; 3 * 1024 * 1024];
-        assert!(zeroed(&mut bytes.as_slice()).unwrap());
-        *bytes.last_mut().unwrap() = 1;
-        assert!(!zeroed(&mut bytes.as_slice()).unwrap());
     }
 
     fn mount(target: &str, device: &str, fstype: &str, options: &str, fsroot: &str) -> Mount {

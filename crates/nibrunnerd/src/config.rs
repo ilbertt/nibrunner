@@ -340,7 +340,8 @@ mod file {
         /// Cron registration and scheduling policy for every app on this host.
         pub(super) cron: Option<Cron>,
         /// Explicitly managed whole-device storage for snapshots and ZeroFS caches. Absent leaves
-        /// mounting to the operator. Only an entirely zeroed device is initialized.
+        /// mounting to the operator. Devices without filesystem signatures are initialized,
+        /// discarding any unrecognized raw contents.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) host_storage: Option<Storage>,
         /// Where this host keeps what is its own.
@@ -391,7 +392,8 @@ mod file {
         /// beneath it. Existing unmounted contents and symlinks are refused.
         #[schemars(pattern(ABSOLUTE_PATH))]
         pub(super) mount_point: Option<String>,
-        /// Filesystem for a blank device. Existing filesystems must match and are never reformatted.
+        /// Filesystem to create when no signatures are found. Existing filesystems must match
+        /// and are never reformatted.
         pub(super) filesystem: Option<super::StorageFilesystem>,
     }
 
