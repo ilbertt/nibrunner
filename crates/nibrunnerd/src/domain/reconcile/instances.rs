@@ -446,6 +446,9 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         now,
         desired.config.restart_policy.reset_after_ms,
     );
+    attempted.state = InstanceState::Pending;
+    attempted.started_at = None;
+    attempted.health = initial_tracker();
     host.state.put_record(attempted.clone()).await;
     host.state.mark_active(&desired.app_id, now).await;
 
@@ -684,6 +687,12 @@ pub async fn refresh_states(host: &Arc<Host>) {
     }
 }
 
+fn same_start(latest: &InstanceRecord, observed: &InstanceRecord) -> bool {
+    latest.deployment_id == observed.deployment_id
+        && latest.started_at == observed.started_at
+        && latest.start_attempts == observed.start_attempts
+}
+
 async fn settle(
     host: &Arc<Host>,
     record: InstanceRecord,
@@ -714,9 +723,15 @@ async fn settle(
         let delay = next_probe_delay_ms(&record.health, &record.grace_inputs(now_ms));
         host.state
             .modify(|snapshot| {
-                snapshot
-                    .next_probe_at_ms
-                    .insert(record.app_id.clone(), now_ms + delay as i64);
+                if snapshot
+                    .records
+                    .get(&record.app_id)
+                    .is_some_and(|latest| same_start(latest, &record))
+                {
+                    snapshot
+                        .next_probe_at_ms
+                        .insert(record.app_id.clone(), now_ms + delay as i64);
+                }
             })
             .await;
         apply_probe(
@@ -749,6 +764,9 @@ async fn settle(
         let said = unwell(state, &health, &record);
         host.state
             .update_record(&record.app_id, |latest| {
+                if !same_start(latest, &record) {
+                    return;
+                }
                 latest.health = health;
                 if said.is_some() && latest.message != said {
                     latest.message = said;
@@ -756,14 +774,6 @@ async fn settle(
             })
             .await;
         return;
-    }
-    match state {
-        InstanceState::Failed if status.active => {
-            host.metrics.health.failed(&record.app_id, Failure::NeverAnswered)
-        }
-        InstanceState::Failed => host.metrics.health.failed(&record.app_id, Failure::Exited),
-        InstanceState::Unhealthy => host.metrics.health.went_unhealthy(&record.app_id),
-        _ => {}
     }
     let message = verdict(host, state, &status, &health, &record).await;
     let exited = state == InstanceState::Failed && !status.active;
@@ -775,8 +785,16 @@ async fn settle(
             .started_at
             .as_ref()
             .is_some_and(|at| now_ms - at.epoch_ms() >= record.restart_policy.reset_after_ms as i64);
-    host.state
-        .update_record(&record.app_id, |latest| {
+    let updated = host
+        .state
+        .modify(|snapshot| {
+            let Some(latest) = snapshot
+                .records
+                .get_mut(&record.app_id)
+                .filter(|latest| same_start(latest, &record))
+            else {
+                return false;
+            };
             latest.health = health;
             latest.state = state;
             if let Some(exit) = status.exit.filter(|_| !status.active) {
@@ -791,8 +809,20 @@ async fn settle(
                 latest.start_attempts = NO_START_ATTEMPTS;
             }
             latest.message = message;
+            true
         })
         .await;
+    if !updated {
+        return;
+    }
+    match state {
+        InstanceState::Failed if status.active => {
+            host.metrics.health.failed(&record.app_id, Failure::NeverAnswered)
+        }
+        InstanceState::Failed => host.metrics.health.failed(&record.app_id, Failure::Exited),
+        InstanceState::Unhealthy => host.metrics.health.went_unhealthy(&record.app_id),
+        _ => {}
+    }
     let answered_ms = (state == InstanceState::Running)
         .then(|| record.started_at.as_ref().map(|at| now_ms - at.epoch_ms()))
         .flatten();
@@ -873,6 +903,65 @@ pub async fn prefetch_layers(host: &Host, plan: &ReconcilePlan) {
 mod tests {
     use super::*;
     use crate::test_support::*;
+
+    #[tokio::test]
+    async fn a_replacement_cannot_inherit_health_from_the_guest_that_exited() {
+        struct PreparingPayload {
+            reached: tokio::sync::Notify,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::ports::PayloadBuilder for PreparingPayload {
+            async fn prepare(
+                &self,
+                _layers: &[protocol::DesiredLayer],
+            ) -> Result<crate::ports::PreparedPayload, crate::ports::ArtifactError> {
+                self.reached.notify_one();
+                std::future::pending().await
+            }
+        }
+
+        let mut host = test_host().await;
+        let payload = Arc::new(PreparingPayload {
+            reached: tokio::sync::Notify::new(),
+        });
+        Arc::get_mut(&mut host.host).unwrap().payloads = payload.clone();
+        let previous = instance_record(|record| {
+            record.state = InstanceState::Running;
+            record.started_at = Some(observed_at());
+            record.health.ever_healthy = true;
+        });
+        host.state.put_record(previous.clone()).await;
+        host.state
+            .modify(|snapshot| snapshot.volume_reports = vec![reported_volume(|_| {})])
+            .await;
+        let desired = desired_instance(|_| {});
+        let starting = start_instance(host.arc(), &desired);
+        tokio::pin!(starting);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                _ = &mut starting => panic!("the replacement finished before its payload was ready"),
+                _ = payload.reached.notified() => {}
+            }
+        })
+        .await
+        .unwrap();
+
+        let pending = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(pending.state, InstanceState::Pending);
+        assert_eq!(pending.health, initial_tracker());
+        assert_eq!(pending.started_at, None);
+
+        for state in [InstanceState::Running, InstanceState::Starting] {
+            let mut observed = previous.clone();
+            observed.state = state;
+            settle(host.arc(), observed, up(), false, false, now_ms()).await;
+            let still_pending = host.state.record(&app_id()).await.unwrap();
+            assert_eq!(still_pending.state, InstanceState::Pending);
+            assert_eq!(still_pending.health, initial_tracker());
+            assert_eq!(still_pending.started_at, None);
+        }
+    }
 
     #[test]
     fn one_image_is_fetched_per_layer_however_many_apps_deploy_it() {

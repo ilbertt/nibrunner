@@ -286,13 +286,18 @@ async fn a_killed_microvm_is_replaced_without_losing_its_disk_or_interrupting_it
 
     {
         let recovery = host.until("the killed VM to be replaced and healthy", |report| {
-            processes
-                .read_record(&app.app_id)
-                .is_some_and(|record| record.pid != previous.pid)
-                && report
-                    .instances
-                    .iter()
-                    .any(|instance| instance.app_id == app.app_id && instance.state == InstanceState::Running)
+            let Some(current) = processes.read_record(&app.app_id) else {
+                return false;
+            };
+            current.pid != previous.pid
+                && report.instances.iter().any(|instance| {
+                    instance.app_id == app.app_id
+                        && instance.state == InstanceState::Running
+                        && instance
+                            .started_at
+                            .as_ref()
+                            .is_some_and(|started| started.epoch_ms() >= current.started_at_ms)
+                })
         });
         tokio::pin!(recovery);
         loop {
