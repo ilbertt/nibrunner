@@ -1,10 +1,13 @@
 use std::collections::BTreeSet;
+use std::error::Error;
+use std::future::Future;
 use std::io::Cursor;
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use futures::TryStreamExt;
 use oci_client::client::ClientConfig;
+use oci_client::errors::{OciDistributionError, OciErrorCode};
 use oci_client::manifest::{OciDescriptor, OciImageManifest, OciManifest};
 use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
@@ -21,6 +24,7 @@ const MAXIMUM_INDEX_DEPTH: usize = 8;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const PULL_TIMEOUT: Duration = Duration::from_secs(300);
+const DOWNLOAD_RETRIES: u32 = 2;
 const MANIFEST_TYPES: &[&str] = &[
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.oci.image.index.v1+json",
@@ -36,6 +40,79 @@ pub(super) struct PulledImage {
 
 fn failed(error: impl std::fmt::Display) -> ArtifactError {
     ArtifactError::Transfer(format!("the registry image could not be fetched: {error}"))
+}
+
+fn transient_transport_failure(error: &(dyn Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+            if error.is_timeout() || error.is_connect() || error.is_body() || error.is_request() {
+                return true;
+            }
+        }
+        if let Some(error) = error.downcast_ref::<hyper::Error>() {
+            if error.is_incomplete_message() || error.is_closed() || error.is_timeout() {
+                return true;
+            }
+        }
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::UnexpectedEof
+            ) {
+                return true;
+            }
+        }
+        cause = error.source();
+    }
+    false
+}
+
+fn retryable(error: &OciDistributionError) -> bool {
+    match error {
+        OciDistributionError::RequestError(error) => transient_transport_failure(error),
+        OciDistributionError::ServerError { code, .. } => matches!(code, 408 | 429 | 500 | 502 | 503 | 504),
+        OciDistributionError::RegistryError { envelope, .. } => {
+            !envelope.errors.is_empty()
+                && envelope
+                    .errors
+                    .iter()
+                    .all(|error| error.code == OciErrorCode::Toomanyrequests)
+        }
+        OciDistributionError::IoError(error) => transient_transport_failure(error),
+        _ => false,
+    }
+}
+
+async fn download<T, F, Fut>(mut request: F) -> Result<T, ArtifactError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, OciDistributionError>>,
+{
+    let mut retries = 0;
+    loop {
+        match request().await {
+            Ok(value) => return Ok(value),
+            Err(error) if retries < DOWNLOAD_RETRIES && retryable(&error) => {
+                tracing::warn!(%error, retry = retries + 1, "retrying a registry download");
+                tokio::time::sleep(Duration::from_secs(1 << retries)).await;
+                retries += 1;
+            }
+            Err(error) => {
+                let mut message = error.to_string();
+                let mut cause = error.source();
+                while let Some(source) = cause {
+                    message.push_str(": ");
+                    message.push_str(&source.to_string());
+                    cause = source.source();
+                }
+                return Err(failed(message));
+            }
+        }
+    }
 }
 
 fn verified(bytes: &[u8], digest: &str) -> Result<(), ArtifactError> {
@@ -93,10 +170,9 @@ async fn image_manifest(
     let mut expected_size = None;
     let mut fetched_bytes = 0;
     for _ in 0..=MAXIMUM_INDEX_DEPTH {
-        let (bytes, _) = client
-            .pull_manifest_raw(&reference, &RegistryAuth::Anonymous, MANIFEST_TYPES)
-            .await
-            .map_err(failed)?;
+        let (bytes, _) =
+            download(|| client.pull_manifest_raw(&reference, &RegistryAuth::Anonymous, MANIFEST_TYPES))
+                .await?;
         if bytes.len() > MAXIMUM_METADATA_BYTES
             || expected_size.is_some_and(|size| size != bytes.len() as i64)
         {
@@ -197,22 +273,33 @@ async fn blob(
     // Foreign-layer URLs are not needed for supported Linux images. Let the registry serve blobs.
     let mut descriptor = descriptor.clone();
     descriptor.urls = None;
-    let mut stream = client
-        .pull_blob_stream(image, &descriptor)
-        .await
-        .map_err(failed)?;
     let size = usize::try_from(descriptor.size).map_err(failed)?;
+    let bytes = download(|| blob_once(client, image, &descriptor, size)).await?;
+    verified(&bytes, &descriptor.digest)?;
+    Ok(bytes)
+}
+
+async fn blob_once(
+    client: &Client,
+    image: &Reference,
+    descriptor: &OciDescriptor,
+    size: usize,
+) -> Result<Vec<u8>, OciDistributionError> {
+    let mut stream = client.pull_blob_stream(image, descriptor).await?;
     let mut bytes = Vec::new();
-    while let Some(chunk) = stream.try_next().await.map_err(failed)? {
+    while let Some(chunk) = stream.try_next().await? {
         if chunk.len() > size.saturating_sub(bytes.len()) {
-            return Err(failed("a blob exceeds its descriptor size"));
+            return Err(OciDistributionError::SpecViolationError(
+                "a blob exceeds its descriptor size".into(),
+            ));
         }
         bytes.extend_from_slice(&chunk);
     }
     if bytes.len() != size {
-        return Err(failed("a blob is shorter than its descriptor size"));
+        return Err(OciDistributionError::SpecViolationError(
+            "a blob is shorter than its descriptor size".into(),
+        ));
     }
-    verified(&bytes, &descriptor.digest)?;
     Ok(bytes)
 }
 
@@ -220,7 +307,7 @@ async fn blob(
 mod tests {
     use std::collections::BTreeMap;
     use std::io::Read;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use oci_client::client::ClientProtocol;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -230,6 +317,12 @@ mod tests {
     struct Registry {
         image: Reference,
         task: tokio::task::JoinHandle<()>,
+        requests: Arc<Mutex<BTreeMap<String, usize>>>,
+    }
+
+    enum Failure {
+        Status(&'static str),
+        InterruptedBody,
     }
 
     impl Drop for Registry {
@@ -240,6 +333,13 @@ mod tests {
 
     impl Registry {
         async fn start(mutate: impl FnOnce(&mut BTreeMap<String, Vec<u8>>, &mut serde_json::Value)) -> Self {
+            Self::with_failures(mutate, |_, _| None).await
+        }
+
+        async fn with_failures(
+            mutate: impl FnOnce(&mut BTreeMap<String, Vec<u8>>, &mut serde_json::Value),
+            failure: impl Fn(&str, usize) -> Option<Failure> + Send + Sync + 'static,
+        ) -> Self {
             let archive = crate::test_support::oci::archive(b"a test program");
             let mut files = BTreeMap::new();
             for entry in tar::Archive::new(Cursor::new(archive)).entries().unwrap() {
@@ -268,10 +368,15 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let responses = Arc::new(responses);
+            let requests = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+            let received = requests.clone();
+            let failure = Arc::new(failure);
             let task = tokio::spawn(async move {
                 loop {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     let responses = responses.clone();
+                    let received = received.clone();
+                    let failure = failure.clone();
                     tokio::spawn(async move {
                         let mut request = Vec::new();
                         let mut buffer = [0; 1024];
@@ -302,6 +407,25 @@ mod tests {
                             .to_ascii_lowercase()
                             .contains("authorization: bearer moo\r\n")
                         {
+                            let count = {
+                                let mut requests = received.lock().unwrap();
+                                let count = requests.entry(path.to_string()).or_default();
+                                *count += 1;
+                                *count
+                            };
+                            match failure(path, count) {
+                                Some(Failure::Status(status)) => {
+                                    stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                                    return;
+                                }
+                                Some(Failure::InterruptedBody) => {
+                                    let body = &responses[path];
+                                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                                    stream.write_all(&body[..body.len() / 2]).await.unwrap();
+                                    return;
+                                }
+                                None => {}
+                            }
                             match responses.get(path) {
                                 Some(body) => ("200 OK", String::new(), body.clone()),
                                 None => ("404 Not Found", String::new(), Vec::new()),
@@ -318,6 +442,7 @@ mod tests {
             Self {
                 image: Reference::with_digest(address.to_string(), "test/image".to_string(), digest),
                 task,
+                requests,
             }
         }
 
@@ -331,6 +456,65 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(10), pull_with(&client, &self.image))
                 .await
                 .unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_temporary_manifest_failure_is_retried_without_losing_digest_verification() {
+        let registry = Registry::with_failures(
+            |_, _| {},
+            |path, count| {
+                (path.contains("/manifests/") && count == 1)
+                    .then_some(Failure::Status("503 Service Unavailable"))
+            },
+        )
+        .await;
+        let pulled = registry.pull().await.unwrap();
+        oci_image::flatten(&pulled.archive).unwrap();
+        assert!(registry
+            .requests
+            .lock()
+            .unwrap()
+            .values()
+            .any(|count| *count == 2));
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_blob_is_downloaded_again_before_its_bytes_are_used() {
+        let registry = Registry::with_failures(
+            |_, _| {},
+            |path, count| (path.contains("/blobs/") && count == 1).then_some(Failure::InterruptedBody),
+        )
+        .await;
+        let pulled = registry.pull().await.unwrap();
+        oci_image::flatten(&pulled.archive).unwrap();
+        assert!(registry
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, count)| { path.contains("/blobs/") && *count == 2 }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn temporary_registry_errors_exhaust_a_bounded_retry_budget_but_permanent_errors_do_not_retry() {
+        for (status, expected_attempts) in [(503, 3), (429, 3), (401, 1), (403, 1), (404, 1)] {
+            let mut attempts = 0;
+            let started = tokio::time::Instant::now();
+            let error = download(|| {
+                attempts += 1;
+                std::future::ready(Err::<(), _>(OciDistributionError::ServerError {
+                    code: status,
+                    url: "https://registry.example/v2/".into(),
+                    message: "registry refused the request".into(),
+                }))
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(attempts, expected_attempts);
+            assert!(error.message().contains(&status.to_string()));
+            let expected_delay = if expected_attempts == 3 { 3 } else { 0 };
+            assert_eq!(started.elapsed(), Duration::from_secs(expected_delay));
         }
     }
 
@@ -398,5 +582,11 @@ mod tests {
             error.message().contains("digest") || error.message().contains("hashes"),
             "{error}"
         );
+        assert!(registry
+            .requests
+            .lock()
+            .unwrap()
+            .values()
+            .all(|count| *count == 1));
     }
 }

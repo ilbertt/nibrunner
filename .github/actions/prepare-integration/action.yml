@@ -18,7 +18,7 @@ runs:
 
     - name: Check the machine can host
       shell: bash
-      run: ls -l /dev/net/tun /dev/kvm
+      run: .github/scripts/check-integration-host.sh
 
     - name: Disable host SMT
       shell: bash
@@ -28,6 +28,10 @@ runs:
           echo forceoff | sudo tee "$smt_directory/control"
         fi
         test "$(cat "$smt_directory/active")" = 0
+
+    - name: Check KVM can create a VM
+      shell: bash
+      run: sudo python3 .github/scripts/check-kvm.py
 
     - name: Disable kernel samepage merging
       shell: bash

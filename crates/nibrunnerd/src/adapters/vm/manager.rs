@@ -78,6 +78,19 @@ impl VmManager {
         }
     }
 
+    fn startup_failure(&self, app_id: &AppId, error: VmError) -> VmError {
+        let status = self.processes.status(app_id);
+        let process = status
+            .exit
+            .map(|exit| exit.describe())
+            .unwrap_or_else(|| format!("has active={}", status.active));
+        let console = self
+            .processes
+            .console_tail(app_id)
+            .unwrap_or_else(|error| format!("could not read the console: {error}"));
+        VmError::Host(format!("{error}; VMM {process}; console tail:\n{console}"))
+    }
+
     fn current_stamp(&self, request: &SuspendRequest) -> SnapshotStamp {
         SnapshotStamp {
             deployment_id: request.deployment_id.clone(),
@@ -493,6 +506,7 @@ impl Vmm for VmManager {
         if let Err(error) =
             super::startup::initialized(&control, || self.processes.status(&app_id).active).await
         {
+            let error = self.startup_failure(&app_id, error);
             self.processes.stop(&app_id).await;
             self.cron_registration.detach(&app_id).await;
             self.logs.detach(&app_id).await;
@@ -945,6 +959,21 @@ mod tests {
         assert!(!fixture.manager.processes.status(&app_id()).active);
         assert!(fixture.manager.logs.attached().await.is_empty());
         assert!(fixture.manager.cron_registration.attached().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_boot_keeps_its_console_in_the_error_after_the_vm_is_discarded() {
+        let mut fixture = fixture();
+        fake_boot_binary(&mut fixture, "sh -c 'echo KVM_CREATE_VM failed >&2; exit 42'");
+        let error = fixture
+            .manager
+            .boot(boot_request(desired_instance(|_| {})))
+            .await
+            .unwrap_err();
+        fixture.manager.discard(&app_id()).await.unwrap();
+        assert!(!fixture.manager.processes.console_path(&app_id()).exists());
+        assert!(error.message().contains("KVM_CREATE_VM failed"), "{error}");
+        assert!(error.message().contains("VMM"), "{error}");
     }
 
     struct Fixture {
