@@ -108,7 +108,7 @@ pub(crate) enum Applied {
     Grown,
 }
 
-fn socket(config: &HostConfig) -> PathBuf {
+pub(crate) fn socket(config: &HostConfig) -> PathBuf {
     config.runtime_dir.join("configuration.sock")
 }
 
