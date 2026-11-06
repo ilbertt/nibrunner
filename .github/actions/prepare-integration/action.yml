@@ -18,14 +18,7 @@ runs:
 
     - name: Check the machine can host
       shell: bash
-      run: |
-        uname -a
-        cat /etc/os-release
-        lscpu
-        ls -l /dev/net/tun /dev/kvm
-        test -c /dev/net/tun
-        test -c /dev/kvm
-        cat /sys/fs/cgroup/cgroup.controllers
+      run: .github/scripts/check-integration-host.sh
 
     - name: Disable host SMT
       shell: bash
@@ -38,18 +31,7 @@ runs:
 
     - name: Check KVM can create a VM
       shell: bash
-      run: |
-        sudo python3 - <<'PY'
-        import fcntl
-        import os
-
-        with open("/dev/kvm", "r+b", buffering=0) as kvm:
-            api_version = fcntl.ioctl(kvm, 0xAE00, 0)
-            if api_version != 12:
-                raise RuntimeError(f"unsupported KVM API version: {api_version}")
-            vm = fcntl.ioctl(kvm, 0xAE01, 0)
-            os.close(vm)
-        PY
+      run: sudo python3 .github/scripts/check-kvm.py
 
     - name: Disable kernel samepage merging
       shell: bash
