@@ -241,8 +241,7 @@ minutes. Runs on `main` remain independent.
 
 Integration jobs build as the runner account and use Cargo's target runner to elevate only test
 executables. Pass the required runtime environment explicitly; Ubuntu 26.04's sudo ignores `-E`.
-CI workflows use `ubuntu-26.04` explicitly. Kernel and microVM jobs log host details and verify KVM
-can create a VM. Change that release deliberately after validating the guest suite; do not use `ubuntu-latest`.
+CI workflows use `ubuntu-latest`. Kernel and microVM jobs log host details and verify KVM can create a VM.
 Cargo cache namespaces include `ImageOS`, so runner releases cannot reuse each other's native libraries.
 Failed VM initialization retains a bounded console tail in the error before cleanup removes its files.
 
