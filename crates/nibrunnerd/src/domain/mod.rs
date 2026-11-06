@@ -3,6 +3,7 @@ pub mod backoff;
 pub mod cron;
 pub mod exports;
 pub mod filesystem;
+pub mod guest_connections;
 pub mod guest_line;
 pub mod health;
 pub mod meters;
