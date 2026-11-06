@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.11.3] - 2026-11-06
+
+### Fixes
+
+- **install:** Check storage in the host mount namespace (#296)
+
 ## [2026.11.2] - 2026-11-06
 
 ### Fixes
