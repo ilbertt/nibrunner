@@ -66,7 +66,12 @@ impl Disk {
         // Loop detachment is lazy; an empty udev queue does not prove the last opener has closed.
         loop {
             match std::fs::read_to_string(&backing_file) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(libc::ENODEV) =>
+                {
+                    return;
+                }
                 Err(error) => panic!("{}: {error}", backing_file.display()),
                 Ok(backing) => assert!(
                     Instant::now() < deadline,
@@ -193,6 +198,35 @@ fn host_storage_initializes_blank_devices_and_preserves_existing_filesystems_acr
             .args(["--user", service_user::ZEROFS_USER, "--", "touch"])
             .arg(settings.cache_dir.join("writable")));
     }
+}
+
+#[test]
+fn host_storage_checks_the_host_mount_namespace_inside_a_service_sandbox() {
+    if !super::enabled() {
+        return;
+    }
+    let disk = Disk::blank();
+    let config = disk.config(StorageFilesystem::Ext4);
+    storage::ensure_mounted(&config).unwrap();
+    storage::ready(&config).unwrap();
+    let cache = disk.mount_point.join("cache");
+    std::fs::create_dir(&cache).unwrap();
+    let config_file = disk.directory.path().join("config.toml");
+    std::fs::write(&config_file, config.to_toml()).unwrap();
+    run(Command::new("unshare")
+        .args([
+            "--mount",
+            "--propagation",
+            "private",
+            "/bin/sh",
+            "-ec",
+            "mount --bind \"$1\" \"$1\"; exec \"$2\" storage check",
+            "storage-check",
+        ])
+        .arg(&cache)
+        .arg(env!("CARGO_BIN_EXE_nibrunnerd"))
+        .env("NIBRUNNER_CONFIG", &config_file));
+    storage::check(&config).unwrap();
 }
 
 #[test]
