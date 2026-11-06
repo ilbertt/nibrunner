@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use crate::adapters::net::allocator::SlotAllocator;
 use crate::config::HostConfig;
 use crate::host::Host;
+use crate::unix_socket::bind_private as bind;
 
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_REPLY: usize = 4096;
@@ -196,29 +197,6 @@ impl Current {
     }
 }
 
-async fn bind(path: &Path) -> io::Result<tokio::net::UnixListener> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if !metadata.file_type().is_socket() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "configuration socket path is occupied",
-            ));
-        }
-        match tokio::time::timeout(TIMEOUT, tokio::net::UnixStream::connect(path)).await {
-            Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => std::fs::remove_file(path)?,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    "another host owns the configuration socket",
-                ))
-            }
-        }
-    }
-    let listener = tokio::net::UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
-}
-
 async fn answer(mut stream: tokio::net::UnixStream, current: Arc<Mutex<Current>>) -> io::Result<()> {
     let length = stream.read_u32().await? as usize;
     if length > MAX_REQUEST {
@@ -265,6 +243,7 @@ pub async fn serve(host: &Arc<Host>, inputs: Inputs) -> io::Result<tokio::task::
 mod tests {
     use super::*;
     use protocol::AppId;
+    use std::os::unix::fs::PermissionsExt;
 
     fn current() -> Current {
         let mut configuration = HostConfig::under(Path::new("/srv/nibrunner"));
