@@ -1,5 +1,12 @@
 # Changelog
 
+## [2026.11.2] - 2026-11-06
+
+### Fixes
+
+- **ci:** Stabilize integration checks (#294)
+- **install:** Initialize signature-free host storage (#292)
+
 ## [2026.11.1] - 2026-11-04
 
 ### Features
