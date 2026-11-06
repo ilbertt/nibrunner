@@ -3,7 +3,7 @@
     {
       "name": "vmlinux",
       "bytes": 44514032,
-      "sha256": "4714cd50377219269f5d8525e0abef452448b883d921d3aa791364bf6995804e"
+      "sha256": "216f0e939b17555abc692f77f16f8c34be69fc3ca857d6e82783608bac37d14f"
     },
     {
       "name": "kernel.config",
@@ -29,6 +29,9 @@
       "libstdc++6": "14.2.0-19"
     },
     "kernel_builder_image": "debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd",
-    "kernel_debian_snapshot": "20261031T000000Z"
+    "kernel_debian_snapshot": "20261031T000000Z",
+    "kernel_patches": {
+      "patches/ext4-fix-null-folio-dereference-in-mballoc.patch": "053de13c635584c02befd4551e024a703b90b4111b1e1db22f9558b9cc8c765c"
+    }
   }
 }
