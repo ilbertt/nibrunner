@@ -21,6 +21,10 @@
       "description": "Absent is a host nothing can ask about a guest's files.",
       "$ref": "#/$defs/filesystem"
     },
+    "guest_connections": {
+      "description": "Private byte streams to guest services, bound to the app's current deployment.",
+      "$ref": "#/$defs/guest_connections"
+    },
     "host_storage": {
       "description": "Explicitly managed whole-device storage for snapshots and ZeroFS caches. Absent leaves\nmounting to the operator. Devices without filesystem signatures are initialized,\ndiscarding any unrecognized raw contents.",
       "$ref": "#/$defs/host_storage"
@@ -146,6 +150,20 @@
       "properties": {
         "socket": {
           "description": "Where the socket is put. Whoever may read it may list any app's files, so it belongs\nsomewhere only this host's own account can reach.",
+          "type": "string",
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "socket"
+      ]
+    },
+    "guest_connections": {
+      "type": "object",
+      "properties": {
+        "socket": {
+          "description": "A private Unix socket for trusted local clients to connect to guest services.",
           "type": "string",
           "pattern": "^/"
         }
