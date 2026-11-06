@@ -352,7 +352,7 @@ async fn a_due_registered_job_wakes_and_pins_its_guest_until_desired_stop_drains
     controller
         .cron_once("2030-12-31T23:59:00Z".parse().unwrap())
         .await;
-    assert!(!host.host.state.cron_running(&app.app_id));
+    assert!(!host.host.state.has_guest_activity(&app.app_id));
     assert_eq!(
         host.instance(&app.app_id).await.unwrap().state,
         InstanceState::Idle
@@ -362,7 +362,7 @@ async fn a_due_registered_job_wakes_and_pins_its_guest_until_desired_stop_drains
         .await;
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            if host.host.state.cron_running(&app.app_id)
+            if host.host.state.has_guest_activity(&app.app_id)
                 && host
                     .instance(&app.app_id)
                     .await
@@ -390,7 +390,7 @@ async fn a_due_registered_job_wakes_and_pins_its_guest_until_desired_stop_drains
     )
     .await;
     nibrunnerd::domain::reconcile::idle::apply_sleep(&host.host).await;
-    assert!(host.host.state.cron_running(&app.app_id));
+    assert!(host.host.state.has_guest_activity(&app.app_id));
     assert_eq!(
         host.instance(&app.app_id).await.unwrap().state,
         InstanceState::Running
@@ -401,7 +401,7 @@ async fn a_due_registered_job_wakes_and_pins_its_guest_until_desired_stop_drains
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         host.deploy(std::slice::from_ref(&stopped)).await;
         host.until_state(&app.app_id, InstanceState::Stopped).await;
-        while host.host.state.cron_running(&app.app_id) {
+        while host.host.state.has_guest_activity(&app.app_id) {
             tokio::task::yield_now().await;
         }
     })
@@ -415,6 +415,6 @@ async fn a_due_registered_job_wakes_and_pins_its_guest_until_desired_stop_drains
     controller
         .cron_once("2032-01-01T00:00:00Z".parse().unwrap())
         .await;
-    assert!(!host.host.state.cron_running(&app.app_id));
+    assert!(!host.host.state.has_guest_activity(&app.app_id));
     host.stop().await;
 }
