@@ -116,9 +116,10 @@ struct Mount {
     fsroot: String,
 }
 
-fn mounts() -> Result<Mounts, InstallError> {
+fn mounts(pid: u32) -> Result<Mounts, InstallError> {
     json(Command::new("findmnt").args([
-        "--kernel",
+        "--task",
+        &pid.to_string(),
         "--list",
         "--json",
         "--output",
@@ -224,7 +225,7 @@ fn prepare_device(storage: &HostStorage) -> Result<Prepared, InstallError> {
             .arg(&device),
     )?;
     check_layout(&devices)?;
-    let is_mounted = mounted(&mounts()?, storage, &number)?;
+    let is_mounted = mounted(&mounts(std::process::id())?, storage, &number)?;
     if !is_mounted
         && storage.mount_point.exists()
         && std::fs::read_dir(&storage.mount_point)
@@ -305,7 +306,7 @@ pub fn ensure_mounted(config: &HostConfig) -> Result<(), InstallError> {
                 .arg(&storage.mount_point),
         )?;
     }
-    if !mounted(&mounts()?, storage, &prepared.number)? {
+    if !mounted(&mounts(std::process::id())?, storage, &prepared.number)? {
         return Err(refused(format!(
             "{} did not become mounted",
             storage.mount_point.display()
@@ -325,7 +326,8 @@ pub fn check(config: &HostConfig) -> Result<(), InstallError> {
             storage.device.display()
         ))
     })?;
-    if !mounted(&mounts()?, storage, &device_number(&device)?)? {
+    // Service sandbox bind mounts must not be mistaken for conflicting host mounts.
+    if !mounted(&mounts(1)?, storage, &device_number(&device)?)? {
         return Err(refused(format!(
             "{} is not mounted from {}",
             storage.mount_point.display(),
