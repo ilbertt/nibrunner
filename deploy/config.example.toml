@@ -92,5 +92,8 @@ listen_address = "127.0.0.1"
 [filesystem]
 socket = "/run/nibrunner/filesystem.sock"
 
+[guest_connections]
+socket = "/run/nibrunner/guest-connections.sock"
+
 [logs]
 keep_mib_per_app = 256
