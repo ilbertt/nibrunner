@@ -8,6 +8,7 @@
     "reported",
     "tenant-log",
     "metrics",
-    "filesystem"
+    "filesystem",
+    "guest-connections"
   ]
 }

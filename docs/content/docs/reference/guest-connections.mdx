@@ -1,0 +1,41 @@
+---
+title: Guest connections
+description: Deployment-scoped byte streams to services supplied by a guest image.
+---
+
+Enable a private Unix socket in `config.toml`:
+
+```toml
+[guest_connections]
+socket = "/run/nibrunner/guest-connections.sock"
+```
+
+The socket belongs to the host account with mode `0600`. Trusted local clients can connect
+to a guest service using HTTP CONNECT. The guest image supplies the service; nibrunner
+forwards its bytes without interpreting the service protocol.
+
+```http
+CONNECT app-1:51099 HTTP/1.1
+Host: localhost
+If-Match: "deployment-1"
+
+```
+
+The authority names the app and guest vsock port. `If-Match` must contain exactly one quoted
+deployment ID. A successful response is `200 OK`; the connection then carries the guest's
+protocol in both directions.
+
+The deployment must still be current after the VMM handshake. An idle app wakes before
+connection, and the connection protects it from idle sleep until the client disconnects.
+Stopping or replacing the deployment may close the connection. Clients must not replay
+operations whose result became uncertain after disconnect.
+
+| Status | Meaning |
+| --- | --- |
+| 400 | Invalid authority, port or deployment tag. |
+| 405 | The request method was not CONNECT. |
+| 409 | The app is unavailable or stopped. |
+| 412 | The requested deployment is no longer current. |
+| 428 | No deployment tag was supplied. |
+| 503 | The app could not wake or its guest service could not be reached. |
+| 504 | Connection or wakeup timed out. |

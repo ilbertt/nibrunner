@@ -229,6 +229,13 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
         datagram_activator,
         config,
     });
+    if let Some(connections) = &host.config.guest_connections {
+        let _server = crate::adapters::guest_connections::serve(&host, &connections.socket)
+            .await
+            .map_err(|error| {
+                StartupError::Config(format!("guest_connections.socket could not be served: {error}"))
+            })?;
+    }
     let _ = waker_slot.set(AppWaker::new(host.clone()));
     Ok(host)
 }

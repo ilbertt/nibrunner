@@ -10,6 +10,68 @@ use protocol::{HealthCheck, InstanceState, Probe, TenantLogBody, TenantLogEvent}
 const KEEP_BYTES: u64 = 256 * 1024;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_private_tunnel_reaches_a_service_inside_the_jailed_guest() {
+    use guest_contract::{filesystem as wire, vsock};
+    use nibrunnerd::config::GuestConnectionsConfig;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let Some(host) = crate::host_with(|config| {
+        config.guest_connections = Some(GuestConnectionsConfig {
+            socket: config.runtime_dir.join("connections.sock"),
+        });
+    })
+    .await
+    else {
+        return;
+    };
+    let app = host.tenant(1);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let socket = host.host.config.guest_connections.as_ref().unwrap();
+        let mut client = BufReader::new(UnixStream::connect(&socket.socket).await.unwrap());
+        client
+            .write_all(
+                format!(
+                    "CONNECT {}:{} HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"{}\"\r\n\r\n",
+                    app.app_id,
+                    vsock::GUEST_FILESYSTEM_VSOCK_PORT,
+                    app.instance.deployment_id
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut status = String::new();
+        client.read_line(&mut status).await.unwrap();
+        assert!(status.contains(" 200 "), "{status}");
+        loop {
+            let mut line = String::new();
+            assert!(client.read_line(&mut line).await.unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        assert!(host.host.state.has_guest_activity(&app.app_id));
+        client
+            .write_all(&wire::encode_request(&wire::GuestFilesystemRequest::Usage))
+            .await
+            .unwrap();
+        let mut header = [0; wire::FRAME_HEADER_BYTES];
+        client.read_exact(&mut header).await.unwrap();
+        let header = wire::decode_header(&header).unwrap();
+        assert!(!wire::is_refusal(header.status));
+        let mut body = vec![0; header.body_length];
+        client.read_exact(&mut body).await.unwrap();
+        wire::decode_usage(&body).unwrap();
+    })
+    .await
+    .expect("the tunnel reaches the guest's filesystem service");
+    host.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_crash_loop_spends_its_budget_and_stays_failed_until_a_new_deployment() {
     let Some(host) = crate::host().await else {
         return;
