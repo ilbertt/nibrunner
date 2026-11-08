@@ -1,5 +1,6 @@
 #[cfg(target_os = "linux")]
 pub mod egress;
+pub mod guest_connections;
 #[cfg(target_os = "linux")]
 pub mod ingress;
 pub mod jwt;
