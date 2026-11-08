@@ -4,6 +4,33 @@ use tokio::net::{UnixListener, UnixStream};
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_SOCKET_MODE: u32 = 0o600;
+const PRIVATE_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub(crate) async fn bind_private(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if !metadata.file_type().is_socket() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "private socket path is occupied",
+            ));
+        }
+        match tokio::time::timeout(PRIVATE_BIND_TIMEOUT, tokio::net::UnixStream::connect(path)).await {
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                std::fs::remove_file(path)?
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "another listener owns the private socket",
+                ))
+            }
+        }
+    }
+    let listener = tokio::net::UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_SOCKET_MODE))?;
+    Ok(listener)
+}
 
 struct StagingDirectory(PathBuf);
 
