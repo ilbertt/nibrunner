@@ -172,6 +172,11 @@ pub struct FilesystemConfig {
     pub socket: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestConnectionsConfig {
+    pub socket: PathBuf,
+}
+
 /// How much of each app's output stays on disk. The newest `keep_bytes_per_app`, in two files:
 /// what the sink writes to, and the one before it. Nothing in this daemon reads them back; they
 /// are there for whoever tails them, and the cap is there because the disk they are on is the one
@@ -250,6 +255,7 @@ pub struct HostConfig {
     pub proxy: ProxyConfig,
     pub metrics: Option<MetricsConfig>,
     pub filesystem: Option<FilesystemConfig>,
+    pub guest_connections: Option<GuestConnectionsConfig>,
     pub logs: LogsConfig,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
@@ -363,6 +369,9 @@ mod file {
         /// Absent is a host nothing can ask about a guest's files.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) filesystem: Option<Filesystem>,
+        /// Private byte streams to guest services, bound to the app's current deployment.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) guest_connections: Option<GuestConnections>,
         /// Absent keeps the newest 256 MiB of each app's output.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) logs: Option<Logs>,
@@ -650,6 +659,15 @@ mod file {
         pub(super) socket: Option<String>,
     }
 
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[schemars(rename = "guest_connections")]
+    pub(super) struct GuestConnections {
+        /// A private Unix socket for trusted local clients to connect to guest services.
+        #[schemars(required, pattern(ABSOLUTE_PATH))]
+        pub(super) socket: Option<String>,
+    }
+
     /// How much of each app's output stays on disk, under `paths.state_dir/logs`. Nothing on the
     /// host reads it back: it is there to be tailed.
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -785,6 +803,7 @@ impl HostConfig {
         let proxy = proxy(document.proxy.as_ref(), max_apps)?;
         let metrics = metrics(document.metrics.as_ref(), &proxy, &backend, max_apps)?;
         let filesystem = filesystem(document.filesystem.as_ref())?;
+        let guest_connections = guest_connections(document.guest_connections.as_ref())?;
         let logs = logs(document.logs.as_ref())?;
 
         let config = Self {
@@ -838,6 +857,7 @@ impl HostConfig {
             proxy,
             metrics,
             filesystem,
+            guest_connections,
             logs,
             export_store_url: object_store_url(
                 "exports.store_url",
@@ -848,6 +868,7 @@ impl HostConfig {
             runtime_dir,
         };
         validate_host_storage(&config)?;
+        validate_guest_connections(&config)?;
         Ok(config)
     }
 
@@ -907,6 +928,7 @@ impl HostConfig {
             proxy: ProxyConfig::default(),
             metrics: None,
             filesystem: None,
+            guest_connections: None,
             max_concurrent_vm_starts: std::num::NonZeroU16::new(2).expect("a positive start limit"),
             logs: LogsConfig::default(),
             export_store_url: state_dir.join("export-store").display().to_string(),
@@ -994,6 +1016,9 @@ impl HostConfig {
             }),
             filesystem: Some(FilesystemConfig {
                 socket: PathBuf::from("/run/nibrunner/filesystem.sock"),
+            }),
+            guest_connections: Some(GuestConnectionsConfig {
+                socket: PathBuf::from("/run/nibrunner/guest-connections.sock"),
             }),
             max_concurrent_vm_starts: std::num::NonZeroU16::new(2).expect("a positive start limit"),
             logs: LogsConfig::default(),
@@ -1108,6 +1133,12 @@ impl HostConfig {
             filesystem: self.filesystem.as_ref().map(|filesystem| file::Filesystem {
                 socket: text(&filesystem.socket),
             }),
+            guest_connections: self
+                .guest_connections
+                .as_ref()
+                .map(|connection| file::GuestConnections {
+                    socket: text(&connection.socket),
+                }),
             max_concurrent_vm_starts: Some(self.max_concurrent_vm_starts),
             logs: Some(file::Logs {
                 keep_mib_per_app: Some(self.logs.keep_bytes_per_app / BYTES_PER_MEBIBYTE),
@@ -1413,6 +1444,35 @@ fn filesystem(document: Option<&file::Filesystem>) -> Result<Option<FilesystemCo
     Ok(Some(FilesystemConfig {
         socket: path_key("filesystem.socket", &document.socket)?,
     }))
+}
+
+fn guest_connections(
+    document: Option<&file::GuestConnections>,
+) -> Result<Option<GuestConnectionsConfig>, ConfigError> {
+    let Some(document) = document else {
+        return Ok(None);
+    };
+    Ok(Some(GuestConnectionsConfig {
+        socket: path_key("guest_connections.socket", &document.socket)?,
+    }))
+}
+
+fn validate_guest_connections(config: &HostConfig) -> Result<(), ConfigError> {
+    let Some(connection) = &config.guest_connections else {
+        return Ok(());
+    };
+    if connection.socket == crate::reload::socket(config)
+        || config
+            .filesystem
+            .as_ref()
+            .is_some_and(|filesystem| filesystem.socket == connection.socket)
+    {
+        return Err(ConfigError::invalid(
+            "guest_connections.socket",
+            "a distinct private socket path",
+        ));
+    }
+    Ok(())
 }
 
 fn logs(document: Option<&file::Logs>) -> Result<LogsConfig, ConfigError> {
@@ -2516,6 +2576,7 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
         assert!(config.proxy.raw.is_some());
         assert!(config.metrics.is_some());
         assert!(config.filesystem.is_some());
+        assert!(config.guest_connections.is_some());
     }
 
     #[test]
@@ -2527,6 +2588,31 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
                 socket: PathBuf::from("/run/nibrunner/filesystem.sock"),
             })
         );
+    }
+
+    #[test]
+    fn guest_connections_require_a_distinct_absolute_socket_when_enabled() {
+        assert_eq!(parsed(&whole()).guest_connections, None);
+        let configured = with("[guest_connections]\nsocket = \"/run/nibrunner/guest-connections.sock\"\n");
+        assert_eq!(
+            configured.guest_connections.as_ref().unwrap().socket,
+            Path::new("/run/nibrunner/guest-connections.sock")
+        );
+        assert_eq!(parsed(&configured.to_toml()), configured);
+        for body in [
+            "[guest_connections]\n",
+            "[guest_connections]\nsocket = \"relative.sock\"\n",
+        ] {
+            assert!(refused(&document(&[], body)).contains("guest_connections.socket"));
+        }
+        let mut shared = configured.clone();
+        shared.filesystem = Some(FilesystemConfig {
+            socket: shared.guest_connections.as_ref().unwrap().socket.clone(),
+        });
+        assert!(HostConfig::from_toml(&shared.to_toml()).is_err());
+        let mut duplicate = configured.clone();
+        duplicate.guest_connections.as_mut().unwrap().socket = crate::reload::socket(&configured);
+        assert!(HostConfig::from_toml(&duplicate.to_toml()).is_err());
     }
 
     #[test]
