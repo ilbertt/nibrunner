@@ -1,5 +1,22 @@
 # Changelog
 
+## [2026.11.4] - 2026-11-08
+
+### Features
+
+- **api:** Tunnel deployment-scoped guest connections (#304)
+- **config:** Configure a private guest service socket (#302)
+- **guest:** Open deployment-fenced service connections (#301)
+
+### Fixes
+
+- **guest:** Backport the ext4 NULL folio correction (#298)
+
+### Refactoring
+
+- **ipc:** Share private host socket binding (#303)
+- **state:** Share guest activity leases beyond cron (#299)
+
 ## [2026.11.3] - 2026-11-06
 
 ### Fixes
