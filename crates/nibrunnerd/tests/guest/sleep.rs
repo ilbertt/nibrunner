@@ -63,22 +63,27 @@ impl SnapshotFilesystem {
         let tree_offset = std::fs::metadata(memory).unwrap().len().div_ceil(65_536) * 65_536;
         let block_size = nix::sys::statvfs::statvfs(&self.mount).unwrap().fragment_size();
         let relative = memory.strip_prefix(&self.mount).unwrap();
-        let image = self._directory.path().join("snapshots.ext4");
+        let device = snapshot_filesystem_command(
+            std::process::Command::new("findmnt")
+                .args(["--noheadings", "--output", "SOURCE", "--mountpoint"])
+                .arg(&self.mount),
+        );
+        assert!(device.starts_with("/dev/loop"), "{device}");
+        let mut disk = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&device)
+            .unwrap();
         snapshot_filesystem_command(std::process::Command::new("umount").arg(&self.mount));
         let request = format!("bmap /{} {}", relative.display(), tree_offset / block_size);
         let block: u64 = snapshot_filesystem_command(
             std::process::Command::new("debugfs")
                 .args(["-R", &request])
-                .arg(&image),
+                .arg(&device),
         )
         .parse()
         .unwrap();
         assert_ne!(block, 0);
-        let mut disk = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&image)
-            .unwrap();
         let offset = block * block_size;
         disk.seek(SeekFrom::Start(offset)).unwrap();
         let mut byte = [0];
@@ -87,13 +92,7 @@ impl SnapshotFilesystem {
         disk.seek(SeekFrom::Start(offset)).unwrap();
         disk.write_all(&byte).unwrap();
         disk.sync_all().unwrap();
-        drop(disk);
-        snapshot_filesystem_command(
-            std::process::Command::new("mount")
-                .args(["-o", "loop"])
-                .arg(&image)
-                .arg(&self.mount),
-        );
+        snapshot_filesystem_command(std::process::Command::new("mount").arg(&device).arg(&self.mount));
     }
 }
 
