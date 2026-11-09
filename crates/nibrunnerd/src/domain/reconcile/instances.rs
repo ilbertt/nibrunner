@@ -380,7 +380,16 @@ enum BootReason {
 }
 
 pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
-    boot_instance(host, desired, BootReason::AppStart).await;
+    let statuses = host.vms.statuses(std::slice::from_ref(&desired.app_id)).await;
+    let reason = if statuses
+        .get(&desired.app_id)
+        .is_some_and(|status| status.host_failure())
+    {
+        BootReason::HostRecovery
+    } else {
+        BootReason::AppStart
+    };
+    boot_instance(host, desired, reason).await;
 }
 
 async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReason) {
@@ -1160,12 +1169,13 @@ mod tests {
         );
         assert_eq!(host.state.record(&app_id()).await.unwrap().start_attempts, window);
 
+        host.vms.set_verdict("the tenant exited with code 1");
         host.vms.set_status(VmStatus {
             active: false,
-            failed: true,
+            failed: false,
             loaded: true,
             started_this_boot: true,
-            exit: Some(VmExit::Code(1)),
+            exit: Some(VmExit::Code(0)),
         });
         refresh_states(host.arc()).await;
         start_instance(&host, &desired).await;
@@ -1205,6 +1215,45 @@ mod tests {
             WakeOutcome::ColdBoot
         );
         assert_eq!(host.state.record(&app_id()).await.unwrap().start_attempts, window);
+    }
+
+    #[tokio::test]
+    async fn a_hypervisor_runtime_failure_replaces_the_vm_without_spending_the_apps_restart_budget() {
+        use crate::adapters::vm::status::{
+            FIRECRACKER_RUNTIME_ERROR_EXIT_CODE, FIRECRACKER_SIGBUS_EXIT_CODE,
+        };
+
+        for exit in [
+            VmExit::Code(FIRECRACKER_RUNTIME_ERROR_EXIT_CODE),
+            VmExit::Code(FIRECRACKER_SIGBUS_EXIT_CODE),
+            VmExit::Signal(libc::SIGBUS),
+        ] {
+            let host = test_host().await;
+            host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+            let window = spent_window();
+            host.state
+                .put_record(instance_record(|record| {
+                    record.state = InstanceState::Failed;
+                    record.start_attempts = window;
+                }))
+                .await;
+            host.vms.set_status(VmStatus {
+                active: false,
+                failed: true,
+                loaded: true,
+                started_this_boot: true,
+                exit: Some(exit),
+            });
+            start_instance(
+                &host,
+                &desired_instance(|instance| instance.config.restart_policy.max_restarts = 0),
+            )
+            .await;
+            let record = host.state.record(&app_id()).await.unwrap();
+            assert_eq!(record.state, InstanceState::Starting);
+            assert_eq!(record.start_attempts, window);
+            assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Boot]);
+        }
     }
 
     #[tokio::test]

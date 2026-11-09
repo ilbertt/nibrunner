@@ -6,6 +6,52 @@ use std::time::Duration;
 
 use protocol::{DesiredInstanceState, DesiredPresence, InstanceState, VolumeState};
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vmm_memory_fault_recovers_even_when_the_app_allows_no_restarts() {
+    use nibrunnerd::adapters::vm::process::VmProcesses;
+
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host
+        .tenant(1)
+        .edited(|instance| instance.config.restart_policy.max_restarts = 0);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(&app, "/write?path=kept&body=durable")
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+    let window = host.host.state.record(&app.app_id).await.unwrap().start_attempts;
+    let processes = VmProcesses::new(host.host.config.runtime_dir.clone());
+    let previous = processes.read_record(&app.app_id).unwrap().pid;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(previous),
+        nix::sys::signal::Signal::SIGBUS,
+    )
+    .expect("the test signals only its own VMM");
+
+    host.until("the memory-faulted VM to be replaced and healthy", |report| {
+        processes
+            .read_record(&app.app_id)
+            .is_some_and(|record| record.pid != previous)
+            && report
+                .instances
+                .iter()
+                .any(|instance| instance.app_id == app.app_id && instance.state == InstanceState::Running)
+    })
+    .await;
+    assert_eq!(
+        host.host.state.record(&app.app_id).await.unwrap().start_attempts,
+        window
+    );
+    assert_eq!(host.get(&app, "/read?path=kept").await.unwrap().body, "durable");
+    host.stop().await;
+}
+
 // Docker's official BusyBox 1.37.0-musl index; the digest fixes both the image and its platform selection.
 const BUSYBOX_INDEX: &str = "5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092";
 

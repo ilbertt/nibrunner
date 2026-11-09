@@ -340,7 +340,12 @@ impl VmManager {
 
     async fn resume_restored_tenant(&self, request: &SuspendRequest) -> Result<ResumeTimings, VmError> {
         let resuming = Instant::now();
-        self.api(&request.app_id).resume().await?;
+        self.api(&request.app_id)
+            .resume()
+            .await
+            .map_err(|error| VmError::SnapshotUnusable {
+                reason: error.message(),
+            })?;
         let resumed_at = Instant::now();
         let control = self
             .working_dir_for(&request.app_id)
@@ -678,7 +683,9 @@ impl Vmm for VmManager {
             Ok(_) => {
                 let api = self.api(&request.app_id);
                 match api.load_snapshot(&state_path, &memory_path).await {
-                    Err(error) => Err(error),
+                    Err(error) => Err(VmError::SnapshotUnusable {
+                        reason: error.message(),
+                    }),
                     Ok(()) => {
                         let loaded_at = Instant::now();
                         self.resume_restored_tenant(&request)
