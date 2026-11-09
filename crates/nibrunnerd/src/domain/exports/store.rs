@@ -100,9 +100,7 @@ impl ExportStore for ObjectExportStore {
             .as_ref()
             .ok_or_else(|| ExportStoreError::Transfer("directory exports require a local store".into()))?;
         let key = Path::new(object_key.as_str());
-        if key.components().count() != 1
-            || !matches!(key.components().next(), Some(std::path::Component::Normal(_)))
-        {
+        if key.file_name() != Some(key.as_os_str()) {
             return Err(ExportStoreError::Transfer(
                 "a directory export needs a single filename".into(),
             ));
@@ -203,7 +201,15 @@ mod tests {
     async fn a_directory_key_cannot_escape_or_descend_into_a_previously_published_tree() {
         let root = tempfile::tempdir().unwrap();
         let store = ObjectExportStore::open(&root.path().display().to_string()).unwrap();
-        for key in ["/outside", "../outside", "existing/data/link/escape", ".", ".."] {
+        for key in [
+            "/outside",
+            "../outside",
+            "existing/data/link/escape",
+            "existing/",
+            "existing/.",
+            ".",
+            "..",
+        ] {
             assert!(store
                 .publish_directory(root.path(), &ObjectKey::parse(key).unwrap())
                 .await
