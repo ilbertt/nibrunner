@@ -19,6 +19,16 @@ struct SnapshotFilesystem {
     mount: std::path::PathBuf,
 }
 
+fn snapshot_filesystem_command(command: &mut std::process::Command) -> String {
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
 impl SnapshotFilesystem {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -38,17 +48,52 @@ impl SnapshotFilesystem {
                 .arg(&image)
                 .arg(&mount),
         ] {
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            snapshot_filesystem_command(command);
         }
         Self {
             _directory: directory,
             mount,
         }
+    }
+
+    fn corrupt_verity_root(&self, memory: &std::path::Path) {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        // ext4 stores the root-first Merkle tree at the next 64 KiB boundary after EOF.
+        let tree_offset = std::fs::metadata(memory).unwrap().len().div_ceil(65_536) * 65_536;
+        let block_size = nix::sys::statvfs::statvfs(&self.mount).unwrap().fragment_size();
+        let relative = memory.strip_prefix(&self.mount).unwrap();
+        let image = self._directory.path().join("snapshots.ext4");
+        snapshot_filesystem_command(std::process::Command::new("umount").arg(&self.mount));
+        let request = format!("bmap /{} {}", relative.display(), tree_offset / block_size);
+        let block: u64 = snapshot_filesystem_command(
+            std::process::Command::new("debugfs")
+                .args(["-R", &request])
+                .arg(&image),
+        )
+        .parse()
+        .unwrap();
+        assert_ne!(block, 0);
+        let mut disk = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&image)
+            .unwrap();
+        let offset = block * block_size;
+        disk.seek(SeekFrom::Start(offset)).unwrap();
+        let mut byte = [0];
+        disk.read_exact(&mut byte).unwrap();
+        byte[0] ^= 1;
+        disk.seek(SeekFrom::Start(offset)).unwrap();
+        disk.write_all(&byte).unwrap();
+        disk.sync_all().unwrap();
+        drop(disk);
+        snapshot_filesystem_command(
+            std::process::Command::new("mount")
+                .args(["-o", "loop"])
+                .arg(&image)
+                .arg(&self.mount),
+        );
     }
 }
 
@@ -62,11 +107,11 @@ impl Drop for SnapshotFilesystem {
 async fn verity_memory_restores_and_lost_verity_cold_boots_without_spending_the_restart_budget() {
     use nibrunnerd::adapters::vm::snapshot::snapshot_paths;
 
-    let mut _filesystem = None;
+    let mut filesystem = None;
     let Some(host) = crate::host_with(|config| {
         let disk = SnapshotFilesystem::new();
         config.snapshot_dir = disk.mount.join("vm");
-        _filesystem = Some(disk);
+        filesystem = Some(disk);
     })
     .await
     else {
@@ -109,6 +154,23 @@ async fn verity_memory_restores_and_lost_verity_cold_boots_without_spending_the_
     std::fs::rename(&replacement, &paths.memory_path).unwrap();
     assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
     assert_eq!(host.get(&app, "/read?path=kept").await.unwrap().body, "durable");
+    assert_eq!(
+        host.host.state.record(&app.app_id).await.unwrap().start_attempts,
+        window
+    );
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    host.let_sleep(&app).await;
+    let digest =
+        nibrunnerd::adapters::fs_verity::measure(&std::fs::File::open(&paths.memory_path).unwrap()).unwrap();
+    filesystem
+        .as_ref()
+        .unwrap()
+        .corrupt_verity_root(&paths.memory_path);
+    assert_eq!(
+        nibrunnerd::adapters::fs_verity::measure(&std::fs::File::open(&paths.memory_path).unwrap()).unwrap(),
+        digest
+    );
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
     assert_eq!(
         host.host.state.record(&app.app_id).await.unwrap().start_attempts,
         window
