@@ -132,6 +132,14 @@ fn host_storage_initializes_blank_devices_and_preserves_existing_filesystems_acr
         assert!(storage::check(&config).is_err());
         storage::ensure_mounted(&config).unwrap();
         storage::ready(&config).unwrap();
+        if filesystem == StorageFilesystem::Ext4 {
+            let superblock = run(Command::new("tune2fs").arg("-l").arg(&disk.device));
+            let features = superblock
+                .lines()
+                .find_map(|line| line.strip_prefix("Filesystem features:"))
+                .unwrap();
+            assert!(features.split_whitespace().any(|feature| feature == "verity"));
+        }
         run(Command::new("runuser")
             .args(["--user", service_user::ZEROFS_USER, "--", "touch"])
             .arg(config.volumes.zerofs().unwrap().cache_dir.join("writable")));
@@ -198,6 +206,36 @@ fn host_storage_initializes_blank_devices_and_preserves_existing_filesystems_acr
             .args(["--user", service_user::ZEROFS_USER, "--", "touch"])
             .arg(settings.cache_dir.join("writable")));
     }
+}
+
+#[test]
+fn an_existing_ext4_filesystem_keeps_its_features_and_contents() {
+    if !super::enabled() {
+        return;
+    }
+    let disk = Disk::blank();
+    run(Command::new("mkfs.ext4")
+        .args(["-q", "-O", "^verity"])
+        .arg(&disk.device));
+    let features_before = run(Command::new("tune2fs").arg("-l").arg(&disk.device));
+    let config = disk.config(StorageFilesystem::Ext4);
+    storage::ensure_mounted(&config).unwrap();
+    std::fs::write(disk.mount_point.join("preserved"), "existing data").unwrap();
+    disk.unmount();
+    storage::ensure_mounted(&config).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(disk.mount_point.join("preserved")).unwrap(),
+        "existing data"
+    );
+    let features_after = run(Command::new("tune2fs").arg("-l").arg(&disk.device));
+    let features = |superblock: &str| {
+        superblock
+            .lines()
+            .find(|line| line.starts_with("Filesystem features:"))
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(features(&features_before), features(&features_after));
 }
 
 #[test]
