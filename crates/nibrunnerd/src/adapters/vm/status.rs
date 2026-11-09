@@ -5,8 +5,21 @@ pub enum VmExit {
     Signal(i32),
 }
 
+// Firecracker v1.16.1 catches SIGBUS and exits with FcExitCode::SIGBUS rather than under the signal.
+pub(crate) const FIRECRACKER_SIGBUS_EXIT_CODE: i32 = 149;
+
 impl VmExit {
+    pub fn is_memory_fault(self) -> bool {
+        matches!(
+            self,
+            Self::Code(FIRECRACKER_SIGBUS_EXIT_CODE) | Self::Signal(libc::SIGBUS)
+        )
+    }
+
     pub fn describe(self) -> String {
+        if self.is_memory_fault() {
+            return "exited after a host memory fault (SIGBUS)".into();
+        }
         match self {
             VmExit::Code(code) => format!("exited with exit code {code}"),
             VmExit::Signal(signal) => {
@@ -35,6 +48,15 @@ pub const UNKNOWN_VM: VmStatus = VmStatus {
     started_this_boot: false,
     exit: None,
 };
+
+impl VmStatus {
+    pub(crate) fn memory_fault(self) -> bool {
+        !self.active
+            && self.failed
+            && self.started_this_boot
+            && self.exit.is_some_and(VmExit::is_memory_fault)
+    }
+}
 
 #[cfg(test)]
 mod tests {
