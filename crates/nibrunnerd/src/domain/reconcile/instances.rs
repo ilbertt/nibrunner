@@ -389,7 +389,9 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
     let recovery_window = existing
         .as_ref()
         .filter(|record| {
-            matches!(reason, BootReason::HostRecovery) && record.deployment_id == desired.deployment_id
+            matches!(reason, BootReason::HostRecovery)
+                && record.deployment_id == desired.deployment_id
+                && record.start_attempts.attempts > 0
         })
         .map(|record| record.start_attempts);
     if recovery_window.is_none() {
@@ -1101,6 +1103,36 @@ mod tests {
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Pending);
         assert_eq!(record.start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn the_first_cold_wake_counts_as_the_apps_initial_start() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Idle;
+                record.start_attempts = NO_START_ATTEMPTS;
+            }))
+            .await;
+        host.vms.refuse_wake(VmError::SnapshotUnusable {
+            reason: "never started".into(),
+        });
+        let desired = desired_instance(|instance| instance.config.restart_policy.max_restarts = 0);
+
+        assert_eq!(
+            resume_instance(&host, &desired).await.unwrap(),
+            WakeOutcome::ColdBoot
+        );
+        assert_eq!(
+            host.state
+                .record(&app_id())
+                .await
+                .unwrap()
+                .start_attempts
+                .attempts,
+            1
+        );
     }
 
     #[tokio::test]
