@@ -280,6 +280,12 @@ fn verity_seals_files_without_preventing_jailer_links_or_private_writable_mappin
     let path = disk.mount_point.join("memory");
     std::fs::write(&path, [42; 8192]).unwrap();
     let file = File::open(&path).unwrap();
+    let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    assert_eq!(
+        fs_verity::seal(&file).unwrap_err().raw_os_error(),
+        Some(libc::ETXTBSY)
+    );
+    drop(writer);
     let digest = fs_verity::seal(&file).unwrap().expect("ext4 supports verity");
     file.sync_all().unwrap();
     assert_eq!(fs_verity::measure(&file).unwrap(), digest);
@@ -339,6 +345,49 @@ fn unsupported_filesystems_leave_files_available_for_full_file_verification() {
     assert_eq!(fs_verity::seal(&file).unwrap(), None);
     assert!(fs_verity::measure(&file).is_err());
     std::fs::write(&path, b"replacement").unwrap();
+}
+
+#[test]
+fn a_verity_digest_is_measurable_but_corrupted_data_cannot_be_read() {
+    use nibrunnerd::adapters::fs_verity;
+
+    if !super::enabled() {
+        return;
+    }
+    let disk = Disk::blank();
+    let config = disk.config(StorageFilesystem::Ext4);
+    storage::ensure_mounted(&config).unwrap();
+    let path = disk.mount_point.join("memory");
+    std::fs::write(&path, [42; 8192]).unwrap();
+    let file = File::open(&path).unwrap();
+    let digest = fs_verity::seal(&file).unwrap().unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let block_size = nix::sys::statvfs::statvfs(&disk.mount_point)
+        .unwrap()
+        .fragment_size();
+    disk.unmount();
+    let block: u64 = run(Command::new("debugfs")
+        .args(["-R", "bmap /memory 0"])
+        .arg(&disk.device))
+    .parse()
+    .unwrap();
+    assert_ne!(block, 0);
+    let mut device = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&disk.device)
+        .unwrap();
+    device.seek(SeekFrom::Start(block * block_size)).unwrap();
+    device.write_all(&[43]).unwrap();
+    device.sync_all().unwrap();
+    drop(device);
+    storage::ensure_mounted(&config).unwrap();
+    let mut file = File::open(&path).unwrap();
+    assert_eq!(fs_verity::measure(&file).unwrap(), digest);
+    assert_eq!(
+        file.read_exact(&mut [0]).unwrap_err().raw_os_error(),
+        Some(libc::EIO)
+    );
 }
 
 #[test]
