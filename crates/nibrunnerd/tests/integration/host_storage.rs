@@ -269,6 +269,128 @@ fn host_storage_checks_the_host_mount_namespace_inside_a_service_sandbox() {
 }
 
 #[test]
+fn verity_seals_files_without_preventing_jailer_links_or_private_writable_mappings() {
+    use nibrunnerd::adapters::fs_verity;
+
+    if !super::enabled() {
+        return;
+    }
+    let disk = Disk::blank();
+    storage::ensure_mounted(&disk.config(StorageFilesystem::Ext4)).unwrap();
+    let path = disk.mount_point.join("memory");
+    std::fs::write(&path, [42; 8192]).unwrap();
+    let file = File::open(&path).unwrap();
+    let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    assert_eq!(
+        fs_verity::seal(&file).unwrap_err().raw_os_error(),
+        Some(libc::ETXTBSY)
+    );
+    drop(writer);
+    let digest = fs_verity::seal(&file).unwrap().expect("ext4 supports verity");
+    file.sync_all().unwrap();
+    assert_eq!(fs_verity::measure(&file).unwrap(), digest);
+    assert_eq!(fs_verity::seal(&file).unwrap(), Some(digest));
+    assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+    let linked = disk.mount_point.join("jailed-memory");
+    std::os::unix::fs::chown(&path, Some(0), Some(1234)).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o440)).unwrap();
+    std::fs::hard_link(&path, &linked).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let file = File::open(&linked).unwrap();
+    std::fs::remove_file(&linked).unwrap();
+    assert_eq!(fs_verity::measure(&file).unwrap(), digest);
+    private_mapping_keeps_verity_pages_readable_and_writes_private(&file);
+    let mut original = [0];
+    (&file).read_exact(&mut original).unwrap();
+    assert_eq!(original, [42]);
+}
+
+#[allow(
+    unsafe_code,
+    reason = "the Firecracker file backend uses a private writable mmap"
+)]
+fn private_mapping_keeps_verity_pages_readable_and_writes_private(file: &File) {
+    use std::os::fd::AsRawFd;
+
+    unsafe {
+        let mapping = libc::mmap(
+            std::ptr::null_mut(),
+            8192,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE,
+            file.as_raw_fd(),
+            0,
+        );
+        assert_ne!(mapping, libc::MAP_FAILED, "{}", std::io::Error::last_os_error());
+        let byte = mapping.cast::<u8>();
+        assert_eq!(byte.read_volatile(), 42);
+        byte.write_volatile(7);
+        assert_eq!(byte.read_volatile(), 7);
+        assert_eq!(libc::munmap(mapping, 8192), 0);
+    }
+}
+
+#[test]
+fn unsupported_filesystems_leave_files_available_for_full_file_verification() {
+    use nibrunnerd::adapters::fs_verity;
+
+    if !super::enabled() {
+        return;
+    }
+    let disk = Disk::blank();
+    storage::ensure_mounted(&disk.config(StorageFilesystem::Xfs)).unwrap();
+    let path = disk.mount_point.join("memory");
+    std::fs::write(&path, b"memory").unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(fs_verity::seal(&file).unwrap(), None);
+    assert!(fs_verity::measure(&file).is_err());
+    std::fs::write(&path, b"replacement").unwrap();
+}
+
+#[test]
+fn a_verity_digest_is_measurable_but_corrupted_data_cannot_be_read() {
+    use nibrunnerd::adapters::fs_verity;
+
+    if !super::enabled() {
+        return;
+    }
+    let disk = Disk::blank();
+    let config = disk.config(StorageFilesystem::Ext4);
+    storage::ensure_mounted(&config).unwrap();
+    let path = disk.mount_point.join("memory");
+    std::fs::write(&path, [42; 8192]).unwrap();
+    let file = File::open(&path).unwrap();
+    let digest = fs_verity::seal(&file).unwrap().unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let block_size = nix::sys::statvfs::statvfs(&disk.mount_point)
+        .unwrap()
+        .fragment_size();
+    disk.unmount();
+    let block: u64 = run(Command::new("debugfs")
+        .args(["-R", "bmap /memory 0"])
+        .arg(&disk.device))
+    .parse()
+    .unwrap();
+    assert_ne!(block, 0);
+    let mut device = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&disk.device)
+        .unwrap();
+    device.seek(SeekFrom::Start(block * block_size)).unwrap();
+    device.write_all(&[43]).unwrap();
+    device.sync_all().unwrap();
+    drop(device);
+    storage::ensure_mounted(&config).unwrap();
+    let mut file = File::open(&path).unwrap();
+    assert_eq!(fs_verity::measure(&file).unwrap(), digest);
+    assert_eq!(
+        file.read_exact(&mut [0]).unwrap_err().raw_os_error(),
+        Some(libc::EIO)
+    );
+}
+
+#[test]
 fn host_storage_initializes_nonzero_devices_without_signatures_and_reuses_their_filesystems() {
     if !super::enabled() {
         return;

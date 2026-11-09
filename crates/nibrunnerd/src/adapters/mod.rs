@@ -3,6 +3,7 @@ pub mod cron_execution;
 pub mod cron_registration;
 pub mod exec;
 pub mod filesystem;
+pub mod fs_verity;
 pub mod guest_connections;
 pub mod guest_measurements;
 pub mod logs;
