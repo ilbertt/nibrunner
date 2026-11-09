@@ -17,6 +17,7 @@ use crate::adapters::vm::snapshot::{
 use crate::adapters::vm::status::VmStatus;
 use crate::adapters::vm::time_sync;
 use crate::adapters::volumes::VolumeBackend;
+use crate::domain::metrics::sleep_wake::RestorePhase;
 use crate::json_store::{make_directory, write_json};
 use crate::ports::{BootRequest, LogSink, SuspendRequest, VmError, Vmm};
 use crate::state::SharedState;
@@ -699,20 +700,30 @@ impl Vmm for VmManager {
         let cleanup = cleanup_started_at.elapsed();
         let restored = restoring.elapsed();
         self.metrics.sleep_wake.restored(restored);
+        for (phase, took) in [
+            (
+                RestorePhase::SnapshotVerify,
+                verified_at.duration_since(restoring),
+            ),
+            (
+                RestorePhase::Compatibility,
+                compatible_at.duration_since(verified_at),
+            ),
+            (RestorePhase::Jail, jailed_at.duration_since(compatible_at)),
+            (RestorePhase::Resources, prepared_at.duration_since(jailed_at)),
+            (RestorePhase::Spawn, spawned_at.duration_since(prepared_at)),
+            (RestorePhase::Load, loaded_at.duration_since(spawned_at)),
+            (RestorePhase::Resume, resume.resume),
+            (RestorePhase::ClockSync, resume.clock_sync),
+            (RestorePhase::Neighbour, resume.neighbour),
+            (RestorePhase::Cleanup, cleanup),
+        ] {
+            self.metrics.sleep_wake.restored_phase(phase, took);
+        }
         tracing::info!(
             app_id = %request.app_id,
             slot = request.slot.slot,
             restore_ms = restored.as_millis(),
-            snapshot_verify_us = verified_at.duration_since(restoring).as_micros(),
-            compatibility_us = compatible_at.duration_since(verified_at).as_micros(),
-            jail_us = jailed_at.duration_since(compatible_at).as_micros(),
-            resources_us = prepared_at.duration_since(jailed_at).as_micros(),
-            spawn_us = spawned_at.duration_since(prepared_at).as_micros(),
-            load_us = loaded_at.duration_since(spawned_at).as_micros(),
-            resume_us = resume.resume.as_micros(),
-            clock_sync_us = resume.clock_sync.as_micros(),
-            neighbour_us = resume.neighbour.as_micros(),
-            cleanup_us = cleanup.as_micros(),
             "instance awake"
         );
         Ok(())
