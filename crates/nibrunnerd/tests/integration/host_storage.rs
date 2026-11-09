@@ -227,6 +227,7 @@ fn an_existing_ext4_filesystem_keeps_its_features_and_contents() {
         std::fs::read_to_string(disk.mount_point.join("preserved")).unwrap(),
         "existing data"
     );
+    disk.unmount();
     let features_after = run(Command::new("tune2fs").arg("-l").arg(&disk.device));
     let features = |superblock: &str| {
         superblock
