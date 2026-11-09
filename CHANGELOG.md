@@ -1,5 +1,18 @@
 # Changelog
 
+## [2026.11.5] - 2026-11-09
+
+### Features
+
+- **metrics:** Expose snapshot restore phase histograms (#311)
+- **exports:** Select output format per export (#309)
+- **exports:** Publish prepared directories locally (#307)
+
+### Fixes
+
+- **init:** Wait for guest control socket readiness (#310)
+- **exports:** Preserve guest symlinks in bundles (#306)
+
 ## [2026.11.4] - 2026-11-08
 
 ### Features
