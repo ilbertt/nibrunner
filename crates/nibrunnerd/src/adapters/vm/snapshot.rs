@@ -449,7 +449,7 @@ fn verify_file(path: &Path, expected: &SnapshotFile) -> Result<(), VmError> {
     let reason = match verify() {
         Ok(true) => return Ok(()),
         Ok(false) => format!(
-            "{} no longer matches its recorded size or integrity digest",
+            "{} no longer matches its recorded size or SHA-256 integrity digest",
             path.display()
         ),
         Err(error) => format!("{} could not be verified: {error}", path.display()),
