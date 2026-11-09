@@ -15,6 +15,9 @@ mod supervise;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod clock_sync;
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod control_wait;
+
 mod crontab;
 
 #[cfg(target_os = "linux")]
