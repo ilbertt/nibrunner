@@ -247,6 +247,9 @@
         "exportId": {
           "$ref": "#/$defs/ExportId"
         },
+        "format": {
+          "$ref": "#/$defs/ExportFormat"
+        },
         "objectKey": {
           "$ref": "#/$defs/ObjectKey"
         },
@@ -259,6 +262,7 @@
         "appId",
         "volumeId",
         "objectKey",
+        "format",
         "desiredState"
       ]
     },
@@ -539,6 +543,13 @@
         ]
       },
       "pattern": "^/$|^(/(?!\\.\\.?(/|$))[^/\\\\\"'\\x00-\\x1f]+)+$"
+    },
+    "ExportFormat": {
+      "type": "string",
+      "enum": [
+        "tar-gzip",
+        "directory"
+      ]
     },
     "ExportId": {
       "description": "an identifier",

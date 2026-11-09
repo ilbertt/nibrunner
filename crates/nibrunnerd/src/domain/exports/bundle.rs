@@ -101,11 +101,11 @@ pub struct WrittenBundle {
     pub size_bytes: u64,
 }
 
-pub fn write_bundle(
+pub fn write_metadata(
     environment: Option<&TenantEnvironment>,
     crontab: Option<&Crontab>,
     staging_dir: &Path,
-) -> Result<WrittenBundle, BundleError> {
+) -> Result<(), BundleError> {
     if let Some(environment) = environment {
         write_file(
             &staging_dir.join(ENV_FILENAME),
@@ -120,7 +120,15 @@ pub fn write_bundle(
             PRIVATE_FILE_MODE,
         )?;
     }
+    Ok(())
+}
 
+pub fn write_bundle(
+    environment: Option<&TenantEnvironment>,
+    crontab: Option<&Crontab>,
+    staging_dir: &Path,
+) -> Result<WrittenBundle, BundleError> {
+    write_metadata(environment, crontab, staging_dir)?;
     let bundle_path = staging_dir.join(BUNDLE_NAME);
     archive(
         &bundle_path,

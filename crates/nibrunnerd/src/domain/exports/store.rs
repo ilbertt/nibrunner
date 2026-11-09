@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
-use protocol::ObjectKey;
+use protocol::{ExportFormat, ObjectKey};
 use tokio::io::AsyncReadExt;
 
 const UPLOAD_PART_SIZE_BYTES: usize = 8 * 1024 * 1024;
@@ -23,6 +23,7 @@ impl ExportStoreError {
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait ExportStore: Send + Sync {
+    fn validate(&self, format: ExportFormat, object_key: &ObjectKey) -> Result<(), ExportStoreError>;
     async fn upload(&self, bundle_path: &Path, object_key: &ObjectKey) -> Result<(), ExportStoreError>;
     async fn publish_directory(
         &self,
@@ -73,6 +74,20 @@ impl ObjectExportStore {
             Some(prefix) => object_store::path::Path::from(format!("{prefix}/{object_key}")),
         }
     }
+
+    fn directory_destination(&self, object_key: &ObjectKey) -> Result<std::path::PathBuf, ExportStoreError> {
+        let root = self
+            .directory
+            .as_ref()
+            .ok_or_else(|| ExportStoreError::Transfer("directory exports require a local store".into()))?;
+        let key = Path::new(object_key.as_str());
+        if key.file_name() != Some(key.as_os_str()) {
+            return Err(ExportStoreError::Transfer(
+                "a directory export needs a single filename".into(),
+            ));
+        }
+        Ok(root.join(key))
+    }
 }
 
 // A read returns what is to hand, not what was asked for, and every part of a multipart upload
@@ -93,21 +108,16 @@ async fn fill(reader: &mut (impl AsyncReadExt + Unpin), part: &mut [u8]) -> std:
 
 #[async_trait]
 impl ExportStore for ObjectExportStore {
+    fn validate(&self, format: ExportFormat, object_key: &ObjectKey) -> Result<(), ExportStoreError> {
+        match format {
+            ExportFormat::TarGzip => Ok(()),
+            ExportFormat::Directory => self.directory_destination(object_key).map(|_| ()),
+        }
+    }
+
     async fn publish_directory(&self, source: &Path, object_key: &ObjectKey) -> Result<(), ExportStoreError> {
         let transfer = |error: &dyn std::fmt::Display| ExportStoreError::Transfer(error.to_string());
-        let root = self
-            .directory
-            .as_ref()
-            .ok_or_else(|| ExportStoreError::Transfer("directory exports require a local store".into()))?;
-        let key = Path::new(object_key.as_str());
-        if key.components().count() != 1
-            || !matches!(key.components().next(), Some(std::path::Component::Normal(_)))
-        {
-            return Err(ExportStoreError::Transfer(
-                "a directory export needs a single filename".into(),
-            ));
-        }
-        let destination = root.join(key);
+        let destination = self.directory_destination(object_key)?;
         match tokio::fs::symlink_metadata(&destination).await {
             Ok(metadata) if metadata.is_dir() => return Ok(()),
             Ok(_) => {
@@ -203,7 +213,15 @@ mod tests {
     async fn a_directory_key_cannot_escape_or_descend_into_a_previously_published_tree() {
         let root = tempfile::tempdir().unwrap();
         let store = ObjectExportStore::open(&root.path().display().to_string()).unwrap();
-        for key in ["/outside", "../outside", "existing/data/link/escape", ".", ".."] {
+        for key in [
+            "/outside",
+            "../outside",
+            "existing/data/link/escape",
+            "existing/",
+            "existing/.",
+            ".",
+            "..",
+        ] {
             assert!(store
                 .publish_directory(root.path(), &ObjectKey::parse(key).unwrap())
                 .await

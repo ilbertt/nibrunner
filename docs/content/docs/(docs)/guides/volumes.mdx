@@ -118,6 +118,7 @@ as an archive:
 "exports": [
   {
     "exportId": "exp-1", "appId": "app-1", "volumeId": "vol-1",
+    "format": "tar-gzip",
     "objectKey": "exports/app-1/bundle.tar.gz", "desiredState": "present",
     "environment": { "DATABASE_URL": "sqlite:///app/data.db" }
   }
@@ -136,5 +137,14 @@ as an archive:
 
 After restoring the volume, install the exported crontab with `crontab /path/to/crontab` inside
 the new deployment.
+
+Each export selects its required `format`: `tar-gzip` or `directory`. For a local consumer
+that builds its own bundle, set `"format": "directory"` in that export request. The host publishes
+the prepared `data/`, `.env` and `crontab` tree without creating an archive. `objectKey` must be
+a single filename, such as `exp-1.export`; the directory is atomically renamed into the local
+store, so staging and the store must share a filesystem. A repeated publication of the same key
+retains the first completed directory. `sizeBytes` is `null` because no archive was produced.
+The consumer owns the published directory's cleanup. A single local store supports both formats;
+an S3 store accepts `tar-gzip` only. Unsupported destinations fail before the guest is frozen.
 
 `reported.json` reports the state of each checkpoint and export, with the reason on failure.

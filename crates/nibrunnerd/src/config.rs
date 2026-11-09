@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_FILE: &str = "/etc/nibrunner/config.toml";
 pub const CONFIG_FILE_VARIABLE: &str = "NIBRUNNER_CONFIG";
@@ -869,6 +869,14 @@ impl HostConfig {
         };
         validate_host_storage(&config)?;
         validate_guest_connections(&config)?;
+        if !config.export_store_url.starts_with("s3://")
+            && Path::new(&config.export_store_url).starts_with(&config.export_staging_dir)
+        {
+            return Err(ConfigError::invalid(
+                "exports.store_url",
+                "outside the export staging directory",
+            ));
+        }
         Ok(config)
     }
 
@@ -2518,6 +2526,12 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
                 config.export_staging_dir.display()
             );
         }
+    }
+
+    #[test]
+    fn a_local_export_store_cannot_be_inside_staging() {
+        let invalid = [("exports.store_url", "\"/var/lib/nibrunner/exports/finished\"")];
+        assert!(refused(&document(&invalid, "")).contains("exports.store_url"));
     }
 
     #[test]

@@ -500,6 +500,7 @@ pub fn exports_answering(
     let spy = ExportSpy::default();
     let uploads = spy.uploads.clone();
     let mut store = MockExportStore::new();
+    store.expect_validate().returning(|_, _| Ok(()));
     store
         .expect_upload()
         .returning(move |bundle_path: &Path, object_key: &ObjectKey| {

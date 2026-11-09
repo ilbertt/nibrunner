@@ -419,9 +419,18 @@ pub struct DesiredExport {
     pub app_id: AppId,
     pub volume_id: VolumeId,
     pub object_key: ObjectKey,
+    pub format: ExportFormat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<TenantEnvironment>,
     pub desired_state: DesiredPresence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ExportFormat {
+    TarGzip,
+    Directory,
 }
 
 /// What one host should be running. The daemon watches this document at the path its
