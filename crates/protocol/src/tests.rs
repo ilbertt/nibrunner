@@ -244,6 +244,36 @@ fn desired_json() -> serde_json::Value {
 }
 
 #[test]
+fn every_export_selects_a_required_output_format() {
+    let validator = jsonschema::validator_for(&crate::schema::desired_state().to_value()).unwrap();
+    let mut document = desired_json();
+    document["exports"] = serde_json::json!([{
+        "exportId": "exp-1", "appId": "app-1", "volumeId": "vol-1",
+        "objectKey": "exp-1.export", "desiredState": "present"
+    }]);
+    assert!(serde_json::from_value::<HostDesiredState>(document.clone()).is_err());
+    assert!(!validator.is_valid(&document));
+    for (format, expected) in [
+        ("tar-gzip", ExportFormat::TarGzip),
+        ("directory", ExportFormat::Directory),
+    ] {
+        document["exports"][0]["format"] = serde_json::json!(format);
+        assert!(validator.is_valid(&document));
+        let parsed: HostDesiredState = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(parsed.exports[0].format, expected);
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["exports"][0]["format"],
+            format
+        );
+    }
+    for invalid in [serde_json::Value::Null, serde_json::json!("zip")] {
+        document["exports"][0]["format"] = invalid;
+        assert!(serde_json::from_value::<HostDesiredState>(document.clone()).is_err());
+        assert!(!validator.is_valid(&document));
+    }
+}
+
+#[test]
 fn a_desired_state_round_trips_with_its_wire_names() {
     let parsed: HostDesiredState = serde_json::from_value(desired_json()).expect("parses");
     assert_eq!(parsed.instances[0].desired_state, DesiredInstanceState::OnRequest);

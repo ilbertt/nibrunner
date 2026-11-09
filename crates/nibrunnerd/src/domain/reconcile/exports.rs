@@ -1,9 +1,8 @@
 use protocol::{
-    AppId, CheckpointId, Crontab, DesiredExport, ExportId, ExportState, ReportedExport, StateMessage,
-    Timestamp,
+    AppId, CheckpointId, Crontab, DesiredExport, ExportFormat, ExportId, ExportState, ReportedExport,
+    StateMessage, Timestamp,
 };
 
-use crate::config::ExportFormat;
 use crate::domain::exports::bundle::{dump_volume, write_bundle, write_metadata};
 use crate::domain::exports::freeze::frozen;
 use crate::domain::exports::reader::ReaderDevice;
@@ -104,6 +103,9 @@ async fn write_inner(
     checkpoint_id: &CheckpointId,
     staging_dir: &std::path::Path,
 ) -> Result<Option<u64>, String> {
+    host.exports
+        .validate(desired.format, &desired.object_key)
+        .map_err(|error| error.message())?;
     let crontab = registered_crontab(host, &desired.app_id).await?;
     let vsock_path = crate::domain::filesystem::reader::guest_vsock_path(host, &desired.app_id);
     let lease = frozen(&desired.app_id, &vsock_path)
@@ -150,7 +152,7 @@ async fn publish_export(
     crontab: Option<&Crontab>,
     staging_dir: &std::path::Path,
 ) -> Result<Option<u64>, String> {
-    match host.config.export_format {
+    match desired.format {
         ExportFormat::Directory => {
             write_metadata(desired.environment.as_ref(), crontab, staging_dir)
                 .map_err(|error| error.message())?;
@@ -289,6 +291,7 @@ mod tests {
             app_id: app_id(),
             volume_id: VolumeId::parse("vol-1").unwrap(),
             object_key: ObjectKey::parse("exports/exp-1/bundle.tar.gz").unwrap(),
+            format: ExportFormat::TarGzip,
             environment: None,
             desired_state: state,
         }
@@ -305,10 +308,10 @@ mod tests {
         let destination = root.path().join("published");
         let mut host = test_host().await;
         let held = std::sync::Arc::get_mut(&mut host.host).unwrap();
-        held.config.export_format = ExportFormat::Directory;
         held.exports =
             std::sync::Arc::new(ObjectExportStore::open(&destination.display().to_string()).unwrap());
         let mut desired = wanted(DesiredPresence::Present);
+        desired.format = ExportFormat::Directory;
         desired.object_key = ObjectKey::parse("exp-1.export").unwrap();
         desired.environment = Some(tenant_environment(&[("KEY", "value")]));
         let crontab = Crontab::parse("@hourly echo hello").unwrap();
@@ -335,6 +338,71 @@ mod tests {
         );
         assert!(!published.join("bundle.tar.gz").exists());
         assert!(!staging.exists());
+    }
+
+    #[tokio::test]
+    async fn one_host_can_publish_both_export_formats() {
+        use crate::domain::exports::store::ObjectExportStore;
+
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("published");
+        let mut host = test_host().await;
+        std::sync::Arc::get_mut(&mut host.host).unwrap().exports =
+            std::sync::Arc::new(ObjectExportStore::open(&destination.display().to_string()).unwrap());
+        for (format, key) in [
+            (ExportFormat::TarGzip, "archive.tar.gz"),
+            (ExportFormat::Directory, "prepared.export"),
+        ] {
+            let staging = root.path().join(key);
+            std::fs::create_dir_all(staging.join("data")).unwrap();
+            std::fs::write(staging.join("data/notes"), b"tenant data").unwrap();
+            let mut desired = wanted(DesiredPresence::Present);
+            desired.format = format;
+            desired.object_key = ObjectKey::parse(key).unwrap();
+            let size = publish_export(host.arc(), &desired, None, &staging)
+                .await
+                .unwrap();
+            match format {
+                ExportFormat::TarGzip => assert_eq!(
+                    size,
+                    Some(std::fs::metadata(destination.join(key)).unwrap().len())
+                ),
+                ExportFormat::Directory => {
+                    assert_eq!(size, None);
+                    assert_eq!(
+                        std::fs::read(destination.join(key).join("data/notes")).unwrap(),
+                        b"tenant data"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_format_fails_before_the_volume_is_flushed_or_checkpointed() {
+        use crate::domain::exports::store::ObjectExportStore;
+
+        let mut host = test_host().await;
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        volumes.expect_observe_checkpoints().returning(Vec::new);
+        volumes.expect_flush().never();
+        volumes.expect_create_checkpoint().never();
+        let held = std::sync::Arc::get_mut(&mut host.host).unwrap();
+        held.exports = std::sync::Arc::new(ObjectExportStore::open("s3://exports-test").unwrap());
+        held.volumes = std::sync::Arc::new(volumes);
+        let mut desired = wanted(DesiredPresence::Present);
+        desired.format = ExportFormat::Directory;
+        let plan = asked_for(host.arc(), vec![desired]).await;
+
+        apply_exports(host.arc(), &plan, Trigger::Change).await;
+
+        let report = host.state.snapshot().await.export_reports.remove(0);
+        assert_eq!(report.state, ExportState::Failed);
+        assert!(report
+            .message
+            .unwrap()
+            .as_str()
+            .contains("directory exports require a local store"));
     }
 
     async fn asked_for(host: &crate::host::Host, exports: Vec<DesiredExport>) -> ReconcilePlan {

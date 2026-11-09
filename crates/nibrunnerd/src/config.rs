@@ -259,17 +259,6 @@ pub struct HostConfig {
     pub logs: LogsConfig,
     pub export_store_url: String,
     pub export_staging_dir: PathBuf,
-    pub export_format: ExportFormat,
-}
-
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum ExportFormat {
-    #[default]
-    TarGzip,
-    Directory,
 }
 
 impl HostConfig {
@@ -457,8 +446,6 @@ mod file {
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "exports")]
     pub(super) struct Exports {
-        /// `tar-gzip` builds an archive; `directory` publishes the prepared tree to a local store.
-        pub(super) format: Option<super::ExportFormat>,
         /// `s3://bucket[/prefix]`, or an absolute path.
         #[schemars(pattern(STORE_URL))]
         pub(super) store_url: Option<String>,
@@ -877,19 +864,17 @@ impl HostConfig {
                 required_str("exports.store_url", &exports.store_url)?,
             )?,
             export_staging_dir: path_key("exports.staging_dir", &exports.staging_dir)?,
-            export_format: *required("exports.format", exports.format.as_ref())?,
             state_dir,
             runtime_dir,
         };
         validate_host_storage(&config)?;
         validate_guest_connections(&config)?;
-        if config.export_format == ExportFormat::Directory
-            && (config.export_store_url.starts_with("s3://")
-                || Path::new(&config.export_store_url).starts_with(&config.export_staging_dir))
+        if !config.export_store_url.starts_with("s3://")
+            && Path::new(&config.export_store_url).starts_with(&config.export_staging_dir)
         {
             return Err(ConfigError::invalid(
                 "exports.store_url",
-                "directory exports need a local store outside the staging directory",
+                "outside the export staging directory",
             ));
         }
         Ok(config)
@@ -956,7 +941,6 @@ impl HostConfig {
             logs: LogsConfig::default(),
             export_store_url: state_dir.join("export-store").display().to_string(),
             export_staging_dir: state_dir.join("exports"),
-            export_format: ExportFormat::default(),
             state_dir,
             runtime_dir,
         }
@@ -1048,7 +1032,6 @@ impl HostConfig {
             logs: LogsConfig::default(),
             export_store_url: "s3://nibrunner-exports-eu-west-2-123456789012/exports".to_string(),
             export_staging_dir: PathBuf::from("/var/lib/nibrunner/exports"),
-            export_format: ExportFormat::default(),
         }
     }
 
@@ -1121,7 +1104,6 @@ impl HostConfig {
                 }),
             }),
             exports: Some(file::Exports {
-                format: Some(self.export_format),
                 store_url: Some(self.export_store_url.clone()),
                 staging_dir: text(&self.export_staging_dir),
             }),
@@ -1870,7 +1852,6 @@ backend = "local-file"
 storage_prefix = "volumes"
 
 [exports]
-format = "tar-gzip"
 store_url = "/var/lib/nibrunner/export-store"
 staging_dir = "/var/lib/nibrunner/exports"
 
@@ -2034,7 +2015,6 @@ denied_egress_addresses_v6 = []
             "volumes.backend",
             "volumes.storage_prefix",
             "exports.store_url",
-            "exports.format",
             "exports.staging_dir",
             "network.denied_egress_addresses_v4",
             "network.denied_egress_addresses_v6",
@@ -2549,17 +2529,9 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
     }
 
     #[test]
-    fn directory_exports_require_a_local_store_outside_staging() {
-        let directory = [("exports.format", "\"directory\"")];
-        assert_eq!(
-            parsed(&document(&directory, "")).export_format,
-            ExportFormat::Directory
-        );
-        assert_eq!(parsed(&document(&[], "")).export_format, ExportFormat::TarGzip);
-        for store in ["\"s3://exports\"", "\"/var/lib/nibrunner/exports/finished\""] {
-            let invalid = [("exports.format", "\"directory\""), ("exports.store_url", store)];
-            assert!(refused(&document(&invalid, "")).contains("exports.store_url"));
-        }
+    fn a_local_export_store_cannot_be_inside_staging() {
+        let invalid = [("exports.store_url", "\"/var/lib/nibrunner/exports/finished\"")];
+        assert!(refused(&document(&invalid, "")).contains("exports.store_url"));
     }
 
     #[test]

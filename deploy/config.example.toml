@@ -55,7 +55,6 @@ checkpoint_config_file = "/etc/zerofs/checkpoint.toml"
 checkpoint_cache_dir = "/data/zerofs-checkpoint"
 
 [exports]
-format = "tar-gzip"
 store_url = "s3://nibrunner-exports-eu-west-2-123456789012/exports"
 staging_dir = "/var/lib/nibrunner/exports"
 

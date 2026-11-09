@@ -204,6 +204,7 @@ pub fn desired_export(edit: impl FnOnce(&mut DesiredExport)) -> DesiredExport {
         app_id: app_id(),
         volume_id: volume_id(),
         object_key: ObjectKey::parse("exports/app-1/exp-1.tar.gz").unwrap(),
+        format: protocol::ExportFormat::TarGzip,
         environment: Some(TenantEnvironment::default()),
         desired_state: DesiredPresence::Present,
     };
