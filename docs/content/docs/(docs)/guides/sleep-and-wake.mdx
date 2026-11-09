@@ -83,3 +83,21 @@ instead. Files on its volume survive, but in-memory state does not.
   paused until the snapshot is committed, so a failed commit can resume it without losing memory.
   This adds disk reads and latency proportional to the app's memory allocation.
 </Callout>
+
+## Restore timings
+
+The `instance awake` log records `restore_ms` for the native restore path and these phases in
+microseconds. App readiness checks and request forwarding follow the restore.
+
+| Field | Work measured |
+| --- | --- |
+| `snapshot_verify_us` | Integrity verification, including the wait for its blocking worker. |
+| `compatibility_us` | Checking the recorded VMM and guest image against the snapshot. |
+| `jail_us` | Consuming the snapshot stamp and rebuilding the jail. |
+| `resources_us` | Attaching log and cron channels, setting TAP ownership and linking snapshot files. |
+| `spawn_us` | Launching the jailed VMM process. |
+| `load_us` | Loading the snapshot, including waiting for the VMM's API socket. |
+| `resume_us` | The VMM resume API call. |
+| `clock_sync_us` | Synchronizing the guest clock and releasing the tenant freeze. |
+| `neighbour_us` | Refreshing the guest's network neighbour entry. |
+| `cleanup_us` | Removing consumed snapshot files and temporary links. |

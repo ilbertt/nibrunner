@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use protocol::AppId;
@@ -53,6 +54,13 @@ struct PreparedVm {
     #[cfg(test)]
     config_file: PathBuf,
     jail: super::jailer::Jail,
+}
+
+#[derive(Debug)]
+struct ResumeTimings {
+    resume: Duration,
+    clock_sync: Duration,
+    neighbour: Duration,
 }
 
 impl VmManager {
@@ -329,8 +337,10 @@ impl VmManager {
         outcome
     }
 
-    async fn resume_restored_tenant(&self, request: &SuspendRequest) -> Result<(), VmError> {
+    async fn resume_restored_tenant(&self, request: &SuspendRequest) -> Result<ResumeTimings, VmError> {
+        let resuming = Instant::now();
         self.api(&request.app_id).resume().await?;
+        let resumed_at = Instant::now();
         let control = self
             .working_dir_for(&request.app_id)
             .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
@@ -339,6 +349,7 @@ impl VmManager {
             .map_err(|error| VmError::SnapshotUnusable {
                 reason: error.message(),
             })?;
+        let synchronized_at = Instant::now();
         self.network
             .refresh_neighbour(&Neighbour {
                 guest_ipv4: request.slot.guest_ipv4.clone(),
@@ -346,7 +357,12 @@ impl VmManager {
                 tap_name: request.slot.tap_name.clone(),
             })
             .await
-            .map_err(|error| VmError::Host(error.message()))
+            .map_err(|error| VmError::Host(error.message()))?;
+        Ok(ResumeTimings {
+            resume: resumed_at.duration_since(resuming),
+            clock_sync: synchronized_at.duration_since(resumed_at),
+            neighbour: synchronized_at.elapsed(),
+        })
     }
 
     async fn resume_frozen_tenant(&self, app_id: &AppId, control: &Path) {
@@ -585,7 +601,7 @@ impl Vmm for VmManager {
         let _starting = self.admit_start()?;
         let paths = snapshot_paths(&self.snapshot_dir, &request.app_id);
         let expected = self.current_stamp(&request);
-        let restoring = std::time::Instant::now();
+        let restoring = Instant::now();
         let checked_paths = paths.clone();
         let verified = tokio::task::spawn_blocking(move || ensure_loadable(&checked_paths, &expected))
             .await
@@ -595,6 +611,7 @@ impl Vmm for VmManager {
             self.discard_snapshot(&request.app_id);
             return Err(error);
         }
+        let verified_at = Instant::now();
 
         if !self
             .processes
@@ -614,9 +631,11 @@ impl Vmm for VmManager {
             self.discard_snapshot(&request.app_id);
             return Err(VmError::SnapshotUnusable { reason });
         }
+        let compatible_at = Instant::now();
 
         let _ = std::fs::remove_file(&paths.stamp_path);
         let jail = self.prepare_jail(&request.app_id).await?;
+        let jailed_at = Instant::now();
         self.readopt(&request.app_id).await?;
         jail.grant_socket(&tenant_log_socket_path(&jail.root))
             .map_err(|error| VmError::Host(error.to_string()))?;
@@ -637,6 +656,7 @@ impl Vmm for VmManager {
                 .map_err(|error| VmError::Host(error.to_string()))?;
             std::fs::hard_link(source, &target).map_err(|error| VmError::Host(error.to_string()))?;
         }
+        let prepared_at = Instant::now();
         let state_path = PathBuf::from("/snapshots/state");
         let memory_path = PathBuf::from("/snapshots/memory");
         let started = self
@@ -651,16 +671,23 @@ impl Vmm for VmManager {
             )
             .await
             .map_err(|error| VmError::Host(error.to_string()));
+        let spawned_at = Instant::now();
         let outcome = match started {
             Err(error) => Err(error),
             Ok(_) => {
                 let api = self.api(&request.app_id);
                 match api.load_snapshot(&state_path, &memory_path).await {
                     Err(error) => Err(error),
-                    Ok(()) => self.resume_restored_tenant(&request).await,
+                    Ok(()) => {
+                        let loaded_at = Instant::now();
+                        self.resume_restored_tenant(&request)
+                            .await
+                            .map(|timings| (loaded_at, timings))
+                    }
                 }
             }
         };
+        let cleanup_started_at = Instant::now();
         if outcome.is_err() {
             self.processes.stop(&request.app_id).await;
         }
@@ -668,12 +695,24 @@ impl Vmm for VmManager {
         for name in ["state", "memory"] {
             let _ = std::fs::remove_file(exchange.join(name));
         }
-        outcome?;
-        self.metrics.sleep_wake.restored(restoring.elapsed());
+        let (loaded_at, resume) = outcome?;
+        let cleanup = cleanup_started_at.elapsed();
+        let restored = restoring.elapsed();
+        self.metrics.sleep_wake.restored(restored);
         tracing::info!(
             app_id = %request.app_id,
             slot = request.slot.slot,
-            restore_ms = restoring.elapsed().as_millis(),
+            restore_ms = restored.as_millis(),
+            snapshot_verify_us = verified_at.duration_since(restoring).as_micros(),
+            compatibility_us = compatible_at.duration_since(verified_at).as_micros(),
+            jail_us = jailed_at.duration_since(compatible_at).as_micros(),
+            resources_us = prepared_at.duration_since(jailed_at).as_micros(),
+            spawn_us = spawned_at.duration_since(prepared_at).as_micros(),
+            load_us = loaded_at.duration_since(spawned_at).as_micros(),
+            resume_us = resume.resume.as_micros(),
+            clock_sync_us = resume.clock_sync.as_micros(),
+            neighbour_us = resume.neighbour.as_micros(),
+            cleanup_us = cleanup.as_micros(),
             "instance awake"
         );
         Ok(())
