@@ -374,14 +374,33 @@ pub async fn wait_for_room(host: &Host, desired: &DesiredInstance, shortfall_mib
     host.state.put_record(waiting).await;
 }
 
+enum BootReason {
+    AppStart,
+    HostRecovery,
+}
+
 pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
+    boot_instance(host, desired, BootReason::AppStart).await;
+}
+
+async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReason) {
     let now = now_ms();
     let existing = host.state.record(&desired.app_id).await;
-    if let Some(refusal) = start_refused(existing.as_ref(), now, desired) {
-        if let StartRefused::OutOfRestarts { attempted, allowed } = refusal {
-            say_it_is_out_of_restarts(host, &desired.app_id, attempted, allowed).await;
+    let recovery_window = existing
+        .as_ref()
+        .filter(|record| {
+            matches!(reason, BootReason::HostRecovery)
+                && record.deployment_id == desired.deployment_id
+                && record.start_attempts.attempts > 0
+        })
+        .map(|record| record.start_attempts);
+    if recovery_window.is_none() {
+        if let Some(refusal) = start_refused(existing.as_ref(), now, desired) {
+            if let StartRefused::OutOfRestarts { attempted, allowed } = refusal {
+                say_it_is_out_of_restarts(host, &desired.app_id, attempted, allowed).await;
+            }
+            return;
         }
-        return;
     }
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
         if report_no_slot(host, desired, StateMessage::new("this host has no slot left")).await {
@@ -438,14 +457,16 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
         return;
     }
 
-    attempted.start_attempts = next_attempt_window(
-        &existing
-            .as_ref()
-            .map(|record| record.start_attempts)
-            .unwrap_or(NO_START_ATTEMPTS),
-        now,
-        desired.config.restart_policy.reset_after_ms,
-    );
+    attempted.start_attempts = recovery_window.unwrap_or_else(|| {
+        next_attempt_window(
+            &existing
+                .as_ref()
+                .map(|record| record.start_attempts)
+                .unwrap_or(NO_START_ATTEMPTS),
+            now,
+            desired.config.restart_policy.reset_after_ms,
+        )
+    });
     attempted.state = InstanceState::Pending;
     attempted.started_at = None;
     attempted.health = initial_tracker();
@@ -495,7 +516,10 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
             if matches!(boot, Err(VmError::StartBusy)) {
                 host.state
                     .update_record(&desired.app_id, |record| {
-                        record.state = InstanceState::Pending;
+                        record.state = existing
+                            .as_ref()
+                            .filter(|_| recovery_window.is_some())
+                            .map_or(InstanceState::Pending, |previous| previous.state);
                         record.started_at = None;
                         record.health = initial_tracker();
                         record.start_attempts = existing
@@ -605,7 +629,7 @@ pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<W
         }
         Err(VmError::SnapshotUnusable { reason }) => {
             tracing::info!(app_id = %desired.app_id, reason, "nothing to wake this app from; booting it instead");
-            start_instance(host, desired).await;
+            boot_instance(host, desired, BootReason::HostRecovery).await;
             let record = host.state.record(&desired.app_id).await;
             if record.as_ref().is_some_and(|record| {
                 matches!(record.state, InstanceState::Starting | InstanceState::Running)
@@ -1082,6 +1106,105 @@ mod tests {
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Pending);
         assert_eq!(record.start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn the_first_cold_wake_counts_as_the_apps_initial_start() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Idle;
+                record.start_attempts = NO_START_ATTEMPTS;
+            }))
+            .await;
+        host.vms.refuse_wake(VmError::SnapshotUnusable {
+            reason: "never started".into(),
+        });
+        let desired = desired_instance(|instance| instance.config.restart_policy.max_restarts = 0);
+
+        assert_eq!(
+            resume_instance(&host, &desired).await.unwrap(),
+            WakeOutcome::ColdBoot
+        );
+        assert_eq!(
+            host.state
+                .record(&app_id())
+                .await
+                .unwrap()
+                .start_attempts
+                .attempts,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_an_unusable_snapshot_preserves_the_apps_restart_budget() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let desired = desired_instance(|instance| instance.config.restart_policy.max_restarts = 0);
+        let window = spent_window();
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Idle;
+                record.start_attempts = window;
+            }))
+            .await;
+        host.vms.refuse_wake(VmError::SnapshotUnusable {
+            reason: "bad snapshot".into(),
+        });
+
+        assert_eq!(
+            resume_instance(&host, &desired).await.unwrap(),
+            WakeOutcome::ColdBoot
+        );
+        assert_eq!(host.state.record(&app_id()).await.unwrap().start_attempts, window);
+
+        host.vms.set_status(VmStatus {
+            active: false,
+            failed: true,
+            loaded: true,
+            started_this_boot: true,
+            exit: Some(VmExit::Code(1)),
+        });
+        refresh_states(host.arc()).await;
+        start_instance(&host, &desired).await;
+        assert_eq!(
+            host.vms.calls(),
+            vec![crate::ports::VmCall::Wake, crate::ports::VmCall::Boot]
+        );
+        assert_eq!(host.state.record(&app_id()).await.unwrap().start_attempts, window);
+    }
+
+    #[tokio::test]
+    async fn a_busy_snapshot_replacement_keeps_the_existing_restart_window() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let mut desired = on_request();
+        desired.config.restart_policy.max_restarts = 0;
+        let window = spent_window();
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Idle;
+                record.on_request = true;
+                record.start_attempts = window;
+            }))
+            .await;
+        host.vms.refuse_wake(VmError::SnapshotUnusable {
+            reason: "bad snapshot".into(),
+        });
+        host.vms.boot_error(Some(VmError::StartBusy));
+        assert!(resume_instance(&host, &desired).await.is_err());
+        refresh_states(host.arc()).await;
+        let record = host.state.record(&app_id()).await.unwrap();
+        assert_eq!(record.state, InstanceState::Idle);
+        assert_eq!(record.start_attempts, window);
+        host.vms.boot_error(None);
+        assert_eq!(
+            resume_instance(&host, &desired).await.unwrap(),
+            WakeOutcome::ColdBoot
+        );
+        assert_eq!(host.state.record(&app_id()).await.unwrap().start_attempts, window);
     }
 
     #[tokio::test]
