@@ -147,6 +147,7 @@ fn archive(
     let file = std::fs::File::create(bundle_path).map_err(unwritable)?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
+    builder.follow_symlinks(false);
     builder
         .append_dir_all(DATA_DIRECTORY, staging_dir.join(DATA_DIRECTORY))
         .map_err(unwritable)?;
@@ -243,6 +244,31 @@ mod tests {
         let written = write_bundle(Some(&environment), None, &staging).unwrap();
         assert!(written.size_bytes > 0);
         assert_eq!(names_in(&written.path), vec![".env", "data/", "data/notes.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_export_preserves_symlinks_without_reading_their_host_targets() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let data = staging.join(DATA_DIRECTORY);
+        std::fs::create_dir_all(&data).unwrap();
+        let host_file = root.path().join("host-private");
+        std::fs::write(&host_file, b"host-only content").unwrap();
+        symlink(&host_file, data.join("link")).unwrap();
+
+        let written = write_bundle(None, None, &staging).unwrap();
+        let decoder = flate2::read::GzDecoder::new(std::fs::File::open(written.path).unwrap());
+        let mut archive = tar::Archive::new(decoder);
+        let mut entries = archive.entries().unwrap();
+        let _directory = entries.next().unwrap().unwrap();
+        let link = entries.next().unwrap().unwrap();
+        assert_eq!(link.path().unwrap(), Path::new("data/link"));
+        assert!(link.header().entry_type().is_symlink());
+        assert_eq!(link.link_name().unwrap().as_deref(), Some(host_file.as_path()));
+        assert_eq!(link.header().size().unwrap(), 0);
     }
 
     #[test]
