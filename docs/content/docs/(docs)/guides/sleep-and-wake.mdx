@@ -83,3 +83,23 @@ instead. Files on its volume survive, but in-memory state does not.
   paused until the snapshot is committed, so a failed commit can resume it without losing memory.
   This adds disk reads and latency proportional to the app's memory allocation.
 </Callout>
+
+## Restore timings
+
+[`nibrunner_vm_restore_duration_seconds`](/docs/reference/metrics) measures successful native
+restores. `nibrunner_vm_restore_phase_seconds{phase="..."}` breaks the same restores into
+histograms with sub-millisecond buckets. App readiness checks and request forwarding follow
+the restore and have their own wake and proxy metrics.
+
+| `phase` | Work measured |
+| --- | --- |
+| `snapshot_verify` | Integrity verification, including the wait for its blocking worker. |
+| `compatibility` | Checking the recorded VMM and guest image against the snapshot. |
+| `jail` | Consuming the snapshot stamp and rebuilding the jail. |
+| `resources` | Attaching log and cron channels, setting TAP ownership and linking snapshot files. |
+| `spawn` | Launching the jailed VMM process. |
+| `load` | Loading the snapshot, including waiting for the VMM's API socket. |
+| `resume` | The VMM resume API call. |
+| `clock_sync` | Synchronizing the guest clock and releasing the tenant freeze. |
+| `neighbour` | Refreshing the guest's network neighbour entry. |
+| `cleanup` | Removing consumed snapshot files and temporary links. |

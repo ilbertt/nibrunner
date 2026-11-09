@@ -22,6 +22,55 @@ const SLEEP_BOUNDS_SECONDS: [f64; 13] = [
     0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 7.5, 10.0, 15.0, 30.0, 60.0, 120.0,
 ];
 
+const RESTORE_PHASE_BOUNDS_SECONDS: [f64; 19] = [
+    0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    30.0, 60.0, 120.0,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestorePhase {
+    SnapshotVerify,
+    Compatibility,
+    Jail,
+    Resources,
+    Spawn,
+    Load,
+    Resume,
+    ClockSync,
+    Neighbour,
+    Cleanup,
+}
+
+impl RestorePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SnapshotVerify => "snapshot_verify",
+            Self::Compatibility => "compatibility",
+            Self::Jail => "jail",
+            Self::Resources => "resources",
+            Self::Spawn => "spawn",
+            Self::Load => "load",
+            Self::Resume => "resume",
+            Self::ClockSync => "clock_sync",
+            Self::Neighbour => "neighbour",
+            Self::Cleanup => "cleanup",
+        }
+    }
+}
+
+const RESTORE_PHASES: [RestorePhase; 10] = [
+    RestorePhase::SnapshotVerify,
+    RestorePhase::Compatibility,
+    RestorePhase::Jail,
+    RestorePhase::Resources,
+    RestorePhase::Spawn,
+    RestorePhase::Load,
+    RestorePhase::Resume,
+    RestorePhase::ClockSync,
+    RestorePhase::Neighbour,
+    RestorePhase::Cleanup,
+];
+
 /// A stretch of a wake as the waker sees it: waiting for what `readyWhen` names once the microVM
 /// is back, and the whole of it. Bringing the microVM back is the difference, and the VMM times
 /// its own part of that on `nibrunner_vm_restore_duration_seconds`.
@@ -160,6 +209,7 @@ pub struct SleepWakeMetrics {
     wake_wait: Histogram,
     snapshot: Histogram,
     restore: Histogram,
+    restore_phases: Vec<Histogram>,
     wake: Vec<Histogram>,
     first_response: Histogram,
     coalesced: AtomicU64,
@@ -176,6 +226,10 @@ impl Default for SleepWakeMetrics {
             wake_wait: Histogram::over(&WAKE_BOUNDS_SECONDS),
             snapshot: Histogram::over(&SLEEP_BOUNDS_SECONDS),
             restore: Histogram::over(&WAKE_BOUNDS_SECONDS),
+            restore_phases: RESTORE_PHASES
+                .iter()
+                .map(|_| Histogram::over(&RESTORE_PHASE_BOUNDS_SECONDS))
+                .collect(),
             wake: (0..WAKE_PHASES.len() * WAKE_OUTCOMES.len())
                 .map(|_| Histogram::over(&WAKE_BOUNDS_SECONDS))
                 .collect(),
@@ -230,6 +284,10 @@ impl SleepWakeMetrics {
 
     pub fn restored(&self, took: Duration) {
         self.restore.observe(took);
+    }
+
+    pub(crate) fn restored_phase(&self, phase: RestorePhase, took: Duration) {
+        self.restore_phases[position(&RESTORE_PHASES, &phase)].observe(took);
     }
 
     pub fn wake_refused(&self, refusal: &WakeRefusal) {
@@ -317,6 +375,13 @@ static VM_RESTORE_DURATION_SECONDS: Metric = Metric {
     labels: &[],
 };
 
+static VM_RESTORE_PHASE_SECONDS: Metric = Metric {
+    name: "nibrunner_vm_restore_phase_seconds",
+    help: "Successful native snapshot restores by phase, before application readiness and request forwarding. Snapshot verification includes its blocking-worker wait; load includes waiting for the VMM API socket.",
+    kind: Kind::Histogram,
+    labels: &["phase"],
+};
+
 static WAKE_PHASE_SECONDS: Metric = Metric {
     name: "nibrunner_wake_phase_seconds",
     help: "One wake, by how it was done and the stretch of it: waiting for what readyWhen names once the microVM was back, and the whole. Total less ready is bringing the microVM back; the VMM's own part of that is nibrunner_vm_restore_duration_seconds.",
@@ -398,6 +463,7 @@ pub(super) static DECLARED: &[&Metric] = &[
     &WAKE_DURATION_SECONDS,
     &VM_SNAPSHOT_DURATION_SECONDS,
     &VM_RESTORE_DURATION_SECONDS,
+    &VM_RESTORE_PHASE_SECONDS,
     &WAKE_PHASE_SECONDS,
     &WAKE_REQUESTS_COALESCED_TOTAL,
     &WAKE_FIRST_RESPONSE_SECONDS,
@@ -420,6 +486,11 @@ pub(super) fn render(page: &mut Page, metrics: &SleepWakeMetrics, snapshot: &Hos
 
     page.declare(&VM_RESTORE_DURATION_SECONDS);
     page.histogram(&VM_RESTORE_DURATION_SECONDS, &[], &metrics.restore);
+
+    page.declare(&VM_RESTORE_PHASE_SECONDS);
+    for (phase, histogram) in RESTORE_PHASES.iter().zip(&metrics.restore_phases) {
+        page.histogram(&VM_RESTORE_PHASE_SECONDS, &[("phase", phase.as_str())], histogram);
+    }
 
     page.declare(&WAKE_PHASE_SECONDS);
     for phase in WAKE_PHASES {
@@ -572,6 +643,29 @@ mod tests {
             .refusals
             .iter()
             .all(|count| count.load(Ordering::Relaxed) == 1));
+    }
+
+    #[test]
+    fn restore_phases_have_independent_histograms_with_sub_millisecond_buckets() {
+        let metrics = SleepWakeMetrics::default();
+        metrics.restored_phase(RestorePhase::SnapshotVerify, Duration::from_millis(125));
+        metrics.restored_phase(RestorePhase::Load, Duration::from_micros(3500));
+        metrics.restored_phase(RestorePhase::Load, Duration::from_micros(4500));
+        metrics.restored_phase(RestorePhase::ClockSync, Duration::from_micros(250));
+        let mut page = Page::new();
+        render(&mut page, &metrics, &HostSnapshot::default());
+        let page = page.0;
+
+        assert!(page.contains("# TYPE nibrunner_vm_restore_phase_seconds histogram\n"));
+        assert!(page.contains("nibrunner_vm_restore_phase_seconds_sum{phase=\"snapshot_verify\"} 0.125\n"));
+        assert!(page.contains("nibrunner_vm_restore_phase_seconds_count{phase=\"snapshot_verify\"} 1\n"));
+        assert!(page.contains("nibrunner_vm_restore_phase_seconds_sum{phase=\"load\"} 0.008\n"));
+        assert!(page.contains("nibrunner_vm_restore_phase_seconds_count{phase=\"load\"} 2\n"));
+        assert!(page.contains("nibrunner_vm_restore_phase_seconds_bucket{phase=\"load\",le=\"0.005\"} 2\n"));
+        assert!(page.contains("nibrunner_vm_restore_phase_seconds_sum{phase=\"clock_sync\"} 0.00025\n"));
+        assert!(page
+            .contains("nibrunner_vm_restore_phase_seconds_bucket{phase=\"clock_sync\",le=\"0.00025\"} 1\n"));
+        assert!(page.contains("nibrunner_vm_restore_phase_seconds_count{phase=\"cleanup\"} 0\n"));
     }
 
     #[tokio::test]

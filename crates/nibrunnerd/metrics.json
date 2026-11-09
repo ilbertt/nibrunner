@@ -189,6 +189,14 @@
     "name": "nibrunner_vm_restore_duration_seconds"
   },
   {
+    "help": "Successful native snapshot restores by phase, before application readiness and request forwarding. Snapshot verification includes its blocking-worker wait; load includes waiting for the VMM API socket.",
+    "kind": "histogram",
+    "labels": [
+      "phase"
+    ],
+    "name": "nibrunner_vm_restore_phase_seconds"
+  },
+  {
     "help": "One wake, by how it was done and the stretch of it: waiting for what readyWhen names once the microVM was back, and the whole. Total less ready is bringing the microVM back; the VMM's own part of that is nibrunner_vm_restore_duration_seconds.",
     "kind": "histogram",
     "labels": [
