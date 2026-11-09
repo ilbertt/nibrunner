@@ -80,6 +80,13 @@
     "network"
   ],
   "$defs": {
+    "ExportFormat": {
+      "type": "string",
+      "enum": [
+        "tar-gzip",
+        "directory"
+      ]
+    },
     "StorageFilesystem": {
       "type": "string",
       "enum": [
@@ -127,6 +134,10 @@
       "description": "The store a bundle is put in, and the disk it is assembled on first.",
       "type": "object",
       "properties": {
+        "format": {
+          "description": "`tar-gzip` builds an archive; `directory` publishes the prepared tree to a local store.",
+          "$ref": "#/$defs/ExportFormat"
+        },
         "staging_dir": {
           "description": "A bundle is assembled here and removed after.",
           "type": "string",
@@ -140,6 +151,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "format",
         "store_url",
         "staging_dir"
       ]

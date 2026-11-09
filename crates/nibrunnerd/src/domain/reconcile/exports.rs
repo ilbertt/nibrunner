@@ -3,7 +3,8 @@ use protocol::{
     Timestamp,
 };
 
-use crate::domain::exports::bundle::{dump_volume, write_bundle};
+use crate::config::ExportFormat;
+use crate::domain::exports::bundle::{dump_volume, write_bundle, write_metadata};
 use crate::domain::exports::freeze::frozen;
 use crate::domain::exports::reader::ReaderDevice;
 use crate::domain::metrics::passes::Trigger;
@@ -81,14 +82,14 @@ async fn write(host: &Host, desired: &DesiredExport) -> ReportedExport {
             tracing::info!(
                 export_id = %desired.export_id,
                 object_key = %desired.object_key,
-                size_bytes,
+                size_bytes = ?size_bytes,
                 "export written"
             );
             ReportedExport {
                 export_id: desired.export_id.clone(),
                 checkpoint_id: Some(checkpoint_id),
                 state: ExportState::Ready,
-                size_bytes: Some(size_bytes),
+                size_bytes,
                 ready_at: Some(Timestamp::now()),
                 message: None,
             }
@@ -102,7 +103,7 @@ async fn write_inner(
     desired: &DesiredExport,
     checkpoint_id: &CheckpointId,
     staging_dir: &std::path::Path,
-) -> Result<u64, String> {
+) -> Result<Option<u64>, String> {
     let crontab = registered_crontab(host, &desired.app_id).await?;
     let vsock_path = crate::domain::filesystem::reader::guest_vsock_path(host, &desired.app_id);
     let lease = frozen(&desired.app_id, &vsock_path)
@@ -140,13 +141,35 @@ async fn write_inner(
     }
     read?;
 
-    let bundle = write_bundle(desired.environment.as_ref(), crontab.as_ref(), staging_dir)
-        .map_err(|error| error.message())?;
-    host.exports
-        .upload(&bundle.path, &desired.object_key)
-        .await
-        .map_err(|error| error.message())?;
-    Ok(bundle.size_bytes)
+    publish_export(host, desired, crontab.as_ref(), staging_dir).await
+}
+
+async fn publish_export(
+    host: &Host,
+    desired: &DesiredExport,
+    crontab: Option<&Crontab>,
+    staging_dir: &std::path::Path,
+) -> Result<Option<u64>, String> {
+    match host.config.export_format {
+        ExportFormat::Directory => {
+            write_metadata(desired.environment.as_ref(), crontab, staging_dir)
+                .map_err(|error| error.message())?;
+            host.exports
+                .publish_directory(staging_dir, &desired.object_key)
+                .await
+                .map_err(|error| error.message())?;
+            Ok(None)
+        }
+        ExportFormat::TarGzip => {
+            let bundle = write_bundle(desired.environment.as_ref(), crontab, staging_dir)
+                .map_err(|error| error.message())?;
+            host.exports
+                .upload(&bundle.path, &desired.object_key)
+                .await
+                .map_err(|error| error.message())?;
+            Ok(Some(bundle.size_bytes))
+        }
+    }
 }
 
 async fn registered_crontab(host: &Host, app_id: &AppId) -> Result<Option<Crontab>, String> {
@@ -269,6 +292,49 @@ mod tests {
             environment: None,
             desired_state: state,
         }
+    }
+
+    #[tokio::test]
+    async fn directory_exports_publish_metadata_and_data_without_building_an_archive() {
+        use crate::domain::exports::store::ObjectExportStore;
+
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("prepared");
+        std::fs::create_dir_all(staging.join("data")).unwrap();
+        std::fs::write(staging.join("data/notes"), b"tenant data").unwrap();
+        let destination = root.path().join("published");
+        let mut host = test_host().await;
+        let held = std::sync::Arc::get_mut(&mut host.host).unwrap();
+        held.config.export_format = ExportFormat::Directory;
+        held.exports =
+            std::sync::Arc::new(ObjectExportStore::open(&destination.display().to_string()).unwrap());
+        let mut desired = wanted(DesiredPresence::Present);
+        desired.object_key = ObjectKey::parse("exp-1.export").unwrap();
+        desired.environment = Some(tenant_environment(&[("KEY", "value")]));
+        let crontab = Crontab::parse("@hourly echo hello").unwrap();
+
+        assert_eq!(
+            publish_export(host.arc(), &desired, Some(&crontab), &staging)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let published = destination.join(desired.object_key.as_str());
+        assert_eq!(
+            std::fs::read(published.join("data/notes")).unwrap(),
+            b"tenant data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(published.join(".env")).unwrap(),
+            "KEY=\"value\"\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(published.join("crontab")).unwrap(),
+            crontab.expose()
+        );
+        assert!(!published.join("bundle.tar.gz").exists());
+        assert!(!staging.exists());
     }
 
     async fn asked_for(host: &crate::host::Host, exports: Vec<DesiredExport>) -> ReconcilePlan {
