@@ -24,11 +24,17 @@ impl ExportStoreError {
 #[async_trait]
 pub trait ExportStore: Send + Sync {
     async fn upload(&self, bundle_path: &Path, object_key: &ObjectKey) -> Result<(), ExportStoreError>;
+    async fn publish_directory(
+        &self,
+        directory: &Path,
+        object_key: &ObjectKey,
+    ) -> Result<(), ExportStoreError>;
 }
 
 pub struct ObjectExportStore {
     store: Arc<dyn ObjectStore>,
     prefix: Option<String>,
+    directory: Option<std::path::PathBuf>,
 }
 
 impl ObjectExportStore {
@@ -46,6 +52,7 @@ impl ObjectExportStore {
             return Ok(Self {
                 store: Arc::new(store),
                 prefix: prefix.filter(|prefix| !prefix.is_empty()),
+                directory: None,
             });
         }
         let directory = std::path::PathBuf::from(url);
@@ -56,6 +63,7 @@ impl ObjectExportStore {
         Ok(Self {
             store: Arc::new(store),
             prefix: None,
+            directory: Some(directory),
         })
     }
 
@@ -85,6 +93,45 @@ async fn fill(reader: &mut (impl AsyncReadExt + Unpin), part: &mut [u8]) -> std:
 
 #[async_trait]
 impl ExportStore for ObjectExportStore {
+    async fn publish_directory(&self, source: &Path, object_key: &ObjectKey) -> Result<(), ExportStoreError> {
+        let transfer = |error: &dyn std::fmt::Display| ExportStoreError::Transfer(error.to_string());
+        let root = self
+            .directory
+            .as_ref()
+            .ok_or_else(|| ExportStoreError::Transfer("directory exports require a local store".into()))?;
+        let key = Path::new(object_key.as_str());
+        if key.components().count() != 1
+            || !matches!(key.components().next(), Some(std::path::Component::Normal(_)))
+        {
+            return Err(ExportStoreError::Transfer(
+                "a directory export needs a single filename".into(),
+            ));
+        }
+        let destination = root.join(key);
+        match tokio::fs::symlink_metadata(&destination).await {
+            Ok(metadata) if metadata.is_dir() => return Ok(()),
+            Ok(_) => {
+                return Err(ExportStoreError::Transfer(
+                    "the export path is already occupied".into(),
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(transfer(&error)),
+        }
+        if !tokio::fs::symlink_metadata(source)
+            .await
+            .map_err(|error| transfer(&error))?
+            .is_dir()
+        {
+            return Err(ExportStoreError::Transfer(
+                "the prepared export is not a directory".into(),
+            ));
+        }
+        tokio::fs::rename(source, destination)
+            .await
+            .map_err(|error| transfer(&error))
+    }
+
     async fn upload(&self, bundle_path: &Path, object_key: &ObjectKey) -> Result<(), ExportStoreError> {
         let transfer = |error: &dyn std::fmt::Display| ExportStoreError::Transfer(error.to_string());
         let mut file = tokio::fs::File::open(bundle_path)
@@ -120,6 +167,69 @@ impl ExportStore for ObjectExportStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_prepared_directory_is_published_without_an_archive_or_following_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("prepared");
+        std::fs::create_dir_all(source.join("data")).unwrap();
+        std::fs::write(source.join("data/notes"), b"tenant data").unwrap();
+        std::fs::write(source.join(".env"), b"KEY=value").unwrap();
+        symlink("/outside", source.join("data/link")).unwrap();
+        let destination = root.path().join("exports");
+        let store = ObjectExportStore::open(&destination.display().to_string()).unwrap();
+        let key = ObjectKey::parse("exp-1.export").unwrap();
+
+        store.publish_directory(&source, &key).await.unwrap();
+
+        let published = destination.join(key.as_str());
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::read(published.join("data/notes")).unwrap(),
+            b"tenant data"
+        );
+        assert_eq!(
+            std::fs::read_link(published.join("data/link")).unwrap(),
+            Path::new("/outside")
+        );
+        assert_eq!(std::fs::read(published.join(".env")).unwrap(), b"KEY=value");
+        assert!(!published.join("bundle.tar.gz").exists());
+        store.publish_directory(&source, &key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_directory_key_cannot_escape_or_descend_into_a_previously_published_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ObjectExportStore::open(&root.path().display().to_string()).unwrap();
+        for key in ["/outside", "../outside", "existing/data/link/escape", ".", ".."] {
+            assert!(store
+                .publish_directory(root.path(), &ObjectKey::parse(key).unwrap())
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_directory_publication_never_replaces_a_file_or_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = ObjectExportStore::open(&root.path().display().to_string()).unwrap();
+        let source = root.path().join("prepared");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(root.path().join("occupied"), b"retained").unwrap();
+        symlink(&source, root.path().join("linked")).unwrap();
+        for key in ["occupied", "linked"] {
+            assert!(store
+                .publish_directory(&source, &ObjectKey::parse(key).unwrap())
+                .await
+                .is_err());
+        }
+        assert!(source.exists());
+        assert_eq!(std::fs::read(root.path().join("occupied")).unwrap(), b"retained");
+    }
 
     // A file read off a page cache hands back what it has, so the reader here gives up a page at a
     // time — which is what the store saw when it refused a 2 MiB part against its 5 MiB floor.
