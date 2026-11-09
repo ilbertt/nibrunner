@@ -17,7 +17,7 @@ const MAX_HOLD: Duration = Duration::from_secs(900);
 const TENANT_LEASE: Duration = Duration::from_millis(guest_contract::control::TENANT_FREEZE_LEASE_MS);
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(guest_contract::control::TENANT_CONTROL_TIMEOUT_MS);
 
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 pub(crate) fn serve() -> ! {
     let Ok(listener) = vsock::listener(guest_contract::vsock::GUEST_CONTROL_VSOCK_PORT) else {
@@ -34,20 +34,26 @@ pub(crate) fn serve() -> ! {
     {
         log("the control listener could not be made nonblocking");
         loop {
-            std::thread::sleep(POLL_INTERVAL);
+            std::thread::sleep(ERROR_BACKOFF);
         }
     }
     let mut frozen_until = None;
     loop {
-        if frozen_until.is_some_and(|deadline| Instant::now() >= deadline)
-            && std::fs::write(TENANT_FREEZE, "0").is_ok()
-        {
+        if frozen_until.is_some_and(|deadline| Instant::now() >= deadline) {
+            if std::fs::write(TENANT_FREEZE, "0").is_err() {
+                std::thread::sleep(ERROR_BACKOFF);
+                continue;
+            }
             frozen_until = None;
             log("the host abandoned the tenant freeze; the tenant has been released");
         }
-        match vsock::accept_from_host(&listener) {
-            Ok(connection) => answer(connection, &mut frozen_until),
-            Err(_) => std::thread::sleep(POLL_INTERVAL),
+        match crate::control_wait::readable(&listener, frozen_until) {
+            Ok(true) => match vsock::accept_from_host(&listener) {
+                Ok(connection) => answer(connection, &mut frozen_until),
+                Err(_) => std::thread::sleep(ERROR_BACKOFF),
+            },
+            Ok(false) => {}
+            Err(_) => std::thread::sleep(ERROR_BACKOFF),
         }
     }
 }
@@ -109,16 +115,11 @@ fn answer(connection: OwnedFd, frozen_until: &mut Option<Instant>) {
         return;
     }
     let deadline = Instant::now() + MAX_HOLD;
-    let mut byte = [0u8; 1];
-    loop {
-        match read_would_block(&mut wire, &mut byte) {
-            Held::Gone => break,
-            Held::Still if Instant::now() >= deadline => {
-                log("a freeze was held past its ceiling and has been taken back");
-                break;
-            }
-            Held::Still => std::thread::sleep(POLL_INTERVAL),
-        }
+    if matches!(
+        crate::control_wait::readable(wire.get_ref(), Some(deadline)),
+        Ok(false)
+    ) {
+        log("a freeze was held past its ceiling and has been taken back");
     }
     thaw_quietly();
 }
@@ -168,28 +169,6 @@ fn set_clock(nanos: u128) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
-}
-
-enum Held {
-    Still,
-    Gone,
-}
-
-fn read_would_block(wire: &mut BufReader<std::fs::File>, byte: &mut [u8; 1]) -> Held {
-    use std::os::fd::AsRawFd;
-    let mut poll = libc::pollfd {
-        fd: wire.get_ref().as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let ready = unsafe { libc::poll(&raw mut poll, 1, 0) };
-    if ready <= 0 {
-        return Held::Still;
-    }
-    match std::io::Read::read(wire.get_mut(), byte) {
-        Ok(0) | Err(_) => Held::Gone,
-        Ok(_) => Held::Gone,
-    }
 }
 
 pub(crate) fn freeze(mount_point: &str) -> std::io::Result<()> {
