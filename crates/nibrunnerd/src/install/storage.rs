@@ -254,11 +254,12 @@ fn prepare_device(storage: &HostStorage) -> Result<Prepared, InstallError> {
             device.display(),
             storage.filesystem.as_str()
         );
-        output(
-            Command::new(format!("mkfs.{}", storage.filesystem.as_str()))
-                .arg("-q")
-                .arg(&device),
-        )?;
+        let mut format = Command::new(format!("mkfs.{}", storage.filesystem.as_str()));
+        format.arg("-q");
+        if storage.filesystem == crate::config::StorageFilesystem::Ext4 {
+            format.args(["-O", "verity"]);
+        }
+        output(format.arg(&device))?;
     }
     crate::json_store::make_directory(&storage.mount_point, 0o755).map_err(io_error)?;
     Ok(Prepared {

@@ -40,6 +40,10 @@ discarding unrecognized raw contents. Use a dedicated device. Cryptographically 
 contain nonzero bytes, so initialization does not require a zero-filled device.
 `--force` never authorizes reformatting an existing filesystem.
 
+New ext4 filesystems have the `verity` feature enabled so individual snapshot files can use
+[fs-verity](https://www.kernel.org/doc/html/latest/filesystems/fsverity.html).
+Existing ext4 filesystems are preserved without changing their features.
+
 Install `util-linux`, `mount`, and the filesystem's tools (`e2fsprogs` or `xfsprogs`); the release
 installer includes them. The managed device and mount point must use normalized absolute paths
 with letters, digits, `/`, `_`, `.`, `:` or `-`. The mount point cannot be `/`.
