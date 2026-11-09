@@ -7,6 +7,7 @@ pub enum VmExit {
 
 // Firecracker v1.16.1 catches SIGBUS and exits with FcExitCode::SIGBUS rather than under the signal.
 pub(crate) const FIRECRACKER_SIGBUS_EXIT_CODE: i32 = 149;
+pub(crate) const FIRECRACKER_RUNTIME_ERROR_EXIT_CODE: i32 = 1;
 
 impl VmExit {
     pub fn is_memory_fault(self) -> bool {
@@ -50,11 +51,13 @@ pub const UNKNOWN_VM: VmStatus = VmStatus {
 };
 
 impl VmStatus {
-    pub(crate) fn memory_fault(self) -> bool {
+    pub(crate) fn host_failure(self) -> bool {
         !self.active
             && self.failed
             && self.started_this_boot
-            && self.exit.is_some_and(VmExit::is_memory_fault)
+            && self.exit.is_some_and(|exit| {
+                exit.is_memory_fault() || exit == VmExit::Code(FIRECRACKER_RUNTIME_ERROR_EXIT_CODE)
+            })
     }
 }
 

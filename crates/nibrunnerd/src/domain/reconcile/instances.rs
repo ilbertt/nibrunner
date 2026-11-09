@@ -383,7 +383,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     let statuses = host.vms.statuses(std::slice::from_ref(&desired.app_id)).await;
     let reason = if statuses
         .get(&desired.app_id)
-        .is_some_and(|status| status.memory_fault())
+        .is_some_and(|status| status.host_failure())
     {
         BootReason::HostRecovery
     } else {
@@ -1169,12 +1169,13 @@ mod tests {
         );
         assert_eq!(host.state.record(&app_id()).await.unwrap().start_attempts, window);
 
+        host.vms.set_verdict("the tenant exited with code 1");
         host.vms.set_status(VmStatus {
             active: false,
-            failed: true,
+            failed: false,
             loaded: true,
             started_this_boot: true,
-            exit: Some(VmExit::Code(1)),
+            exit: Some(VmExit::Code(0)),
         });
         refresh_states(host.arc()).await;
         start_instance(&host, &desired).await;
@@ -1217,10 +1218,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_host_memory_fault_replaces_the_vm_without_spending_the_apps_restart_budget() {
-        use crate::adapters::vm::status::FIRECRACKER_SIGBUS_EXIT_CODE;
+    async fn a_hypervisor_runtime_failure_replaces_the_vm_without_spending_the_apps_restart_budget() {
+        use crate::adapters::vm::status::{
+            FIRECRACKER_RUNTIME_ERROR_EXIT_CODE, FIRECRACKER_SIGBUS_EXIT_CODE,
+        };
 
         for exit in [
+            VmExit::Code(FIRECRACKER_RUNTIME_ERROR_EXIT_CODE),
             VmExit::Code(FIRECRACKER_SIGBUS_EXIT_CODE),
             VmExit::Signal(libc::SIGBUS),
         ] {
