@@ -130,7 +130,14 @@ async fn verity_memory_restores_and_lost_verity_cold_boots_without_spending_the_
         200
     );
     assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
-    let window = host.host.state.record(&app.app_id).await.unwrap().start_attempts;
+    let initial_attempts = host
+        .host
+        .state
+        .record(&app.app_id)
+        .await
+        .unwrap()
+        .start_attempts
+        .attempts;
     host.let_sleep(&app).await;
     let paths = snapshot_paths(&host.host.config.snapshot_dir, &app.app_id);
     let manifest: serde_json::Value = nibrunnerd::json_store::read_json(&paths.stamp_path)
@@ -154,8 +161,14 @@ async fn verity_memory_restores_and_lost_verity_cold_boots_without_spending_the_
     assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
     assert_eq!(host.get(&app, "/read?path=kept").await.unwrap().body, "durable");
     assert_eq!(
-        host.host.state.record(&app.app_id).await.unwrap().start_attempts,
-        window
+        host.host
+            .state
+            .record(&app.app_id)
+            .await
+            .unwrap()
+            .start_attempts
+            .attempts,
+        initial_attempts
     );
     host.until_state(&app.app_id, InstanceState::Running).await;
     host.let_sleep(&app).await;
@@ -171,8 +184,14 @@ async fn verity_memory_restores_and_lost_verity_cold_boots_without_spending_the_
     );
     assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
     assert_eq!(
-        host.host.state.record(&app.app_id).await.unwrap().start_attempts,
-        window
+        host.host
+            .state
+            .record(&app.app_id)
+            .await
+            .unwrap()
+            .start_attempts
+            .attempts,
+        initial_attempts
     );
     host.stop().await;
 }
