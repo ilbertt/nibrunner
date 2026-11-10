@@ -1,5 +1,18 @@
 # Changelog
 
+## [2026.11.6] - 2026-11-10
+
+### Features
+
+- **vm:** Verify snapshot memory with fs-verity (#319)
+- **storage:** Seal and measure fs-verity files (#315)
+- **storage:** Enable verity on new ext4 host filesystems (#314)
+
+### Fixes
+
+- **vm:** Recover from hypervisor runtime failures (#318)
+- **vm:** Preserve restart budgets when replacing snapshots (#317)
+
 ## [2026.11.5] - 2026-11-09
 
 ### Features
