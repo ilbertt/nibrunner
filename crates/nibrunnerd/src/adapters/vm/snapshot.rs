@@ -311,7 +311,15 @@ const HASH_BUFFER_BYTES: usize = 65_536;
 #[serde(rename_all = "camelCase")]
 struct SnapshotFile {
     bytes: u64,
-    sha256: String,
+    #[serde(flatten)]
+    integrity: SnapshotIntegrity,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SnapshotIntegrity {
+    Sha256(String),
+    FsVeritySha256(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -342,7 +350,7 @@ fn hash_file(file: &mut std::fs::File) -> std::io::Result<SnapshotFile> {
     }
     Ok(SnapshotFile {
         bytes,
-        sha256: hex::encode(digest.finalize()),
+        integrity: SnapshotIntegrity::Sha256(hex::encode(digest.finalize())),
     })
 }
 
@@ -353,6 +361,29 @@ fn seal_file(path: &Path) -> Result<SnapshotFile, VmError> {
     let integrity = hash_file(&mut file).map_err(failed)?;
     file.sync_all().map_err(failed)?;
     Ok(integrity)
+}
+
+fn seal_memory(path: &Path) -> Result<SnapshotFile, VmError> {
+    let seal = || -> std::io::Result<SnapshotFile> {
+        let mut file = std::fs::File::open(path)?;
+        let bytes = file.metadata()?.len();
+        if bytes == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the file is empty",
+            ));
+        }
+        let integrity = match crate::adapters::fs_verity::seal(&file)? {
+            Some(digest) => SnapshotFile {
+                bytes,
+                integrity: SnapshotIntegrity::FsVeritySha256(hex::encode(digest)),
+            },
+            None => hash_file(&mut file)?,
+        };
+        file.sync_all()?;
+        Ok(integrity)
+    };
+    seal().map_err(|error| VmError::Host(format!("{} could not be committed: {error}", path.display())))
 }
 
 fn sync_directory(path: &Path) -> Result<(), VmError> {
@@ -376,7 +407,7 @@ impl StagedSnapshot {
         let manifest = SnapshotManifest {
             stamp,
             state: seal_file(&self.paths.state_path)?,
-            memory: seal_file(&self.paths.memory_path)?,
+            memory: seal_memory(&self.paths.memory_path)?,
         };
         write_json(&self.paths.stamp_path, &manifest).map_err(|error| VmError::Host(error.message()))?;
         std::fs::File::open(&self.paths.stamp_path)
@@ -407,12 +438,18 @@ fn verify_file(path: &Path, expected: &SnapshotFile) -> Result<(), VmError> {
         if file.metadata()?.len() != expected.bytes {
             return Ok(false);
         }
-        Ok(hash_file(&mut file)? == *expected)
+        let integrity = match &expected.integrity {
+            SnapshotIntegrity::Sha256(_) => hash_file(&mut file)?.integrity,
+            SnapshotIntegrity::FsVeritySha256(_) => {
+                SnapshotIntegrity::FsVeritySha256(hex::encode(crate::adapters::fs_verity::measure(&file)?))
+            }
+        };
+        Ok(integrity == expected.integrity)
     };
     let reason = match verify() {
         Ok(true) => return Ok(()),
         Ok(false) => format!(
-            "{} no longer matches its recorded size or SHA-256",
+            "{} no longer matches its recorded size or SHA-256 integrity digest",
             path.display()
         ),
         Err(error) => format!("{} could not be verified: {error}", path.display()),
@@ -648,10 +685,10 @@ mod tests {
             let damaged = paths.directory.join(filename);
             let mut bytes = std::fs::read(&damaged).unwrap();
             bytes[0] ^= 1;
+            std::fs::remove_file(&damaged).unwrap();
             std::fs::write(&damaged, bytes).unwrap();
             let error = ensure_loadable(&paths, &stamp()).unwrap_err();
             assert!(error.message().contains(filename), "{error}");
-            assert!(error.message().contains("SHA-256"), "{error}");
         }
     }
 
@@ -665,6 +702,7 @@ mod tests {
                 if missing {
                     std::fs::remove_file(&damaged).unwrap();
                 } else {
+                    std::fs::remove_file(&damaged).unwrap();
                     std::fs::write(&damaged, b"x").unwrap();
                 }
                 let error = ensure_loadable(&paths, &stamp()).unwrap_err();
@@ -681,6 +719,31 @@ mod tests {
         write_json(&paths.stamp_path, &stamp()).unwrap();
         let error = ensure_loadable(&paths, &stamp()).unwrap_err();
         assert!(error.message().contains("integrity record"), "{error}");
+    }
+
+    #[test]
+    fn legacy_sha256_memory_records_remain_loadable() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = published_snapshot(directory.path());
+        let mut manifest: SnapshotManifest = read_json(&paths.stamp_path).unwrap().unwrap();
+        manifest.memory = hash_file(&mut std::fs::File::open(&paths.memory_path).unwrap()).unwrap();
+        write_json(&paths.stamp_path, &manifest).unwrap();
+        ensure_loadable(&paths, &stamp()).unwrap();
+        let json: serde_json::Value = read_json(&paths.stamp_path).unwrap().unwrap();
+        assert!(json["memory"]["sha256"].is_string());
+        assert!(json["memory"].get("fsVeritySha256").is_none());
+    }
+
+    #[test]
+    fn a_verity_record_never_falls_back_to_a_full_file_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = published_snapshot(directory.path());
+        std::fs::remove_file(&paths.memory_path).unwrap();
+        std::fs::write(&paths.memory_path, b"memory").unwrap();
+        let mut manifest: SnapshotManifest = read_json(&paths.stamp_path).unwrap().unwrap();
+        manifest.memory.integrity = SnapshotIntegrity::FsVeritySha256(hex::encode(Sha256::digest(b"memory")));
+        write_json(&paths.stamp_path, &manifest).unwrap();
+        assert!(ensure_loadable(&paths, &stamp()).is_err());
     }
 
     #[test]
@@ -735,8 +798,20 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let paths = published_snapshot(directory.path());
         let manifest: SnapshotManifest = read_json(&paths.stamp_path).unwrap().unwrap();
-        assert_eq!(manifest.state.sha256, hex::encode(Sha256::digest(b"state")));
-        assert_eq!(manifest.memory.sha256, hex::encode(Sha256::digest(b"memory")));
+        assert_eq!(
+            manifest.state.integrity,
+            SnapshotIntegrity::Sha256(hex::encode(Sha256::digest(b"state")))
+        );
+        match manifest.memory.integrity {
+            SnapshotIntegrity::Sha256(digest) => assert_eq!(digest, hex::encode(Sha256::digest(b"memory"))),
+            SnapshotIntegrity::FsVeritySha256(digest) => assert_eq!(
+                digest,
+                hex::encode(
+                    crate::adapters::fs_verity::measure(&std::fs::File::open(&paths.memory_path).unwrap())
+                        .unwrap()
+                )
+            ),
+        }
         ensure_loadable(&paths, &stamp()).unwrap();
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }

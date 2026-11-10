@@ -14,6 +14,188 @@ const ANSWERED_WITHIN: Duration = Duration::from_secs(15);
 /// the timer.
 const IDLE_TIMEOUT_MS: u64 = 60_000;
 
+struct SnapshotFilesystem {
+    _directory: tempfile::TempDir,
+    mount: std::path::PathBuf,
+}
+
+fn snapshot_filesystem_command(command: &mut std::process::Command) -> String {
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+impl SnapshotFilesystem {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let image = directory.path().join("snapshots.ext4");
+        std::fs::File::create(&image)
+            .unwrap()
+            .set_len(16 * 1024 * 1024 * 1024)
+            .unwrap();
+        let mount = directory.path().join("mount");
+        std::fs::create_dir(&mount).unwrap();
+        for command in [
+            std::process::Command::new("mkfs.ext4")
+                .args(["-q", "-O", "verity"])
+                .arg(&image),
+            std::process::Command::new("mount")
+                .args(["-o", "loop"])
+                .arg(&image)
+                .arg(&mount),
+        ] {
+            snapshot_filesystem_command(command);
+        }
+        Self {
+            _directory: directory,
+            mount,
+        }
+    }
+
+    fn corrupt_verity_root(&self, memory: &std::path::Path) {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        // ext4 stores the root-first Merkle tree at the next 64 KiB boundary after EOF.
+        let tree_offset = std::fs::metadata(memory).unwrap().len().div_ceil(65_536) * 65_536;
+        let block_size = nix::sys::statvfs::statvfs(&self.mount).unwrap().fragment_size();
+        let relative = memory.strip_prefix(&self.mount).unwrap();
+        let device = snapshot_filesystem_command(
+            std::process::Command::new("findmnt")
+                .args(["--noheadings", "--output", "SOURCE", "--mountpoint"])
+                .arg(&self.mount),
+        );
+        assert!(device.starts_with("/dev/loop"), "{device}");
+        let mut disk = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&device)
+            .unwrap();
+        snapshot_filesystem_command(std::process::Command::new("umount").arg(&self.mount));
+        let request = format!("bmap /{} {}", relative.display(), tree_offset / block_size);
+        let block: u64 = snapshot_filesystem_command(
+            std::process::Command::new("debugfs")
+                .args(["-R", &request])
+                .arg(&device),
+        )
+        .parse()
+        .unwrap();
+        assert_ne!(block, 0);
+        let offset = block * block_size;
+        disk.seek(SeekFrom::Start(offset)).unwrap();
+        let mut byte = [0];
+        disk.read_exact(&mut byte).unwrap();
+        byte[0] ^= 1;
+        disk.seek(SeekFrom::Start(offset)).unwrap();
+        disk.write_all(&byte).unwrap();
+        disk.sync_all().unwrap();
+        snapshot_filesystem_command(std::process::Command::new("mount").arg(&device).arg(&self.mount));
+    }
+}
+
+impl Drop for SnapshotFilesystem {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("umount").arg(&self.mount).status();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verity_memory_restores_and_lost_verity_cold_boots_without_spending_the_restart_budget() {
+    use nibrunnerd::adapters::vm::snapshot::snapshot_paths;
+
+    let mut filesystem = None;
+    let Some(host) = crate::host_with(|config| {
+        let disk = SnapshotFilesystem::new();
+        config.snapshot_dir = disk.mount.join("vm");
+        filesystem = Some(disk);
+    })
+    .await
+    else {
+        return;
+    };
+    let app = host
+        .tenant(1)
+        .on_request(IDLE_TIMEOUT_MS)
+        .edited(|instance| instance.config.restart_policy.max_restarts = 0);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(&app, "/write?path=kept&body=durable")
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
+    let initial_attempts = host
+        .host
+        .state
+        .record(&app.app_id)
+        .await
+        .unwrap()
+        .start_attempts
+        .attempts;
+    host.let_sleep(&app).await;
+    let paths = snapshot_paths(&host.host.config.snapshot_dir, &app.app_id);
+    let manifest: serde_json::Value = nibrunnerd::json_store::read_json(&paths.stamp_path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(manifest["memory"]["fsVeritySha256"].as_str().unwrap().len(), 64);
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(&paths.memory_path)
+        .is_err());
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "2");
+    host.let_sleep(&app).await;
+
+    let bytes = std::fs::metadata(&paths.memory_path).unwrap().len();
+    let replacement = paths.directory.join("replacement");
+    std::fs::File::create(&replacement)
+        .unwrap()
+        .set_len(bytes)
+        .unwrap();
+    std::fs::rename(&replacement, &paths.memory_path).unwrap();
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
+    assert_eq!(host.get(&app, "/read?path=kept").await.unwrap().body, "durable");
+    assert_eq!(
+        host.host
+            .state
+            .record(&app.app_id)
+            .await
+            .unwrap()
+            .start_attempts
+            .attempts,
+        initial_attempts
+    );
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    host.let_sleep(&app).await;
+    let digest =
+        nibrunnerd::adapters::fs_verity::measure(&std::fs::File::open(&paths.memory_path).unwrap()).unwrap();
+    filesystem
+        .as_ref()
+        .unwrap()
+        .corrupt_verity_root(&paths.memory_path);
+    assert_eq!(
+        nibrunnerd::adapters::fs_verity::measure(&std::fs::File::open(&paths.memory_path).unwrap()).unwrap(),
+        digest
+    );
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
+    assert_eq!(
+        host.host
+            .state
+            .record(&app.app_id)
+            .await
+            .unwrap()
+            .start_attempts
+            .attempts,
+        initial_attempts
+    );
+    host.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_requests_restore_one_guest_and_every_caller_is_answered() {
     const CALLERS: u64 = 32;
@@ -168,14 +350,16 @@ async fn a_corrupt_snapshot_cold_boots_the_app_and_still_answers_the_request() {
         assert_eq!(host.get(&app, "/remember").await.expect("an answer").body, "2");
         host.let_sleep(&app).await;
         let paths = snapshot_paths(&host.host.config.snapshot_dir, &app.app_id);
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(paths.directory.join(filename))
-            .unwrap();
+        let path = paths.directory.join(filename);
+        let mut file = std::fs::File::open(&path).unwrap();
+        let bytes = file.metadata().unwrap().len();
         let mut byte = [0];
         file.read_exact(&mut byte).unwrap();
         byte[0] ^= 1;
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.set_len(bytes).unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
         file.write_all(&byte).unwrap();
         drop(file);

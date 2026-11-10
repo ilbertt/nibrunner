@@ -74,14 +74,20 @@ If an older guest's init does not support the freeze protocol, the host refuses 
 after its normal backoff. Redeploy the app to start it with the new guest image.
 
 The host commits a snapshot only after its state, memory and integrity record have been synced
-to disk. It verifies both files' sizes and SHA-256 hashes before restoring. A missing, damaged or
+to disk. It checks both files' sizes and the state file's SHA-256 hash before restoring.
+On filesystems supporting fs-verity, memory is sealed during publication: wake compares its
+fs-verity digest, and the kernel verifies pages as they are read. Other filesystems retain full
+SHA-256 verification of memory on each wake. Existing SHA-256 snapshots remain readable.
+An fs-verity page error can surface after resume. The host replaces the memory-faulted VM from
+cold without spending the app's restart window.
+A missing, damaged or
 older snapshot without integrity records is discarded; the request starts the app from cold
 instead. Files on its volume survive, but in-memory state does not.
 
 <Callout title="Snapshot cost">
-  Hashing reads the state and memory once during sleep and once during wake. The guest stays
-  paused until the snapshot is committed, so a failed commit can resume it without losing memory.
-  This adds disk reads and latency proportional to the app's memory allocation.
+  Both paths read memory during sleep. Only full-file SHA-256 verification reads all memory again
+  before wake; fs-verity measures its digest in constant time. The guest stays paused until the
+  snapshot is committed, so a failed commit can resume it without losing memory.
 </Callout>
 
 ## Restore timings

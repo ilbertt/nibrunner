@@ -1593,11 +1593,15 @@ mod tests {
         staged
             .publish(&paths, fixture.manager.current_stamp(&request))
             .unwrap();
+        std::fs::remove_file(&paths.memory_path).unwrap();
         std::fs::write(&paths.memory_path, b"broken").unwrap();
 
         let error = fixture.manager.wake(request).await.unwrap_err();
         assert!(matches!(error, VmError::SnapshotUnusable { .. }), "{error}");
-        assert!(error.message().contains("SHA-256"), "{error}");
+        assert!(
+            error.message().contains(&paths.memory_path.display().to_string()),
+            "{error}"
+        );
         assert!(fixture.manager.processes.read_record(&app_id()).is_none());
         assert!(!paths.directory.exists());
     }
