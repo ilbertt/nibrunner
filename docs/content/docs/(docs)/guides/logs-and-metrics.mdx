@@ -34,12 +34,13 @@ there are no registrations.
 Each app's output goes to `<paths.state_dir>/logs/<appId>.jsonl`, one JSON record per event:
 
 ```json
-{"appId":"app-1","deploymentId":"dep-1","sourceId":"session-1","sequence":42,"observedAt":"2026-09-16T10:41:07.318Z","kind":"data","stream":"stdout","text":"listening on :3000"}
+{"appId":"app-1","deploymentId":"dep-1","sourceId":"session-1","sequence":42,"observedAt":"2026-09-16T10:41:07.318Z","kind":"data","stream":"stdout","text":"listening on :3000\n"}
 ```
 
 Each record preserves the app, deployment, source, sequence and observation time. Its `kind`
-identifies output, cron output, a buffering gap or a tenant restart. Embedded newlines remain
-inside one JSON record. The [tenant log reference](/docs/reference/tenant-log) lists every field
+identifies output, cron output, a buffering gap or a tenant restart. Output text preserves
+whitespace and LF or CRLF line endings inside the JSON string. Partial output is emitted
+without adding a newline. The [tenant log reference](/docs/reference/tenant-log) lists every field
 from the generated schema. Clients parse these records to display or format the output.
 
 The host keeps the newest 256 MiB per app, in two files. When `<appId>.jsonl` reaches the limit it

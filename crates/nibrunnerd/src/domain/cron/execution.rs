@@ -58,6 +58,7 @@ impl CronRunOutput {
         let mut lines = Vec::new();
         for byte in bytes {
             if *byte == b'\n' {
+                held.push(*byte);
                 lines.push(String::from_utf8_lossy(held).into_owned());
                 held.clear();
             } else {
@@ -124,13 +125,28 @@ mod tests {
         let mut first = output();
         assert!(first.receive(TenantLogStream::Stdout, &[0xc3]).is_empty());
         let events = first.receive(TenantLogStream::Stdout, &[0xa9, b'\n', b'x']);
-        assert_eq!(text(&events[0]), "é");
+        assert_eq!(text(&events[0]), "é\n");
         assert_eq!(events[0].sequence, 0);
         let tail = first.close();
         assert_eq!(text(&tail[0]), "x");
         assert_eq!(tail[0].sequence, 1);
         assert_eq!(tail[0].source_id, events[0].source_id);
         assert!(!events[0].source_id.contains("secret"));
+    }
+
+    #[test]
+    fn both_streams_preserve_whitespace_and_line_endings_across_every_frame_boundary() {
+        let input = "  ☃\t\r\n\n\r\ncarriage\rreturn\n tail ";
+        for stream in [TenantLogStream::Stdout, TenantLogStream::Stderr] {
+            for split in 0..=input.len() {
+                let mut run = output();
+                let mut events = run.receive(stream, &input.as_bytes()[..split]);
+                events.extend(run.receive(stream, &input.as_bytes()[split..]));
+                events.extend(run.close());
+                let restored: String = events.iter().map(text).collect();
+                assert_eq!(restored, input, "{stream:?} split at {split}");
+            }
+        }
     }
 
     #[test]
