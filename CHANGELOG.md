@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.11.7] - 2026-11-11
+
+### Fixes
+
+- **logs:** Preserve tenant line endings (#321)
+
 ## [2026.11.6] - 2026-11-10
 
 ### Features
