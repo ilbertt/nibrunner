@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufWriter, ErrorKind, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -74,6 +75,30 @@ impl FileLogSink {
         self.directory.join(format!("{app_id}.jsonl"))
     }
 
+    fn lock_directory(&self) -> std::io::Result<File> {
+        let directory = File::open(&self.directory)?;
+        // A directory retains its inode when the log files underneath it rotate.
+        directory.lock()?;
+        Ok(directory)
+    }
+
+    fn refresh_writer(&self, writers: &mut BTreeMap<AppId, AppLog>, app_id: &AppId) {
+        let Some(log) = writers.get_mut(app_id) else {
+            return;
+        };
+        match (
+            log.writer.get_ref().metadata(),
+            std::fs::metadata(self.path_for(app_id)),
+        ) {
+            (Ok(open), Ok(current)) if open.dev() == current.dev() && open.ino() == current.ino() => {
+                log.size = open.len();
+            }
+            _ => {
+                writers.remove(app_id);
+            }
+        }
+    }
+
     /// What `<appId>.jsonl` held before the last cut.
     pub fn previous_path_for(&self, app_id: &AppId) -> PathBuf {
         previous_path(&self.path_for(app_id))
@@ -86,6 +111,17 @@ impl FileLogSink {
     /// output it never wrote.
     pub fn discard(&self, app_id: &AppId) {
         let mut writers = self.writers.lock().expect("no panic holds the log writer lock");
+        let _lock = match self.lock_directory() {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                writers.remove(app_id);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%app_id, %error, "tenant logs could not be locked for removal");
+                return;
+            }
+        };
         drop(writers.remove(app_id));
         // Old hosts may still have text logs to remove when an app leaves.
         for path in [
@@ -131,14 +167,24 @@ impl LogSink for FileLogSink {
         if events.is_empty() {
             return;
         }
+        if let Err(error) = make_directory(&self.directory, LOG_DIR_MODE) {
+            tracing::warn!(%error, "tenant logs have nowhere to go");
+            return;
+        }
         let mut writers = self.writers.lock().expect("no panic holds the log writer lock");
+        let _lock = match self.lock_directory() {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(%error, "tenant log writers could not be locked");
+                return;
+            }
+        };
         let mut touched: BTreeSet<AppId> = BTreeSet::new();
+        for app_id in events.iter().map(|event| &event.app_id).collect::<BTreeSet<_>>() {
+            self.refresh_writer(&mut writers, app_id);
+        }
         for event in events {
             if !writers.contains_key(&event.app_id) {
-                if let Err(error) = make_directory(&self.directory, LOG_DIR_MODE) {
-                    tracing::warn!(%error, "tenant logs have nowhere to go");
-                    continue;
-                }
                 match AppLog::open(&self.path_for(&event.app_id)) {
                     Ok(log) => {
                         writers.insert(event.app_id.clone(), log);
@@ -210,6 +256,55 @@ mod tests {
     /// A sink with a cap no test here reaches.
     fn unbounded(logs: PathBuf) -> FileLogSink {
         FileLogSink::new(logs, u64::MAX)
+    }
+
+    #[tokio::test]
+    async fn a_cached_writer_reopens_the_current_file_after_another_writer_rotates() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = unbounded(directory.path().to_path_buf());
+        let rotating = FileLogSink::new(directory.path().to_path_buf(), 1);
+        let before = event(TenantLogBody::Gap { dropped_bytes: 1 }, 0);
+        let cut = event(TenantLogBody::Gap { dropped_bytes: 2 }, 1);
+        let after = event(TenantLogBody::Gap { dropped_bytes: 3 }, 2);
+        first.publish(vec![before.clone()]).await;
+        rotating.publish(vec![cut.clone()]).await;
+        first.publish(vec![after.clone()]).await;
+        let previous: Vec<TenantLogEvent> = std::fs::read_to_string(first.previous_path_for(&app_id()))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let current: Vec<TenantLogEvent> = std::fs::read_to_string(first.path_for(&app_id()))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(previous, vec![before, cut]);
+        assert_eq!(current, vec![after]);
+    }
+
+    #[tokio::test]
+    async fn rotation_counts_bytes_appended_by_another_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let events: Vec<_> = (0..3)
+            .map(|n| event(TenantLogBody::Gap { dropped_bytes: 1 }, n))
+            .collect();
+        let cap = events
+            .iter()
+            .map(|event| serde_json::to_vec(event).unwrap().len() as u64 + 1)
+            .sum();
+        let first = FileLogSink::new(directory.path().to_path_buf(), cap);
+        let second = FileLogSink::new(directory.path().to_path_buf(), cap);
+        first.publish(vec![events[0].clone()]).await;
+        second.publish(vec![events[1].clone()]).await;
+        first.publish(vec![events[2].clone()]).await;
+        assert!(!first.path_for(&app_id()).exists());
+        let written: Vec<TenantLogEvent> = std::fs::read_to_string(first.previous_path_for(&app_id()))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(written, events);
     }
 
     #[tokio::test]
@@ -393,7 +488,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_handle_is_kept_open_so_a_later_batch_does_not_reopen_the_path() {
+    async fn a_batch_after_external_rotation_writes_to_the_current_path() {
         let directory = tempfile::tempdir().unwrap();
         let logs = directory.path().join("logs");
         let sink = unbounded(logs.clone());
@@ -406,8 +501,6 @@ mod tests {
         )])
         .await;
 
-        // Move the file out of the way. A sink that reopened the path per batch would make a new
-        // one here; a sink that holds the handle open keeps writing to the same inode.
         let moved = logs.join("app-1.jsonl.moved");
         std::fs::rename(sink.path_for(&app_id()), &moved).unwrap();
         sink.publish(vec![event(
@@ -421,11 +514,10 @@ mod tests {
 
         let written = std::fs::read_to_string(&moved).unwrap();
         assert!(written.contains("before"), "{written}");
-        assert!(written.contains("after"), "{written}");
-        assert!(
-            !sink.path_for(&app_id()).exists(),
-            "a held-open handle is not a fresh open of the path"
-        );
+        assert!(!written.contains("after"), "{written}");
+        let current = std::fs::read_to_string(sink.path_for(&app_id())).unwrap();
+        assert!(current.contains("after"), "{current}");
+        assert!(!current.contains("before"), "{current}");
     }
 
     #[tokio::test]
@@ -583,7 +675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_file_moved_out_from_under_the_handle_is_not_the_sinks_to_keep_at_the_cut() {
+    async fn rotation_after_an_external_rename_keeps_the_archived_file_untouched() {
         let directory = tempfile::tempdir().unwrap();
         let logs = directory.path().join("logs");
         let sink = FileLogSink::new(logs.clone(), 2 * line_bytes());
@@ -591,12 +683,11 @@ mod tests {
         let moved = logs.join("app-1.jsonl.moved");
         std::fs::rename(sink.path_for(&app_id()), &moved).unwrap();
 
-        // The held-open handle takes the line that reaches the cap; the cut then finds nothing at
-        // the path, and the next line starts afresh there.
         sink.publish(vec![line(1)]).await;
         sink.publish(vec![line(2)]).await;
-        assert_eq!(lines_in(&moved), ["000", "001"]);
-        assert_eq!(lines_in(&sink.path_for(&app_id())), ["002"]);
-        assert_eq!(files_in(&logs), ["app-1.jsonl", "app-1.jsonl.moved"]);
+        assert_eq!(lines_in(&moved), ["000"]);
+        assert_eq!(lines_in(&sink.previous_path_for(&app_id())), ["001", "002"]);
+        assert!(!sink.path_for(&app_id()).exists());
+        assert_eq!(files_in(&logs), ["app-1.jsonl.1", "app-1.jsonl.moved"]);
     }
 }
