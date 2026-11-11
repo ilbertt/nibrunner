@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(guest.await.unwrap(), [wire::ACK; 3]);
         let events = sink.0.lock().unwrap();
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0].body, TenantLogBody::CronData { text, .. } if text == "hello"));
+        assert!(matches!(&events[0].body, TenantLogBody::CronData { text, .. } if text == "hello\n"));
         assert!(matches!(&events[1].body, TenantLogBody::CronData { text, .. } if text == "last words"));
         assert!(events.iter().all(|event| event.source_id == events[0].source_id));
     }

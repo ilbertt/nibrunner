@@ -259,8 +259,6 @@ impl OpenLines {
         !self.stdout.is_empty() || !self.stderr.is_empty()
     }
 
-    /// Takes in what the guest forwarded, handing over each line it ends without its newline and
-    /// keeping whatever follows the last one.
     fn extend(
         &mut self,
         stream: TenantLogStream,
@@ -271,9 +269,9 @@ impl OpenLines {
         let mut rest = bytes;
         while let Some(at) = rest.iter().position(|&byte| byte == b'\n') {
             let text = if held.is_empty() {
-                lossy(&rest[..at])
+                lossy(&rest[..=at])
             } else {
-                held.extend_from_slice(&rest[..at]);
+                held.extend_from_slice(&rest[..=at]);
                 let text = lossy(held);
                 held.clear();
                 text
@@ -358,6 +356,39 @@ mod tests {
         panic!("the receiver never saw what the guest wrote");
     }
 
+    #[test]
+    fn whitespace_and_line_endings_survive_every_frame_boundary() {
+        let input = "  ☃\t\r\n\n\r\ncarriage\rreturn\n tail ";
+        for stream in [TenantLogStream::Stdout, TenantLogStream::Stderr] {
+            for split in 0..=input.len() {
+                let mut lines = OpenLines::default();
+                let mut output = Vec::new();
+                let mut emit = |received, text| {
+                    assert_eq!(received, stream);
+                    output.push(text);
+                };
+                lines.extend(stream, &input.as_bytes()[..split], &mut emit);
+                lines.extend(stream, &input.as_bytes()[split..], &mut emit);
+                lines.close(&mut emit);
+                assert_eq!(output.concat(), input, "{stream:?} split at {split}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_idle_flush_does_not_add_or_remove_a_later_line_ending() {
+        let mut lines = OpenLines::default();
+        let mut output = Vec::new();
+        let mut emit = |_, text| output.push(text);
+        lines.extend(TenantLogStream::Stdout, b"prompt> ", &mut emit);
+        lines.flush(&mut emit);
+        lines.extend(TenantLogStream::Stdout, b"\r", &mut emit);
+        lines.flush(&mut emit);
+        lines.extend(TenantLogStream::Stdout, b"\ntail", &mut emit);
+        lines.close(&mut emit);
+        assert_eq!(output.concat(), "prompt> \r\ntail");
+    }
+
     #[tokio::test]
     async fn what_a_guest_writes_arrives_as_events_in_order() {
         let directory = tempfile::tempdir().unwrap();
@@ -386,7 +417,7 @@ mod tests {
             events[0].body,
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "listening".into()
+                text: "listening\n".into()
             }
         );
         assert_eq!(events[1].body, TenantLogBody::Gap { dropped_bytes: 4096 });
@@ -427,7 +458,7 @@ mod tests {
             vec![
                 TenantLogBody::Data {
                     stream: TenantLogStream::Stderr,
-                    text: "out of memory".into()
+                    text: "out of memory\n".into()
                 },
                 TenantLogBody::Data {
                     stream: TenantLogStream::Stderr,
@@ -436,7 +467,7 @@ mod tests {
                 TenantLogBody::Restart(tenant_restart(|_| {})),
                 TenantLogBody::Data {
                     stream: TenantLogStream::Stdout,
-                    text: "listening".into()
+                    text: "listening\n".into()
                 },
             ]
         );
@@ -472,7 +503,7 @@ mod tests {
             spy.events()[0].body,
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "☃".into()
+                text: "☃\n".into()
             }
         );
     }
@@ -508,7 +539,7 @@ mod tests {
             spy.events()[0].body,
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "☃".into()
+                text: "☃\n".into()
             }
         );
     }
@@ -543,7 +574,7 @@ mod tests {
             events[0].body,
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "line 1359 of 100000".into()
+                text: "line 1359 of 100000\n".into()
             }
         );
     }
@@ -578,10 +609,10 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                (0, "one".to_string()),
-                (1, "two".to_string()),
-                (2, String::new()),
-                (3, "four".to_string())
+                (0, "one\n".to_string()),
+                (1, "two\n".to_string()),
+                (2, "\n".to_string()),
+                (3, "four\n".to_string())
             ]
         );
         assert!(events
@@ -616,14 +647,14 @@ mod tests {
             events[0].body,
             TenantLogBody::Data {
                 stream: TenantLogStream::Stderr,
-                text: "warning".into()
+                text: "warning\n".into()
             }
         );
         assert_eq!(
             events[1].body,
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "partial".into()
+                text: "partial\n".into()
             }
         );
     }
@@ -663,10 +694,10 @@ mod tests {
         assert_eq!(
             bodies,
             vec![
-                line("one"),
+                line("one\n"),
                 line("tw"),
                 TenantLogBody::Gap { dropped_bytes: 512 },
-                line("o")
+                line("o\n")
             ],
             "what follows a gap is not the rest of the line before it"
         );
@@ -711,7 +742,7 @@ mod tests {
             spy.events()[1].body,
             TenantLogBody::Data {
                 stream: TenantLogStream::Stdout,
-                text: "ada".into()
+                text: "ada\n".into()
             },
             "what comes after the idle is a line of its own"
         );
@@ -861,7 +892,7 @@ mod tests {
                 event.body,
                 TenantLogBody::Data {
                     stream: TenantLogStream::Stdout,
-                    text: format!("line {number} of 100000 at 1789308052995"),
+                    text: format!("line {number} of 100000 at 1789308052995\n"),
                 },
                 "{line}"
             );

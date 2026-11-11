@@ -147,7 +147,7 @@ fn lines_written(held: &str) -> Vec<u64> {
     held.lines()
         .filter_map(|record| serde_json::from_str::<TenantLogEvent>(record).ok())
         .filter_map(|event| match event.body {
-            TenantLogBody::Data { text, .. } => text.strip_prefix("line ")?.parse().ok(),
+            TenantLogBody::Data { text, .. } => text.strip_prefix("line ")?.strip_suffix('\n')?.parse().ok(),
             _ => None,
         })
         .collect()

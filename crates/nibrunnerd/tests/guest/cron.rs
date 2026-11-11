@@ -34,8 +34,7 @@ impl Output {
                 }
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
     }
 }
 
