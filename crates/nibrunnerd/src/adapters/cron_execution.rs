@@ -34,6 +34,28 @@ pub enum CronExecutionError {
     Cancelled,
 }
 
+pub struct VsockCronExecution {
+    logs: std::sync::Arc<dyn LogSink>,
+}
+
+impl VsockCronExecution {
+    pub fn new(logs: std::sync::Arc<dyn LogSink>) -> Self {
+        Self { logs }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ports::CronExecution for VsockCronExecution {
+    async fn run<'a>(
+        &'a self,
+        socket: &'a Path,
+        run: ScheduledRun,
+        cancellation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> Result<CronExitStatus, CronExecutionError> {
+        GuestCronExecution::run(socket, run, self.logs.as_ref(), cancellation).await
+    }
+}
+
 pub struct GuestCronExecution;
 
 impl GuestCronExecution {

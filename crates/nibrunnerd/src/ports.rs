@@ -327,6 +327,19 @@ pub enum VmCall {
     DeleteTap,
 }
 
+#[async_trait]
+pub trait CronExecution: Send + Sync {
+    async fn run<'a>(
+        &'a self,
+        socket: &'a std::path::Path,
+        run: crate::domain::cron::scheduler::ScheduledRun,
+        cancellation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> Result<
+        crate::adapters::cron_execution::CronExitStatus,
+        crate::adapters::cron_execution::CronExecutionError,
+    >;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
