@@ -5,13 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyper::body::Incoming;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use hyper_util::server::conn::auto;
 use protocol::{AccessPolicy, AppId, DeploymentId, HostPort};
-use tokio::net::{TcpListener, TcpStream};
 
 use crate::domain::metrics::{HostMetrics, Outcome};
 use tokio::sync::RwLock;
@@ -23,7 +18,6 @@ use crate::adapters::proxy::http_log::{HttpRequestLog, HttpRequestRecord};
 use crate::adapters::proxy::jwks::{self, JwksCache};
 use crate::adapters::proxy::jwt::{JwtVerifier, PolicyError};
 use crate::adapters::proxy::pem;
-use crate::domain::metrics::proxy::Handshake;
 use crate::domain::report::routes::RouteTarget;
 
 const LOOPBACK: &str = "127.0.0.1";
@@ -33,7 +27,7 @@ const LOOPBACK: &str = "127.0.0.1";
 // held for as long as its opener likes. The header alone, and the same ten seconds nibrun's edge
 // gives, because a tenant's slow upload and its streaming response are the tenant's to take as
 // long over as their own users need.
-const GREETING_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const GREETING_TIMEOUT: Duration = Duration::from_secs(10);
 
 // The app behind a hostname, not just the port: a request is measured against the tenant it was
 // for, and the port alone cannot say which that is.
@@ -118,7 +112,7 @@ pub struct Router {
     fallback: Option<crate::config::HttpFallback>,
     routes: RwLock<Arc<RouteTable>>,
     upstreams: Upstreams,
-    metrics: Arc<HostMetrics>,
+    pub(super) metrics: Arc<HostMetrics>,
     http_log: Option<Arc<HttpRequestLog>>,
     concurrency: Option<super::concurrency::ConcurrencyLimiter>,
     jwks: JwksCache,
@@ -373,42 +367,16 @@ impl Router {
     }
 }
 
-// A reply leaves this proxy as more than one write — the headers, then the body, and under TLS the
-// records carrying them. With Nagle still on, the second write waits for an ACK the other end has
-// already decided to delay, so a visitor pays about 40ms for an answer the tenant produced in two.
-// The connector to the tenant is already nodelay; the leg the visitor is on was not.
-fn without_nagle(stream: TcpStream) -> TcpStream {
+pub(super) fn without_nagle(stream: tokio::net::TcpStream) -> tokio::net::TcpStream {
     let _ = stream.set_nodelay(true);
     stream
 }
 
 pub async fn serve_http(router: Arc<Router>, address: SocketAddr) -> std::io::Result<()> {
-    let listener = TcpListener::bind(address).await?;
-    tracing::info!(%address, "the proxy is listening");
-    loop {
-        let Ok((stream, peer)) = listener.accept().await else {
-            continue;
-        };
-        let stream = without_nagle(stream);
-        let router = router.clone();
-        tokio::spawn(async move {
-            let arrival = Arrival {
-                server_name: None,
-                peer: peer.ip(),
-                secure: false,
-            };
-            let service = service_fn(move |request| {
-                let (router, arrival) = (router.clone(), arrival.clone());
-                async move { Ok::<_, std::convert::Infallible>(router.handle(request, arrival).await) }
-            });
-            let _ = http1::Builder::new()
-                .timer(TokioTimer::new())
-                .header_read_timeout(GREETING_TIMEOUT)
-                .serve_connection(TokioIo::new(stream), service)
-                .with_upgrades()
-                .await;
-        });
-    }
+    super::listener::HttpListener::bind(router, address, None)
+        .await?
+        .serve(std::future::pending())
+        .await
 }
 
 pub async fn serve_https(
@@ -417,55 +385,13 @@ pub async fn serve_https(
     acceptor: tokio_rustls::TlsAcceptor,
     client_ca: Option<&Path>,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(address).await?;
-    match client_ca {
-        Some(pool) => tracing::info!(
-            %address,
-            trust_pool = %pool.display(),
-            "the proxy is listening for TLS, and refuses a caller that presents no certificate of its own"
-        ),
-        None => tracing::info!(
-            %address,
-            "the proxy is listening for TLS, and serves whoever reaches this address"
-        ),
+    if let Some(pool) = client_ca {
+        tracing::info!(trust_pool = %pool.display(), "the proxy requires a client certificate");
     }
-    loop {
-        let Ok((stream, peer)) = listener.accept().await else {
-            continue;
-        };
-        let stream = without_nagle(stream);
-        let router = router.clone();
-        let acceptor = acceptor.clone();
-        tokio::spawn(async move {
-            let stream = match tokio::time::timeout(GREETING_TIMEOUT, acceptor.accept(stream)).await {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(_)) => {
-                    router.metrics.proxy.handshake(Handshake::Failed);
-                    return;
-                }
-                Err(_) => {
-                    router.metrics.proxy.handshake(Handshake::TimedOut);
-                    return;
-                }
-            };
-            router.metrics.proxy.handshake(Handshake::Completed);
-            let arrival = Arrival {
-                server_name: stream.get_ref().1.server_name().map(Arc::from),
-                peer: peer.ip(),
-                secure: true,
-            };
-            let service = service_fn(move |request| {
-                let (router, arrival) = (router.clone(), arrival.clone());
-                async move { Ok::<_, std::convert::Infallible>(router.handle(request, arrival).await) }
-            });
-            let _ = auto::Builder::new(TokioExecutor::new())
-                .http1()
-                .timer(TokioTimer::new())
-                .header_read_timeout(GREETING_TIMEOUT)
-                .serve_connection_with_upgrades(TokioIo::new(stream), service)
-                .await;
-        });
-    }
+    super::listener::HttpListener::bind(router, address, Some(acceptor))
+        .await?
+        .serve(std::future::pending())
+        .await
 }
 
 fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> std::io::Error {
@@ -519,6 +445,10 @@ pub fn tls_acceptor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio::net::{TcpListener, TcpStream};
 
     #[tokio::test]
     async fn a_visitor_never_waits_on_an_ack_the_other_end_is_delaying() {
