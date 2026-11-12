@@ -61,7 +61,7 @@ impl LayerMetrics {
 
 static LAYER_PREPARATION_PHASE_SECONDS: Metric = Metric {
     name: "nibrunner_layer_preparation_phase_seconds",
-    help: "Cache-miss layer preparation by stage: reading an artifact, verifying its digest, packing an executable, and publishing its image. Cache hits do not repeat these stages. OCI extraction has its own storage operation.",
+    help: "Cache-miss layer preparation by stage: reading an artifact, verifying its digest, packing an executable directly to a staged file, and publishing its image. Cache hits do not repeat these stages. OCI extraction has its own storage operation.",
     kind: Kind::Histogram,
     labels: &["phase", "outcome"],
 };
