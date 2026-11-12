@@ -528,6 +528,7 @@ async fn test_host_over(
             artifacts,
             config.artifact_cache_dir(),
             commands.clone(),
+            metrics.clone(),
         ),
         repositories,
         exports,

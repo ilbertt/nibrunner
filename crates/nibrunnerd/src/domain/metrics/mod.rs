@@ -1,6 +1,7 @@
 pub mod conntrack;
 pub mod converge;
 pub mod health;
+pub mod layers;
 pub mod passes;
 pub mod proxy;
 pub mod resources;
@@ -31,6 +32,7 @@ pub struct HostMetrics {
     pub passes: PassMetrics,
     pub health: HealthMetrics,
     pub resources: ResourceMetrics,
+    pub layers: layers::LayerMetrics,
     pub conntrack: ConntrackWatch,
 }
 
@@ -351,6 +353,7 @@ pub fn declared() -> Vec<&'static Metric> {
         converge::DECLARED,
         health::DECLARED,
         resources::DECLARED,
+        layers::DECLARED,
         conntrack::DECLARED,
     ]
     .concat()
@@ -380,6 +383,7 @@ pub fn page_of_every_series() -> String {
 pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     let (report, snapshot, now_ms) = (scrape.report, scrape.snapshot, scrape.now_ms);
     let mut page = Page::new();
+    layers::render(&mut page, &metrics.layers);
 
     page.declare(&UP);
     page.value(&UP, &[], 1);

@@ -7,9 +7,11 @@ use backhand::compression::{CompressionOptions, Compressor, Zstd};
 use backhand::{FilesystemCompressor, FilesystemWriter, NodeHeader};
 use protocol::{DesiredLayer, OciSource};
 
+use crate::domain::metrics::layers::LayerPhase;
+use crate::domain::metrics::HostMetrics;
 use crate::json_store::make_directory;
 use crate::ports::{
-    ArtifactError, ArtifactStore, ArtifactStoreExt, CommandRunner, PayloadBuilder, PreparedPayload,
+    verify_artifact, ArtifactError, ArtifactStore, CommandRunner, PayloadBuilder, PreparedPayload,
 };
 
 mod oci;
@@ -107,6 +109,7 @@ pub struct LayerImages {
     store: Arc<dyn ArtifactStore>,
     cache_dir: PathBuf,
     commands: Arc<dyn CommandRunner>,
+    metrics: Arc<HostMetrics>,
 }
 
 impl LayerImages {
@@ -114,11 +117,13 @@ impl LayerImages {
         store: Arc<dyn ArtifactStore>,
         cache_dir: PathBuf,
         commands: Arc<dyn CommandRunner>,
+        metrics: Arc<HostMetrics>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             cache_dir,
             commands,
+            metrics,
         })
     }
 }
@@ -129,7 +134,9 @@ impl PayloadBuilder for LayerImages {
         let mut layer_image_paths = Vec::with_capacity(layers.len());
         let mut fetched_bytes = 0;
         for layer in layers {
-            let image = ensure_layer_image(&self.store, &self.cache_dir, layer, &self.commands).await?;
+            let image =
+                ensure_layer_image(&self.store, &self.cache_dir, layer, &self.commands, &self.metrics)
+                    .await?;
             layer_image_paths.push(image.path);
             fetched_bytes += image.fetched_bytes;
         }
@@ -152,6 +159,7 @@ pub async fn ensure_layer_image(
     cache_dir: &Path,
     layer: &DesiredLayer,
     commands: &Arc<dyn CommandRunner>,
+    metrics: &HostMetrics,
 ) -> Result<LayerImage, ArtifactError> {
     let image_path = layer_image_path(cache_dir, layer);
     if image_path.exists() {
@@ -180,7 +188,18 @@ pub async fn ensure_layer_image(
         }
         | DesiredLayer::Filesystem { object }
         | DesiredLayer::Executable { object, .. } => {
-            let bytes = store.read_verified(object).await?;
+            let reading = std::time::Instant::now();
+            let result = store.read(&object.object_key).await;
+            metrics
+                .layers
+                .observed(LayerPhase::Read, result.is_ok(), reading.elapsed());
+            let bytes = result?;
+            let verifying = std::time::Instant::now();
+            let result = verify_artifact(&bytes, object);
+            metrics
+                .layers
+                .observed(LayerPhase::Verify, result.is_ok(), verifying.elapsed());
+            result?;
             let fetched_bytes = bytes.len() as u64;
             (bytes, fetched_bytes)
         }
@@ -200,22 +219,21 @@ pub async fn ensure_layer_image(
             })
         }
         DesiredLayer::Executable { destination_path, .. } => {
-            pack(&[(destination_path.as_str(), &bytes, BINARY_MODE)])?
+            let packing = std::time::Instant::now();
+            let result = pack(&[(destination_path.as_str(), &bytes, BINARY_MODE)]);
+            metrics
+                .layers
+                .observed(LayerPhase::Pack, result.is_ok(), packing.elapsed());
+            result?
         }
     };
 
-    let directory = image_path
-        .parent()
-        .expect("the image is one level inside the cache");
-    make_directory(directory, CACHE_DIR_MODE)
-        .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    let filename = image_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("the image has a name");
-    let staged = directory.join(format!("{filename}.{}.tmp", std::process::id()));
-    std::fs::write(&staged, &image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    std::fs::rename(&staged, &image_path).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+    let publishing = std::time::Instant::now();
+    let result = publish_image(&image_path, &image);
+    metrics
+        .layers
+        .observed(LayerPhase::Publish, result.is_ok(), publishing.elapsed());
+    result?;
     tracing::info!(
         digest = %layer.digest(),
         size_bytes = fetched_bytes,
@@ -227,6 +245,22 @@ pub async fn ensure_layer_image(
         path: image_path,
         fetched_bytes,
     })
+}
+
+fn publish_image(image_path: &Path, image: &[u8]) -> Result<(), ArtifactError> {
+    let directory = image_path
+        .parent()
+        .expect("the image is one level inside the cache");
+    make_directory(directory, CACHE_DIR_MODE)
+        .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+    let filename = image_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("the image has a name");
+    let staged = directory.join(format!("{filename}.{}.tmp", std::process::id()));
+    std::fs::write(&staged, image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+    std::fs::rename(&staged, image_path).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+    Ok(())
 }
 
 pub fn build_instance_config_image(working_dir: &Path, rendered: &str) -> Result<PathBuf, ArtifactError> {
@@ -251,6 +285,7 @@ pub fn build_instance_config_image(working_dir: &Path, rendered: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::ArtifactStoreExt;
     use crate::test_support::mocks;
     use crate::test_support::{base_layer, layer, ARTIFACT_BYTES, ARTIFACT_DIGEST, BASE_LAYER_BYTES};
     use protocol::{ExecutablePath, Sha256Digest};
@@ -282,7 +317,7 @@ mod tests {
         layer: &DesiredLayer,
     ) -> Result<LayerImage, ArtifactError> {
         let commands: Arc<dyn CommandRunner> = mocks::commands_succeeding().0;
-        super::ensure_layer_image(store, cache_dir, layer, &commands).await
+        super::ensure_layer_image(store, cache_dir, layer, &commands, &HostMetrics::new()).await
     }
 
     fn read_back(image: &[u8], path: &str) -> Vec<u8> {
@@ -327,6 +362,62 @@ mod tests {
         assert_eq!(std::fs::metadata(&image_path).unwrap().len(), before);
         let siblings = std::fs::read_dir(image_path.parent().unwrap()).unwrap().count();
         assert_eq!(siblings, 1);
+    }
+
+    fn phase_page(metrics: &HostMetrics) -> String {
+        crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            metrics,
+            &crate::state::HostSnapshot::default(),
+            0,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cache_hit_does_not_repeat_layer_preparation_measurements() {
+        let directory = tempfile::tempdir().unwrap();
+        let metrics = Arc::new(HostMetrics::new());
+        let images = LayerImages::new(
+            store(artifact_bytes()),
+            directory.path().to_path_buf(),
+            mocks::commands_succeeding().0,
+            metrics.clone(),
+        );
+        images.prepare(&[layer(|_| {})]).await.unwrap();
+        images.prepare(&[layer(|_| {})]).await.unwrap();
+
+        let page = phase_page(&metrics);
+        for phase in ["read", "verify", "pack", "publish"] {
+            assert!(page.contains(&format!(
+                "nibrunner_layer_preparation_phase_seconds_count{{phase=\"{phase}\",outcome=\"ok\"}} 1\n"
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_digest_mismatch_is_measured_without_packing_or_publishing() {
+        let directory = tempfile::tempdir().unwrap();
+        let metrics = Arc::new(HostMetrics::new());
+        let images = LayerImages::new(
+            store(b"wrong program".to_vec()),
+            directory.path().to_path_buf(),
+            mocks::commands_succeeding().0,
+            metrics.clone(),
+        );
+        assert!(matches!(
+            images.prepare(&[layer(|_| {})]).await,
+            Err(ArtifactError::DigestMismatch { .. })
+        ));
+
+        let page = phase_page(&metrics);
+        assert!(page.contains(
+            "nibrunner_layer_preparation_phase_seconds_count{phase=\"verify\",outcome=\"failed\"} 1\n"
+        ));
+        for phase in ["pack", "publish"] {
+            assert!(page.contains(&format!(
+                "nibrunner_layer_preparation_phase_seconds_count{{phase=\"{phase}\",outcome=\"ok\"}} 0\n"
+            )));
+        }
     }
 
     #[tokio::test]
@@ -473,6 +564,7 @@ mod tests {
             Arc::new(store),
             directory.path().to_path_buf(),
             mocks::commands_succeeding().0,
+            Arc::new(HostMetrics::new()),
         );
         let prepared = images.prepare(&[base_layer(), layer(|_| {})]).await.unwrap();
         assert_eq!(

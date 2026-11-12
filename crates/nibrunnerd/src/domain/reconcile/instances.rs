@@ -1445,9 +1445,10 @@ mod tests {
         let cache_dir = host.config.artifact_cache_dir();
         let refusing = mocks::artifacts_refusing(crate::ports::ArtifactError::Transfer(reason.to_string()));
         let commands = host.host.commands.clone();
+        let metrics = host.metrics.clone();
         Arc::get_mut(&mut host.host)
             .expect("nothing else holds this host yet")
-            .payloads = crate::adapters::vm::layers::LayerImages::new(refusing, cache_dir, commands);
+            .payloads = crate::adapters::vm::layers::LayerImages::new(refusing, cache_dir, commands, metrics);
     }
 
     fn on_request() -> DesiredInstance {

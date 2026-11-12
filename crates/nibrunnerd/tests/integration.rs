@@ -103,11 +103,16 @@ async fn an_oci_filesystem_preserves_root_and_inode_metadata_in_its_read_only_la
         }),
     };
     let store: Arc<dyn nibrunnerd::ports::ArtifactStore> = mocks::artifacts_holding(archive);
-    let image =
-        nibrunnerd::adapters::vm::layers::ensure_layer_image(&store, directory.path(), &layer, &commands())
-            .await
-            .unwrap()
-            .path;
+    let image = nibrunnerd::adapters::vm::layers::ensure_layer_image(
+        &store,
+        directory.path(),
+        &layer,
+        &commands(),
+        &nibrunnerd::domain::metrics::HostMetrics::new(),
+    )
+    .await
+    .unwrap()
+    .path;
     for (path, mode, attribute) in [
         ("/", "0750", "root"),
         ("/app", "0755", "directory"),
@@ -166,11 +171,16 @@ async fn a_ustar_layer_preserves_long_file_paths_and_short_hardlinks() {
     };
     let directory = tempfile::tempdir().unwrap();
     let store: Arc<dyn nibrunnerd::ports::ArtifactStore> = mocks::artifacts_holding(archive);
-    let image =
-        nibrunnerd::adapters::vm::layers::ensure_layer_image(&store, directory.path(), &layer, &commands())
-            .await
-            .unwrap()
-            .path;
+    let image = nibrunnerd::adapters::vm::layers::ensure_layer_image(
+        &store,
+        directory.path(),
+        &layer,
+        &commands(),
+        &nibrunnerd::domain::metrics::HostMetrics::new(),
+    )
+    .await
+    .unwrap()
+    .path;
     for path in ["alias", original.as_str()] {
         assert_eq!(debugfs(&image, &format!("cat /{path}")).await, "from OCI");
         let metadata = debugfs(&image, &format!("stat /{path}")).await;

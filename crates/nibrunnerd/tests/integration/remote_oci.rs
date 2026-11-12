@@ -40,7 +40,13 @@ async fn verify_image(name: &str, tag: &str) {
     println!("Pulling {name}:{tag} at sha256:{} into a fresh cache", pin.digest);
     let image = tokio::time::timeout(
         Duration::from_secs(600),
-        ensure_layer_image(&store, cache.path(), &layer, &commands),
+        ensure_layer_image(
+            &store,
+            cache.path(),
+            &layer,
+            &commands,
+            &nibrunnerd::domain::metrics::HostMetrics::new(),
+        ),
     )
     .await
     .expect("registry pull and filesystem preparation finish within ten minutes")
@@ -59,9 +65,15 @@ async fn verify_image(name: &str, tag: &str) {
         ]))
         .await
         .expect("the complete assembled ext4 filesystem is clean");
-    let cached = ensure_layer_image(&store, cache.path(), &layer, &commands)
-        .await
-        .unwrap();
+    let cached = ensure_layer_image(
+        &store,
+        cache.path(),
+        &layer,
+        &commands,
+        &nibrunnerd::domain::metrics::HostMetrics::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(cached.path, image.path);
     assert_eq!(cached.fetched_bytes, 0);
     println!(
