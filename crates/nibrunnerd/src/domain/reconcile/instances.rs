@@ -403,6 +403,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
 }
 
 async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReason) -> BootOutcome {
+    let _starting = host.state.guest_start(&desired.app_id);
     let now = now_ms();
     let existing = host.state.record(&desired.app_id).await;
     let recovery_window = existing
@@ -604,6 +605,7 @@ pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<W
     if status.get(&desired.app_id).copied().unwrap_or(UNKNOWN_VM).active {
         return Ok(WakeOutcome::AlreadyRunning);
     }
+    let _starting = host.state.guest_start(&desired.app_id);
 
     // The snapshot carries the guest's page cache, so a guest restored onto a device that no
     // longer answers serves reads from memory and only finds out when it writes. The device is
@@ -752,7 +754,8 @@ async fn settle(
     snapshotting: bool,
     now_ms: i64,
 ) {
-    let health = if status.active && due {
+    // A live VMM can precede guest networking; an early TCP connect can wait for a SYN retransmission.
+    let health = if status.active && due && !host.state.has_guest_start(&record.app_id) {
         let probed = std::time::Instant::now();
         let outcome = if !asks_the_port(&record.health, &record.health_check) {
             // A boot-completed tenant found listening is asked nothing more: that its microVM is
@@ -2050,6 +2053,39 @@ mod tests {
         let long_lived = exited_after(reset_after_ms).await;
         assert_eq!(long_lived.state, InstanceState::Failed);
         assert_eq!(long_lived.start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn an_active_vmm_is_not_probed_until_its_start_finishes_and_adopted_guests_still_are() {
+        let host = test_host().await;
+        host.vms.set_status(up());
+        let port = listening().await;
+        host.state
+            .put_record(instance_record(|record| {
+                record.state = InstanceState::Pending;
+                record.started_at = None;
+                record.health_check = protocol::HealthCheck::BootCompleted;
+                record.guest_ipv4 = Some(crate::domain::health::probe::loopback());
+                record.http_port = port;
+            }))
+            .await;
+        let starting = host.state.guest_start(&app_id());
+
+        refresh_states(host.arc()).await;
+
+        let health = host.metrics.health.of(&app_id());
+        assert_eq!((health.probes_healthy, health.probes_unhealthy), (0, 0));
+        assert!(!host.state.record(&app_id()).await.unwrap().health.ever_healthy);
+        drop(starting);
+
+        refresh_states(host.arc()).await;
+
+        let health = host.metrics.health.of(&app_id());
+        assert_eq!((health.probes_healthy, health.probes_unhealthy), (1, 0));
+        assert_eq!(
+            host.state.record(&app_id()).await.unwrap().state,
+            InstanceState::Running
+        );
     }
 
     #[tokio::test]
