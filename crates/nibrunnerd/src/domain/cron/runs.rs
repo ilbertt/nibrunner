@@ -79,6 +79,32 @@ pub struct CronRuns {
 }
 
 impl CronRuns {
+    pub fn active_for(&self, app_id: &AppId) -> usize {
+        lock(&self.owners)
+            .get(app_id)
+            .map_or(0, |owner| lock(&owner.active).cancellations.len())
+    }
+
+    pub async fn start_owned(&self, app_id: &AppId, deployment_id: &DeploymentId) -> Option<CronRunLease> {
+        let _mutation = self.mutation.lock().await;
+        let mut owners = lock(&self.owners);
+        if self.stopping.load(Ordering::Acquire) {
+            return None;
+        }
+        let replace = match owners.get(app_id) {
+            Some(owner) if owner.deployment_id == *deployment_id && lock(&owner.active).accepting => false,
+            Some(owner) if !lock(&owner.active).cancellations.is_empty() => return None,
+            _ => true,
+        };
+        if replace {
+            owners.insert(
+                app_id.clone(),
+                Arc::new(DeploymentRuns::new(deployment_id.clone())),
+            );
+        }
+        owners.get(app_id).and_then(|owner| owner.start())
+    }
+
     pub fn start(&self, app_id: &AppId, deployment_id: &DeploymentId) -> Option<CronRunLease> {
         let owners = lock(&self.owners);
         if self.stopping.load(Ordering::Acquire) {
@@ -191,6 +217,18 @@ mod tests {
     use super::*;
     use crate::test_support::{app_id, deployment_id};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn owned_runs_reject_a_replacement_until_the_previous_deployment_finishes() {
+        let runs = CronRuns::default();
+        let lease = runs.start_owned(&app_id(), &deployment_id()).await.unwrap();
+        assert_eq!(runs.active_for(&app_id()), 1);
+        let next = DeploymentId::parse("dep-2").unwrap();
+        assert!(runs.start_owned(&app_id(), &next).await.is_none());
+        drop(lease);
+        assert_eq!(runs.active_for(&app_id()), 0);
+        assert!(runs.start_owned(&app_id(), &next).await.is_some());
+    }
 
     #[tokio::test]
     async fn runs_may_overlap_and_the_same_deployment_keeps_them_owned() {

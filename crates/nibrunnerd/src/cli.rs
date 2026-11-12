@@ -14,6 +14,11 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
+    #[command(hide = true)]
+    CronWorker {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     #[command(about = "Lay out the host, including configured storage, without starting its services")]
     Install {
         #[arg(long, help = "Replace files these commands did not write")]

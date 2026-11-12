@@ -14,7 +14,7 @@ use crate::ports::LogSink;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_REPLY_MAX_BYTES: u64 = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CronExitStatus {
     pub code: u32,
     pub signal: u32,
@@ -22,6 +22,10 @@ pub struct CronExitStatus {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CronExecutionError {
+    #[error("the cron execution worker could not be reached")]
+    WorkerUnavailable,
+    #[error("cron execution failed in its worker: {0}")]
+    WorkerFailed(String),
     #[error("the guest connection closed before cron execution completed")]
     Disconnected,
     #[error("the guest sent a malformed cron execution reply")]

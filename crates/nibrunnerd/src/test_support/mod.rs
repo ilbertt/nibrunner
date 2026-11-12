@@ -1,3 +1,4 @@
+pub mod cron_worker;
 #[cfg(target_os = "linux")]
 pub mod egress;
 pub mod guest_connections;

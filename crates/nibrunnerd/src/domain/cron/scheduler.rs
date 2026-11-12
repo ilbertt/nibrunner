@@ -3,17 +3,18 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use protocol::{AppId, CronJobDefinition, CronTable, DeploymentId};
+use serde::{Deserialize, Serialize};
 
 use super::schedule::{InvalidCronSchedule, ParsedSchedule};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct JobKey {
     pub app_id: AppId,
     pub deployment_id: DeploymentId,
     pub index: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledRun {
     pub key: JobKey,
     pub job: CronJobDefinition,

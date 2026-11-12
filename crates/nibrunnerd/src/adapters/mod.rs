@@ -1,6 +1,7 @@
 pub mod artifact_store;
 pub mod cron_execution;
 pub mod cron_registration;
+pub mod cron_worker;
 pub mod exec;
 pub mod filesystem;
 pub mod fs_verity;
