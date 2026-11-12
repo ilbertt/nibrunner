@@ -71,6 +71,12 @@ fn answer(connection: OwnedFd, frozen_until: &mut Option<Instant>) {
     let Ok(request) = crate::clock_sync::request(&mut wire) else {
         return;
     };
+    if request == guest_contract::startup::STARTUP_REQUEST {
+        let reply =
+            super::startup::sample().map_or_else(|| "UNAVAILABLE\n".to_string(), |sample| sample.reply());
+        let _ = wire.get_mut().write_all(reply.as_bytes());
+        return;
+    }
     if request.trim() == guest_contract::control::TENANT_FREEZE_REQUEST {
         let result = crate::clock_sync::confirm_freeze(&mut wire).and_then(|()| freeze_tenant());
         if result.is_ok() {
