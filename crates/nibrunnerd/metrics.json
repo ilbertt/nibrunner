@@ -171,6 +171,14 @@
     "name": "nibrunner_raw_port_bytes_total"
   },
   {
+    "help": "Successful cold microVM boots by phase: staging the jail and devices, spawning Firecracker, waiting for guest initialization, and the total before application readiness.",
+    "kind": "histogram",
+    "labels": [
+      "phase"
+    ],
+    "name": "nibrunner_vm_boot_phase_seconds"
+  },
+  {
     "help": "Bringing a sleeping app back for the request that asked for it, from the request reaching the waker to the app being ready to be forwarded one, whether it set the wake going or joined one under way. On an on-request host this is the population that makes the tail of nibrunner_proxy_request_duration_seconds.",
     "kind": "histogram",
     "labels": [],

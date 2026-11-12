@@ -17,7 +17,7 @@ use crate::adapters::vm::snapshot::{
 use crate::adapters::vm::status::VmStatus;
 use crate::adapters::vm::time_sync;
 use crate::adapters::volumes::VolumeBackend;
-use crate::domain::metrics::sleep_wake::RestorePhase;
+use crate::domain::metrics::sleep_wake::{BootPhase, RestorePhase};
 use crate::json_store::{make_directory, write_json};
 use crate::ports::{BootRequest, LogSink, SuspendRequest, VmError, Vmm};
 use crate::state::SharedState;
@@ -502,7 +502,7 @@ impl Vmm for VmManager {
         self.discard_snapshot(&app_id);
         let staged = std::time::Instant::now();
         let prepared = self.stage(&request).await?;
-        let staged_ms = staged.elapsed().as_millis();
+        let staged_for = staged.elapsed();
 
         let starting = std::time::Instant::now();
         let started = self
@@ -521,6 +521,7 @@ impl Vmm for VmManager {
             let _ = self.logs.detach(&app_id).await;
             return Err(VmError::Host(error.to_string()));
         }
+        let spawned_at = staged.elapsed();
         let control = prepared
             .jail
             .root
@@ -534,10 +535,22 @@ impl Vmm for VmManager {
             self.logs.detach(&app_id).await;
             return Err(error);
         }
+        let total = staged.elapsed();
+        let guest_init = total - spawned_at;
+        for (phase, took) in [
+            (BootPhase::Stage, staged_for),
+            (BootPhase::Spawn, spawned_at - staged_for),
+            (BootPhase::GuestInit, guest_init),
+            (BootPhase::Total, total),
+        ] {
+            self.metrics.sleep_wake.booted_phase(phase, took);
+        }
         tracing::info!(
             %app_id,
             slot = request.slot.slot,
-            staged_ms,
+            staged_ms = staged_for.as_millis(),
+            spawn_ms = (spawned_at - staged_for).as_millis(),
+            guest_init_ms = guest_init.as_millis(),
             vmm_ms = starting.elapsed().as_millis(),
             "instance booting"
         );
@@ -933,6 +946,15 @@ mod tests {
         fixture.manager.start_permits = tokio::sync::Semaphore::new(1);
     }
 
+    fn boot_metrics(fixture: &Fixture) -> String {
+        crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            &fixture.manager.metrics,
+            &crate::state::HostSnapshot::default(),
+            0,
+        )
+    }
+
     #[tokio::test]
     async fn a_spawned_vm_holds_start_capacity_until_its_guest_control_port_answers() {
         let mut fixture = fixture();
@@ -985,11 +1007,19 @@ mod tests {
             result = answer => result.unwrap(),
         }
         assert!(fixture.manager.admit_start().is_err());
+        assert!(boot_metrics(&fixture)
+            .contains("nibrunner_vm_boot_phase_seconds_count{phase=\"guest_init\"} 0\n"));
         release.send(()).unwrap();
         boot.await.unwrap();
         server.await.unwrap();
         assert!(fixture.manager.admit_start().is_ok());
         assert!(fixture.manager.processes.status(&app_id()).active);
+        let measured = boot_metrics(&fixture);
+        for phase in ["stage", "spawn", "guest_init", "total"] {
+            assert!(measured.contains(&format!(
+                "nibrunner_vm_boot_phase_seconds_count{{phase=\"{phase}\"}} 1\n"
+            )));
+        }
         assert_eq!(
             fixture
                 .manager
