@@ -2,7 +2,7 @@ use protocol::{AccessPolicy, AppHostname, AppId, DeploymentId, HostPort};
 
 use crate::domain::report::InstanceRecord;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RouteTarget {
     pub app_id: AppId,
     pub deployment_id: DeploymentId,
