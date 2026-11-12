@@ -35,13 +35,14 @@ const EXT4_MAGIC_OFFSET: usize = 0x438;
 const EXT4_MAGIC: [u8; 2] = [0x53, 0xEF];
 
 // Layer compression is on the startup path, so favor packing speed over smaller cached images.
-const COMPRESSION_LEVEL: u32 = 1;
+const COMPRESSION_LEVEL: i32 = -3;
 
 fn image_compressor() -> FilesystemCompressor {
     FilesystemCompressor::new(
         Compressor::Zstd,
         Some(CompressionOptions::Zstd(Zstd {
-            compression_level: COMPRESSION_LEVEL,
+            // Squashfs stores a signed level; backhand represents its bits as u32.
+            compression_level: COMPRESSION_LEVEL as u32,
         })),
     )
     .expect("zstd takes a level and nothing else")
@@ -625,6 +626,16 @@ mod tests {
         let image = pack(&[("/app/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
         let id = u16::from_le_bytes([image[COMPRESSOR_ID_OFFSET], image[COMPRESSOR_ID_OFFSET + 1]]);
         assert_eq!(id, ZSTD);
+    }
+
+    #[test]
+    fn the_fast_zstd_level_is_preserved_in_the_standard_compression_options() {
+        let image = pack(&[("/app/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
+        let filesystem = backhand::FilesystemReader::from_reader(Cursor::new(image)).unwrap();
+        let Some(CompressionOptions::Zstd(options)) = filesystem.compression_options else {
+            panic!("the filesystem must describe its zstd compression level");
+        };
+        assert_eq!(options.compression_level as i32, COMPRESSION_LEVEL);
     }
 
     #[test]
