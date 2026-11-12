@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.11.10] - 2026-11-12
+
+### Fixes
+
+- Fail closed when tenant isolation cannot be verified (#348)
+
 ## [2026.11.9] - 2026-11-12
 
 ### Fixes
