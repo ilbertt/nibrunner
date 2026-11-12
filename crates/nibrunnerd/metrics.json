@@ -171,6 +171,14 @@
     "name": "nibrunner_raw_port_bytes_total"
   },
   {
+    "help": "Successful restore clock handshakes by phase: connecting to the guest control port, waiting for its READY reply, and setting its clock and confirming tenant release.",
+    "kind": "histogram",
+    "labels": [
+      "phase"
+    ],
+    "name": "nibrunner_vm_clock_sync_phase_seconds"
+  },
+  {
     "help": "Successful cold microVM boots by phase: staging the jail and devices, spawning Firecracker, waiting for guest initialization, and the total before application readiness.",
     "kind": "histogram",
     "labels": [

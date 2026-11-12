@@ -8,6 +8,13 @@ use crate::ports::VmError;
 
 const TIMEOUT: Duration = Duration::from_millis(guest_contract::control::TENANT_CONTROL_TIMEOUT_MS);
 
+#[derive(Debug)]
+pub(super) struct WakeTimings {
+    pub(super) connect: Duration,
+    pub(super) ready: Duration,
+    pub(super) release: Duration,
+}
+
 fn failed(reason: impl std::fmt::Display) -> VmError {
     VmError::Host(format!("guest clock synchronization failed: {reason}"))
 }
@@ -72,14 +79,16 @@ async fn freeze_connected_tenant(path: &Path) -> Result<(), VmError> {
     Ok(())
 }
 
-pub(super) async fn wake(path: &Path) -> Result<(), VmError> {
+pub(super) async fn wake(path: &Path) -> Result<WakeTimings, VmError> {
     tokio::time::timeout(TIMEOUT, release_connected_tenant(path))
         .await
         .map_err(|_| failed("guest clock synchronization timed out"))?
 }
 
-async fn release_connected_tenant(path: &Path) -> Result<(), VmError> {
+async fn release_connected_tenant(path: &Path) -> Result<WakeTimings, VmError> {
+    let started = std::time::Instant::now();
     let mut wire = connect(path).await?;
+    let connected_at = started.elapsed();
     wire.get_mut()
         .write_all(format!("{}\n", guest_contract::control::TENANT_CLOCK_REQUEST).as_bytes())
         .await
@@ -88,6 +97,7 @@ async fn release_connected_tenant(path: &Path) -> Result<(), VmError> {
     if reply != guest_contract::control::TENANT_CLOCK_READY {
         return Err(failed(&reply));
     }
+    let ready_at = started.elapsed();
     let sent = SystemTime::now().duration_since(UNIX_EPOCH).map_err(failed)?;
     wire.get_mut()
         .write_all(
@@ -103,7 +113,11 @@ async fn release_connected_tenant(path: &Path) -> Result<(), VmError> {
     if line(&mut wire).await? != guest_contract::control::TENANT_CLOCK_RELEASED {
         return Err(failed("the tenant cgroup was not released"));
     }
-    Ok(())
+    Ok(WakeTimings {
+        connect: connected_at,
+        ready: ready_at - connected_at,
+        release: started.elapsed() - ready_at,
+    })
 }
 
 #[cfg(test)]
@@ -181,7 +195,8 @@ mod tests {
             assert!(timestamp >= ready_at);
             wire.get_mut().write_all(b"OK\n").await.unwrap();
         });
-        wake(&socket).await.unwrap();
+        let timings = wake(&socket).await.unwrap();
+        assert!(timings.ready >= Duration::from_millis(50));
         answer.await.unwrap();
     }
 

@@ -17,7 +17,7 @@ use crate::adapters::vm::snapshot::{
 use crate::adapters::vm::status::VmStatus;
 use crate::adapters::vm::time_sync;
 use crate::adapters::volumes::VolumeBackend;
-use crate::domain::metrics::sleep_wake::{BootPhase, RestorePhase};
+use crate::domain::metrics::sleep_wake::{BootPhase, ClockPhase, RestorePhase};
 use crate::json_store::{make_directory, write_json};
 use crate::ports::{BootRequest, LogSink, SuspendRequest, VmError, Vmm};
 use crate::state::SharedState;
@@ -350,11 +350,25 @@ impl VmManager {
         let control = self
             .working_dir_for(&request.app_id)
             .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
-        time_sync::wake(&control)
+        let clock = time_sync::wake(&control)
             .await
             .map_err(|error| VmError::SnapshotUnusable {
                 reason: error.message(),
             })?;
+        for (phase, took) in [
+            (ClockPhase::Connect, clock.connect),
+            (ClockPhase::Ready, clock.ready),
+            (ClockPhase::Release, clock.release),
+        ] {
+            self.metrics.sleep_wake.clock_phase(phase, took);
+        }
+        tracing::info!(
+            app_id = %request.app_id,
+            connect_us = clock.connect.as_micros(),
+            ready_us = clock.ready.as_micros(),
+            release_us = clock.release.as_micros(),
+            "guest clock synchronized"
+        );
         let synchronized_at = Instant::now();
         self.network
             .refresh_neighbour(&Neighbour {
