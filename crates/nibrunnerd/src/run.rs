@@ -140,6 +140,7 @@ pub async fn build_host(
     }
 
     let vms = Arc::new(VmManager {
+        start_available: tokio::sync::Notify::new(),
         start_permits: tokio::sync::Semaphore::new(usize::from(config.max_concurrent_vm_starts.get())),
         vm_dir: config.vm_dir(),
         snapshot_dir: config.snapshot_dir.clone(),

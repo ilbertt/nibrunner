@@ -66,6 +66,7 @@ directory, and environment, using `/bin/sh` or `SHELL` if set. Crontab assignmen
 app's environment.
 
 - Running commands keep the guest awake.
+- Wakes wait up to 30 seconds when all VM start slots are busy.
 - Running commands survive daemon restarts and binary upgrades without being restarted.
 - Runs of the same job can overlap.
 - The host does not replay jobs missed while the daemon was stopped.

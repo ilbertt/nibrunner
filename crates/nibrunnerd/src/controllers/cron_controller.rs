@@ -12,9 +12,11 @@ use crate::domain::cron::runs::CronRunLease;
 use crate::domain::cron::schedule::InvalidCronSchedule;
 use crate::domain::cron::scheduler::{CronScheduler, ScheduledRun};
 use crate::host::Host;
+use crate::ports::{WakeFailure, WakeRefusal};
 use crate::state::GuestActivity;
 
 const CRON_RETRY_DELAY: Duration = Duration::from_secs(1);
+const CRON_WAKE_QUEUE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 enum CronSynchronizationError {
@@ -127,6 +129,63 @@ impl CronController {
         })
     }
 
+    async fn scheduled(
+        host: &Host,
+        registry: &CronRegistry,
+        run: &ScheduledRun,
+        expected: Option<&CronTable>,
+    ) -> bool {
+        Self::current(host, run).await
+            && Self::registered(registry, run, expected).await
+            && host.state.snapshot().await.isolated
+    }
+
+    async fn wake_when_available(
+        host: &Host,
+        registry: &CronRegistry,
+        run: &ScheduledRun,
+        expected: Option<&CronTable>,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + CRON_WAKE_QUEUE_TIMEOUT;
+        let mut registrations = registry.watch();
+        loop {
+            if !Self::scheduled(host, registry, run, expected).await {
+                return false;
+            }
+            let available = tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => {
+                    tracing::warn!(app_id = %run.key.app_id, "cron timed out waiting for VM start capacity");
+                    return false;
+                }
+                change = registrations.changed() => {
+                    if change.is_err() { return false; }
+                    continue;
+                }
+                available = host.vms.wait_for_start_capacity() => available,
+            };
+            if let Err(error) = available {
+                tracing::warn!(app_id = %run.key.app_id, %error, "cron could not wait for VM start capacity");
+                return false;
+            }
+            if !Self::scheduled(host, registry, run, expected).await {
+                return false;
+            }
+            match host.waker.wake(&run.key.app_id).await {
+                Ok(()) => return true,
+                // Capacity can be taken by another wake between the notification and admission.
+                Err(WakeRefusal::Failed {
+                    kind: WakeFailure::StartBusy,
+                    ..
+                }) => {}
+                Err(refusal) => {
+                    tracing::warn!(app_id = %run.key.app_id, refusal = ?refusal, "cron could not wake its app");
+                    return false;
+                }
+            }
+        }
+    }
+
     async fn prepare(
         host: &Host,
         registry: &CronRegistry,
@@ -135,10 +194,7 @@ impl CronController {
     ) -> Option<GuestActivity> {
         let (activity, needs_wake) = {
             let _transition = host.state.transition(&run.key.app_id).await;
-            if !Self::current(host, run).await
-                || !Self::registered(registry, run, expected).await
-                || !host.state.snapshot().await.isolated
-            {
+            if !Self::scheduled(host, registry, run, expected).await {
                 return None;
             }
             let record = host.state.record(&run.key.app_id).await?;
@@ -160,11 +216,8 @@ impl CronController {
                 record.state == InstanceState::Idle,
             )
         };
-        if needs_wake {
-            if let Err(refusal) = host.waker.wake(&run.key.app_id).await {
-                tracing::warn!(app_id = %run.key.app_id, refusal = ?refusal, "cron could not wake its app");
-                return None;
-            }
+        if needs_wake && !Self::wake_when_available(host, registry, run, expected).await {
+            return None;
         }
         {
             let _transition = host.state.transition(&run.key.app_id).await;
@@ -279,7 +332,7 @@ mod tests {
     use super::*;
     use crate::domain::cron::scheduler::JobKey;
     use crate::domain::store::StoreError;
-    use crate::ports::{WakeRefusal, Waker};
+    use crate::ports::{VmError, Vmm, Waker};
     use crate::repositories::cron_repository::MockCronRepository;
     use crate::test_support::*;
 
@@ -410,6 +463,220 @@ mod tests {
             .await
             .last_active_at_ms
             .contains_key(&app_id()));
+    }
+
+    struct BusyStarts {
+        vms: Arc<dyn Vmm>,
+        capacity: tokio::sync::Semaphore,
+        waiting: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl Vmm for BusyStarts {
+        async fn wait_for_start_capacity(&self) -> Result<(), VmError> {
+            self.waiting.notify_one();
+            drop(self.capacity.acquire().await.unwrap());
+            Ok(())
+        }
+        async fn boot(&self, request: crate::ports::BootRequest) -> Result<(), VmError> {
+            self.vms.boot(request).await
+        }
+        async fn sleep(&self, request: crate::ports::SuspendRequest) -> Result<(), VmError> {
+            self.vms.sleep(request).await
+        }
+        async fn wake(&self, request: crate::ports::SuspendRequest) -> Result<(), VmError> {
+            self.vms.wake(request).await
+        }
+        async fn stop(&self, app_id: &protocol::AppId) -> Result<(), VmError> {
+            self.vms.stop(app_id).await
+        }
+        async fn discard(&self, app_id: &protocol::AppId) -> Result<(), VmError> {
+            self.vms.discard(app_id).await
+        }
+        async fn delete_tap(&self, tap_name: &str) -> Result<(), VmError> {
+            self.vms.delete_tap(tap_name).await
+        }
+        async fn tap_names(&self) -> Vec<String> {
+            self.vms.tap_names().await
+        }
+        async fn statuses(
+            &self,
+            app_ids: &[protocol::AppId],
+        ) -> std::collections::BTreeMap<protocol::AppId, crate::adapters::vm::VmStatus> {
+            self.vms.statuses(app_ids).await
+        }
+        async fn adopted_app_ids(&self) -> Vec<protocol::AppId> {
+            self.vms.adopted_app_ids().await
+        }
+        async fn readopt(&self, app_id: &protocol::AppId) -> Result<(), VmError> {
+            self.vms.readopt(app_id).await
+        }
+        async fn guest_verdict(&self, app_id: &protocol::AppId) -> Option<String> {
+            self.vms.guest_verdict(app_id).await
+        }
+        fn working_dir(&self, app_id: &protocol::AppId) -> std::path::PathBuf {
+            self.vms.working_dir(app_id)
+        }
+    }
+
+    async fn queued_host() -> (TestHost, Arc<BusyStarts>, Arc<AtomicBool>) {
+        let mut host = named_host().await;
+        host.state
+            .update_record(&app_id(), |record| {
+                record.state = InstanceState::Idle;
+                record.started_at = None;
+                record.stop_requested = true;
+            })
+            .await;
+        let starts = Arc::new(BusyStarts {
+            vms: host.host.vms.clone(),
+            capacity: tokio::sync::Semaphore::new(0),
+            waiting: Notify::new(),
+        });
+        let called = Arc::new(AtomicBool::new(false));
+        let waker = WakeChecksPin {
+            state: host.state.clone(),
+            called: called.clone(),
+        };
+        let inner = Arc::get_mut(&mut host.host).unwrap();
+        inner.vms = starts.clone();
+        inner.waker = Arc::new(waker);
+        (host, starts, called)
+    }
+
+    #[tokio::test]
+    async fn a_due_cron_waits_for_start_capacity_without_holding_the_transition_lock() {
+        let (host, starts, called) = queued_host().await;
+        let dispatch = tokio::spawn(CronController::dispatch(
+            host.arc().clone(),
+            host.cron.clone(),
+            run(),
+        ));
+        starts.waiting.notified().await;
+        assert!(!dispatch.is_finished());
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(host.state.has_guest_activity(&app_id()));
+        let transition = tokio::time::timeout(Duration::from_secs(1), host.state.transition(&app_id()))
+            .await
+            .unwrap();
+        drop(transition);
+        starts.capacity.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), dispatch)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(called.load(Ordering::SeqCst));
+        assert!(!host.state.has_guest_activity(&app_id()));
+        assert_eq!(starts.capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_deployment_cancels_its_queued_wake() {
+        let (host, starts, called) = queued_host().await;
+        let dispatch = tokio::spawn(CronController::dispatch(
+            host.arc().clone(),
+            host.cron.clone(),
+            run(),
+        ));
+        starts.waiting.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), host.cron_runs.stop(&app_id()))
+            .await
+            .unwrap();
+        dispatch.await.unwrap();
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(!host.state.has_guest_activity(&app_id()));
+    }
+
+    #[tokio::test]
+    async fn editing_a_crontab_cancels_its_queued_wake() {
+        let (host, starts, called) = queued_host().await;
+        let table = host.cron.tables().await.unwrap().remove(0);
+        let lease = host.cron_runs.start(&app_id(), &deployment_id()).unwrap();
+        let dispatch = tokio::spawn(CronController::execute_owned(
+            host.arc().clone(),
+            host.cron.clone(),
+            run(),
+            lease,
+            Some(table),
+        ));
+        starts.waiting.notified().await;
+        host.cron
+            .replace(
+                &app_id(),
+                &deployment_id(),
+                "# edited\n* * * * * echo ok",
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), dispatch)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(!host.state.has_guest_activity(&app_id()));
+    }
+
+    #[tokio::test]
+    async fn a_queued_wake_expires_without_booting_or_leaking_guest_activity() {
+        let (host, starts, called) = queued_host().await;
+        let dispatch = tokio::spawn(CronController::dispatch(
+            host.arc().clone(),
+            host.cron.clone(),
+            run(),
+        ));
+        starts.waiting.notified().await;
+        tokio::time::pause();
+        tokio::time::advance(CRON_WAKE_QUEUE_TIMEOUT).await;
+        dispatch.await.unwrap();
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(!host.state.has_guest_activity(&app_id()));
+        assert_eq!(host.cron_runs.active_for(&app_id()), 0);
+    }
+
+    struct RefusingWake {
+        attempts: AtomicUsize,
+        kind: WakeFailure,
+        recovery: WakeChecksPin,
+    }
+
+    #[async_trait::async_trait]
+    impl Waker for RefusingWake {
+        async fn wake(&self, app_id: &protocol::AppId) -> Result<(), WakeRefusal> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(WakeRefusal::Failed {
+                    kind: self.kind,
+                    reason: "refused".into(),
+                });
+            }
+            self.recovery.wake(app_id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn only_busy_admission_is_retried_when_another_start_wins_the_available_slot() {
+        for kind in [
+            WakeFailure::StartBusy,
+            WakeFailure::WouldNotStart,
+            WakeFailure::VolumeUnusable,
+        ] {
+            let (mut host, starts, called) = queued_host().await;
+            let waker = Arc::new(RefusingWake {
+                attempts: AtomicUsize::new(0),
+                kind,
+                recovery: WakeChecksPin {
+                    state: host.state.clone(),
+                    called: called.clone(),
+                },
+            });
+            Arc::get_mut(&mut host.host).unwrap().waker = waker.clone();
+            starts.capacity.add_permits(1);
+            CronController::dispatch(host.arc().clone(), host.cron.clone(), run()).await;
+            let retries = kind == WakeFailure::StartBusy;
+            assert_eq!(waker.attempts.load(Ordering::SeqCst), if retries { 2 } else { 1 });
+            assert_eq!(called.load(Ordering::SeqCst), retries);
+            assert!(!host.state.has_guest_activity(&app_id()));
+        }
     }
 
     struct WakeChecksPin {

@@ -34,6 +34,7 @@ const FIRST_GUEST_CID: u32 = 3;
 
 pub struct VmManager {
     pub start_permits: tokio::sync::Semaphore,
+    pub start_available: tokio::sync::Notify,
     pub vm_dir: PathBuf,
     pub snapshot_dir: PathBuf,
     pub guest_image_dir: PathBuf,
@@ -57,6 +58,18 @@ struct PreparedVm {
     jail: super::jailer::Jail,
 }
 
+struct StartPermit<'a> {
+    permit: Option<tokio::sync::SemaphorePermit<'a>>,
+    available: &'a tokio::sync::Notify,
+}
+
+impl Drop for StartPermit<'_> {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.available.notify_waiters();
+    }
+}
+
 #[derive(Debug)]
 struct ResumeTimings {
     resume: Duration,
@@ -65,8 +78,11 @@ struct ResumeTimings {
 }
 
 impl VmManager {
-    fn admit_start(&self) -> Result<tokio::sync::SemaphorePermit<'_>, VmError> {
-        self.start_permits.try_acquire().map_err(|_| VmError::StartBusy)
+    fn admit_start(&self) -> Result<StartPermit<'_>, VmError> {
+        Ok(StartPermit {
+            permit: Some(self.start_permits.try_acquire().map_err(|_| VmError::StartBusy)?),
+            available: &self.start_available,
+        })
     }
 
     pub fn working_dir_for(&self, app_id: &AppId) -> PathBuf {
@@ -510,6 +526,17 @@ impl VmManager {
 
 #[async_trait]
 impl Vmm for VmManager {
+    async fn wait_for_start_capacity(&self) -> Result<(), VmError> {
+        loop {
+            let available = self.start_available.notified();
+            tokio::pin!(available);
+            available.as_mut().enable();
+            if self.start_permits.available_permits() > 0 {
+                return Ok(());
+            }
+            available.await;
+        }
+    }
     async fn startup_sample(&self, app_id: &AppId) -> Option<crate::ports::GuestStartupSample> {
         let path = self
             .working_dir_for(app_id)
@@ -957,6 +984,33 @@ mod tests {
         assert!(host.manager.admit_start().is_ok());
     }
 
+    #[tokio::test]
+    async fn start_capacity_waits_for_a_free_slot_without_reserving_it() {
+        let host = fixture();
+        let first = host.manager.admit_start().unwrap();
+        let second = host.manager.admit_start().unwrap();
+        let waiting = host.manager.wait_for_start_capacity();
+        tokio::pin!(waiting);
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+            .await
+            .is_err());
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.manager.start_permits.available_permits(), 1);
+        let first = host.manager.admit_start().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), host.manager.wait_for_start_capacity())
+                .await
+                .is_err()
+        );
+        drop(first);
+        drop(second);
+        assert!(host.manager.admit_start().is_ok());
+    }
+
     fn fake_boot_binary(fixture: &mut Fixture, command: &str) {
         use std::os::unix::fs::PermissionsExt;
         let binary = fixture._directory.path().join("fake-jailer");
@@ -1097,6 +1151,7 @@ mod tests {
         let state = HostState::shared();
         let manager = VmManager {
             start_permits: tokio::sync::Semaphore::new(2),
+            start_available: tokio::sync::Notify::new(),
             metrics: Arc::new(crate::domain::metrics::HostMetrics::new()),
             vm_dir: root.join("vm"),
             snapshot_dir: root.join("snapshots"),

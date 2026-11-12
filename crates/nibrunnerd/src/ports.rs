@@ -176,6 +176,10 @@ impl WakeOutcome {
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait Vmm: Send + Sync {
+    /// Wait for an available start slot without reserving it; admission may still return [`VmError::StartBusy`].
+    async fn wait_for_start_capacity(&self) -> Result<(), VmError> {
+        Ok(())
+    }
     async fn startup_sample(&self, _app_id: &AppId) -> Option<GuestStartupSample> {
         None
     }
@@ -294,19 +298,21 @@ pub enum WakeFailure {
     /// Its volume's device does not answer and could not be re-attached, so there is nothing
     /// sound to put the guest on.
     VolumeUnusable,
+    StartBusy,
     WouldNotStart,
     NeverAnswered,
     Abandoned,
 }
 
 impl WakeFailure {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             WakeFailure::HostStarting => "host_starting",
             WakeFailure::NotNamed => "not_named",
             WakeFailure::NotOnRequest => "not_on_request",
             WakeFailure::NotIsolated => "not_isolated",
             WakeFailure::VolumeUnusable => "volume_unusable",
+            WakeFailure::StartBusy => "start_busy",
             WakeFailure::WouldNotStart => "would_not_start",
             WakeFailure::NeverAnswered => "never_answered",
             WakeFailure::Abandoned => "abandoned",
