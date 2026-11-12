@@ -27,10 +27,8 @@ const SQUASHFS_MAGIC: &[u8; 4] = b"hsqs";
 const EXT4_MAGIC_OFFSET: usize = 0x438;
 const EXT4_MAGIC: [u8; 2] = [0x53, 0xEF];
 
-// zstd's own default. gzip took the host over a second for a 32 MB program, and the guest kernel
-// inflates every block of it the program pages in; this packs the same bytes in a twelfth of the
-// time to an image three percent larger, and the kernel reads it back in half the time.
-const COMPRESSION_LEVEL: u32 = 3;
+// Layer compression is on the startup path, so favor packing speed over smaller cached images.
+const COMPRESSION_LEVEL: u32 = 1;
 
 fn image_compressor() -> FilesystemCompressor {
     FilesystemCompressor::new(
@@ -71,7 +69,7 @@ fn pack(files: &[(&str, &[u8], u16)]) -> Result<Vec<u8>, ArtifactError> {
                 .map_err(unpackable)?;
         }
         writer
-            .push_file(Cursor::new(bytes.to_vec()), path, header(*permissions))
+            .push_file(Cursor::new(*bytes), path, header(*permissions))
             .map_err(unpackable)?;
     }
     let mut image = Cursor::new(Vec::new());
@@ -422,6 +420,18 @@ mod tests {
         let once = pack(&[("/app/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
         let twice = pack(&[("/app/server", &artifact_bytes(), BINARY_MODE)]).unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_program_spanning_compressed_blocks_and_a_fragment_is_preserved() {
+        let program: Vec<u8> = (0..backhand::DEFAULT_BLOCK_SIZE as usize * 3 + 137)
+            .map(|index| (index.wrapping_mul(31) ^ (index >> 8)) as u8)
+            .collect();
+        let files = [("/app/server", program.as_slice(), BINARY_MODE)];
+        let image = pack(&files).unwrap();
+
+        assert_eq!(read_back(&image, "/app/server"), program);
+        assert_eq!(pack(&files).unwrap(), image);
     }
 
     #[tokio::test]
