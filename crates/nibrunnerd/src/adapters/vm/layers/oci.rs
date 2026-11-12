@@ -356,9 +356,15 @@ mod tests {
         let store: Arc<dyn ArtifactStore> = mocks::artifacts_holding(bytes);
         let (commands, log) = mocks::commands_succeeding();
         let commands: Arc<dyn CommandRunner> = commands;
-        let error = super::super::ensure_layer_image(&store, cache.path(), &layer, &commands)
-            .await
-            .unwrap_err();
+        let error = super::super::ensure_layer_image(
+            &store,
+            cache.path(),
+            &layer,
+            &commands,
+            &crate::domain::metrics::HostMetrics::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("cannot preserve hard links to symbolic links"));
@@ -375,9 +381,15 @@ mod tests {
         let store: Arc<dyn ArtifactStore> = mocks::artifacts_holding(bytes);
         let commands: Arc<dyn CommandRunner> = mocks::commands_formatting().0;
         let cache = tempfile::tempdir().unwrap();
-        let error = super::super::ensure_layer_image(&store, cache.path(), &layer, &commands)
-            .await
-            .unwrap_err();
+        let error = super::super::ensure_layer_image(
+            &store,
+            cache.path(),
+            &layer,
+            &commands,
+            &crate::domain::metrics::HostMetrics::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("debugfs did not preserve"));
         let path = super::super::layer_image_path(cache.path(), &layer);
         assert!(!path.exists());
@@ -427,14 +439,26 @@ mod tests {
             Ok(CommandResult::succeeded())
         });
         let commands: Arc<dyn CommandRunner> = commands;
-        let first = super::super::ensure_layer_image(&store, cache.path(), &layer, &commands)
-            .await
-            .unwrap();
+        let first = super::super::ensure_layer_image(
+            &store,
+            cache.path(),
+            &layer,
+            &commands,
+            &crate::domain::metrics::HostMetrics::new(),
+        )
+        .await
+        .unwrap();
         assert!(first.path.ends_with("oci.ext4"));
         assert!(first.fetched_bytes > 0);
-        let second = super::super::ensure_layer_image(&store, cache.path(), &layer, &commands)
-            .await
-            .unwrap();
+        let second = super::super::ensure_layer_image(
+            &store,
+            cache.path(),
+            &layer,
+            &commands,
+            &crate::domain::metrics::HostMetrics::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(second.fetched_bytes, 0);
         assert_eq!(log.executables(), ["mke2fs", "debugfs"]);
         assert_eq!(fs::read_dir(first.path.parent().unwrap()).unwrap().count(), 1);
@@ -454,11 +478,15 @@ mod tests {
         });
         let commands: Arc<dyn CommandRunner> = commands;
         let path = super::super::layer_image_path(cache.path(), &layer);
-        assert!(
-            super::super::ensure_layer_image(&store, cache.path(), &layer, &commands)
-                .await
-                .is_err()
-        );
+        assert!(super::super::ensure_layer_image(
+            &store,
+            cache.path(),
+            &layer,
+            &commands,
+            &crate::domain::metrics::HostMetrics::new()
+        )
+        .await
+        .is_err());
         assert!(!path.exists());
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 0);
         let (commands, _) = mocks::commands_answering(|request| {
@@ -469,11 +497,15 @@ mod tests {
             Ok(CommandResult::succeeded())
         });
         let commands: Arc<dyn CommandRunner> = commands;
-        assert!(
-            super::super::ensure_layer_image(&store, cache.path(), &layer, &commands)
-                .await
-                .is_ok()
-        );
+        assert!(super::super::ensure_layer_image(
+            &store,
+            cache.path(),
+            &layer,
+            &commands,
+            &crate::domain::metrics::HostMetrics::new()
+        )
+        .await
+        .is_ok());
         assert!(path.exists());
     }
 
@@ -485,11 +517,15 @@ mod tests {
         let store: Arc<dyn ArtifactStore> = mocks::artifacts_holding(bytes);
         let (commands, log) = mocks::commands_succeeding();
         let commands: Arc<dyn CommandRunner> = commands;
-        assert!(
-            super::super::ensure_layer_image(&store, cache.path(), &layer, &commands)
-                .await
-                .is_err()
-        );
+        assert!(super::super::ensure_layer_image(
+            &store,
+            cache.path(),
+            &layer,
+            &commands,
+            &crate::domain::metrics::HostMetrics::new()
+        )
+        .await
+        .is_err());
         assert!(log.executables().is_empty());
         assert!(!super::super::layer_image_path(cache.path(), &layer).exists());
     }

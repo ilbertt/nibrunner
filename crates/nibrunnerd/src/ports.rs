@@ -239,18 +239,23 @@ pub trait ArtifactStoreExt {
 #[async_trait]
 impl<T: ArtifactStore + ?Sized> ArtifactStoreExt for T {
     async fn read_verified(&self, object: &StoredObject) -> Result<Vec<u8>, ArtifactError> {
-        use sha2::Digest;
-
         let bytes = self.read(&object.object_key).await?;
-        let actual = hex::encode(sha2::Sha256::digest(&bytes));
-        if actual != object.digest.as_str() {
-            return Err(ArtifactError::DigestMismatch {
-                expected: object.digest.clone(),
-                actual,
-            });
-        }
+        verify_artifact(&bytes, object)?;
         Ok(bytes)
     }
+}
+
+pub fn verify_artifact(bytes: &[u8], object: &StoredObject) -> Result<(), ArtifactError> {
+    use sha2::Digest;
+
+    let actual = hex::encode(sha2::Sha256::digest(bytes));
+    if actual != object.digest.as_str() {
+        return Err(ArtifactError::DigestMismatch {
+            expected: object.digest.clone(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 /// The images a microVM is given for its layers, one each, in the order the document listed them.
