@@ -255,3 +255,9 @@ State the intent in a line or two.
 
 Do not add a validation section for checks CI already runs. Include validation only when it is
 specific to the PR and not covered by CI, such as a local manual run and its observed result.
+
+Tenant firewall health compares the echoed write transaction with the complete kernel rules,
+including rule order, chain policy and both IP families. Counter values are excluded. Unknown
+or damaged isolation disconnects all tenant TAPs; only verified recovery reconnects them.
+Every operation that brings a TAP up must hold `HostFirewall::while_isolated`.
+Containment and network setup finish under their shared lock even if the caller is cancelled.

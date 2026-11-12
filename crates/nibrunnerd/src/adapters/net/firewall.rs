@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nft_render::{
-    parse_app_traffic, parse_kernel_tables, render_ruleset, AppTraffic, FirewallState, KernelTables,
-    NFTABLES_TABLE,
+    parse_app_traffic, parse_kernel_ruleset, render_ruleset, AppTraffic, FirewallState, NFTABLES_TABLE,
 };
 use protocol::AppId;
 use tokio::sync::Mutex;
@@ -12,63 +13,146 @@ use crate::ports::{CommandError, CommandRequest, CommandRunner, CommandRunnerExt
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Applied {
-    ruleset: String,
-    tables: KernelTables,
+    source: String,
+    installed: String,
 }
 
+#[derive(Clone)]
 pub struct HostFirewall {
     commands: Arc<dyn CommandRunner>,
-    applied: Mutex<Option<Applied>>,
+    applied: Arc<Mutex<Option<Applied>>>,
+}
+
+fn unverified() -> CommandError {
+    CommandError::Unstartable {
+        executable: "tenant network".into(),
+        reason: "the installed isolation rules could not be verified".into(),
+    }
 }
 
 impl HostFirewall {
     pub fn new(commands: Arc<dyn CommandRunner>) -> Self {
         Self {
             commands,
-            applied: Mutex::new(None),
+            applied: Arc::new(Mutex::new(None)),
         }
     }
 
-    async fn kernel_tables(&self) -> Option<KernelTables> {
-        self.commands
-            .stdout_of(CommandRequest::new(&["nft", "-j", "list", "tables"]))
-            .await
-            .ok()
-            .map(|json| parse_kernel_tables(&json))
+    async fn run(&self, mut request: CommandRequest) -> Result<String, CommandError> {
+        request.timeout = Duration::from_secs(5);
+        self.commands.stdout_of(request).await
     }
 
-    pub async fn apply(&self, state: &FirewallState) -> Result<(), CommandError> {
-        let ruleset = render_ruleset(state);
-        let mut applied = self.applied.lock().await;
-        if let Some(last) = applied.as_ref() {
-            if last.ruleset == ruleset {
-                if let Some(current) = self.kernel_tables().await {
-                    if current == last.tables {
-                        return Ok(());
-                    }
+    async fn inspect(&self) -> Result<String, CommandError> {
+        let output = self
+            .run(CommandRequest::new(&["nft", "-j", "list", "ruleset"]))
+            .await?;
+        parse_kernel_ruleset(&output).ok_or_else(unverified)
+    }
+
+    async fn set_taps(&self, state: &str) -> Result<(), CommandError> {
+        let output = self
+            .run(CommandRequest::new(&["ip", "-json", "link", "show"]))
+            .await?;
+        let links: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|_| unverified())?;
+        let mut failure = None;
+        for link in links {
+            let name = link
+                .get("ifname")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(unverified)?;
+            if nft_render::is_tap_name(name) {
+                if let Err(error) = self
+                    .run(CommandRequest::new(&["ip", "link", "set", "dev", name, state]))
+                    .await
+                {
+                    failure = Some(error);
                 }
             }
         }
-        self.commands
-            .stdout_of(CommandRequest::new(&["nft", "-f", "-"]).with_stdin(ruleset.clone()))
-            .await?;
-        let denied: Vec<&str> = state
-            .denied_egress_addresses_v4
-            .iter()
-            .chain(&state.denied_egress_addresses_v6)
-            .map(String::as_str)
-            .collect();
-        if !denied.is_empty() {
-            tracing::info!(
-                denied = denied.join(", "),
-                "egress denies in place, flows already open to them included"
-            );
+        failure.map_or(Ok(()), Err)
+    }
+
+    async fn contain(&self, applied: &mut Option<Applied>) -> Result<(), CommandError> {
+        *applied = None;
+        self.set_taps("down").await
+    }
+
+    async fn write(&self, state: &FirewallState, applied: &mut Option<Applied>) -> Result<(), CommandError> {
+        let source = render_ruleset(state);
+        let mut reconnect = applied.is_none();
+        if let Some(last) = applied.as_ref() {
+            if self
+                .inspect()
+                .await
+                .is_ok_and(|current| current == last.installed)
+            {
+                if last.source == source {
+                    return Ok(());
+                }
+            } else {
+                self.contain(applied).await?;
+                reconnect = true;
+            }
         }
-        *applied = self
-            .kernel_tables()
-            .await
-            .map(|tables| Applied { ruleset, tables });
+        // Echo describes the committed transaction. A flush before read-back must not become
+        // the baseline, and counters must not turn every packet into a firewall replacement.
+        let echo = self
+            .run(CommandRequest::new(&["nft", "-j", "-e", "-f", "-"]).with_stdin(source.clone()))
+            .await?;
+        let installed = parse_kernel_ruleset(&echo).ok_or_else(unverified)?;
+        if self.inspect().await? != installed {
+            return Err(unverified());
+        }
+        if reconnect {
+            self.set_taps("up").await?;
+        }
+        *applied = Some(Applied { source, installed });
         Ok(())
+    }
+
+    pub async fn apply(&self, state: &FirewallState) -> Result<(), CommandError> {
+        let firewall = self.clone();
+        let state = state.clone();
+        // Controller cancellation must not interrupt disconnection or leave a partial reconnect.
+        tokio::spawn(async move { firewall.apply_locked(&state).await })
+            .await
+            .map_err(|_| unverified())?
+    }
+
+    pub(crate) async fn apply_locked(&self, state: &FirewallState) -> Result<(), CommandError> {
+        let mut applied = self.applied.lock().await;
+        if let Err(error) = self.write(state, &mut applied).await {
+            self.contain(&mut applied).await?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub async fn while_isolated<T: Send + 'static>(
+        &self,
+        action: impl Future<Output = T> + Send + 'static,
+    ) -> Result<T, CommandError> {
+        let firewall = self.clone();
+        tokio::spawn(async move { firewall.with_isolation_lock(action).await })
+            .await
+            .map_err(|_| unverified())?
+    }
+
+    async fn with_isolation_lock<T>(&self, action: impl Future<Output = T>) -> Result<T, CommandError> {
+        let mut applied = self.applied.lock().await;
+        let verified = match applied.as_ref() {
+            Some(last) => self
+                .inspect()
+                .await
+                .is_ok_and(|current| current == last.installed),
+            None => false,
+        };
+        if !verified {
+            self.contain(&mut applied).await?;
+            return Err(unverified());
+        }
+        Ok(action.await)
     }
 
     pub async fn traffic(&self) -> Result<BTreeMap<AppId, AppTraffic>, CommandError> {
@@ -92,221 +176,166 @@ impl HostFirewall {
 mod tests {
     use super::*;
     use crate::ports::CommandResult;
-    use crate::test_support::mocks::{self, CommandLog};
-    use nft_render::{app_received_counter_name, app_sent_counter_name, Counted, ForwardedInstance};
-    use protocol::{HostPort, Ipv4Address};
+    use crate::test_support::mocks;
+    use std::sync::Mutex as StdMutex;
 
-    fn holding(handles: (u64, u64)) -> String {
-        format!(
-            r#"{{"nftables":[{{"table":{{"family":"ip","name":"nibrun","handle":{}}}}},{{"table":{{"family":"ip6","name":"nibrun","handle":{}}}}}]}}"#,
-            handles.0, handles.1
-        )
+    const INSTALLED: &str = include_str!("../../../../nft-render/tests/fixtures/installed.json");
+    struct Kernel {
+        installed: String,
+        fail_write: bool,
+        fail_read: bool,
+        corrupt_after_write: bool,
+    }
+    fn fixture() -> (Arc<HostFirewall>, Arc<StdMutex<Kernel>>, mocks::CommandLog) {
+        let kernel = Arc::new(StdMutex::new(Kernel {
+            installed: INSTALLED.into(),
+            fail_write: false,
+            fail_read: false,
+            corrupt_after_write: false,
+        }));
+        let (commands, log) = mocks::commands_answering({
+            let kernel = kernel.clone();
+            move |request| {
+                if request.command == ["ip", "-json", "link", "show"] {
+                    return Ok(CommandResult::with_stdout(
+                        r#"[{"ifname":"nbr0"},{"ifname":"nbr1"},{"ifname":"eth0"}]"#,
+                    ));
+                }
+                if request.executable() == "ip" {
+                    return Ok(CommandResult::succeeded());
+                }
+                let mut kernel = kernel.lock().unwrap();
+                if request.command.contains(&"-f".into()) {
+                    if kernel.fail_write {
+                        return Err(unverified());
+                    }
+                    kernel.installed = if kernel.corrupt_after_write {
+                        r#"{"nftables":[]}"#.into()
+                    } else {
+                        INSTALLED.into()
+                    };
+                    Ok(CommandResult::with_stdout(INSTALLED))
+                } else {
+                    if kernel.fail_read {
+                        return Err(unverified());
+                    }
+                    Ok(CommandResult::with_stdout(kernel.installed.clone()))
+                }
+            }
+        });
+        (Arc::new(HostFirewall::new(commands)), kernel, log)
     }
 
-    fn instance() -> ForwardedInstance {
-        ForwardedInstance {
-            app_id: AppId::parse("app-1").unwrap(),
-            ports: vec![nft_render::ForwardedPort {
-                host_port: HostPort::new(21_000).unwrap(),
-                guest_port: protocol::GuestPort::new(3000).unwrap(),
-                raw: false,
-            }],
-            host_ipv4: Ipv4Address::parse("10.201.0.1").unwrap(),
-            guest_ipv4: Ipv4Address::parse("10.201.0.2").unwrap(),
+    #[tokio::test]
+    async fn unchanged_rules_are_not_rewritten_and_removed_rules_are_repaired_before_reconnection() {
+        let (firewall, kernel, log) = fixture();
+        let state = FirewallState::default();
+        firewall.apply(&state).await.unwrap();
+        firewall.apply(&state).await.unwrap();
+        assert_eq!(
+            log.calls()
+                .iter()
+                .filter(|call| call.command.contains(&"-f".into()))
+                .count(),
+            1
+        );
+        kernel.lock().unwrap().installed = r#"{"nftables":[]}"#.into();
+        firewall.apply(&state).await.unwrap();
+        let steps: Vec<String> = log.commands().iter().map(|command| command.join(" ")).collect();
+        let down = steps
+            .iter()
+            .position(|step| step == "ip link set dev nbr0 down")
+            .unwrap();
+        let repair = steps.iter().rposition(|step| step == "nft -j -e -f -").unwrap();
+        assert!(down < repair);
+        assert_eq!(steps.last().unwrap(), "ip link set dev nbr1 up");
+        assert!(!steps.iter().any(|step| step.contains("dev eth0")));
+    }
+
+    #[tokio::test]
+    async fn failed_writes_reads_and_read_back_races_disconnect_existing_guests_until_verified_recovery() {
+        for failure in 0..3 {
+            let (firewall, kernel, log) = fixture();
+            let state = FirewallState::default();
+            firewall.apply(&state).await.unwrap();
+            let before = log.calls().len();
+            {
+                let mut kernel = kernel.lock().unwrap();
+                kernel.installed = r#"{"nftables":[]}"#.into();
+                kernel.fail_write = failure == 0;
+                kernel.fail_read = failure == 1;
+                kernel.corrupt_after_write = failure == 2;
+            }
+            assert!(firewall.apply(&state).await.is_err());
+            let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            assert!(firewall
+                .while_isolated({
+                    let connected = connected.clone();
+                    async move {
+                        connected.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                })
+                .await
+                .is_err());
+            assert!(!connected.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(!log.calls()[before..]
+                .iter()
+                .any(|call| call.command.last().is_some_and(|word| word == "up")));
+            {
+                let mut kernel = kernel.lock().unwrap();
+                kernel.fail_write = false;
+                kernel.fail_read = false;
+                kernel.corrupt_after_write = false;
+            }
+            firewall.apply(&state).await.unwrap();
+            firewall
+                .while_isolated({
+                    let connected = connected.clone();
+                    async move {
+                        connected.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                })
+                .await
+                .unwrap();
+            assert!(connected.load(std::sync::atomic::Ordering::SeqCst));
         }
     }
 
-    fn listing(answer: String) -> (Arc<crate::ports::MockCommandRunner>, CommandLog) {
-        mocks::commands_answering(move |request| {
-            if request.command.contains(&"list".to_string()) {
-                Ok(CommandResult::with_stdout(answer.clone()))
-            } else {
-                Ok(CommandResult::succeeded())
-            }
-        })
-    }
-
-    fn writes(log: &CommandLog) -> usize {
-        log.calls()
-            .iter()
-            .filter(|request| request.command.contains(&"-f".to_string()))
-            .count()
-    }
-
     #[tokio::test]
-    async fn the_ruleset_is_piped_to_nft_whole_and_a_rerun_costs_nothing() {
-        let (commands, log) = listing(holding((2, 4)));
-        let firewall = HostFirewall::new(commands);
-        let state = FirewallState {
-            instances: vec![instance()],
-            ..Default::default()
-        };
-        firewall.apply(&state).await.unwrap();
-        let written = log
+    async fn containment_cannot_race_a_tap_being_connected_even_when_its_caller_is_cancelled() {
+        let (firewall, kernel, log) = fixture();
+        firewall.apply(&FirewallState::default()).await.unwrap();
+        let (entered, reached) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let setup = tokio::spawn({
+            let firewall = firewall.clone();
+            async move {
+                firewall
+                    .while_isolated(async move {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                    })
+                    .await
+            }
+        });
+        reached.await.unwrap();
+        setup.abort();
+        kernel.lock().unwrap().installed = r#"{"nftables":[]}"#.into();
+        let repair = tokio::spawn({
+            let firewall = firewall.clone();
+            async move { firewall.apply(&FirewallState::default()).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!log
             .calls()
-            .into_iter()
-            .find(|request| request.command.contains(&"-f".to_string()))
-            .unwrap();
-        assert_eq!(written.command, vec!["nft", "-f", "-"]);
-        assert!(written
-            .stdin
-            .as_deref()
-            .unwrap()
-            .starts_with("table ip nibrun\ndelete table ip nibrun"));
-
-        firewall.apply(&state).await.unwrap();
-        assert_eq!(
-            writes(&log),
-            1,
-            "an unchanged ruleset the kernel still holds is not rewritten"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_ruleset_something_else_dropped_is_written_again() {
-        let flushed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (commands, log) = mocks::commands_answering({
-            let flushed = flushed.clone();
-            move |request| {
-                if request.command.contains(&"list".to_string()) {
-                    let answer = if flushed.load(std::sync::atomic::Ordering::SeqCst) {
-                        r#"{"nftables":[]}"#.to_string()
-                    } else {
-                        holding((2, 4))
-                    };
-                    return Ok(CommandResult::with_stdout(answer));
-                }
-                Ok(CommandResult::succeeded())
-            }
-        });
-        let firewall = HostFirewall::new(commands);
-        let state = FirewallState::default();
-        firewall.apply(&state).await.unwrap();
-        flushed.store(true, std::sync::atomic::Ordering::SeqCst);
-        firewall.apply(&state).await.unwrap();
-        assert_eq!(writes(&log), 2);
-    }
-
-    #[tokio::test]
-    async fn a_table_rebuilt_under_this_daemon_is_written_again() {
-        let handles = Arc::new(std::sync::atomic::AtomicU64::new(2));
-        let (commands, log) = mocks::commands_answering({
-            let handles = handles.clone();
-            move |request| {
-                if request.command.contains(&"list".to_string()) {
-                    let handle = handles.load(std::sync::atomic::Ordering::SeqCst);
-                    return Ok(CommandResult::with_stdout(holding((handle, handle + 2))));
-                }
-                Ok(CommandResult::succeeded())
-            }
-        });
-        let firewall = HostFirewall::new(commands);
-        firewall.apply(&FirewallState::default()).await.unwrap();
-        handles.store(8, std::sync::atomic::Ordering::SeqCst);
-        firewall.apply(&FirewallState::default()).await.unwrap();
-        assert_eq!(writes(&log), 2);
-    }
-
-    #[tokio::test]
-    async fn a_kernel_that_would_not_answer_is_not_taken_as_proof_the_rules_are_in_place() {
-        let (commands, log) = mocks::commands_answering(|request| {
-            if request.command.contains(&"list".to_string()) {
-                Err(CommandError::Unstartable {
-                    executable: "nft".into(),
-                    reason: "not found".into(),
-                })
-            } else {
-                Ok(CommandResult::succeeded())
-            }
-        });
-        let firewall = HostFirewall::new(commands.clone());
-        firewall.apply(&FirewallState::default()).await.unwrap();
-        firewall.apply(&FirewallState::default()).await.unwrap();
-        assert_eq!(writes(&log), 2);
-    }
-
-    #[tokio::test]
-    async fn what_the_kernel_counted_is_read_back_per_app() {
-        let app = AppId::parse("app-1").unwrap();
-        let counted = |name: String, bytes: u64| {
-            format!(
-                r#"{{"counter":{{"family":"ip","name":"{name}","table":"nibrun","handle":2,"packets":3,"bytes":{bytes}}}}}"#
-            )
-        };
-        // One listing carries both ways, so metering each apart costs no second call.
-        let counters = format!(
-            r#"{{"nftables":[{},{}]}}"#,
-            counted(app_received_counter_name(&app), 512),
-            counted(app_sent_counter_name(&app), 4096)
-        );
-        let firewall = HostFirewall::new(listing(counters).0);
-        assert_eq!(
-            firewall.traffic().await.unwrap().get(&app),
-            Some(&AppTraffic {
-                received: Counted {
-                    packets: 3,
-                    bytes: 512
-                },
-                sent: Counted {
-                    packets: 3,
-                    bytes: 4096
-                },
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn a_ruleset_the_kernel_would_not_take_is_handed_up_and_never_remembered_as_applied() {
-        let (commands, log) = mocks::commands_answering(|request| {
-            if request.command.contains(&"-f".to_string()) {
-                Err(CommandError::Unstartable {
-                    executable: "nft".into(),
-                    reason: "not found".into(),
-                })
-            } else {
-                Ok(CommandResult::with_stdout(holding((2, 4))))
-            }
-        });
-        let firewall = HostFirewall::new(commands);
-        let state = FirewallState {
-            instances: vec![instance()],
-            ..Default::default()
-        };
-        let error = firewall.apply(&state).await.unwrap_err();
-        assert!(matches!(error, CommandError::Unstartable { .. }), "{error}");
-        firewall.apply(&state).await.unwrap_err();
-        assert_eq!(writes(&log), 2, "a ruleset that never landed is written again");
-    }
-
-    #[tokio::test]
-    async fn counters_this_host_cannot_read_are_a_failure_rather_than_an_empty_reading() {
-        let (commands, _) = mocks::commands_answering(|_| {
-            Err(CommandError::TimedOut {
-                executable: "nft".into(),
-            })
-        });
-        let error = HostFirewall::new(commands).traffic().await.unwrap_err();
-        assert!(matches!(error, CommandError::TimedOut { .. }), "{error}");
-    }
-
-    #[tokio::test]
-    async fn a_counter_listing_that_is_not_json_reads_as_no_traffic_rather_than_a_failure() {
-        let firewall = HostFirewall::new(listing("not json at all".to_string()).0);
-        assert!(firewall.traffic().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_ruleset_that_changed_is_written_even_when_the_kernel_still_holds_the_old_one() {
-        let (commands, log) = listing(holding((2, 4)));
-        let firewall = HostFirewall::new(commands);
-        firewall.apply(&FirewallState::default()).await.unwrap();
-        firewall
-            .apply(&FirewallState {
-                instances: vec![instance()],
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(writes(&log), 2);
+            .iter()
+            .any(|call| call.command.last().is_some_and(|word| word == "down")));
+        release.send(()).unwrap();
+        assert!(setup.await.unwrap_err().is_cancelled());
+        repair.await.unwrap().unwrap();
+        assert!(log
+            .calls()
+            .iter()
+            .any(|call| call.command.last().is_some_and(|word| word == "down")));
     }
 }

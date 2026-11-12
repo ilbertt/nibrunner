@@ -5,6 +5,9 @@ use std::sync::Arc;
 use nibrunnerd::ports::{CommandRunner, CommandRunnerExt};
 use nibrunnerd::test_support::mocks;
 
+#[path = "integration/firewall.rs"]
+mod firewall;
+
 #[path = "integration/remote_oci.rs"]
 mod remote_oci;
 

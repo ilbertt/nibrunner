@@ -33,6 +33,7 @@ const VM_DIR_MODE: u32 = 0o700;
 const FIRST_GUEST_CID: u32 = 3;
 
 pub struct VmManager {
+    pub firewall: Arc<crate::adapters::net::firewall::HostFirewall>,
     pub start_permits: tokio::sync::Semaphore,
     pub start_available: tokio::sync::Notify,
     pub vm_dir: PathBuf,
@@ -144,13 +145,16 @@ impl VmManager {
     async fn stage_inputs(&self, request: &BootRequest) -> Result<PathBuf, VmError> {
         let slot = &request.slot;
         let host = |error: crate::adapters::net::tap::NetworkError| VmError::Host(error.message());
-        self.network
-            .ensure_tap(&TapInterface {
-                tap_name: slot.tap_name.clone(),
-                host_ipv4: slot.host_ipv4.clone(),
-                subnet_prefix_length: slot.subnet_prefix_length,
-            })
+        let network = self.network.clone();
+        let tap = TapInterface {
+            tap_name: slot.tap_name.clone(),
+            host_ipv4: slot.host_ipv4.clone(),
+            subnet_prefix_length: slot.subnet_prefix_length,
+        };
+        self.firewall
+            .while_isolated(async move { network.ensure_tap(&tap).await })
             .await
+            .map_err(|error| VmError::Host(error.message()))?
             .map_err(host)?;
         self.network
             .refresh_neighbour(&Neighbour {
@@ -1150,6 +1154,7 @@ mod tests {
         let (network, network_spy) = mocks::network();
         let state = HostState::shared();
         let manager = VmManager {
+            firewall: mocks::verified_firewall(),
             start_permits: tokio::sync::Semaphore::new(2),
             start_available: tokio::sync::Notify::new(),
             metrics: Arc::new(crate::domain::metrics::HostMetrics::new()),
