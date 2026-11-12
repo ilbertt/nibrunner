@@ -6,13 +6,11 @@ use protocol::{CronTable, DesiredInstanceState, InstanceState};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinSet;
 
-use crate::adapters::cron_execution::GuestCronExecution;
 use crate::controllers::Controller;
 use crate::domain::cron::registry::{CronRegistry, CronRegistryError};
 use crate::domain::cron::runs::CronRunLease;
 use crate::domain::cron::schedule::InvalidCronSchedule;
 use crate::domain::cron::scheduler::{CronScheduler, ScheduledRun};
-use crate::domain::filesystem::reader::guest_vsock_path;
 use crate::host::Host;
 use crate::state::GuestActivity;
 
@@ -202,13 +200,14 @@ impl CronController {
             activity = Self::prepare(&host, &registry, &run, expected.as_ref()) => activity,
         };
         if let Some(activity) = activity {
-            if let Err(error) = GuestCronExecution::run(
-                &guest_vsock_path(&host, &run.key.app_id),
-                run.clone(),
-                host.logs.as_ref(),
-                lease.cancelled(),
-            )
-            .await
+            if let Err(error) = host
+                .cron_execution
+                .run(
+                    &crate::domain::filesystem::reader::guest_vsock_path(&host, &run.key.app_id),
+                    run.clone(),
+                    Box::pin(lease.cancelled()),
+                )
+                .await
             {
                 tracing::warn!(app_id = %run.key.app_id, deployment_id = %run.key.deployment_id, job_index = run.key.index, %error, "cron execution did not complete");
             }
@@ -269,6 +268,7 @@ impl Controller for CronController {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::filesystem::reader::guest_vsock_path;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
