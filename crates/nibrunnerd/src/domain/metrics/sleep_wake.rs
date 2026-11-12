@@ -71,6 +71,32 @@ const RESTORE_PHASES: [RestorePhase; 10] = [
     RestorePhase::Cleanup,
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootPhase {
+    Stage,
+    Spawn,
+    GuestInit,
+    Total,
+}
+
+impl BootPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stage => "stage",
+            Self::Spawn => "spawn",
+            Self::GuestInit => "guest_init",
+            Self::Total => "total",
+        }
+    }
+}
+
+const BOOT_PHASES: [BootPhase; 4] = [
+    BootPhase::Stage,
+    BootPhase::Spawn,
+    BootPhase::GuestInit,
+    BootPhase::Total,
+];
+
 /// A stretch of a wake as the waker sees it: waiting for what `readyWhen` names once the microVM
 /// is back, and the whole of it. Bringing the microVM back is the difference, and the VMM times
 /// its own part of that on `nibrunner_vm_restore_duration_seconds`.
@@ -210,6 +236,7 @@ pub struct SleepWakeMetrics {
     snapshot: Histogram,
     restore: Histogram,
     restore_phases: Vec<Histogram>,
+    boot_phases: Vec<Histogram>,
     wake: Vec<Histogram>,
     first_response: Histogram,
     coalesced: AtomicU64,
@@ -226,6 +253,10 @@ impl Default for SleepWakeMetrics {
             wake_wait: Histogram::over(&WAKE_BOUNDS_SECONDS),
             snapshot: Histogram::over(&SLEEP_BOUNDS_SECONDS),
             restore: Histogram::over(&WAKE_BOUNDS_SECONDS),
+            boot_phases: BOOT_PHASES
+                .iter()
+                .map(|_| Histogram::over(&WAKE_BOUNDS_SECONDS))
+                .collect(),
             restore_phases: RESTORE_PHASES
                 .iter()
                 .map(|_| Histogram::over(&RESTORE_PHASE_BOUNDS_SECONDS))
@@ -284,6 +315,10 @@ impl SleepWakeMetrics {
 
     pub fn restored(&self, took: Duration) {
         self.restore.observe(took);
+    }
+
+    pub(crate) fn booted_phase(&self, phase: BootPhase, took: Duration) {
+        self.boot_phases[position(&BOOT_PHASES, &phase)].observe(took);
     }
 
     pub(crate) fn restored_phase(&self, phase: RestorePhase, took: Duration) {
@@ -382,6 +417,13 @@ static VM_RESTORE_PHASE_SECONDS: Metric = Metric {
     labels: &["phase"],
 };
 
+static VM_BOOT_PHASE_SECONDS: Metric = Metric {
+    name: "nibrunner_vm_boot_phase_seconds",
+    help: "Successful cold microVM boots by phase: staging the jail and devices, spawning Firecracker, waiting for guest initialization, and the total before application readiness.",
+    kind: Kind::Histogram,
+    labels: &["phase"],
+};
+
 static WAKE_PHASE_SECONDS: Metric = Metric {
     name: "nibrunner_wake_phase_seconds",
     help: "One wake, by how it was done and the stretch of it: waiting for what readyWhen names once the microVM was back, and the whole. Total less ready is bringing the microVM back; the VMM's own part of that is nibrunner_vm_restore_duration_seconds.",
@@ -460,6 +502,7 @@ static APP_LAST_SLEEP_SECONDS: Metric = Metric {
 };
 
 pub(super) static DECLARED: &[&Metric] = &[
+    &VM_BOOT_PHASE_SECONDS,
     &WAKE_DURATION_SECONDS,
     &VM_SNAPSHOT_DURATION_SECONDS,
     &VM_RESTORE_DURATION_SECONDS,
@@ -478,6 +521,10 @@ pub(super) static DECLARED: &[&Metric] = &[
 ];
 
 pub(super) fn render(page: &mut Page, metrics: &SleepWakeMetrics, snapshot: &HostSnapshot) {
+    page.declare(&VM_BOOT_PHASE_SECONDS);
+    for (phase, histogram) in BOOT_PHASES.iter().zip(&metrics.boot_phases) {
+        page.histogram(&VM_BOOT_PHASE_SECONDS, &[("phase", phase.as_str())], histogram);
+    }
     page.declare(&WAKE_DURATION_SECONDS);
     page.histogram(&WAKE_DURATION_SECONDS, &[], &metrics.wake_wait);
 
