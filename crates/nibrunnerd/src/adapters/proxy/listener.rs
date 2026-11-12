@@ -45,6 +45,16 @@ impl HttpListener {
         Ok(self.listener.as_fd().try_clone_to_owned()?.into())
     }
 
+    pub fn send_listener(&self, channel: &std::os::unix::net::UnixStream) -> std::io::Result<()> {
+        super::listener_handoff::send(channel, &self.duplicate_listener()?)
+    }
+
+    pub fn receive_listener(
+        channel: &std::os::unix::net::UnixStream,
+    ) -> std::io::Result<std::net::TcpListener> {
+        super::listener_handoff::receive(channel)
+    }
+
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
     }
