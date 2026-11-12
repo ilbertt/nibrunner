@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026.11.11] - 2026-11-12
+
+### Fixes
+
+- Queue HTTP wakes when VM start slots are busy (#350)
+- Defer health probes until guest initialization finishes (#351)
+
+### Performance
+
+- Use zstd fast mode for layer images (#352)
+
 ## [2026.11.10] - 2026-11-12
 
 ### Fixes
