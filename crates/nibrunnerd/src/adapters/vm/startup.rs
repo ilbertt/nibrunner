@@ -5,8 +5,9 @@ use tokio::io::{AsyncWriteExt, BufReader};
 
 use crate::ports::VmError;
 
+use super::CONTROL_RETRY_INTERVAL;
+
 const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(60);
-const RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 // PID 1 opens this port after mounting its filesystems and preparing the tenant cgroup.
@@ -23,7 +24,7 @@ pub(super) async fn initialized(path: &Path, active: impl Fn() -> bool) -> Resul
                 Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                     return Err(VmError::Host(error.to_string()));
                 }
-                Err(_) => tokio::time::sleep(RETRY_INTERVAL).await,
+                Err(_) => tokio::time::sleep(CONTROL_RETRY_INTERVAL).await,
             }
         }
     })
@@ -52,6 +53,32 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[tokio::test(start_paused = true)]
+    async fn guest_control_readiness_is_retried_before_ten_milliseconds_pass() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("missing");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let starting = tokio::spawn(async move {
+            initialized(&socket, || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                true
+            })
+            .await
+        });
+        while attempts.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(8)).await;
+        tokio::task::yield_now().await;
+        assert!(attempts.load(Ordering::Relaxed) > 1);
+        starting.abort();
+        assert!(starting.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_guest_that_never_initializes_has_a_bounded_wait() {
         let directory = tempfile::tempdir().unwrap();
         let error = initialized(&directory.path().join("missing"), || true)
@@ -69,7 +96,7 @@ mod tests {
         tokio::pin!(waiting);
         tokio::select! {
             result = &mut waiting => panic!("initialization ended before exit: {result:?}"),
-            () = tokio::time::sleep(RETRY_INTERVAL) => active.store(false, Ordering::Relaxed),
+            () = tokio::time::sleep(CONTROL_RETRY_INTERVAL) => active.store(false, Ordering::Relaxed),
         }
         assert!(waiting.await.unwrap_err().message().contains("exited"));
     }

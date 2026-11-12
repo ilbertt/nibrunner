@@ -14,3 +14,5 @@ pub use status::{VmExit, VmStatus, UNKNOWN_VM};
 pub(crate) mod mount_namespace;
 
 pub(crate) mod jailer;
+
+pub(super) const CONTROL_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
