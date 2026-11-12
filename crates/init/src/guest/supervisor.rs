@@ -365,6 +365,7 @@ fn spawn(config: &InstanceConfig, ceiling: &Ceiling) -> Option<Tenant> {
             let _ = nix::unistd::setgid(Gid::from_raw(paths::TENANT_GID)).map_err(failed);
             let _ = nix::unistd::setgroups(&[]).map_err(failed);
             let _ = nix::unistd::setuid(Uid::from_raw(paths::TENANT_UID)).map_err(failed);
+            super::startup::record(guest_contract::startup::StartupMilestone::TenantExec);
             let _ = nix::unistd::execve(&executable, &argv, &environment);
             unsafe { libc::_exit(127) }
         }

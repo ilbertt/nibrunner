@@ -622,3 +622,42 @@ async fn an_app_the_document_stopped_has_no_microvm_of_its_own_left_running() {
 
     host.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ready_guest_reports_its_kernel_init_and_first_exec_checkpoints() {
+    use guest_contract::startup::{StartupMilestone, StartupSnapshot, STARTUP_REQUEST};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let Some(host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, protocol::InstanceState::Running)
+        .await;
+    let path = nibrunnerd::domain::filesystem::reader::guest_vsock_path(&host.host, &app.app_id);
+    let sample = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let socket = tokio::net::UnixStream::connect(path).await.unwrap();
+        let mut wire = BufReader::new(socket);
+        let port = guest_contract::vsock::GUEST_CONTROL_VSOCK_PORT;
+        wire.get_mut()
+            .write_all(guest_contract::vsock::connect_request(port).as_bytes())
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        wire.read_line(&mut reply).await.unwrap();
+        guest_contract::vsock::read_connect_reply(&reply, port).unwrap();
+        wire.get_mut()
+            .write_all(format!("{STARTUP_REQUEST}\n").as_bytes())
+            .await
+            .unwrap();
+        reply.clear();
+        wire.read_line(&mut reply).await.unwrap();
+        StartupSnapshot::from_reply(&reply).expect("a running guest reports complete startup checkpoints")
+    })
+    .await
+    .unwrap();
+    assert!(sample.at(StartupMilestone::InitStarted) > 0);
+    assert!(sample.at(StartupMilestone::TenantExec) > sample.at(StartupMilestone::RootReady));
+    host.stop().await;
+}

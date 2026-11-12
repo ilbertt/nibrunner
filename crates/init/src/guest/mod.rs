@@ -5,6 +5,7 @@ mod filesystem;
 mod logs;
 mod memory;
 mod mounts;
+mod startup;
 mod supervisor;
 mod vsock;
 
@@ -21,6 +22,7 @@ pub(crate) fn run() -> ExitCode {
     }
     adopt_console();
     log("guest runtime starting");
+    startup::initialize();
 
     supervisor::block_signals();
     route_ctrl_alt_del_here();
@@ -33,6 +35,7 @@ pub(crate) fn run() -> ExitCode {
         }
     };
 
+    startup::record(guest_contract::startup::StartupMilestone::RootReady);
     let channels = channels::start(&config, &ceiling);
 
     log(&format!(
