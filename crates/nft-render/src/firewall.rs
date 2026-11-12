@@ -240,7 +240,7 @@ fn forward_chain_v4(state: &FirewallState) -> Vec<String> {
         })
     }));
     rules.extend([
-        "ct state established,related accept".to_string(),
+        "ct direction reply ct state established,related accept".to_string(),
         format!("iifname {tap} ip daddr {INSTANCE_METADATA_ADDRESS_V4} {DENY} comment \"instance metadata endpoint\""),
         format!("iifname {tap} oifname {tap} {DENY} comment \"guest to guest\""),
         format!("iifname {tap} ip daddr {GUEST_NETWORK_CIDR} {DENY} comment \"guest to guest\""),
@@ -258,7 +258,7 @@ fn input_chain_v4() -> Vec<String> {
         "input {",
         &[
             "type filter hook input priority filter; policy accept;".to_string(),
-            format!("iifname {tap} ct state established,related accept"),
+            format!("iifname {tap} ct direction reply ct state established,related accept"),
             format!("iifname {tap} {DENY} comment \"guest to host\""),
         ],
     )
@@ -273,7 +273,7 @@ fn forward_chain_v6(state: &FirewallState) -> Vec<String> {
         &state.denied_egress_addresses_v6,
     ));
     rules.extend([
-        "ct state established,related accept".to_string(),
+        "ct direction reply ct state established,related accept".to_string(),
         format!("iifname {tap} ip6 daddr {INSTANCE_METADATA_ADDRESS_V6} {DENY} comment \"instance metadata endpoint\""),
         format!("iifname {tap} oifname {tap} {DENY} comment \"guest to guest\""),
     ]);
@@ -290,7 +290,7 @@ fn input_chain_v6() -> Vec<String> {
         "input {",
         &[
             "type filter hook input priority filter; policy accept;".to_string(),
-            format!("iifname {tap} ct state established,related accept"),
+            format!("iifname {tap} ct direction reply ct state established,related accept"),
             format!("iifname {tap} {DENY} comment \"guest to host\""),
         ],
     )
@@ -505,7 +505,7 @@ mod tests {
         ] {
             let established = chain
                 .iter()
-                .position(|l| l.starts_with("ct state established"))
+                .position(|l| l.starts_with("ct direction reply ct state established"))
                 .unwrap();
             let denies: Vec<usize> = chain
                 .iter()
@@ -536,7 +536,7 @@ mod tests {
         let ruleset = render_ruleset(&state(vec![], &[], &[]));
         for chain in [forward_chain(&ruleset), forward_chain(&v6_half(&ruleset))] {
             assert!(chain[0].starts_with("type filter hook forward"));
-            assert_eq!(chain[1], "ct state established,related accept");
+            assert_eq!(chain[1], "ct direction reply ct state established,related accept");
             assert!(!ruleset.contains("denied egress"));
         }
     }
@@ -602,7 +602,7 @@ mod tests {
             .unwrap();
         let established = chain
             .iter()
-            .position(|line| line.starts_with("ct state established"))
+            .position(|line| line.starts_with("ct direction reply ct state established"))
             .unwrap();
         assert!(guard < established);
         assert_eq!(chain[guard], "oifname \"nbr*\" ip daddr 10.201.0.2 tcp dport 3000 ct direction original reject with tcp reset comment \"HTTP through proxy only\"");

@@ -485,7 +485,7 @@ mod tests {
         host.commands
             .calls()
             .into_iter()
-            .filter(|request| request.command == ["nft", "-f", "-"])
+            .filter(|request| request.executable() == "nft" && request.command.contains(&"-f".into()))
             .filter_map(|request| request.stdin)
             .collect()
     }

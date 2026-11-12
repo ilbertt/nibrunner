@@ -245,3 +245,68 @@ async fn jailed_vmm_processes_have_distinct_non_root_identities_and_resume_their
     assert_eq!(host.get(&one, "/").await.expect("the readopted app").status, 200);
     host.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_guest_is_disconnected_when_firewall_repair_fails_and_reconnected_only_after_verification(
+) {
+    use nibrunnerd::adapters::exec::HostCommands;
+    use nibrunnerd::ports::{CommandRequest, CommandRunnerExt};
+    let Some(mut host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1).running();
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    host.until_routed(&app).await;
+    host.pause_controllers().await;
+    let slot = host.host.slot_of(&app.app_id).await.unwrap();
+    let process = VmProcesses::new(host.host.config.runtime_dir.clone());
+    let original = process.read_record(&app.app_id).unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .no_proxy()
+        .build()
+        .unwrap();
+    let url = format!("http://{}:{}/", slot.guest_ipv4, protocol::DEFAULT_HTTP_PORT);
+    assert!(client.get(&url).send().await.is_ok());
+    let valid = nft_render::FirewallState {
+        instances: nibrunnerd::domain::reconcile::network::forwarded_instances(&host.host).await,
+        denied_egress_addresses_v4: host.host.config.denied_egress_addresses_v4.clone(),
+        denied_egress_addresses_v6: host.host.config.denied_egress_addresses_v6.clone(),
+    };
+    HostCommands
+        .stdout_of(CommandRequest::new(&[
+            "nft", "flush", "chain", "ip", "nibrun", "forward",
+        ]))
+        .await
+        .unwrap();
+    let invalid = nft_render::FirewallState {
+        denied_egress_addresses_v4: vec!["not-an-address".into()],
+        ..valid.clone()
+    };
+    assert!(host.host.firewall.apply(&invalid).await.is_err());
+    assert!(
+        client.get(&url).send().await.is_err(),
+        "a running guest must lose connectivity when repair fails"
+    );
+    assert!(
+        process.status(&app.app_id).active,
+        "containment preserves the guest process and disk"
+    );
+    assert_eq!(process.read_record(&app.app_id).unwrap().pid, original.pid);
+    host.host.firewall.apply(&valid).await.unwrap();
+    assert!(client.get(&url).send().await.is_ok());
+    let metadata = client
+        .get(format!("{url}reach?addr=169.254.169.254:80"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        metadata.starts_with("blocked"),
+        "recovery restored connectivity without restoring isolation: {metadata}"
+    );
+    host.stop().await;
+}

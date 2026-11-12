@@ -139,7 +139,9 @@ pub async fn build_host(
         );
     }
 
+    let firewall = Arc::new(HostFirewall::new(commands.clone()));
     let vms = Arc::new(VmManager {
+        firewall: firewall.clone(),
         start_available: tokio::sync::Notify::new(),
         start_permits: tokio::sync::Semaphore::new(usize::from(config.max_concurrent_vm_starts.get())),
         vm_dir: config.vm_dir(),
@@ -231,7 +233,7 @@ pub async fn build_host(
         volumes,
         artifacts,
         payloads,
-        firewall: Arc::new(HostFirewall::new(commands)),
+        firewall,
         router: Router::with_http_config(metrics.clone(), Some(http_log), config.proxy.http.as_ref()),
         tls,
         metrics,

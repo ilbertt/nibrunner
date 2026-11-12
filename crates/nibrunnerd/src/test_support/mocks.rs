@@ -51,7 +51,25 @@ impl CommandLog {
 }
 
 pub fn commands_succeeding() -> (Arc<MockCommandRunner>, CommandLog) {
-    commands_answering(|_| Ok(CommandResult::succeeded()))
+    commands_answering(|request| Ok(successful_command(request)))
+}
+
+pub fn successful_command(request: &CommandRequest) -> CommandResult {
+    if request.executable() == "nft" {
+        return CommandResult::with_stdout(include_str!("../../../nft-render/tests/fixtures/installed.json"));
+    }
+    if request.command == ["ip", "-json", "link", "show"] {
+        return CommandResult::with_stdout("[]");
+    }
+    CommandResult::succeeded()
+}
+
+pub fn verified_firewall() -> Arc<crate::adapters::net::firewall::HostFirewall> {
+    let firewall = Arc::new(crate::adapters::net::firewall::HostFirewall::new(
+        commands_succeeding().0,
+    ));
+    futures::executor::block_on(firewall.apply_locked(&nft_render::FirewallState::default())).unwrap();
+    firewall
 }
 
 /// Succeeds at everything, and leaves behind the one thing the real `mke2fs` does that anything
@@ -61,7 +79,7 @@ pub fn commands_formatting() -> (Arc<MockCommandRunner>, CommandLog) {
         if request.executable() == "mke2fs" {
             lay_superblock(request.command.last().expect("a device to format"));
         }
-        Ok(CommandResult::succeeded())
+        Ok(successful_command(request))
     })
 }
 

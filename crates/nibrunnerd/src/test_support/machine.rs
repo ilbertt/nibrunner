@@ -532,6 +532,13 @@ impl RunningHost {
     /// Every microVM down, every tap back, and the document this host was holding written out.
     /// A test calls this at its end; one that panicked first has it done on the way out, because
     /// a guest left running holds the slot the next test is about to be handed.
+    pub async fn pause_controllers(&mut self) {
+        for task in self.controllers.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
     pub async fn stop(mut self) {
         self.take_down().await;
     }
