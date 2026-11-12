@@ -216,13 +216,14 @@ const WAKE_OUTCOMES: [WakeOutcome; 3] = [
     WakeOutcome::ColdBoot,
     WakeOutcome::AlreadyRunning,
 ];
-const REFUSALS: [&str; 9] = [
+const REFUSALS: [&str; 10] = [
     "no_room",
     "host_starting",
     "not_named",
     "not_on_request",
     "not_isolated",
     "volume_unusable",
+    crate::ports::WakeFailure::StartBusy.as_str(),
     "would_not_start",
     "never_answered",
     "abandoned",
@@ -721,6 +722,7 @@ mod tests {
             WakeFailure::NotOnRequest,
             WakeFailure::NotIsolated,
             WakeFailure::VolumeUnusable,
+            WakeFailure::StartBusy,
             WakeFailure::WouldNotStart,
             WakeFailure::NeverAnswered,
             WakeFailure::Abandoned,

@@ -382,6 +382,13 @@ enum BootReason {
     HostRecovery,
 }
 
+#[derive(PartialEq, Eq)]
+enum BootOutcome {
+    Started,
+    StartBusy,
+    NotStarted,
+}
+
 pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     let statuses = host.vms.statuses(std::slice::from_ref(&desired.app_id)).await;
     let reason = if statuses
@@ -395,7 +402,7 @@ pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
     boot_instance(host, desired, reason).await;
 }
 
-async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReason) {
+async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReason) -> BootOutcome {
     let now = now_ms();
     let existing = host.state.record(&desired.app_id).await;
     let recovery_window = existing
@@ -411,14 +418,14 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
             if let StartRefused::OutOfRestarts { attempted, allowed } = refusal {
                 say_it_is_out_of_restarts(host, &desired.app_id, attempted, allowed).await;
             }
-            return;
+            return BootOutcome::NotStarted;
         }
     }
     let Ok(slot) = host.slot_for(&desired.app_id).await else {
         if report_no_slot(host, desired, StateMessage::new("this host has no slot left")).await {
             host.metrics.health.failed(&desired.app_id, Failure::NoSlot);
         }
-        return;
+        return BootOutcome::NotStarted;
     };
 
     // Before anything is fetched or attached, and before it counts as an attempt: a microVM this
@@ -441,7 +448,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
             host.metrics.health.failed(&desired.app_id, Failure::Refused);
             tracing::error!(app_id = %desired.app_id, refusal, "instance refused before it was started");
         }
-        return;
+        return BootOutcome::NotStarted;
     }
 
     let mut attempted = match existing.clone() {
@@ -466,7 +473,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
             host.metrics.health.failed(&desired.app_id, Failure::Volume);
             tracing::error!(app_id = %desired.app_id, reason = refusal.as_str(), "instance start failed");
         }
-        return;
+        return BootOutcome::NotStarted;
     }
 
     attempted.start_attempts = recovery_window.unwrap_or_else(|| {
@@ -511,7 +518,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
                         .await;
                     host.metrics.health.failed(&desired.app_id, Failure::Volume);
                     tracing::error!(app_id = %desired.app_id, error = %error.message(), "instance start failed");
-                    return;
+                    return BootOutcome::NotStarted;
                 }
             };
             host.router.close_connections_to(&desired.app_id).await;
@@ -540,7 +547,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
                         record.message = Some(StateMessage::new(VmError::StartBusy.message()));
                     })
                     .await;
-                return;
+                return BootOutcome::StartBusy;
             }
             boot.map_err(|error| (Failure::Boot, error.message()))
         }
@@ -568,6 +575,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
             .await;
             host.state.probe_at_once(&desired.app_id).await;
             tracing::info!(app_id = %desired.app_id, host_port = ?attempted.host_port, guest_ipv4 = ?attempted.guest_ipv4, "instance started");
+            BootOutcome::Started
         }
         Err((failure, reason)) => {
             host.state
@@ -578,6 +586,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
                 .await;
             host.metrics.health.failed(&desired.app_id, failure);
             tracing::error!(app_id = %desired.app_id, attempt = attempted.start_attempts.attempts, reason, "instance start failed");
+            BootOutcome::NotStarted
         }
     }
 }
@@ -641,7 +650,12 @@ pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<W
         }
         Err(VmError::SnapshotUnusable { reason }) => {
             tracing::info!(app_id = %desired.app_id, reason, "nothing to wake this app from; booting it instead");
-            boot_instance(host, desired, BootReason::HostRecovery).await;
+            if boot_instance(host, desired, BootReason::HostRecovery).await == BootOutcome::StartBusy {
+                return Err(WakeRefusal::Failed {
+                    kind: WakeFailure::StartBusy,
+                    reason: VmError::StartBusy.message(),
+                });
+            }
             let record = host.state.record(&desired.app_id).await;
             if record.as_ref().is_some_and(|record| {
                 matches!(record.state, InstanceState::Starting | InstanceState::Running)
@@ -662,7 +676,14 @@ pub async fn resume_instance(host: &Host, desired: &DesiredInstance) -> Result<W
                     record.message = Some(StateMessage::new(reason.clone()));
                 })
                 .await;
-            Err(would_not_start(reason))
+            Err(WakeRefusal::Failed {
+                kind: if matches!(error, VmError::StartBusy) {
+                    WakeFailure::StartBusy
+                } else {
+                    WakeFailure::WouldNotStart
+                },
+                reason,
+            })
         }
     }
 }
@@ -1111,12 +1132,27 @@ mod tests {
         host.vms.boot_error(Some(VmError::StartBusy));
         let result = resume_instance(&host, &desired_instance(|_| {})).await;
         assert!(
-            matches!(result, Err(WakeRefusal::Failed { reason, .. }) if reason == VmError::StartBusy.message())
+            matches!(result, Err(WakeRefusal::Failed { kind: WakeFailure::StartBusy, reason }) if reason == VmError::StartBusy.message())
         );
         refresh_states(host.arc()).await;
         let record = host.state.record(&app_id()).await.unwrap();
         assert_eq!(record.state, InstanceState::Pending);
         assert_eq!(record.start_attempts, NO_START_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn a_busy_snapshot_restore_preserves_its_typed_refusal() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        host.vms.refuse_wake(VmError::StartBusy);
+        assert!(matches!(
+            resume_instance(&host, &desired_instance(|_| {})).await,
+            Err(WakeRefusal::Failed {
+                kind: WakeFailure::StartBusy,
+                ..
+            })
+        ));
+        assert_eq!(host.vms.calls(), vec![crate::ports::VmCall::Wake]);
     }
 
     #[tokio::test]
