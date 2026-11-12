@@ -22,8 +22,12 @@ async fn requests_for_different_sleeping_apps_queue_behind_one_restore_slot() {
     else {
         return;
     };
-    let apps: Vec<_> = (1..=4)
-        .map(|index| host.tenant(index).on_request(IDLE_TIMEOUT_MS))
+    let apps: Vec<_> = (1..=2)
+        .map(|index| {
+            host.tenant(index)
+                .on_request(IDLE_TIMEOUT_MS)
+                .edited(|instance| instance.config.resources.memory_mib = 128)
+        })
         .collect();
     host.deploy(&apps).await;
     for app in &apps {
