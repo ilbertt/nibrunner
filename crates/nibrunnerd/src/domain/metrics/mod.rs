@@ -6,6 +6,7 @@ pub mod passes;
 pub mod proxy;
 pub mod resources;
 pub mod sleep_wake;
+pub mod startup;
 
 pub use conntrack::{Conntrack, ConntrackWatch};
 pub use proxy::{Outcome, ProxyMetrics};
@@ -31,6 +32,7 @@ pub struct HostMetrics {
     pub converge: ConvergeMetrics,
     pub passes: PassMetrics,
     pub health: HealthMetrics,
+    pub startup: startup::StartupMetrics,
     pub resources: ResourceMetrics,
     pub layers: layers::LayerMetrics,
     pub conntrack: ConntrackWatch,
@@ -352,6 +354,7 @@ pub fn declared() -> Vec<&'static Metric> {
         passes::DECLARED,
         converge::DECLARED,
         health::DECLARED,
+        startup::DECLARED,
         resources::DECLARED,
         layers::DECLARED,
         conntrack::DECLARED,
@@ -368,6 +371,7 @@ pub fn declared() -> Vec<&'static Metric> {
 pub fn page_of_every_series() -> String {
     let unobserved = Histogram::over(&[]);
     let mut page = Page::new();
+
     for metric in declared() {
         let labels: Vec<(&str, &str)> = metric.labels.iter().map(|label| (*label, "x")).collect();
         page.declare(metric);
@@ -384,6 +388,7 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     let (report, snapshot, now_ms) = (scrape.report, scrape.snapshot, scrape.now_ms);
     let mut page = Page::new();
     layers::render(&mut page, &metrics.layers);
+    startup::render(&mut page, &metrics.startup);
 
     page.declare(&UP);
     page.value(&UP, &[], 1);

@@ -169,6 +169,7 @@ pub fn vmm() -> (Arc<MockVmm>, VmmSpy) {
 pub(crate) fn vmm_under(directory: PathBuf) -> (Arc<MockVmm>, VmmSpy) {
     let spy = VmmSpy::default();
     let mut vms = MockVmm::new();
+    vms.expect_startup_sample().returning(|_| None);
 
     let (calls, on_boot) = (spy.calls.clone(), spy.on_boot.clone());
     vms.expect_boot().returning(move |_| {

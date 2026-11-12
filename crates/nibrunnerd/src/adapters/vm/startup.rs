@@ -7,6 +7,35 @@ use crate::ports::VmError;
 
 use super::CONTROL_RETRY_INTERVAL;
 
+pub(super) async fn sample(path: &Path) -> Option<crate::ports::GuestStartupSample> {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let socket = crate::unix_socket::connect(path).await.ok()?;
+        let mut wire = BufReader::new(socket);
+        let port = guest_contract::vsock::GUEST_CONTROL_VSOCK_PORT;
+        wire.get_mut()
+            .write_all(guest_contract::vsock::connect_request(port).as_bytes())
+            .await
+            .ok()?;
+        let reply = crate::domain::guest_line::read(&mut wire, CONNECT_TIMEOUT).await?;
+        guest_contract::vsock::read_connect_reply(&reply, port).ok()?;
+        let requested = std::time::Instant::now();
+        wire.get_mut()
+            .write_all(format!("{}\n", guest_contract::startup::STARTUP_REQUEST).as_bytes())
+            .await
+            .ok()?;
+        let reply = crate::domain::guest_line::read(&mut wire, CONNECT_TIMEOUT).await?;
+        let received_at = std::time::Instant::now();
+        Some(crate::ports::GuestStartupSample {
+            guest: guest_contract::startup::StartupSnapshot::from_reply(&reply)?,
+            received_at,
+            round_trip: received_at.duration_since(requested),
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
