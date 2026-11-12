@@ -59,7 +59,7 @@ impl ArtifactStore for ObjectArtifactStore {
             .bytes()
             .await
             .map_err(|error| ArtifactError::Transfer(error.to_string()))?;
-        Ok(bytes.to_vec())
+        Ok(bytes.into())
     }
 }
 
