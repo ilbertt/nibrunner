@@ -62,6 +62,26 @@ pub struct GuestActivity {
     app_id: AppId,
 }
 
+impl GuestActivity {
+    fn new(operations: GuestOperations, app_id: &AppId) -> Self {
+        {
+            let mut held = operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *held.entry(app_id.clone()).or_default() += 1;
+        }
+        Self {
+            operations,
+            app_id: app_id.clone(),
+        }
+    }
+
+    fn is_held(operations: &GuestOperations, app_id: &AppId) -> bool {
+        operations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(app_id)
+    }
+}
+
 impl Drop for GuestActivity {
     fn drop(&mut self) {
         let mut operations = self
@@ -83,6 +103,7 @@ pub struct HostState {
     report: Notify,
     transitions: Mutex<Transitions>,
     guest_operations: GuestOperations,
+    guest_starts: GuestOperations,
 }
 
 impl HostState {
@@ -93,6 +114,7 @@ impl HostState {
             report: Notify::new(),
             transitions: Mutex::new(BTreeMap::new()),
             guest_operations: Arc::new(Mutex::new(BTreeMap::new())),
+            guest_starts: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -119,22 +141,19 @@ impl HostState {
     }
 
     pub fn guest_activity(&self, app_id: &AppId) -> GuestActivity {
-        let mut operations = self
-            .guest_operations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *operations.entry(app_id.clone()).or_default() += 1;
-        GuestActivity {
-            operations: self.guest_operations.clone(),
-            app_id: app_id.clone(),
-        }
+        GuestActivity::new(self.guest_operations.clone(), app_id)
     }
 
     pub fn has_guest_activity(&self, app_id: &AppId) -> bool {
-        self.guest_operations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains_key(app_id)
+        GuestActivity::is_held(&self.guest_operations, app_id)
+    }
+
+    pub fn guest_start(&self, app_id: &AppId) -> GuestActivity {
+        GuestActivity::new(self.guest_starts.clone(), app_id)
+    }
+
+    pub fn has_guest_start(&self, app_id: &AppId) -> bool {
+        GuestActivity::is_held(&self.guest_starts, app_id)
     }
 
     pub async fn records(&self) -> Vec<InstanceRecord> {
@@ -245,6 +264,19 @@ mod tests {
     use super::*;
     use crate::test_support::{app_id, instance_record, volume_id};
     use protocol::{InstanceState, VolumeState};
+
+    #[test]
+    fn nested_starts_are_tracked_separately_from_guest_activity_and_release_on_drop() {
+        let state = HostState::shared();
+        let first = state.guest_start(&app_id());
+        let second = state.guest_start(&app_id());
+        assert!(state.has_guest_start(&app_id()));
+        assert!(!state.has_guest_activity(&app_id()));
+        drop(first);
+        assert!(state.has_guest_start(&app_id()));
+        drop(second);
+        assert!(!state.has_guest_start(&app_id()));
+    }
 
     #[test]
     fn guest_activity_lasts_until_the_last_command_finishes() {
