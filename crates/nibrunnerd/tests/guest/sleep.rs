@@ -28,6 +28,7 @@ async fn requests_for_different_sleeping_apps_queue_behind_one_restore_slot() {
     host.deploy(&apps).await;
     for app in &apps {
         host.until_state(&app.app_id, InstanceState::Running).await;
+        host.until_routed(app).await;
         assert_eq!(host.get(app, "/remember").await.unwrap().body, "1");
         host.let_sleep(app).await;
     }
