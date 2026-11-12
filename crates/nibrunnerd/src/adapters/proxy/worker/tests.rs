@@ -7,21 +7,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 use super::*;
-use crate::config;
-use crate::domain::report::routes::RouteTarget;
-use crate::test_support::{app_hostname, app_id, deployment_id};
+use crate::test_support::{app_hostname, app_id, http_worker};
 
 async fn worker(root: &Path, name: &str) -> (HttpWorkerClient, tokio::task::JoinHandle<io::Result<()>>) {
-    let mut config = HostConfig::example();
-    config.runtime_dir = root.join("runtime");
-    config.state_dir = root.join("state");
-    config.proxy.http = Some(config::HttpListener {
-        listen_address: Ipv4Addr::LOCALHOST.into(),
-        port: 0,
-        tls: None,
-        fallback: None,
-        concurrency: None,
-    });
+    let config = http_worker::configuration(root, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
     let path = config.runtime_dir.join(format!("http/{name}.sock"));
     let client = HttpWorkerClient::new(&path);
     let serving = tokio::spawn(serve(config, path));
@@ -40,24 +29,11 @@ async fn worker(root: &Path, name: &str) -> (HttpWorkerClient, tokio::task::Join
 }
 
 async fn route(client: &HttpWorkerClient, port: u16) {
-    client
-        .apply(vec![RouteTarget {
-            app_id: app_id(),
-            deployment_id: deployment_id(),
-            hostnames: vec![app_hostname()],
-            host_port: protocol::HostPort::new(port).unwrap(),
-            access: protocol::AccessPolicy::Public,
-        }])
-        .await
-        .unwrap();
+    client.apply(http_worker::routes(port)).await.unwrap();
 }
 
 async fn headers(stream: &mut TcpStream) -> String {
-    let mut bytes = Vec::new();
-    while !bytes.ends_with(b"\r\n\r\n") {
-        bytes.push(stream.read_u8().await.unwrap());
-    }
-    String::from_utf8(bytes).unwrap()
+    String::from_utf8(http_worker::read_headers(stream).await.unwrap()).unwrap()
 }
 
 async fn request(address: SocketAddr) -> TcpStream {

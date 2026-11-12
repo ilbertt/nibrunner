@@ -19,6 +19,11 @@ pub(super) enum Command {
         #[arg(long)]
         socket: PathBuf,
     },
+    #[command(hide = true)]
+    HttpWorker {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     #[command(about = "Lay out the host, including configured storage, without starting its services")]
     Install {
         #[arg(long, help = "Replace files these commands did not write")]
@@ -65,6 +70,17 @@ mod tests {
     fn parse(arguments: &[&str]) -> Result<Option<Command>, clap::Error> {
         Cli::try_parse_from(std::iter::once("nibrunnerd").chain(arguments.iter().copied()))
             .map(|cli| cli.command)
+    }
+
+    #[test]
+    fn the_http_worker_requires_its_private_socket_argument() {
+        let Some(Command::HttpWorker { socket }) =
+            parse(&["http-worker", "--socket", "/run/nibrunner/http/worker.sock"]).unwrap()
+        else {
+            panic!("the internal worker command takes its control socket");
+        };
+        assert_eq!(socket, PathBuf::from("/run/nibrunner/http/worker.sock"));
+        assert!(parse(&["http-worker"]).is_err());
     }
 
     #[test]

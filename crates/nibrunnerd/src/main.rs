@@ -15,7 +15,12 @@ fn main() -> std::process::ExitCode {
 
     // An installer talks to whoever ran it, and a daemon talks to the log store. Structured JSON
     // on stderr is right for one and unreadable for the other.
-    if command.is_none() || matches!(command.as_ref(), Some(Command::CronWorker { .. })) {
+    if command.is_none()
+        || matches!(
+            command.as_ref(),
+            Some(Command::CronWorker { .. } | Command::HttpWorker { .. })
+        )
+    {
         install_logger();
     }
 
@@ -38,6 +43,15 @@ fn main() -> std::process::ExitCode {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(error) => {
                     tracing::error!(%error, "cron worker stopped unexpectedly");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
+        Some(Command::HttpWorker { socket }) => {
+            match runtime.block_on(nibrunnerd::adapters::proxy::worker::serve(config, socket)) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(error) => {
+                    tracing::error!(%error, "HTTP worker stopped unexpectedly");
                     std::process::ExitCode::FAILURE
                 }
             }
@@ -143,7 +157,7 @@ fn print_laid(laid: &install::Laid) {
 fn configuration(command: Option<&Command>) -> Result<(HostConfig, Origin), std::process::ExitCode> {
     let refused = |error: &nibrunnerd::config::ConfigError| {
         match command {
-            None | Some(Command::CronWorker { .. }) => {
+            None | Some(Command::CronWorker { .. } | Command::HttpWorker { .. }) => {
                 tracing::error!(error = %error.message(), "this host is not configured")
             }
             Some(Command::Install { .. } | Command::Start { .. } | Command::Storage { .. }) => {
@@ -153,7 +167,10 @@ fn configuration(command: Option<&Command>) -> Result<(HostConfig, Origin), std:
         std::process::ExitCode::FAILURE
     };
 
-    if matches!(command, Some(Command::CronWorker { .. })) {
+    if matches!(
+        command,
+        Some(Command::CronWorker { .. } | Command::HttpWorker { .. })
+    ) {
         return match std::io::read_to_string(std::io::stdin()) {
             Ok(document) => HostConfig::from_toml(&document)
                 .map(|config| (config, Origin::Operator))
