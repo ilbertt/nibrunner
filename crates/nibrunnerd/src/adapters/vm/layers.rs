@@ -1,14 +1,14 @@
 use std::io::{BufWriter, Cursor, Seek, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use backhand::compression::{CompressionOptions, Compressor, Zstd};
 use backhand::{FilesystemCompressor, FilesystemWriter, NodeHeader};
 use protocol::{DesiredLayer, OciSource};
 
-use crate::domain::metrics::layers::LayerPhase;
+use crate::domain::metrics::layers::{LayerMetrics, LayerPhase};
 use crate::domain::metrics::HostMetrics;
 use crate::json_store::make_directory;
 use crate::ports::{
@@ -17,6 +17,10 @@ use crate::ports::{
 
 mod oci;
 mod registry;
+
+const MAX_PREPARATIONS: usize = 2;
+static PREPARATION: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_PREPARATIONS)));
 
 pub const VERBATIM_IMAGE_FILENAME: &str = "layer.img";
 
@@ -167,18 +171,20 @@ pub async fn ensure_layer_image(
     metrics: &HostMetrics,
 ) -> Result<LayerImage, ArtifactError> {
     let image_path = layer_image_path(cache_dir, layer);
-    if image_path.exists() {
-        let _ = std::fs::File::open(&image_path).and_then(|file| {
-            file.set_times(
-                std::fs::FileTimes::new()
-                    .set_accessed(std::time::SystemTime::now())
-                    .set_modified(std::time::SystemTime::now()),
-            )
-        });
-        return Ok(LayerImage {
-            path: image_path,
-            fetched_bytes: 0,
-        });
+    if let Some(cached) = cached_image(&image_path) {
+        return Ok(cached);
+    }
+    // A miss retains an artifact while packing it, so reserve capacity before reading it.
+    let queued = std::time::Instant::now();
+    let permit = PREPARATION
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+    metrics.layers.observed(LayerPhase::Queue, true, queued.elapsed());
+    let permit = Arc::new(permit);
+    if let Some(cached) = cached_image(&image_path) {
+        return Ok(cached);
     }
 
     let (bytes, fetched_bytes) = match layer {
@@ -199,43 +205,90 @@ pub async fn ensure_layer_image(
                 .layers
                 .observed(LayerPhase::Read, result.is_ok(), reading.elapsed());
             let bytes = result?;
-            let verifying = std::time::Instant::now();
-            let result = verify_artifact(&bytes, object);
-            metrics
-                .layers
-                .observed(LayerPhase::Verify, result.is_ok(), verifying.elapsed());
-            result?;
+            let object = object.clone();
+            let measured = metrics.layers.clone();
+            let bytes = in_worker(&permit, move || {
+                let verifying = std::time::Instant::now();
+                let result = verify_artifact(&bytes, &object);
+                measured.observed(LayerPhase::Verify, result.is_ok(), verifying.elapsed());
+                result?;
+                Ok(bytes)
+            })
+            .await?;
             let fetched_bytes = bytes.len() as u64;
             (bytes, fetched_bytes)
         }
     };
+    if matches!(layer, DesiredLayer::Oci { .. }) {
+        oci::prepare(bytes, image_path.clone(), commands).await?;
+        return Ok(LayerImage {
+            path: image_path,
+            fetched_bytes,
+        });
+    }
+    let layer = layer.clone();
+    let measured = metrics.layers.clone();
+    in_worker(&permit, move || {
+        write_stored_image(&layer, bytes, image_path, fetched_bytes, &measured)
+    })
+    .await
+}
+
+fn cached_image(image_path: &Path) -> Option<LayerImage> {
+    if !image_path.exists() {
+        return None;
+    }
+    let _ = std::fs::File::open(image_path).and_then(|file| {
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(std::time::SystemTime::now())
+                .set_modified(std::time::SystemTime::now()),
+        )
+    });
+    Some(LayerImage {
+        path: image_path.to_path_buf(),
+        fetched_bytes: 0,
+    })
+}
+
+async fn in_worker<T: Send + 'static>(
+    permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+    work: impl FnOnce() -> Result<T, ArtifactError> + Send + 'static,
+) -> Result<T, ArtifactError> {
+    let permit = permit.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|error| ArtifactError::Unpackable(format!("layer preparation worker failed: {error}")))?
+}
+
+fn write_stored_image(
+    layer: &DesiredLayer,
+    bytes: Vec<u8>,
+    image_path: PathBuf,
+    fetched_bytes: u64,
+    metrics: &LayerMetrics,
+) -> Result<LayerImage, ArtifactError> {
     let preparing = std::time::Instant::now();
     let result = match layer {
-        DesiredLayer::Oci { .. } => {
-            oci::prepare(bytes, image_path.clone(), commands).await?;
-            return Ok(LayerImage {
-                path: image_path,
-                fetched_bytes,
-            });
-        }
-        DesiredLayer::Filesystem { object } if !is_filesystem_image(&bytes) => {
+        _ if !matches!(layer, DesiredLayer::Executable { .. }) && !is_filesystem_image(&bytes) => {
             return Err(ArtifactError::NotAnImage {
-                digest: object.digest.clone(),
+                digest: layer.digest().clone(),
             });
         }
-        DesiredLayer::Filesystem { .. } => stage_filesystem(&image_path, &bytes),
         DesiredLayer::Executable { destination_path, .. } => {
             stage_executable(&image_path, destination_path.as_str(), &bytes)
         }
+        _ => stage_filesystem(&image_path, &bytes),
     };
     let prepared_for = preparing.elapsed();
     let executable = matches!(layer, DesiredLayer::Executable { .. });
     if executable {
-        metrics
-            .layers
-            .observed(LayerPhase::Pack, result.is_ok(), prepared_for);
+        metrics.observed(LayerPhase::Pack, result.is_ok(), prepared_for);
     } else if result.is_err() {
-        metrics.layers.observed(LayerPhase::Publish, false, prepared_for);
+        metrics.observed(LayerPhase::Publish, false, prepared_for);
     }
     let PreparedImage { staged, image_bytes } = result?;
     let publishing = std::time::Instant::now();
@@ -246,9 +299,7 @@ pub async fn ensure_layer_image(
         } else {
             prepared_for
         };
-    metrics
-        .layers
-        .observed(LayerPhase::Publish, result.is_ok(), published_for);
+    metrics.observed(LayerPhase::Publish, result.is_ok(), published_for);
     result.map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     tracing::info!(
         digest = %layer.digest(),
@@ -417,6 +468,30 @@ mod tests {
             &crate::state::HostSnapshot::default(),
             0,
         )
+    }
+
+    #[tokio::test]
+    async fn cancelling_preparation_keeps_capacity_reserved_until_its_worker_finishes() {
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::new(capacity.clone().acquire_owned().await.unwrap());
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let preparing = tokio::spawn(async move {
+            in_worker(&permit, move || {
+                started.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+            })
+            .await
+        });
+        running.await.unwrap();
+        preparing.abort();
+        assert!(preparing.await.unwrap_err().is_cancelled());
+        assert!(capacity.try_acquire().is_err());
+
+        release.send(()).unwrap();
+        let available = tokio::time::timeout(std::time::Duration::from_secs(2), capacity.acquire()).await;
+        assert!(available.unwrap().is_ok());
     }
 
     #[tokio::test]
