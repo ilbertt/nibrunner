@@ -37,9 +37,19 @@ async fn requests_for_different_sleeping_apps_queue_behind_one_restore_slot() {
         barrier.wait().await;
         host.get(app, "/remember").await.unwrap()
     });
-    let responses = tokio::time::timeout(ANSWERED_WITHIN, futures::future::join_all(requests))
-        .await
-        .expect("every queued wake completes within the request deadline");
+    let responses = match tokio::time::timeout(ANSWERED_WITHIN, futures::future::join_all(requests)).await {
+        Ok(responses) => responses,
+        Err(error) => {
+            let ids: Vec<_> = apps.iter().map(|app| app.app_id.clone()).collect();
+            let records = host.host.state.records().await;
+            let statuses = host.host.vms.statuses(&ids).await;
+            let wakes: Vec<_> = ids
+                .iter()
+                .map(|id| (id, host.host.metrics.sleep_wake.of(id)))
+                .collect();
+            panic!("queued wakes timed out: {error}; records={records:?}; vms={statuses:?}; wakes={wakes:?}");
+        }
+    };
     for response in responses {
         assert_eq!(response.status, 200, "{response:?}");
         assert_eq!(response.body, "2");
