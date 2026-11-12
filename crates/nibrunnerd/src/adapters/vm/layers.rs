@@ -1,4 +1,5 @@
-use std::io::Cursor;
+use std::io::{BufWriter, Cursor, Seek, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -56,6 +57,12 @@ fn header(permissions: u16) -> NodeHeader {
 /// Builds a squashfs holding exactly these files at these absolute paths, byte-identical for the
 /// same input so an image is cached by what went into it.
 fn pack(files: &[(&str, &[u8], u16)]) -> Result<Vec<u8>, ArtifactError> {
+    let mut image = Cursor::new(Vec::new());
+    pack_into(files, &mut image)?;
+    Ok(image.into_inner())
+}
+
+fn pack_into(files: &[(&str, &[u8], u16)], image: &mut (impl Write + Seek)) -> Result<u64, ArtifactError> {
     let unpackable = |error: backhand::BackhandError| ArtifactError::Unpackable(error.to_string());
     let mut writer = FilesystemWriter::default();
     writer.set_compressor(image_compressor());
@@ -74,9 +81,7 @@ fn pack(files: &[(&str, &[u8], u16)]) -> Result<Vec<u8>, ArtifactError> {
             .push_file(Cursor::new(*bytes), path, header(*permissions))
             .map_err(unpackable)?;
     }
-    let mut image = Cursor::new(Vec::new());
-    writer.write(&mut image).map_err(unpackable)?;
-    Ok(image.into_inner())
+    writer.write(image).map(|(_, bytes)| bytes).map_err(unpackable)
 }
 
 pub fn is_filesystem_image(bytes: &[u8]) -> bool {
@@ -204,7 +209,8 @@ pub async fn ensure_layer_image(
             (bytes, fetched_bytes)
         }
     };
-    let image = match layer {
+    let preparing = std::time::Instant::now();
+    let result = match layer {
         DesiredLayer::Oci { .. } => {
             oci::prepare(bytes, image_path.clone(), commands).await?;
             return Ok(LayerImage {
@@ -212,32 +218,42 @@ pub async fn ensure_layer_image(
                 fetched_bytes,
             });
         }
-        DesiredLayer::Filesystem { .. } if is_filesystem_image(&bytes) => bytes,
-        DesiredLayer::Filesystem { object } => {
+        DesiredLayer::Filesystem { object } if !is_filesystem_image(&bytes) => {
             return Err(ArtifactError::NotAnImage {
                 digest: object.digest.clone(),
-            })
+            });
         }
+        DesiredLayer::Filesystem { .. } => stage_filesystem(&image_path, &bytes),
         DesiredLayer::Executable { destination_path, .. } => {
-            let packing = std::time::Instant::now();
-            let result = pack(&[(destination_path.as_str(), &bytes, BINARY_MODE)]);
-            metrics
-                .layers
-                .observed(LayerPhase::Pack, result.is_ok(), packing.elapsed());
-            result?
+            stage_executable(&image_path, destination_path.as_str(), &bytes)
         }
     };
-
+    let prepared_for = preparing.elapsed();
+    let executable = matches!(layer, DesiredLayer::Executable { .. });
+    if executable {
+        metrics
+            .layers
+            .observed(LayerPhase::Pack, result.is_ok(), prepared_for);
+    } else if result.is_err() {
+        metrics.layers.observed(LayerPhase::Publish, false, prepared_for);
+    }
+    let PreparedImage { staged, image_bytes } = result?;
     let publishing = std::time::Instant::now();
-    let result = publish_image(&image_path, &image);
+    let result = staged.persist(&image_path);
+    let published_for = publishing.elapsed()
+        + if executable {
+            std::time::Duration::ZERO
+        } else {
+            prepared_for
+        };
     metrics
         .layers
-        .observed(LayerPhase::Publish, result.is_ok(), publishing.elapsed());
-    result?;
+        .observed(LayerPhase::Publish, result.is_ok(), published_for);
+    result.map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
     tracing::info!(
         digest = %layer.digest(),
         size_bytes = fetched_bytes,
-        image_bytes = image.len(),
+        image_bytes,
         packed = matches!(layer, DesiredLayer::Executable { .. }),
         "layer image ready"
     );
@@ -247,20 +263,50 @@ pub async fn ensure_layer_image(
     })
 }
 
-fn publish_image(image_path: &Path, image: &[u8]) -> Result<(), ArtifactError> {
+struct PreparedImage {
+    staged: tempfile::NamedTempFile,
+    image_bytes: u64,
+}
+
+fn stage_executable(
+    image_path: &Path,
+    destination: &str,
+    bytes: &[u8],
+) -> Result<PreparedImage, ArtifactError> {
+    let mut staged = stage_image(image_path)?;
+    let image_bytes = {
+        let mut output = BufWriter::new(staged.as_file_mut());
+        let written = pack_into(&[(destination, bytes, BINARY_MODE)], &mut output)?;
+        output
+            .flush()
+            .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+        written
+    };
+    Ok(PreparedImage { staged, image_bytes })
+}
+
+fn stage_filesystem(image_path: &Path, bytes: &[u8]) -> Result<PreparedImage, ArtifactError> {
+    let mut staged = stage_image(image_path)?;
+    staged
+        .write_all(bytes)
+        .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
+    Ok(PreparedImage {
+        staged,
+        image_bytes: bytes.len() as u64,
+    })
+}
+
+fn stage_image(image_path: &Path) -> Result<tempfile::NamedTempFile, ArtifactError> {
     let directory = image_path
         .parent()
         .expect("the image is one level inside the cache");
     make_directory(directory, CACHE_DIR_MODE)
         .map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    let filename = image_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("the image has a name");
-    let staged = directory.join(format!("{filename}.{}.tmp", std::process::id()));
-    std::fs::write(&staged, image).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    std::fs::rename(&staged, image_path).map_err(|error| ArtifactError::Unpackable(error.to_string()))?;
-    Ok(())
+    tempfile::Builder::new()
+        .prefix(".layer-")
+        .permissions(std::fs::Permissions::from_mode(0o644))
+        .tempfile_in(directory)
+        .map_err(|error| ArtifactError::Unpackable(error.to_string()))
 }
 
 pub fn build_instance_config_image(working_dir: &Path, rendered: &str) -> Result<PathBuf, ArtifactError> {
@@ -523,6 +569,41 @@ mod tests {
 
         assert_eq!(read_back(&image, "/app/server"), program);
         assert_eq!(pack(&files).unwrap(), image);
+    }
+
+    #[test]
+    fn a_streamed_image_matches_the_buffered_image_and_is_readable_by_the_jailer() {
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("program.squashfs");
+        let program = vec![0x5a; backhand::DEFAULT_BLOCK_SIZE as usize * 3 + 137];
+        let image = stage_executable(&image_path, "/app/server", &program).unwrap();
+
+        assert!(!image_path.exists());
+        assert_eq!(
+            std::fs::read(image.staged.path()).unwrap(),
+            pack(&[("/app/server", &program, BINARY_MODE)]).unwrap()
+        );
+        assert_ne!(
+            image.staged.as_file().metadata().unwrap().permissions().mode() & 0o004,
+            0
+        );
+        assert_eq!(
+            image.image_bytes,
+            image.staged.as_file().metadata().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn abandoned_preparation_removes_its_staged_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("program.squashfs");
+        let first = stage_executable(&image_path, "/app/server", ARTIFACT_BYTES).unwrap();
+        let second = stage_executable(&image_path, "/app/server", ARTIFACT_BYTES).unwrap();
+        assert_ne!(first.staged.path(), second.staged.path());
+        drop(first);
+        drop(second);
+        assert!(!image_path.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
