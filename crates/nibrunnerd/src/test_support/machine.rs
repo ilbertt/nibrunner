@@ -323,6 +323,23 @@ impl RunningHost {
         crate::domain::report::writer::build(&self.host, crate::run::host_versions(&self.host)).await
     }
 
+    pub async fn metrics(&self) -> String {
+        let report = self.report().await;
+        let snapshot = self.host.state.snapshot().await;
+        crate::domain::metrics::render(
+            &self.host.metrics,
+            &crate::domain::metrics::Scrape {
+                report: &report,
+                snapshot: &snapshot,
+                now_ms: crate::clock::now_ms(),
+                slots_used: self.host.slots().await.len(),
+                slots_total: self.host.config.max_apps,
+                memory_available_bytes: None,
+                conntrack: None,
+            },
+        )
+    }
+
     /// What the file the control plane reads says, rather than what a fresh build would say.
     pub fn reported_file(&self) -> Option<HostReportedState> {
         crate::json_store::read_json(&crate::domain::report::writer::reported_state_file(&self.host))

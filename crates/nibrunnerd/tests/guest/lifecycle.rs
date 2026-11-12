@@ -659,5 +659,16 @@ async fn a_ready_guest_reports_its_kernel_init_and_first_exec_checkpoints() {
     .unwrap();
     assert!(sample.at(StartupMilestone::InitStarted) > 0);
     assert!(sample.at(StartupMilestone::TenantExec) > sample.at(StartupMilestone::RootReady));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let page = host.metrics().await;
+            if page.contains("nibrunner_guest_startup_phase_seconds_count{phase=\"exec_to_ready\"} 1\n") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the host records guest startup phases after observing readiness");
     host.stop().await;
 }

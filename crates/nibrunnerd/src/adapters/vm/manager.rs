@@ -510,6 +510,12 @@ impl VmManager {
 
 #[async_trait]
 impl Vmm for VmManager {
+    async fn startup_sample(&self, app_id: &AppId) -> Option<crate::ports::GuestStartupSample> {
+        let path = self
+            .working_dir_for(app_id)
+            .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
+        super::startup::sample(&path).await
+    }
     async fn boot(&self, request: BootRequest) -> Result<(), VmError> {
         let _starting = self.admit_start()?;
         let app_id = request.desired.app_id.clone();

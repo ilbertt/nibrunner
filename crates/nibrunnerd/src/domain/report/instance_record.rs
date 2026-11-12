@@ -92,6 +92,11 @@ pub struct RecordFields {
 }
 
 impl InstanceRecord {
+    pub fn has_same_start(&self, observed: &Self) -> bool {
+        self.deployment_id == observed.deployment_id
+            && self.started_at == observed.started_at
+            && self.start_attempts == observed.start_attempts
+    }
     pub fn new(fields: RecordFields, state: InstanceState, health: HealthTracker) -> Self {
         Self {
             app_id: fields.app_id,

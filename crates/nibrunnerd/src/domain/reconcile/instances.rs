@@ -723,12 +723,6 @@ pub async fn refresh_states(host: &Arc<Host>) {
     }
 }
 
-fn same_start(latest: &InstanceRecord, observed: &InstanceRecord) -> bool {
-    latest.deployment_id == observed.deployment_id
-        && latest.started_at == observed.started_at
-        && latest.start_attempts == observed.start_attempts
-}
-
 async fn settle(
     host: &Arc<Host>,
     record: InstanceRecord,
@@ -762,7 +756,7 @@ async fn settle(
                 if snapshot
                     .records
                     .get(&record.app_id)
-                    .is_some_and(|latest| same_start(latest, &record))
+                    .is_some_and(|latest| latest.has_same_start(&record))
                 {
                     snapshot
                         .next_probe_at_ms
@@ -800,7 +794,7 @@ async fn settle(
         let said = unwell(state, &health, &record);
         host.state
             .update_record(&record.app_id, |latest| {
-                if !same_start(latest, &record) {
+                if !latest.has_same_start(&record) {
                     return;
                 }
                 latest.health = health;
@@ -821,16 +815,18 @@ async fn settle(
             .started_at
             .as_ref()
             .is_some_and(|at| now_ms - at.epoch_ms() >= record.restart_policy.reset_after_ms as i64);
-    let updated = host
+    let ready_at = std::time::Instant::now();
+    let (updated, first_ready) = host
         .state
         .modify(|snapshot| {
             let Some(latest) = snapshot
                 .records
                 .get_mut(&record.app_id)
-                .filter(|latest| same_start(latest, &record))
+                .filter(|latest| latest.has_same_start(&record))
             else {
-                return false;
+                return (false, false);
             };
+            let first_ready = state == InstanceState::Running && !latest.health.ever_healthy;
             latest.health = health;
             latest.state = state;
             if let Some(exit) = status.exit.filter(|_| !status.active) {
@@ -845,11 +841,14 @@ async fn settle(
                 latest.start_attempts = NO_START_ATTEMPTS;
             }
             latest.message = message;
-            true
+            (true, first_ready)
         })
         .await;
     if !updated {
         return;
+    }
+    if first_ready {
+        crate::domain::startup::observed_ready(host.clone(), record.clone(), ready_at);
     }
     match state {
         InstanceState::Failed if status.active => {

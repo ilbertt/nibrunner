@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use guest_contract::filesystem::{MeasuredBytes, MeasuredCompute};
@@ -176,6 +176,9 @@ impl WakeOutcome {
 #[cfg_attr(any(test, feature = "testing"), mockall::automock)]
 #[async_trait]
 pub trait Vmm: Send + Sync {
+    async fn startup_sample(&self, _app_id: &AppId) -> Option<GuestStartupSample> {
+        None
+    }
     async fn boot(&self, request: BootRequest) -> Result<(), VmError>;
     async fn sleep(&self, request: SuspendRequest) -> Result<(), VmError>;
     async fn wake(&self, request: SuspendRequest) -> Result<(), VmError>;
@@ -193,6 +196,13 @@ pub trait Vmm: Send + Sync {
     /// down, or the kernel's panic. A guest killed from outside said nothing.
     async fn guest_verdict(&self, app_id: &AppId) -> Option<String>;
     fn working_dir(&self, app_id: &AppId) -> PathBuf;
+}
+
+#[derive(Debug)]
+pub struct GuestStartupSample {
+    pub guest: guest_contract::startup::StartupSnapshot,
+    pub received_at: Instant,
+    pub round_trip: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

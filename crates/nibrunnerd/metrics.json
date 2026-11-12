@@ -480,6 +480,14 @@
     "name": "nibrunner_app_start_attempts"
   },
   {
+    "help": "Guest startup checkpoints through first host-observed readiness. Exec-to-ready aligns the guest clock with the sampling handshake midpoint; sample_round_trip bounds calibration uncertainty rather than startup work.",
+    "kind": "histogram",
+    "labels": [
+      "phase"
+    ],
+    "name": "nibrunner_guest_startup_phase_seconds"
+  },
+  {
     "help": "Something done to storage or the artifact store on an app's behalf, by what and how it ended.",
     "kind": "histogram",
     "labels": [
