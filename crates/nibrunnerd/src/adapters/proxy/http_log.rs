@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -183,6 +183,30 @@ impl HttpLogWriter {
         })
     }
 
+    fn lock_directory(&self) -> std::io::Result<File> {
+        // A rotation replaces the file inode; the directory remains shared by every writer.
+        let directory = File::open(&self.directory)?;
+        directory.lock()?;
+        Ok(directory)
+    }
+
+    fn refresh(&mut self, app_id: &AppId) -> std::io::Result<()> {
+        let path = self.path(app_id);
+        if let Some(file) = self.files.get_mut(app_id) {
+            match (file.writer.get_ref().metadata(), std::fs::metadata(&path)) {
+                (Ok(open), Ok(current)) if open.dev() == current.dev() && open.ino() == current.ino() => {
+                    file.size = current.len() + file.writer.buffer().len() as u64;
+                    return Ok(());
+                }
+                (_, Err(error)) if error.kind() != ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+        }
+        self.files.remove(app_id);
+        self.files.insert(app_id.clone(), Self::open(&path)?);
+        Ok(())
+    }
+
     fn write(&mut self, app_id: AppId, record: HttpRequestRecord) -> std::io::Result<()> {
         let mut line = serde_json::to_vec(&record).map_err(std::io::Error::other)?;
         line.push(b'\n');
@@ -242,11 +266,25 @@ fn write_records(mut receiver: Receiver<HttpLogCommand>, directory: PathBuf) {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
+        let _directory = match writer.lock_directory() {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(%error, "HTTP request log directory could not be locked");
+                continue;
+            }
+        };
+        let mut refreshed = BTreeSet::new();
         for command in records {
             match command {
                 HttpLogCommand::Record(scope, record) => {
                     if scope.active.load(Ordering::Acquire) {
-                        if let Err(error) = writer.write(scope.app_id.clone(), record) {
+                        let written = (|| {
+                            if refreshed.insert(scope.app_id.clone()) {
+                                writer.refresh(&scope.app_id)?;
+                            }
+                            writer.write(scope.app_id.clone(), record)
+                        })();
+                        if let Err(error) = written {
                             tracing::warn!(app_id = %scope.app_id, %error, "HTTP request log could not be written");
                         }
                     }
@@ -259,7 +297,6 @@ fn write_records(mut receiver: Receiver<HttpLogCommand>, directory: PathBuf) {
         }
         writer.flush();
     }
-    writer.flush();
 }
 
 #[cfg(test)]
@@ -298,6 +335,7 @@ mod tests {
         };
         let app = AppId::parse("fleet-shop").expect("an app ID");
         let uri: Uri = "/shop/item".parse().expect("a request URI");
+        let _directory = writer.lock_directory().unwrap();
         for _ in 0..20_000 {
             writer
                 .write(
@@ -309,6 +347,86 @@ mod tests {
         writer.flush();
         for name in ["fleet-shop.http.jsonl", "fleet-shop.http.jsonl.1"] {
             let content = std::fs::read_to_string(directory.path().join(name)).expect("rotated log");
+            assert!(content.len() as u64 <= KEPT_BYTES_PER_APP);
+            assert!(content
+                .lines()
+                .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok()));
+        }
+    }
+
+    fn append(writer: &mut HttpLogWriter, path: &str) {
+        let _directory = writer.lock_directory().unwrap();
+        writer.refresh(&crate::test_support::app_id()).unwrap();
+        writer
+            .write(
+                crate::test_support::app_id(),
+                HttpRequestRecord::new(
+                    "GET",
+                    &path.parse().unwrap(),
+                    200,
+                    1,
+                    crate::test_support::deployment_id(),
+                ),
+            )
+            .unwrap();
+        writer.flush();
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture; the rotation test invokes this with --ignored"]
+    fn another_process_rotates_http_logs() {
+        let directory = std::env::var_os("NIBRUNNER_TEST_HTTP_LOG_DIRECTORY").unwrap();
+        let mut writer = HttpLogWriter {
+            directory: directory.into(),
+            files: BTreeMap::new(),
+        };
+        let _directory = writer.lock_directory().unwrap();
+        for _ in 0..20_000 {
+            writer
+                .write(
+                    crate::test_support::app_id(),
+                    HttpRequestRecord::new(
+                        "GET",
+                        &"/other-process".parse().unwrap(),
+                        200,
+                        1,
+                        crate::test_support::deployment_id(),
+                    ),
+                )
+                .unwrap();
+        }
+        writer.flush();
+    }
+
+    #[test]
+    fn a_cached_writer_reopens_after_another_process_rotates_its_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut writer = HttpLogWriter {
+            directory: directory.path().to_path_buf(),
+            files: BTreeMap::new(),
+        };
+        append(&mut writer, "/before-rotation");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "adapters::proxy::http_log::tests::another_process_rotates_http_logs",
+                "--ignored",
+            ])
+            .env("NIBRUNNER_TEST_HTTP_LOG_DIRECTORY", directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        append(&mut writer, "/after-rotation");
+        let app = crate::test_support::app_id();
+        let current = std::fs::read_to_string(writer.path(&app)).unwrap();
+        let previous = std::fs::read_to_string(writer.previous_path(&app)).unwrap();
+        assert!(current.contains("/after-rotation"));
+        assert!(!previous.contains("/after-rotation"));
+        for content in [current, previous] {
             assert!(content.len() as u64 <= KEPT_BYTES_PER_APP);
             assert!(content
                 .lines()
