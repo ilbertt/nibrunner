@@ -12,8 +12,6 @@ const STATUS_TICK: Duration = Duration::from_secs(1);
 
 const SETTLING_TICK: Duration = Duration::from_millis(crate::domain::health::STARTUP_PROBE_INTERVAL_MS);
 
-const MIN_REFRESH_GAP: Duration = Duration::from_millis(250);
-
 pub struct StatusController {
     host: Arc<Host>,
     reconciler: Arc<dyn ReconcileService>,
@@ -63,7 +61,7 @@ impl Controller for StatusController {
             tokio::select! {
                 _ = tokio::time::sleep(tick) => {}
                 _ = async {
-                    tokio::time::sleep(MIN_REFRESH_GAP).await;
+                    tokio::time::sleep(SETTLING_TICK).await;
                     self.host.state.refresh_signalled().await;
                 } => {}
             }

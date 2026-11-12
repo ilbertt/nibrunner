@@ -568,6 +568,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
             .await;
             host.state.probe_at_once(&desired.app_id).await;
             tracing::info!(app_id = %desired.app_id, host_port = ?attempted.host_port, guest_ipv4 = ?attempted.guest_ipv4, "instance started");
+            host.state.signal_refresh();
         }
         Err((failure, reason)) => {
             host.state
