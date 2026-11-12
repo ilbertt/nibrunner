@@ -151,3 +151,106 @@ async fn stopping_one_app_cancels_its_run_while_another_apps_run_keeps_its_chann
     .await
     .expect("stopping one app leaves other apps' jobs running");
 }
+
+#[tokio::test]
+#[ignore = "subprocess fixture; the daemon restart test invokes this with --ignored"]
+async fn a_daemon_process_waits_for_its_detached_scheduled_command() {
+    use nibrunnerd::adapters::cron_worker::process::DetachedCronExecution;
+    use nibrunnerd::ports::CronExecution;
+    let config = HostConfig::load().unwrap();
+    let execution = DetachedCronExecution::new(&config, PathBuf::from(env!("CARGO_BIN_EXE_nibrunnerd")));
+    execution
+        .run(
+            &config.runtime_dir.join("guest.vsock"),
+            cron_worker::run(),
+            Box::pin(std::future::pending()),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_binary_upgrade_keeps_the_old_run_alive_and_launches_new_work_without_replaying_it() {
+    use nibrunnerd::adapters::cron_worker::process::DetachedCronExecution;
+    use nibrunnerd::ports::CronExecution;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let config = HostConfig::under(directory.path());
+        let config_file = directory.path().join("config.toml");
+        std::fs::write(&config_file, config.to_toml()).unwrap();
+        let mut guest = HoldingGuest::new(&config.runtime_dir.join("guest.vsock")).await;
+        let diagnostics = std::fs::File::create(directory.path().join("daemon.stderr")).unwrap();
+        let mut daemon = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "a_daemon_process_waits_for_its_detached_scheduled_command",
+                "--nocapture",
+            ])
+            .env("NIBRUNNER_CONFIG", &config_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(diagnostics))
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        guest.started().await;
+        daemon.kill().await.unwrap();
+        {
+            use std::io::Write;
+            let cache = config.state_dir.join("cron-worker");
+            let mut replacement = tempfile::NamedTempFile::new_in(&cache).unwrap();
+            replacement.write_all(b"replaced executable image").unwrap();
+            replacement.persist(cache.join("nibrunnerd")).unwrap();
+        }
+        let successor = std::sync::Arc::new(DetachedCronExecution::new(
+            &config,
+            PathBuf::from(env!("CARGO_BIN_EXE_nibrunnerd")),
+        ));
+        let app = cron_worker::run().key.app_id;
+        assert!(successor.busy(&app).await.unwrap());
+        let second_path = config.runtime_dir.join("next.vsock");
+        let mut next_guest = HoldingGuest::new(&second_path).await;
+        let execution = successor.clone();
+        let next = tokio::spawn(async move {
+            execution
+                .run(&second_path, cron_worker::run(), Box::pin(std::future::pending()))
+                .await
+        });
+        next_guest.started().await;
+        assert!(successor.busy(&app).await.unwrap());
+        guest.finish().await;
+        next_guest.finish().await;
+        assert_eq!(next.await.unwrap().unwrap().code, 0);
+        while successor.busy(&app).await.unwrap() {
+            tokio::task::yield_now().await;
+        }
+        let text = std::fs::read_to_string(config.logs_dir().join(format!("{app}.jsonl"))).unwrap();
+        let events: Vec<TenantLogEvent> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let mut runs = std::collections::BTreeMap::new();
+        for event in &events {
+            if let TenantLogBody::CronData { text, run_id, .. } = &event.body {
+                runs.entry(run_id).or_insert_with(Vec::new).push(text.as_str());
+            }
+        }
+        assert_eq!(runs.len(), 2);
+        assert!(runs.values().all(|output| output == &vec!["before\n", "after\n"]));
+        while std::fs::read_dir(config.runtime_dir.join("cron"))
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "sock")
+            })
+        {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .expect("a fresh daemon observes the surviving run and its worker exits after it finishes");
+}

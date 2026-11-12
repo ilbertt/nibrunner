@@ -338,6 +338,9 @@ pub trait CronExecution: Send + Sync {
         crate::adapters::cron_execution::CronExitStatus,
         crate::adapters::cron_execution::CronExecutionError,
     >;
+    async fn busy(&self, app_id: &AppId)
+        -> Result<bool, crate::adapters::cron_execution::CronExecutionError>;
+    async fn stop(&self, app_id: &AppId) -> Result<(), crate::adapters::cron_execution::CronExecutionError>;
 }
 
 #[cfg(test)]

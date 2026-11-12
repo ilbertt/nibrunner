@@ -1,3 +1,5 @@
+pub mod process;
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -61,9 +63,13 @@ impl CronWorkerClient {
         let stream = crate::unix_socket::connect(path)
             .await
             .map_err(|_| CronExecutionError::WorkerUnavailable)?;
-        Ok(Self {
+        Ok(Self::from_stream(stream))
+    }
+
+    pub(crate) fn from_stream(stream: UnixStream) -> Self {
+        Self {
             stream: BufReader::new(stream),
-        })
+        }
     }
 
     pub async fn execute(

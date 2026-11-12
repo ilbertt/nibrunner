@@ -40,11 +40,15 @@ pub enum CronExecutionError {
 
 pub struct VsockCronExecution {
     logs: std::sync::Arc<dyn LogSink>,
+    runs: std::sync::Arc<crate::domain::cron::runs::CronRuns>,
 }
 
 impl VsockCronExecution {
-    pub fn new(logs: std::sync::Arc<dyn LogSink>) -> Self {
-        Self { logs }
+    pub fn new(
+        logs: std::sync::Arc<dyn LogSink>,
+        runs: std::sync::Arc<crate::domain::cron::runs::CronRuns>,
+    ) -> Self {
+        Self { logs, runs }
     }
 }
 
@@ -57,6 +61,14 @@ impl crate::ports::CronExecution for VsockCronExecution {
         cancellation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
     ) -> Result<CronExitStatus, CronExecutionError> {
         GuestCronExecution::run(socket, run, self.logs.as_ref(), cancellation).await
+    }
+    async fn busy(&self, app_id: &protocol::AppId) -> Result<bool, CronExecutionError> {
+        Ok(self.runs.active_for(app_id) > 0)
+    }
+
+    async fn stop(&self, app_id: &protocol::AppId) -> Result<(), CronExecutionError> {
+        self.runs.stop(app_id).await;
+        Ok(())
     }
 }
 

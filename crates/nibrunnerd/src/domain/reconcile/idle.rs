@@ -281,6 +281,14 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bo
     if host.state.has_guest_activity(app_id) {
         return false;
     }
+    match host.cron_execution.busy(app_id).await {
+        Ok(false) => {}
+        Ok(true) => return false,
+        Err(error) => {
+            tracing::warn!(%app_id, %error, "cron activity could not be verified before sleep");
+            return false;
+        }
+    }
     let now = crate::clock::now_ms();
     let snapshot = host.state.snapshot().await;
     if !waited_out(&snapshot, app_id, now) {
@@ -798,6 +806,17 @@ mod sleep_tests {
         assert!(host.vms.calls().is_empty());
         drop(command);
         assert!(let_sleep(&host, &id, &policy).await);
+    }
+
+    #[tokio::test]
+    async fn a_cron_owned_outside_guest_activity_prevents_idle_sleep() {
+        let host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+        host.cron_runs.synchronize(&[(app_id(), deployment_id())]).await;
+        let _run = host.cron_runs.start(&app_id(), &deployment_id()).unwrap();
+        assert!(!host.state.has_guest_activity(&app_id()));
+        assert_eq!(apply_sleep(host.arc()).await, 0);
+        assert!(host.vms.calls().is_empty());
     }
 
     #[tokio::test]

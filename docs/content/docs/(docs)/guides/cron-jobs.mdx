@@ -66,6 +66,7 @@ directory, and environment, using `/bin/sh` or `SHELL` if set. Crontab assignmen
 app's environment.
 
 - Running commands keep the guest awake.
+- Running commands survive daemon restarts and binary upgrades without being restarted.
 - Runs of the same job can overlap.
 - The host does not replay jobs missed while the daemon was stopped.
 - Editing or removing a crontab changes future runs. Running commands continue.

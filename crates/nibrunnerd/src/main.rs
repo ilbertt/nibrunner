@@ -190,7 +190,19 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let host = match run::build_host(config).await {
+    let executable = if cfg!(target_os = "linux") {
+        Ok(std::path::PathBuf::from("/proc/self/exe"))
+    } else {
+        std::env::current_exe()
+    };
+    let executable = match executable {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!(%error, "the daemon executable could not be located");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let host = match run::build_host(config, executable).await {
         Ok(host) => host,
         Err(error) => {
             tracing::error!(error = %error.to_string(), "this host could not be brought up");

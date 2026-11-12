@@ -173,15 +173,8 @@ impl CronRuns {
     pub async fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
         let _mutation = self.mutation.lock().await;
-        let owners: Vec<_> = {
-            let owners = lock(&self.owners);
-            owners.values().cloned().collect()
-        };
-        for owner in &owners {
-            owner.cancel();
-        }
-        for owner in owners {
-            owner.drain().await;
+        for owner in lock(&self.owners).values() {
+            lock(&owner.active).accepting = false;
         }
     }
 }
@@ -315,21 +308,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_drains_runs_and_later_synchronization_cannot_reopen_their_owners() {
-        let runs = Arc::new(CronRuns::default());
+    async fn shutdown_keeps_existing_runs_uncancelled_and_rejects_new_runs() {
+        let runs = CronRuns::default();
         runs.synchronize(&[(app_id(), deployment_id())]).await;
         let mut lease = runs.start(&app_id(), &deployment_id()).unwrap();
-        let stopping = tokio::spawn({
-            let runs = runs.clone();
-            async move { runs.shutdown().await }
-        });
-        lease.cancelled().await;
-        assert!(!stopping.is_finished());
+        runs.shutdown().await;
+        assert!(tokio::time::timeout(Duration::from_millis(10), lease.cancelled())
+            .await
+            .is_err());
         assert!(runs.start(&app_id(), &deployment_id()).is_none());
-        drop(lease);
-        stopping.await.unwrap();
         runs.synchronize(&[(app_id(), deployment_id())]).await;
         assert!(runs.start(&app_id(), &deployment_id()).is_none());
+        drop(lease);
         runs.shutdown().await;
     }
 }
