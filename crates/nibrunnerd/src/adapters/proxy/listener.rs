@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::os::fd::AsFd;
 use std::sync::Arc;
 
 use hyper::service::service_fn;
@@ -24,13 +25,24 @@ impl HttpListener {
         address: SocketAddr,
         tls: Option<tokio_rustls::TlsAcceptor>,
     ) -> std::io::Result<Self> {
-        let listener = TcpListener::bind(address).await?;
+        Self::from_listener(router, TcpListener::bind(address).await?, tls)
+    }
+
+    pub fn from_listener(
+        router: Arc<Router>,
+        listener: TcpListener,
+        tls: Option<tokio_rustls::TlsAcceptor>,
+    ) -> std::io::Result<Self> {
         tracing::info!(address = %listener.local_addr()?, secure = tls.is_some(), "the proxy is listening");
         Ok(Self {
             listener,
             router,
             tls,
         })
+    }
+
+    pub fn duplicate_listener(&self) -> std::io::Result<std::net::TcpListener> {
+        Ok(self.listener.as_fd().try_clone_to_owned()?.into())
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -161,7 +173,7 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
-    async fn proxy(upstream: SocketAddr) -> (HttpListener, Arc<HostMetrics>) {
+    async fn router(upstream: SocketAddr) -> (Arc<Router>, Arc<HostMetrics>) {
         let metrics = Arc::new(HostMetrics::new());
         let router = Router::new(metrics.clone(), None);
         router
@@ -171,6 +183,11 @@ mod tests {
                 },
             )])))
             .await;
+        (router, metrics)
+    }
+
+    async fn proxy(upstream: SocketAddr) -> (HttpListener, Arc<HostMetrics>) {
+        let (router, metrics) = router(upstream).await;
         let listener = HttpListener::bind(router, SocketAddr::from(([127, 0, 0, 1], 0)), None)
             .await
             .unwrap();
@@ -185,6 +202,83 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_replacement_accepts_queued_connections_while_the_old_response_keeps_streaming() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let old_upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let new_upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let (old, _) = proxy(old_upstream.local_addr().unwrap()).await;
+            let address = old.local_addr().unwrap();
+            let shared = old.duplicate_listener().unwrap();
+            let (new_router, _) = router(new_upstream.local_addr().unwrap()).await;
+            let replacement =
+                HttpListener::from_listener(new_router, TcpListener::from_std(shared).unwrap(), None)
+                    .unwrap();
+            assert_eq!(replacement.local_addr().unwrap(), address);
+            let (finish, finished) = oneshot::channel();
+            let old_tenant = tokio::spawn(async move {
+                let (mut stream, _) = old_upstream.accept().await.unwrap();
+                header(&mut stream).await;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello")
+                    .await
+                    .unwrap();
+                finished.await.unwrap();
+                stream.write_all(b"world").await.unwrap();
+            });
+            let new_tenant = tokio::spawn(async move {
+                let (mut stream, _) = new_upstream.accept().await.unwrap();
+                header(&mut stream).await;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nnew")
+                    .await
+                    .unwrap();
+            });
+            let (stop, stopped) = oneshot::channel();
+            let (accepted_stop, accepting_stopped) = oneshot::channel();
+            let old_server = tokio::spawn(old.serve(async {
+                let _ = stopped.await;
+                accepted_stop.send(()).unwrap();
+            }));
+            let mut existing = TcpStream::connect(address).await.unwrap();
+            existing
+                .write_all(b"GET / HTTP/1.1\r\nHost: app-1.apps.example.com\r\n\r\n")
+                .await
+                .unwrap();
+            assert!(header(&mut existing).await.starts_with("HTTP/1.1 200"));
+            let mut first = [0; 5];
+            existing.read_exact(&mut first).await.unwrap();
+            assert_eq!(&first, b"hello");
+            stop.send(()).unwrap();
+            accepting_stopped.await.unwrap();
+            let mut queued = TcpStream::connect(address).await.unwrap();
+            queued
+                .write_all(b"GET / HTTP/1.1\r\nHost: app-1.apps.example.com\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let (stop_new, stopped_new) = oneshot::channel();
+            let new_server = tokio::spawn(replacement.serve(async {
+                let _ = stopped_new.await;
+            }));
+            assert!(header(&mut queued).await.starts_with("HTTP/1.1 200"));
+            let mut answer = Vec::new();
+            queued.read_to_end(&mut answer).await.unwrap();
+            assert_eq!(answer, b"new");
+            assert!(!old_server.is_finished());
+            finish.send(()).unwrap();
+            let mut tail = Vec::new();
+            existing.read_to_end(&mut tail).await.unwrap();
+            assert_eq!(tail, b"world");
+            old_server.await.unwrap().unwrap();
+            stop_new.send(()).unwrap();
+            new_server.await.unwrap().unwrap();
+            old_tenant.await.unwrap();
+            new_tenant.await.unwrap();
+        })
+        .await
+        .expect("a shared listening socket preserves queued and accepted requests during handoff");
     }
 
     #[tokio::test]
