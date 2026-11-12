@@ -78,7 +78,7 @@ impl HttpWorkerClient {
         let (mut stream, reply) = self.request(Request::Export).await?;
         Self::ready(reply)?;
         // A normal read can consume the descriptor's payload and discard its ancillary data.
-        stream.write_all(b"R").await?;
+        stream.write_all(&[wire::DESCRIPTOR_READY]).await?;
         wire::receive_listener(stream.into_inner())
             .await
             .map(|(_, listener)| listener)
