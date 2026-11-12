@@ -6,6 +6,8 @@ use tokio::net::UnixStream;
 
 use crate::ports::VmError;
 
+use super::CONTROL_RETRY_INTERVAL;
+
 const TIMEOUT: Duration = Duration::from_millis(guest_contract::control::TENANT_CONTROL_TIMEOUT_MS);
 
 #[derive(Debug)]
@@ -33,7 +35,7 @@ async fn connect(path: &Path) -> Result<BufReader<UnixStream>, VmError> {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Err(failed(error)),
             Err(error) if tokio::time::Instant::now() < deadline => {
                 tracing::debug!(%error, socket = %path.display(), "waiting for guest control socket");
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(CONTROL_RETRY_INTERVAL).await;
             }
             Err(error) => return Err(failed(error)),
         }
