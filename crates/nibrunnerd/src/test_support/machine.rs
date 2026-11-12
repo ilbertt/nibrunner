@@ -169,9 +169,17 @@ pub async fn started_with(edit: impl FnOnce(&mut crate::config::HostConfig)) -> 
     crate::install::jailer_identities::ensure(config.max_apps)
         .expect("the installer reserves this machine's jailer identities");
 
-    let host = crate::run::build_host(config)
-        .await
-        .expect("a host on this machine");
+    let host = crate::run::build_host(
+        config,
+        std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .expect("Cargo test executables live in target/debug/deps")
+            .join("nibrunnerd"),
+    )
+    .await
+    .expect("a host on this machine");
     let lifecycle = LifecycleController::new(host.clone(), crate::run::host_versions(&host));
     lifecycle.start().await;
     let controllers = lifecycle
@@ -527,6 +535,7 @@ impl RunningHost {
             .map(|record| record.app_id)
             .collect();
         for app_id in app_ids {
+            let _ = self.host.cron_execution.stop(&app_id).await;
             let _ = self.host.vms.stop(&app_id).await;
         }
         for tap_name in self.host.vms.tap_names().await {

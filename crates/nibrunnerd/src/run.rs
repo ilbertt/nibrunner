@@ -38,7 +38,10 @@ pub enum StartupError {
     Unusable(String),
 }
 
-pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
+pub async fn build_host(
+    config: HostConfig,
+    executable: std::path::PathBuf,
+) -> Result<Arc<Host>, StartupError> {
     crate::host_security::report_cpu_vulnerabilities();
     crate::host_security::check().map_err(|error| StartupError::Unusable(error.to_string()))?;
     crate::install::storage::check(&config).map_err(|error| StartupError::Unusable(error.message()))?;
@@ -203,8 +206,8 @@ pub async fn build_host(config: HostConfig) -> Result<Arc<Host>, StartupError> {
 
     let host = Arc::new(Host {
         cron,
-        cron_execution: Arc::new(crate::adapters::cron_execution::VsockCronExecution::new(
-            files.clone(),
+        cron_execution: Arc::new(crate::adapters::cron_worker::process::DetachedCronExecution::new(
+            &config, executable,
         )),
         cron_runs: Arc::new(crate::domain::cron::runs::CronRuns::default()),
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
@@ -412,7 +415,9 @@ mod tests {
         });
         let state = config.state_dir.clone();
         let snapshots = config.snapshot_dir.clone();
-        assert!(super::build_host(config).await.is_err());
+        assert!(super::build_host(config, std::env::current_exe().unwrap())
+            .await
+            .is_err());
         assert!(!state.exists());
         assert!(!snapshots.exists());
     }

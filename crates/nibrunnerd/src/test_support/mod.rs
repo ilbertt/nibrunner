@@ -494,6 +494,7 @@ async fn test_host_over(
         config.cron.max_jobs_per_app,
         config.cron.time_zone,
     ));
+    let cron_runs = Arc::new(crate::domain::cron::runs::CronRuns::default());
     let logs = Arc::new(crate::adapters::logs::FileLogSink::new(
         config.logs_dir(),
         config.logs.keep_bytes_per_app,
@@ -502,8 +503,9 @@ async fn test_host_over(
         cron,
         cron_execution: Arc::new(crate::adapters::cron_execution::VsockCronExecution::new(
             logs.clone(),
+            cron_runs.clone(),
         )),
-        cron_runs: Arc::new(crate::domain::cron::runs::CronRuns::default()),
+        cron_runs,
         guest_memory_mib: u64::from(DEFAULT_INSTANCE_RESOURCES.memory_mib) * 4,
         guest_image_version: "6.1.180-test".to_string(),
         state: state.clone(),
