@@ -113,9 +113,8 @@ after changing it.
 max_concurrent_vm_starts = 2
 ```
 
-A full budget refuses a start immediately rather than queuing it. Reconciliation
-uses its existing retry path; callers waking an app receive the existing start
-failure. Requests for an app already being woken still share its single wake.
+A full budget defers reconciliation. HTTP requests and cron wakes wait up to 30 seconds
+for start capacity. Requests for an app already being woken still share its single wake.
 A cold boot holds its permit until the guest's control port accepts a connection,
 confirming PID 1 initialized. A restore holds it through the guest clock-sync and
 release handshake. A guest that does not initialize within 60 seconds is stopped

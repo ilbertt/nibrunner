@@ -9,13 +9,56 @@ use crate::domain::health::is_within_grace_period;
 use crate::domain::health::probe::probe_instance;
 use crate::domain::report::capacity::{committed_resources, memory_shortfall_mib};
 use crate::host::Host;
-use crate::ports::{WakeFailure, WakeRefusal, Waker};
+use crate::ports::{Vmm, WakeFailure, WakeRefusal, Waker};
 
 const PROBE_INTERVAL: Duration = Duration::from_millis(5);
+const CAPACITY_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Outcome = Result<(), WakeRefusal>;
 type Coalescing = BTreeMap<AppId, (broadcast::Sender<Outcome>, u64)>;
 type InFlight = Mutex<Coalescing>;
+
+pub struct QueuedWaker {
+    waker: Arc<dyn Waker>,
+    vms: Arc<dyn Vmm>,
+}
+
+impl QueuedWaker {
+    pub fn new(waker: Arc<dyn Waker>, vms: Arc<dyn Vmm>) -> Arc<Self> {
+        Arc::new(Self { waker, vms })
+    }
+}
+
+#[async_trait::async_trait]
+impl Waker for QueuedWaker {
+    async fn wake(&self, app_id: &AppId) -> Result<(), WakeRefusal> {
+        let deadline = tokio::time::Instant::now() + CAPACITY_WAIT_TIMEOUT;
+        loop {
+            let refusal = match self.waker.wake(app_id).await {
+                Err(
+                    refusal @ WakeRefusal::Failed {
+                        kind: WakeFailure::StartBusy,
+                        ..
+                    },
+                ) => refusal,
+                outcome => return outcome,
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(refusal);
+            }
+            match tokio::time::timeout_at(deadline, self.vms.wait_for_start_capacity()).await {
+                Ok(Ok(())) if tokio::time::Instant::now() < deadline => {}
+                Ok(Ok(())) | Err(_) => return Err(refusal),
+                Ok(Err(error)) => {
+                    return Err(WakeRefusal::Failed {
+                        kind: WakeFailure::WouldNotStart,
+                        reason: error.message(),
+                    });
+                }
+            }
+        }
+    }
+}
 
 fn lock(in_flight: &InFlight) -> std::sync::MutexGuard<'_, Coalescing> {
     in_flight.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -331,6 +374,96 @@ impl Waker for AppWaker {
                 outcome
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use crate::ports::{MockVmm, MockWaker, VmError};
+    use crate::test_support::app_id;
+
+    fn busy() -> WakeRefusal {
+        WakeRefusal::Failed {
+            kind: WakeFailure::StartBusy,
+            reason: VmError::StartBusy.message(),
+        }
+    }
+
+    fn queued(outcomes: Vec<Outcome>, waits: usize) -> Arc<QueuedWaker> {
+        let mut outcomes: std::collections::VecDeque<_> = outcomes.into();
+        let mut waker = MockWaker::new();
+        waker
+            .expect_wake()
+            .times(outcomes.len())
+            .returning(move |_| outcomes.pop_front().unwrap());
+        let mut vms = MockVmm::new();
+        vms.expect_wait_for_start_capacity()
+            .times(waits)
+            .returning(|| Ok(()));
+        QueuedWaker::new(Arc::new(waker), Arc::new(vms))
+    }
+
+    #[tokio::test]
+    async fn a_busy_wake_waits_for_capacity_and_retries_admission() {
+        let waker = queued(vec![Err(busy()), Ok(())], 1);
+        assert_eq!(waker.wake(&app_id()).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn another_wake_taking_the_available_slot_keeps_the_request_queued() {
+        let waker = queued(vec![Err(busy()), Err(busy()), Ok(())], 2);
+        assert_eq!(waker.wake(&app_id()).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_wake_that_needs_no_capacity_never_waits_for_it() {
+        assert_eq!(queued(vec![Ok(())], 0).wake(&app_id()).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn memory_and_boot_failures_are_terminal_even_after_queuing() {
+        for refusal in [
+            WakeRefusal::NoRoom { shortfall_mib: 256 },
+            WakeRefusal::Failed {
+                kind: WakeFailure::WouldNotStart,
+                reason: "the microVM failed".into(),
+            },
+            WakeRefusal::Failed {
+                kind: WakeFailure::NeverAnswered,
+                reason: "the app never listened".into(),
+            },
+        ] {
+            for queued_first in [false, true] {
+                let mut outcomes = Vec::new();
+                if queued_first {
+                    outcomes.push(Err(busy()));
+                }
+                outcomes.push(Err(refusal.clone()));
+                let waker = queued(outcomes, usize::from(queued_first));
+                assert_eq!(waker.wake(&app_id()).await, Err(refusal.clone()));
+            }
+        }
+    }
+
+    struct AlwaysBusy;
+
+    #[async_trait::async_trait]
+    impl Waker for AlwaysBusy {
+        async fn wake(&self, _: &AppId) -> Outcome {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err(busy())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_races_share_one_thirty_second_queue_deadline() {
+        let mut vms = MockVmm::new();
+        vms.expect_wait_for_start_capacity().returning(|| Ok(()));
+        let waker = QueuedWaker::new(Arc::new(AlwaysBusy), Arc::new(vms));
+        let started = tokio::time::Instant::now();
+        assert_eq!(waker.wake(&app_id()).await, Err(busy()));
+        assert_eq!(started.elapsed(), CAPACITY_WAIT_TIMEOUT);
     }
 }
 

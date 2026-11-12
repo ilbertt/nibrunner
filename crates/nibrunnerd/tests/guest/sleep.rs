@@ -14,6 +14,38 @@ const ANSWERED_WITHIN: Duration = Duration::from_secs(15);
 /// the timer.
 const IDLE_TIMEOUT_MS: u64 = 60_000;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_for_different_sleeping_apps_queue_behind_one_restore_slot() {
+    let Some(host) =
+        crate::host_with(|config| config.max_concurrent_vm_starts = std::num::NonZeroU16::new(1).unwrap())
+            .await
+    else {
+        return;
+    };
+    let apps: Vec<_> = (1..=4)
+        .map(|index| host.tenant(index).on_request(IDLE_TIMEOUT_MS))
+        .collect();
+    host.deploy(&apps).await;
+    for app in &apps {
+        host.until_state(&app.app_id, InstanceState::Running).await;
+        assert_eq!(host.get(app, "/remember").await.unwrap().body, "1");
+        host.let_sleep(app).await;
+    }
+    let barrier = tokio::sync::Barrier::new(apps.len());
+    let requests = apps.iter().map(|app| async {
+        barrier.wait().await;
+        host.get(app, "/remember").await.unwrap()
+    });
+    let responses = tokio::time::timeout(ANSWERED_WITHIN, futures::future::join_all(requests))
+        .await
+        .expect("every queued wake completes within the request deadline");
+    for response in responses {
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(response.body, "2");
+    }
+    host.stop().await;
+}
+
 struct SnapshotFilesystem {
     _directory: tempfile::TempDir,
     mount: std::path::PathBuf,
