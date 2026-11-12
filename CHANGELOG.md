@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.11.9] - 2026-11-12
+
+### Fixes
+
+- Queue cron wakes while VM start slots are busy (#346)
+
 ## [2026.11.8] - 2026-11-12
 
 ### Features
