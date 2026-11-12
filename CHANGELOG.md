@@ -1,5 +1,41 @@
 # Changelog
 
+## [2026.11.8] - 2026-11-12
+
+### Features
+
+- Run the HTTP proxy worker in its own process (#343)
+- Serve HTTP through a transferable proxy worker (#340)
+- Add the HTTP proxy worker control client (#337)
+- **metrics:** Measure guest startup through readiness (#344)
+- Expose guest startup checkpoints over vsock (#341)
+- **metrics:** Measure guest clock handshake phases (#339)
+- **metrics:** Measure cold VM boot phases (#334)
+- **metrics:** Measure layer preparation phases (#332)
+- Transfer HTTP listeners between processes (#329)
+- **cron:** Preserve guest execution channels in a worker (#326)
+
+### Fixes
+
+- Coordinate HTTP log rotation across proxy workers (#333)
+- **cron:** Keep running jobs alive across daemon restarts (#327)
+- **logs:** Coordinate rotation across log writers (#325)
+
+### Performance
+
+- Move layer preparation to bounded blocking workers (#336)
+- Detect guest control readiness sooner (#342)
+- Write layer images directly to staged files (#335)
+- Reuse downloaded artifact buffers (#338)
+- Observe startup readiness every 50 ms (#331)
+- Reduce executable layer packing cost (#330)
+
+### Refactoring
+
+- **proxy:** Allow listener ownership handoff (#328)
+- **proxy:** Drain accepted HTTP connections (#323)
+- **cron:** Inject the scheduled command executor (#324)
+
 ## [2026.11.7] - 2026-11-11
 
 ### Fixes
