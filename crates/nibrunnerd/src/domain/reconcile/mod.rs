@@ -237,6 +237,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
 
     host.cron_runs.synchronize(&enabled).await;
     host.state.modify(|snapshot| snapshot.converged = true).await;
+    host.state.signal_refresh();
     host.state.signal_report();
 }
 
