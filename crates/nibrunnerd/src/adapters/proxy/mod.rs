@@ -10,6 +10,7 @@ mod listener_handoff;
 pub mod pem;
 pub mod router;
 pub mod stream_activator;
+pub mod worker;
 
 pub use datagram_activator::DatagramActivator;
 pub use router::{RouteTable, Router};
