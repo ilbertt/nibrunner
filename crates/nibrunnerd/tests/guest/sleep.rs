@@ -14,6 +14,53 @@ const ANSWERED_WITHIN: Duration = Duration::from_secs(15);
 /// the timer.
 const IDLE_TIMEOUT_MS: u64 = 60_000;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_for_different_sleeping_apps_queue_behind_one_restore_slot() {
+    let Some(host) =
+        crate::host_with(|config| config.max_concurrent_vm_starts = std::num::NonZeroU16::new(1).unwrap())
+            .await
+    else {
+        return;
+    };
+    let apps: Vec<_> = (1..=2)
+        .map(|index| {
+            host.tenant(index)
+                .on_request(IDLE_TIMEOUT_MS)
+                .edited(|instance| instance.config.resources.memory_mib = 128)
+        })
+        .collect();
+    host.deploy(&apps).await;
+    for app in &apps {
+        host.until_state(&app.app_id, InstanceState::Running).await;
+        host.until_routed(app).await;
+        assert_eq!(host.get(app, "/remember").await.unwrap().body, "1");
+        host.let_sleep(app).await;
+    }
+    let barrier = tokio::sync::Barrier::new(apps.len());
+    let requests = apps.iter().map(|app| async {
+        barrier.wait().await;
+        host.get(app, "/remember").await.unwrap()
+    });
+    let responses = match tokio::time::timeout(ANSWERED_WITHIN, futures::future::join_all(requests)).await {
+        Ok(responses) => responses,
+        Err(error) => {
+            let ids: Vec<_> = apps.iter().map(|app| app.app_id.clone()).collect();
+            let records = host.host.state.records().await;
+            let statuses = host.host.vms.statuses(&ids).await;
+            let wakes: Vec<_> = ids
+                .iter()
+                .map(|id| (id, host.host.metrics.sleep_wake.of(id)))
+                .collect();
+            panic!("queued wakes timed out: {error}; records={records:?}; vms={statuses:?}; wakes={wakes:?}");
+        }
+    };
+    for response in responses {
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(response.body, "2");
+    }
+    host.stop().await;
+}
+
 struct SnapshotFilesystem {
     _directory: tempfile::TempDir,
     mount: std::path::PathBuf,

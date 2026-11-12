@@ -26,7 +26,7 @@ use crate::desired::DesiredStateCache;
 use crate::domain::exports::reader::CheckpointServers;
 use crate::domain::report::capacity::{guest_memory_mib, read_host_memory_mib};
 use crate::domain::restarts::RestartRecorder;
-use crate::domain::waker::AppWaker;
+use crate::domain::waker::{AppWaker, QueuedWaker};
 use crate::host::Host;
 use crate::state::HostState;
 
@@ -164,9 +164,12 @@ pub async fn build_host(
     let waker_slot: Arc<tokio::sync::OnceCell<Arc<AppWaker>>> = Arc::new(tokio::sync::OnceCell::new());
     let activator = AppActivator::new(
         state.clone(),
-        Arc::new(DeferredWaker {
-            waker: waker_slot.clone(),
-        }),
+        QueuedWaker::new(
+            Arc::new(DeferredWaker {
+                waker: waker_slot.clone(),
+            }),
+            vms.clone(),
+        ),
         metrics.clone(),
     );
     let deferred = || {
