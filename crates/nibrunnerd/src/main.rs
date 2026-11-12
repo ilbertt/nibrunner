@@ -15,7 +15,7 @@ fn main() -> std::process::ExitCode {
 
     // An installer talks to whoever ran it, and a daemon talks to the log store. Structured JSON
     // on stderr is right for one and unreadable for the other.
-    if command.is_none() {
+    if command.is_none() || matches!(command.as_ref(), Some(Command::CronWorker { .. })) {
         install_logger();
     }
 
@@ -33,6 +33,15 @@ fn main() -> std::process::ExitCode {
     };
 
     match command {
+        Some(Command::CronWorker { socket }) => {
+            match runtime.block_on(nibrunnerd::adapters::cron_worker::serve(config, socket)) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(error) => {
+                    tracing::error!(%error, "cron worker stopped unexpectedly");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
         None => runtime.block_on(serve(config)),
         Some(Command::Install { force, release }) => {
             runtime.block_on(lay_out(config, force, release, origin))
@@ -134,13 +143,27 @@ fn print_laid(laid: &install::Laid) {
 fn configuration(command: Option<&Command>) -> Result<(HostConfig, Origin), std::process::ExitCode> {
     let refused = |error: &nibrunnerd::config::ConfigError| {
         match command {
-            None => tracing::error!(error = %error.message(), "this host is not configured"),
+            None | Some(Command::CronWorker { .. }) => {
+                tracing::error!(error = %error.message(), "this host is not configured")
+            }
             Some(Command::Install { .. } | Command::Start { .. } | Command::Storage { .. }) => {
                 eprintln!("this host is not configured: {}", error.message())
             }
         }
         std::process::ExitCode::FAILURE
     };
+
+    if matches!(command, Some(Command::CronWorker { .. })) {
+        return match std::io::read_to_string(std::io::stdin()) {
+            Ok(document) => HostConfig::from_toml(&document)
+                .map(|config| (config, Origin::Operator))
+                .map_err(|error| refused(&error)),
+            Err(error) => {
+                tracing::error!(%error, "worker configuration could not be received");
+                Err(std::process::ExitCode::FAILURE)
+            }
+        };
+    }
 
     let path = HostConfig::configured_file();
     match HostConfig::load() {
