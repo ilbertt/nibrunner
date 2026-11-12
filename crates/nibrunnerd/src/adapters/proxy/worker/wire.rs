@@ -11,6 +11,7 @@ use tokio::net::UnixStream;
 
 use crate::domain::report::routes::RouteTarget;
 
+pub(super) const DESCRIPTOR_READY: u8 = b'R';
 pub(super) const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const MESSAGE_LIMIT: u64 = 8 * 1024 * 1024;
 
