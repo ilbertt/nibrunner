@@ -32,7 +32,7 @@ pub struct HostMetrics {
     pub passes: PassMetrics,
     pub health: HealthMetrics,
     pub resources: ResourceMetrics,
-    pub layers: layers::LayerMetrics,
+    pub layers: std::sync::Arc<layers::LayerMetrics>,
     pub conntrack: ConntrackWatch,
 }
 

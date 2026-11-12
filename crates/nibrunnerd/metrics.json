@@ -586,7 +586,7 @@
     "name": "nibrunner_app_measured_timestamp_seconds"
   },
   {
-    "help": "Cache-miss layer preparation by stage: reading an artifact, verifying its digest, packing an executable directly to a staged file, and publishing its image. Cache hits do not repeat these stages. OCI extraction has its own storage operation.",
+    "help": "Cache-miss layer preparation by stage: waiting for preparation capacity, reading an artifact, verifying its digest, packing an executable directly to a staged file, and publishing its image. Cache hits do not repeat these stages. OCI extraction has its own storage operation.",
     "kind": "histogram",
     "labels": [
       "phase",

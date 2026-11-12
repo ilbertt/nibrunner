@@ -8,6 +8,7 @@ const BOUNDS_SECONDS: [f64; 15] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerPhase {
+    Queue,
     Read,
     Verify,
     Pack,
@@ -17,6 +18,7 @@ pub enum LayerPhase {
 impl LayerPhase {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Queue => "queue",
             Self::Read => "read",
             Self::Verify => "verify",
             Self::Pack => "pack",
@@ -25,7 +27,8 @@ impl LayerPhase {
     }
 }
 
-const PHASES: [LayerPhase; 4] = [
+const PHASES: [LayerPhase; 5] = [
+    LayerPhase::Queue,
     LayerPhase::Read,
     LayerPhase::Verify,
     LayerPhase::Pack,
@@ -61,7 +64,7 @@ impl LayerMetrics {
 
 static LAYER_PREPARATION_PHASE_SECONDS: Metric = Metric {
     name: "nibrunner_layer_preparation_phase_seconds",
-    help: "Cache-miss layer preparation by stage: reading an artifact, verifying its digest, packing an executable directly to a staged file, and publishing its image. Cache hits do not repeat these stages. OCI extraction has its own storage operation.",
+    help: "Cache-miss layer preparation by stage: waiting for preparation capacity, reading an artifact, verifying its digest, packing an executable directly to a staged file, and publishing its image. Cache hits do not repeat these stages. OCI extraction has its own storage operation.",
     kind: Kind::Histogram,
     labels: &["phase", "outcome"],
 };
