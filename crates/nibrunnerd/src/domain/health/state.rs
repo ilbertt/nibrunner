@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::adapters::vm::VmStatus;
 use crate::domain::health::probe::ProbeFailure;
 
-pub const STARTUP_PROBE_INTERVAL_MS: u64 = 250;
+pub const STARTUP_PROBE_INTERVAL_MS: u64 = 50;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
