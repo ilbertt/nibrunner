@@ -150,6 +150,7 @@ type Apps = Arc<Mutex<BTreeMap<AppId, AppProxy>>>;
 pub struct OpenRequest {
     apps: Apps,
     app_id: AppId,
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for OpenRequest {
@@ -158,6 +159,8 @@ impl Drop for OpenRequest {
         if let Some(app) = apps.get_mut(&self.app_id) {
             app.open = app.open.saturating_sub(1);
         }
+        drop(apps);
+        self.changed.notify_waiters();
     }
 }
 
@@ -168,6 +171,7 @@ pub struct ProxyMetrics {
     in_flight: AtomicU64,
     handshakes: [AtomicU64; HANDSHAKES.len()],
     apps: Apps,
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl Default for ProxyMetrics {
@@ -178,6 +182,7 @@ impl Default for ProxyMetrics {
             in_flight: AtomicU64::new(0),
             handshakes: Default::default(),
             apps: Arc::new(Mutex::new(BTreeMap::new())),
+            changed: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -193,6 +198,19 @@ impl ProxyMetrics {
         OpenRequest {
             apps: self.apps.clone(),
             app_id: app_id.clone(),
+            changed: self.changed.clone(),
+        }
+    }
+
+    pub(crate) async fn wait_for_requests(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.open_requests().is_empty() {
+                return;
+            }
+            changed.await;
         }
     }
 
