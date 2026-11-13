@@ -91,6 +91,7 @@ impl HoldingGuest {
             send(&mut stream, ExecutionFrame::Stdout(b"before\n".to_vec())).await;
             began.send(()).unwrap();
             let completion = tokio::select! {
+                biased;
                 requested = released => requested.unwrap(),
                 result = stream.read_u8() => panic!("the execution channel changed before release: {result:?}"),
             };
