@@ -206,11 +206,14 @@ impl DetachedHttpProxy {
                     live.insert(path.clone());
                     samples.insert(path, sample);
                 }
-                Err(error) => {
-                    if worker.active().await.is_ok() {
-                        return Err(error);
-                    }
-                }
+                Err(error) => match worker.active().await {
+                    Err(gone)
+                        if matches!(
+                            gone.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) => {}
+                    _ => return Err(error),
+                },
             }
         }
         for (path, sample) in samples.iter_mut() {
