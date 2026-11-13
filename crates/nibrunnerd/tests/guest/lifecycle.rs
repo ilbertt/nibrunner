@@ -400,6 +400,13 @@ async fn an_app_the_document_names_answers_on_its_hostname() {
     let answer = host.get(&app, "/").await.expect("the proxy answers");
     assert_eq!(answer.status, 200, "{answer:?}");
     assert_eq!(answer.body, "ok");
+    assert_eq!(
+        host.get(&app, "/env?name=PATH")
+            .await
+            .expect("the tenant's environment")
+            .body,
+        "/usr/bin:/bin"
+    );
 
     host.stop().await;
 }
