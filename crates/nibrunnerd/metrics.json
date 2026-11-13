@@ -488,6 +488,30 @@
     "name": "nibrunner_guest_startup_phase_seconds"
   },
   {
+    "help": "Time spent awaiting each VM start capacity check, by caller. Includes immediately available capacity and cancelled waits; excludes boot, restore and readiness work. A request can wait more than once when admission races.",
+    "kind": "histogram",
+    "labels": [
+      "caller"
+    ],
+    "name": "nibrunner_vm_start_capacity_wait_seconds"
+  },
+  {
+    "help": "Callers currently awaiting VM start capacity, excluding those already booting, restoring or checking readiness.",
+    "kind": "gauge",
+    "labels": [
+      "caller"
+    ],
+    "name": "nibrunner_vm_start_capacity_waiters"
+  },
+  {
+    "help": "Wake requests whose VM start capacity queue deadline expired, by caller. Cancelled requests and terminal wake failures are not timeouts.",
+    "kind": "counter",
+    "labels": [
+      "caller"
+    ],
+    "name": "nibrunner_vm_start_capacity_timeouts_total"
+  },
+  {
     "help": "Something done to storage or the artifact store on an app's behalf, by what and how it ended.",
     "kind": "histogram",
     "labels": [
