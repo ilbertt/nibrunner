@@ -11,6 +11,7 @@ use crate::domain::cron::registry::{CronRegistry, CronRegistryError};
 use crate::domain::cron::runs::CronRunLease;
 use crate::domain::cron::schedule::InvalidCronSchedule;
 use crate::domain::cron::scheduler::{CronScheduler, ScheduledRun};
+use crate::domain::metrics::start_capacity::Caller;
 use crate::host::Host;
 use crate::ports::{WakeFailure, WakeRefusal};
 use crate::state::GuestActivity;
@@ -152,17 +153,21 @@ impl CronController {
             if !Self::scheduled(host, registry, run, expected).await {
                 return false;
             }
-            let available = tokio::select! {
-                biased;
-                () = tokio::time::sleep_until(deadline) => {
-                    tracing::warn!(app_id = %run.key.app_id, "cron timed out waiting for VM start capacity");
-                    return false;
+            let available = {
+                let _waiting = host.metrics.start_capacity.waiting(Caller::Cron);
+                tokio::select! {
+                    biased;
+                    () = tokio::time::sleep_until(deadline) => {
+                        host.metrics.start_capacity.timed_out(Caller::Cron);
+                        tracing::warn!(app_id = %run.key.app_id, "cron timed out waiting for VM start capacity");
+                        return false;
+                    }
+                    change = registrations.changed() => {
+                        if change.is_err() { return false; }
+                        continue;
+                    }
+                    available = host.vms.wait_for_start_capacity() => available,
                 }
-                change = registrations.changed() => {
-                    if change.is_err() { return false; }
-                    continue;
-                }
-                available = host.vms.wait_for_start_capacity() => available,
             };
             if let Err(error) = available {
                 tracing::warn!(app_id = %run.key.app_id, %error, "cron could not wait for VM start capacity");
@@ -544,6 +549,15 @@ mod tests {
         (host, starts, called)
     }
 
+    fn capacity_page(host: &Host) -> String {
+        crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            &host.metrics,
+            &crate::state::HostSnapshot::default(),
+            0,
+        )
+    }
+
     #[tokio::test]
     async fn a_due_cron_waits_for_start_capacity_without_holding_the_transition_lock() {
         let (host, starts, called) = queued_host().await;
@@ -554,6 +568,7 @@ mod tests {
         ));
         starts.waiting.notified().await;
         assert!(!dispatch.is_finished());
+        assert!(capacity_page(&host).contains("nibrunner_vm_start_capacity_waiters{caller=\"cron\"} 1\n"));
         assert!(!called.load(Ordering::SeqCst));
         assert!(host.state.has_guest_activity(&app_id()));
         let transition = tokio::time::timeout(Duration::from_secs(1), host.state.transition(&app_id()))
@@ -568,6 +583,9 @@ mod tests {
         assert!(called.load(Ordering::SeqCst));
         assert!(!host.state.has_guest_activity(&app_id()));
         assert_eq!(starts.capacity.available_permits(), 1);
+        assert!(capacity_page(&host).contains("nibrunner_vm_start_capacity_waiters{caller=\"cron\"} 0\n"));
+        assert!(capacity_page(&host)
+            .contains("nibrunner_vm_start_capacity_wait_seconds_count{caller=\"cron\"} 1\n"));
     }
 
     #[tokio::test]
@@ -632,6 +650,10 @@ mod tests {
         assert!(!called.load(Ordering::SeqCst));
         assert!(!host.state.has_guest_activity(&app_id()));
         assert_eq!(host.cron_runs.active_for(&app_id()), 0);
+        assert!(
+            capacity_page(&host).contains("nibrunner_vm_start_capacity_timeouts_total{caller=\"cron\"} 1\n")
+        );
+        assert!(capacity_page(&host).contains("nibrunner_vm_start_capacity_waiters{caller=\"cron\"} 0\n"));
     }
 
     struct RefusingWake {
