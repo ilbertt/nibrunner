@@ -21,6 +21,7 @@ pub(super) enum Request {
     Attach,
     Export,
     Active,
+    Metrics,
     Drain,
     Close(AppId),
     Discard(AppId),
@@ -30,6 +31,7 @@ pub(super) enum Request {
 pub(super) enum Reply {
     Ready,
     Active(BTreeMap<AppId, u64>),
+    Metrics(crate::domain::metrics::proxy::ProxySnapshot),
     Failed(String),
 }
 

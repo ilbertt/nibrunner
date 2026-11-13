@@ -73,7 +73,26 @@ pub struct Histogram {
     total_micros: AtomicU64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HistogramSnapshot {
+    pub buckets: Vec<u64>,
+    pub above_every_bucket: u64,
+    pub total_micros: u64,
+}
+
 impl Histogram {
+    pub fn snapshot(&self) -> HistogramSnapshot {
+        HistogramSnapshot {
+            buckets: self
+                .buckets
+                .iter()
+                .map(|bucket| bucket.load(Ordering::Relaxed))
+                .collect(),
+            above_every_bucket: self.above_every_bucket.load(Ordering::Relaxed),
+            total_micros: self.total_micros.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn over(bounds: &'static [f64]) -> Self {
         Self {
             bounds,

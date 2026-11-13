@@ -125,7 +125,7 @@ fn class_of(status: StatusCode) -> usize {
 /// cost is a sum and a count, deliberately without buckets: a tenant's own distribution would be
 /// fifteen series each on a page rendered whole every scrape, and `rate(sum) / rate(count)` is
 /// enough to say which tenant is slow. The shape of the distribution is the host-wide histogram's.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppProxy {
     pub requests: [u64; CLASSES.len()],
     pub request_count: u64,
@@ -174,6 +174,15 @@ pub struct ProxyMetrics {
     changed: Arc<tokio::sync::Notify>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProxySnapshot {
+    pub served: [u64; OUTCOMES.len()],
+    pub answered: super::HistogramSnapshot,
+    pub in_flight: u64,
+    pub handshakes: [u64; HANDSHAKES.len()],
+    pub apps: BTreeMap<AppId, AppProxy>,
+}
+
 impl Default for ProxyMetrics {
     fn default() -> Self {
         Self {
@@ -188,6 +197,20 @@ impl Default for ProxyMetrics {
 }
 
 impl ProxyMetrics {
+    pub fn snapshot(&self) -> ProxySnapshot {
+        ProxySnapshot {
+            served: std::array::from_fn(|index| self.served[index].load(Ordering::Relaxed)),
+            answered: self.answered.snapshot(),
+            in_flight: self.in_flight.load(Ordering::Relaxed),
+            handshakes: std::array::from_fn(|index| self.handshakes[index].load(Ordering::Relaxed)),
+            apps: self
+                .apps
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        }
+    }
+
     fn app(&self, app_id: &AppId, change: impl FnOnce(&mut AppProxy)) {
         let mut apps = self.apps.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         change(apps.entry(app_id.clone()).or_default());

@@ -35,7 +35,7 @@ impl HttpWorkerClient {
         match reply {
             Reply::Ready => Ok(()),
             Reply::Failed(message) => Err(io::Error::other(message)),
-            Reply::Active(_) => Err(io::ErrorKind::InvalidData.into()),
+            Reply::Active(_) | Reply::Metrics(_) => Err(io::ErrorKind::InvalidData.into()),
         }
     }
 
@@ -51,7 +51,15 @@ impl HttpWorkerClient {
         match self.request(Request::Active).await?.1 {
             Reply::Active(apps) => Ok(apps),
             Reply::Failed(message) => Err(io::Error::other(message)),
-            Reply::Ready => Err(io::ErrorKind::InvalidData.into()),
+            Reply::Ready | Reply::Metrics(_) => Err(io::ErrorKind::InvalidData.into()),
+        }
+    }
+
+    pub async fn metrics(&self) -> io::Result<crate::domain::metrics::proxy::ProxySnapshot> {
+        match self.request(Request::Metrics).await?.1 {
+            Reply::Metrics(metrics) => Ok(metrics),
+            Reply::Failed(message) => Err(io::Error::other(message)),
+            Reply::Ready | Reply::Active(_) => Err(io::ErrorKind::InvalidData.into()),
         }
     }
 

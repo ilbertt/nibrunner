@@ -117,6 +117,9 @@ impl Worker {
                 )
                 .await;
             }
+            Request::Metrics => {
+                return wire::write(stream.get_mut(), &Reply::Metrics(self.metrics.proxy.snapshot())).await;
+            }
             Request::Drain => {
                 let previous = std::mem::replace(&mut *self.listener.lock().await, Listening::Draining);
                 match previous {
