@@ -1,5 +1,21 @@
 # Changelog
 
+## [2026.11.12] - 2026-11-13
+
+### Features
+
+- Manage detached HTTP proxy worker handoff (#359)
+- Expose boot-slot queue metrics (#358)
+- **metrics:** Expose HTTP worker metric snapshots (#357)
+
+### Fixes
+
+- Keep HTTP listeners across daemon restarts (#361)
+- Provide a default guest executable search path (#360)
+- Reserve startup polling for starting instances (#356)
+- Skip format-time discard on ZeroFS NBD volumes (#355)
+- Serialize reconciliation with request wakes (#354)
+
 ## [2026.11.11] - 2026-11-12
 
 ### Fixes
