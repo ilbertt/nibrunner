@@ -128,6 +128,7 @@ pub async fn started() -> Option<RunningHost> {
 }
 
 pub async fn started_with(edit: impl FnOnce(&mut crate::config::HostConfig)) -> Option<RunningHost> {
+    crate::install_crypto_provider();
     let guest_image_dir = guest_image_dir()?;
     let tenant = tenant_binary()?;
 
