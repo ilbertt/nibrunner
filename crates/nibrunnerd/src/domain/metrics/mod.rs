@@ -6,6 +6,7 @@ pub mod passes;
 pub mod proxy;
 pub mod resources;
 pub mod sleep_wake;
+pub mod start_capacity;
 pub mod startup;
 
 pub use conntrack::{Conntrack, ConntrackWatch};
@@ -33,6 +34,7 @@ pub struct HostMetrics {
     pub passes: PassMetrics,
     pub health: HealthMetrics,
     pub startup: startup::StartupMetrics,
+    pub start_capacity: start_capacity::StartCapacityMetrics,
     pub resources: ResourceMetrics,
     pub layers: std::sync::Arc<layers::LayerMetrics>,
     pub conntrack: ConntrackWatch,
@@ -355,6 +357,7 @@ pub fn declared() -> Vec<&'static Metric> {
         converge::DECLARED,
         health::DECLARED,
         startup::DECLARED,
+        start_capacity::DECLARED,
         resources::DECLARED,
         layers::DECLARED,
         conntrack::DECLARED,
@@ -389,6 +392,7 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     let mut page = Page::new();
     layers::render(&mut page, &metrics.layers);
     startup::render(&mut page, &metrics.startup);
+    start_capacity::render(&mut page, &metrics.start_capacity);
 
     page.declare(&UP);
     page.value(&UP, &[], 1);
