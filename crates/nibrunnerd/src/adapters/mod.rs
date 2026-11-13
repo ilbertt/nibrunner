@@ -12,3 +12,5 @@ pub mod net;
 pub mod proxy;
 pub mod vm;
 pub mod volumes;
+
+pub(crate) mod worker_process;

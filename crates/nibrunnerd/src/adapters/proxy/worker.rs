@@ -1,4 +1,5 @@
 mod client;
+pub mod process;
 mod wire;
 
 pub use client::HttpWorkerClient;
