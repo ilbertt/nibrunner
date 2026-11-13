@@ -89,3 +89,133 @@ async fn the_worker_process_finishes_a_response_after_its_control_client_is_drop
     .await
     .expect("a standalone HTTP worker owns its listener and unfinished requests");
 }
+
+#[tokio::test]
+#[ignore = "subprocess fixture; the daemon restart test invokes this"]
+async fn a_daemon_process_owns_the_http_proxy_controller() {
+    let path = std::path::PathBuf::from(std::env::var_os("NIBRUNNER_HTTP_FIXTURE").unwrap());
+    let config = nibrunnerd::config::HostConfig::from_toml(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let port = std::env::var("NIBRUNNER_HTTP_GUEST_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let proxy = nibrunnerd::adapters::proxy::worker::process::DetachedHttpProxy::new(
+        &config,
+        env!("CARGO_BIN_EXE_nibrunnerd").into(),
+    );
+    proxy.apply(http_worker::routes(port)).await.unwrap();
+    std::fs::write(path.with_extension("ready"), "ready").unwrap();
+    std::future::pending::<()>().await;
+}
+
+#[tokio::test]
+async fn killing_the_daemon_controller_keeps_the_listener_and_its_response_for_the_replacement() {
+    use nibrunnerd::adapters::proxy::worker::process::DetachedHttpProxy;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let config = http_worker::configuration(directory.path(), address);
+        let path = directory.path().join("fixture.toml");
+        std::fs::write(&path, config.to_toml()).unwrap();
+        let guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut owner = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_daemon_process_owns_the_http_proxy_controller",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("NIBRUNNER_HTTP_FIXTURE", &path)
+            .env(
+                "NIBRUNNER_HTTP_GUEST_PORT",
+                guest.local_addr().unwrap().port().to_string(),
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        while !path.with_extension("ready").exists() {
+            assert!(owner.try_wait().unwrap().is_none());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let replacement = DetachedHttpProxy::new(&config, env!("CARGO_BIN_EXE_nibrunnerd").into());
+        let (finish, finished) = oneshot::channel();
+        let guest = tokio::spawn(async move {
+            let (mut stream, _) = guest.accept().await.unwrap();
+            http_worker::read_headers(&mut stream).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nbefore")
+                .await
+                .unwrap();
+            finished.await.unwrap();
+            stream.write_all(b"after").await.unwrap();
+        });
+        let mut request = TcpStream::connect(address).await.unwrap();
+        request
+            .write_all(
+                format!(
+                    "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    app_hostname().hostname
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        http_worker::read_headers(&mut request).await.unwrap();
+        let mut first = [0; 6];
+        request.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first, b"before");
+        owner.kill().await.unwrap();
+        owner.wait().await.unwrap();
+        drop(TcpStream::connect(address).await.unwrap());
+        let new_guest = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        replacement
+            .apply(http_worker::routes(new_guest.local_addr().unwrap().port()))
+            .await
+            .unwrap();
+        assert_eq!(
+            replacement
+                .metrics()
+                .await
+                .unwrap()
+                .iter()
+                .map(|sample| sample.apps.get(&app_id()).map_or(0, |app| app.open))
+                .sum::<u64>(),
+            1
+        );
+        let new_guest = tokio::spawn(async move {
+            let (mut stream, _) = new_guest.accept().await.unwrap();
+            http_worker::read_headers(&mut stream).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nnew")
+                .await
+                .unwrap();
+        });
+        let mut next = TcpStream::connect(address).await.unwrap();
+        next.write_all(
+            format!(
+                "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                app_hostname().hostname
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        http_worker::read_headers(&mut next).await.unwrap();
+        let mut body = Vec::new();
+        next.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"new");
+        finish.send(()).unwrap();
+        let mut tail = Vec::new();
+        request.read_to_end(&mut tail).await.unwrap();
+        assert_eq!(tail, b"after");
+        replacement.drain().await.unwrap();
+        guest.await.unwrap();
+        new_guest.await.unwrap();
+    })
+    .await
+    .expect("the controller can be killed and replaced without losing a response or listener");
+}

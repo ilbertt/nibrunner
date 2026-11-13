@@ -1,4 +1,5 @@
 mod client;
+pub mod process;
 mod wire;
 
 pub use client::HttpWorkerClient;
@@ -83,10 +84,17 @@ impl Worker {
     async fn export(&self, mut stream: BufReader<UnixStream>) -> io::Result<()> {
         let listener = {
             let state = self.listener.lock().await;
-            let Listening::Serving(listener) = &*state else {
-                return Err(io::ErrorKind::NotConnected.into());
-            };
-            listener.try_clone()?
+            match &*state {
+                Listening::Serving(listener) => Some(listener.try_clone()?),
+                _ => None,
+            }
+        };
+        let Some(listener) = listener else {
+            return wire::write(
+                stream.get_mut(),
+                &Reply::Failed("the worker is not accepting requests".into()),
+            )
+            .await;
         };
         wire::write(stream.get_mut(), &Reply::Ready).await?;
         if stream.read_u8().await? != wire::DESCRIPTOR_READY {

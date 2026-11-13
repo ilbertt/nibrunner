@@ -1,6 +1,6 @@
 use std::future::Future;
-use std::io::{self, Write};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::io;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, OnceCell};
 
 use crate::adapters::cron_execution::{CronExecutionError, CronExitStatus};
 use crate::adapters::cron_worker::CronWorkerClient;
+use crate::adapters::worker_process::install_program;
 use crate::config::HostConfig;
 use crate::domain::cron::scheduler::ScheduledRun;
 use crate::ports::CronExecution;
@@ -24,23 +25,6 @@ pub struct DetachedCronExecution {
     executable: PathBuf,
     program: OnceCell<PathBuf>,
     current: Mutex<Option<PathBuf>>,
-}
-
-fn install_program(directory: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-    crate::json_store::make_directory(directory, 0o700)?;
-    let path = directory.join("nibrunnerd");
-    if std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
-        return Ok(path);
-    }
-    let mut staged = tempfile::NamedTempFile::new_in(directory)?;
-    staged
-        .as_file()
-        .set_permissions(std::fs::Permissions::from_mode(0o700))?;
-    staged.write_all(bytes)?;
-    staged.as_file().sync_all()?;
-    staged.persist(&path).map_err(|error| error.error)?;
-    std::fs::File::open(directory)?.sync_all()?;
-    Ok(path)
 }
 
 impl DetachedCronExecution {
