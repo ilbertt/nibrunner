@@ -25,6 +25,17 @@ pub struct DetachedHttpProxy {
     samples: Mutex<BTreeMap<PathBuf, ProxySnapshot>>,
 }
 
+async fn worker_exited(path: &Path) -> bool {
+    matches!(crate::unix_socket::connect(path).await, Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused))
+}
+
+async fn allow_worker_exit(path: &Path, outcome: io::Result<()>) -> io::Result<()> {
+    match outcome {
+        Err(error) if !worker_exited(path).await => Err(error),
+        _ => Ok(()),
+    }
+}
+
 impl DetachedHttpProxy {
     pub fn new(config: &HostConfig, executable: PathBuf) -> Self {
         Self {
@@ -116,12 +127,7 @@ impl DetachedHttpProxy {
             let client = HttpWorkerClient::new(&path);
             match client.active().await {
                 Ok(_) => workers.push((path.clone(), client)),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                    ) =>
-                {
+                Err(_) if worker_exited(&path).await => {
                     let _ = std::fs::remove_file(path);
                 }
                 Err(error) => return Err(error),
@@ -186,8 +192,8 @@ impl DetachedHttpProxy {
         HttpWorkerClient::new(path).apply(routes.clone()).await?;
         for (previous, worker) in workers {
             if &previous != path {
-                worker.apply(routes.clone()).await?;
-                worker.drain().await?;
+                allow_worker_exit(&previous, worker.apply(routes.clone()).await).await?;
+                allow_worker_exit(&previous, worker.drain().await).await?;
             }
         }
         Ok(())
@@ -206,14 +212,8 @@ impl DetachedHttpProxy {
                     live.insert(path.clone());
                     samples.insert(path, sample);
                 }
-                Err(error) => match worker.active().await {
-                    Err(gone)
-                        if matches!(
-                            gone.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                        ) => {}
-                    _ => return Err(error),
-                },
+                Err(_) if worker_exited(&path).await => {}
+                Err(error) => return Err(error),
             }
         }
         for (path, sample) in samples.iter_mut() {
@@ -228,23 +228,42 @@ impl DetachedHttpProxy {
     }
 
     pub async fn close_connections_to(&self, app_id: &AppId) -> io::Result<()> {
-        for (_, worker) in self.workers().await? {
-            worker.close_connections_to(app_id).await?;
+        for (path, worker) in self.workers().await? {
+            allow_worker_exit(&path, worker.close_connections_to(app_id).await).await?;
         }
         Ok(())
     }
 
     pub async fn discard(&self, app_id: &AppId) -> io::Result<()> {
-        for (_, worker) in self.workers().await? {
-            worker.discard(app_id).await?;
+        for (path, worker) in self.workers().await? {
+            allow_worker_exit(&path, worker.discard(app_id).await).await?;
         }
         Ok(())
     }
 
     pub async fn drain(&self) -> io::Result<()> {
-        for (_, worker) in self.workers().await? {
-            worker.drain().await?;
+        for (path, worker) in self.workers().await? {
+            allow_worker_exit(&path, worker.drain().await).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_control_request_is_ignored_only_after_its_worker_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("worker.sock");
+        let listener = crate::unix_socket::bind_private(&path).await.unwrap();
+        assert!(allow_worker_exit(&path, Err(io::ErrorKind::BrokenPipe.into()))
+            .await
+            .is_err());
+        drop(listener);
+        assert!(allow_worker_exit(&path, Err(io::ErrorKind::BrokenPipe.into()))
+            .await
+            .is_ok());
     }
 }
