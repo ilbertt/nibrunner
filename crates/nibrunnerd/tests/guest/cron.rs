@@ -368,8 +368,7 @@ async fn a_due_registered_job_wakes_and_pins_its_guest_until_desired_stop_drains
                     .is_some_and(|instance| instance.state == InstanceState::Running)
             {
                 let answer = host.get(&app, "/read?path=cron-started").await.unwrap();
-                if answer.status == 200 {
-                    assert!(answer.body.trim().parse::<u32>().unwrap() > 1);
+                if answer.status == 200 && answer.body.trim().parse::<u32>().is_ok_and(|pid| pid > 1) {
                     break;
                 }
             }

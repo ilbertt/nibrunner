@@ -370,7 +370,6 @@ fn environment(config: &InstanceConfig, request: &ExecutionRequest) -> Vec<(Stri
     let mut environment = vec![
         ("HOME".to_string(), config.working_directory.clone()),
         ("TMPDIR".to_string(), "/tmp".to_string()),
-        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
     ];
     let overrides = config
         .tenant_environment()
