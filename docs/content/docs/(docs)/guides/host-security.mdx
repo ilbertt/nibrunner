@@ -83,9 +83,9 @@ meets the workloads' requirements; guest-local SMT settings cannot enforce that 
 Check host settings before upgrading or restarting nibrunner. Host security changes can
 require a reboot, affect other services on the same machine and change usable capacity.
 Before upgrading to a version that enforces inactive SMT, verify `smt/active` reports `0`.
-An unsuccessful daemon restart leaves routing and wake functionality unavailable even if
-existing VMM processes remain alive. A VPS with unavailable SMT status cannot satisfy this
-check; verify its compatibility before upgrading.
+An unsuccessful daemon restart prevents wakes and routing updates even if existing VMM processes
+remain alive. An existing HTTP worker keeps its last routes to running guests. A VPS with
+unavailable SMT status cannot satisfy this check; verify its compatibility before upgrading.
 Also verify KSM is stopped and has no retained shared pages before upgrading to a version
 that enforces the KSM requirement.
 Keep host settings persistent: a startup check cannot prevent a host administrator from

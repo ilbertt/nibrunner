@@ -28,7 +28,7 @@ async fn a_lifetime_expiry_drains_an_open_request_only_until_its_allowance_is_sp
     host.until_state(&app.app_id, InstanceState::Running).await;
     {
         let checking = async {
-            while host.host.metrics.proxy.open_requests_for(&app.app_id) == 0 {
+            while host.open_requests(&app).await == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             let recently_expired =
@@ -42,7 +42,7 @@ async fn a_lifetime_expiry_drains_an_open_request_only_until_its_allowance_is_sp
                 host.instance(&app.app_id).await.expect("a draining app").state,
                 InstanceState::Running
             );
-            assert!(host.host.metrics.proxy.open_requests_for(&app.app_id) > 0);
+            assert!(host.open_requests(&app).await > 0);
             let allowance_spent = Timestamp::from_epoch_ms(
                 nibrunnerd::clock::now_ms() - IDLE_TIMEOUT_MS as i64 - MAX_LIFETIME_DRAIN_MS - 1_000,
             );
@@ -77,14 +77,14 @@ async fn a_quiet_open_request_prevents_idle_sleep_until_its_answer_is_finished()
 
     let watching = async {
         tokio::time::timeout(Duration::from_secs(5), async {
-            while host.host.metrics.proxy.open_requests_for(&app.app_id) == 0 {
+            while host.open_requests(&app).await == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("the proxy starts carrying the request");
         for _ in 0..5 {
-            assert!(host.host.metrics.proxy.open_requests_for(&app.app_id) > 0);
+            assert!(host.open_requests(&app).await > 0);
             nibrunnerd::test_support::measured_quiet_since(
                 &host.host.state,
                 &app.app_id,
@@ -103,7 +103,7 @@ async fn a_quiet_open_request_prevents_idle_sleep_until_its_answer_is_finished()
     let answer = answer.expect("the quiet request completes");
     assert_eq!(answer.status, 200, "{answer:?}");
     assert_eq!(answer.body, "waited");
-    assert_eq!(host.host.metrics.proxy.open_requests_for(&app.app_id), 0);
+    assert_eq!(host.open_requests(&app).await, 0);
     host.let_sleep(&app).await;
     host.stop().await;
 }

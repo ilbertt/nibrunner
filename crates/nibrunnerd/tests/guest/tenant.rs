@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use nibrunnerd::test_support::machine::RunningHost;
 use protocol::{HealthCheck, InstanceState, Probe, TenantLogBody, TenantLogEvent};
 
-const KEEP_BYTES: u64 = 256 * 1024;
+const KEEP_BYTES: u64 = 1024 * 1024;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_private_tunnel_reaches_a_service_inside_the_jailed_guest() {
