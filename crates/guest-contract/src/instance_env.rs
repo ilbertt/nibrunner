@@ -260,6 +260,9 @@ impl InstanceConfig {
                 owned.push((name.clone(), value.clone()));
             }
         }
+        if !owned.iter().any(|(name, _)| name == "PATH") {
+            owned.push(("PATH".to_string(), "/usr/bin:/bin".to_string()));
+        }
         owned
     }
 }
@@ -517,6 +520,28 @@ mod both_ends {
             DEFAULT_HTTP_PORT.to_string(),
             "and never exported over the real one"
         );
+    }
+
+    #[test]
+    fn a_tenant_without_a_path_can_find_the_guest_utilities() {
+        let exported = parse_instance_env(&written(&[], &[]))
+            .unwrap()
+            .tenant_environment();
+        let paths: Vec<_> = exported.iter().filter(|(name, _)| name == "PATH").collect();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].1, "/usr/bin:/bin");
+    }
+
+    #[test]
+    fn a_tenants_explicit_path_is_preserved_even_when_empty() {
+        for path in ["/app/bin:/usr/bin:/bin", ""] {
+            let exported = parse_instance_env(&written(&[("PATH", path)], &[]))
+                .unwrap()
+                .tenant_environment();
+            let paths: Vec<_> = exported.iter().filter(|(name, _)| name == "PATH").collect();
+            assert_eq!(paths.len(), 1);
+            assert_eq!(paths[0].1, path);
+        }
     }
 
     #[test]
