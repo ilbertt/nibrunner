@@ -169,6 +169,7 @@ pub async fn build_host(
                 waker: waker_slot.clone(),
             }),
             vms.clone(),
+            metrics.clone(),
         ),
         metrics.clone(),
     );

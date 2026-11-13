@@ -7,6 +7,8 @@ use tokio::sync::broadcast;
 
 use crate::domain::health::is_within_grace_period;
 use crate::domain::health::probe::probe_instance;
+use crate::domain::metrics::start_capacity::Caller;
+use crate::domain::metrics::HostMetrics;
 use crate::domain::report::capacity::{committed_resources, memory_shortfall_mib};
 use crate::host::Host;
 use crate::ports::{Vmm, WakeFailure, WakeRefusal, Waker};
@@ -21,11 +23,12 @@ type InFlight = Mutex<Coalescing>;
 pub struct QueuedWaker {
     waker: Arc<dyn Waker>,
     vms: Arc<dyn Vmm>,
+    metrics: Arc<HostMetrics>,
 }
 
 impl QueuedWaker {
-    pub fn new(waker: Arc<dyn Waker>, vms: Arc<dyn Vmm>) -> Arc<Self> {
-        Arc::new(Self { waker, vms })
+    pub fn new(waker: Arc<dyn Waker>, vms: Arc<dyn Vmm>, metrics: Arc<HostMetrics>) -> Arc<Self> {
+        Arc::new(Self { waker, vms, metrics })
     }
 }
 
@@ -44,11 +47,19 @@ impl Waker for QueuedWaker {
                 outcome => return outcome,
             };
             if tokio::time::Instant::now() >= deadline {
+                self.metrics.start_capacity.timed_out(Caller::Http);
                 return Err(refusal);
             }
-            match tokio::time::timeout_at(deadline, self.vms.wait_for_start_capacity()).await {
+            let available = {
+                let _waiting = self.metrics.start_capacity.waiting(Caller::Http);
+                tokio::time::timeout_at(deadline, self.vms.wait_for_start_capacity()).await
+            };
+            match available {
                 Ok(Ok(())) if tokio::time::Instant::now() < deadline => {}
-                Ok(Ok(())) | Err(_) => return Err(refusal),
+                Ok(Ok(())) | Err(_) => {
+                    self.metrics.start_capacity.timed_out(Caller::Http);
+                    return Err(refusal);
+                }
                 Ok(Err(error)) => {
                     return Err(WakeRefusal::Failed {
                         kind: WakeFailure::WouldNotStart,
@@ -379,6 +390,15 @@ mod queue_tests {
     use crate::ports::{MockVmm, MockWaker, VmError};
     use crate::test_support::app_id;
 
+    fn page(waker: &QueuedWaker) -> String {
+        crate::domain::metrics::tests::page(
+            &crate::domain::metrics::tests::report(),
+            &waker.metrics,
+            &crate::state::HostSnapshot::default(),
+            0,
+        )
+    }
+
     fn busy() -> WakeRefusal {
         WakeRefusal::Failed {
             kind: WakeFailure::StartBusy,
@@ -397,13 +417,15 @@ mod queue_tests {
         vms.expect_wait_for_start_capacity()
             .times(waits)
             .returning(|| Ok(()));
-        QueuedWaker::new(Arc::new(waker), Arc::new(vms))
+        QueuedWaker::new(Arc::new(waker), Arc::new(vms), Arc::new(HostMetrics::default()))
     }
 
     #[tokio::test]
     async fn a_busy_wake_waits_for_capacity_and_retries_admission() {
         let waker = queued(vec![Err(busy()), Ok(())], 1);
         assert_eq!(waker.wake(&app_id()).await, Ok(()));
+        assert!(page(&waker).contains("nibrunner_vm_start_capacity_waiters{caller=\"http\"} 0\n"));
+        assert!(page(&waker).contains("nibrunner_vm_start_capacity_wait_seconds_count{caller=\"http\"} 1\n"));
     }
 
     #[tokio::test]
@@ -414,7 +436,9 @@ mod queue_tests {
 
     #[tokio::test]
     async fn a_wake_that_needs_no_capacity_never_waits_for_it() {
-        assert_eq!(queued(vec![Ok(())], 0).wake(&app_id()).await, Ok(()));
+        let waker = queued(vec![Ok(())], 0);
+        assert_eq!(waker.wake(&app_id()).await, Ok(()));
+        assert!(page(&waker).contains("nibrunner_vm_start_capacity_wait_seconds_count{caller=\"http\"} 0\n"));
     }
 
     #[tokio::test]
@@ -456,10 +480,15 @@ mod queue_tests {
     async fn capacity_races_share_one_thirty_second_queue_deadline() {
         let mut vms = MockVmm::new();
         vms.expect_wait_for_start_capacity().returning(|| Ok(()));
-        let waker = QueuedWaker::new(Arc::new(AlwaysBusy), Arc::new(vms));
+        let waker = QueuedWaker::new(
+            Arc::new(AlwaysBusy),
+            Arc::new(vms),
+            Arc::new(HostMetrics::default()),
+        );
         let started = tokio::time::Instant::now();
         assert_eq!(waker.wake(&app_id()).await, Err(busy()));
         assert_eq!(started.elapsed(), CAPACITY_WAIT_TIMEOUT);
+        assert!(page(&waker).contains("nibrunner_vm_start_capacity_timeouts_total{caller=\"http\"} 1\n"));
     }
 }
 
