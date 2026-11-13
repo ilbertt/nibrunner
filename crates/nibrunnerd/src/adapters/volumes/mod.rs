@@ -150,6 +150,9 @@ pub(crate) fn format_request(
     let mut command = vec!["mke2fs", "-q", "-t", "ext4"];
     if regular_file {
         command.push("-F");
+    } else {
+        // ZeroFS rejects the optional whole-device discard attempted by mke2fs.
+        command.extend(["-E", "nodiscard"]);
     }
     command.extend(["-L", FILESYSTEM_LABEL]);
     let root;
@@ -357,7 +360,17 @@ pub(crate) mod tests {
         let plain = format_request("/dev/nbd0", None, false);
         assert_eq!(
             plain.command,
-            ["mke2fs", "-q", "-t", "ext4", "-L", FILESYSTEM_LABEL, "/dev/nbd0"]
+            [
+                "mke2fs",
+                "-q",
+                "-t",
+                "ext4",
+                "-E",
+                "nodiscard",
+                "-L",
+                FILESYSTEM_LABEL,
+                "/dev/nbd0"
+            ]
         );
         assert_eq!(plain.timeout, CommandRequest::new(&[]).timeout);
 
@@ -387,6 +400,24 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(seeded.timeout, SEEDED_FORMAT_TIMEOUT);
+        let seeded_nbd = format_request("/dev/nbd0", Some(&staged), false);
+        assert_eq!(
+            seeded_nbd.command,
+            [
+                "mke2fs",
+                "-q",
+                "-t",
+                "ext4",
+                "-E",
+                "nodiscard",
+                "-L",
+                FILESYSTEM_LABEL,
+                "-d",
+                &staged.path().display().to_string(),
+                "/dev/nbd0"
+            ]
+        );
+        assert_eq!(seeded_nbd.timeout, SEEDED_FORMAT_TIMEOUT);
     }
 
     #[test]

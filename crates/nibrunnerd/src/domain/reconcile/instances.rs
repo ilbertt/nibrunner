@@ -390,7 +390,17 @@ enum BootOutcome {
 }
 
 pub async fn start_instance(host: &Host, desired: &DesiredInstance) {
+    let _transition = host.state.transition(&desired.app_id).await;
     let statuses = host.vms.statuses(std::slice::from_ref(&desired.app_id)).await;
+    if statuses.get(&desired.app_id).is_some_and(|status| status.active)
+        && host
+            .state
+            .record(&desired.app_id)
+            .await
+            .is_some_and(|record| record.deployment_id == desired.deployment_id)
+    {
+        return;
+    }
     let reason = if statuses
         .get(&desired.app_id)
         .is_some_and(|status| status.host_failure())
@@ -962,6 +972,40 @@ pub async fn prefetch_layers(host: &Host, plan: &ReconcilePlan) {
 mod tests {
     use super::*;
     use crate::test_support::*;
+
+    #[tokio::test]
+    async fn a_planned_start_waits_for_a_wake_and_keeps_the_guest_it_started() {
+        let host = test_host().await;
+        let desired = desired_instance(|_| {});
+        let transition = host.state.transition(&desired.app_id).await;
+        let starting = start_instance(&host, &desired);
+        tokio::pin!(starting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut starting)
+                .await
+                .is_err()
+        );
+        assert!(host.vms.calls().is_empty());
+
+        let running = instance_record(|record| {
+            record.state = InstanceState::Running;
+            record.started_at = Some(observed_at());
+            record.health.ever_healthy = true;
+        });
+        host.state.put_record(running.clone()).await;
+        host.vms.set_status(VmStatus {
+            loaded: true,
+            active: true,
+            failed: false,
+            started_this_boot: true,
+            exit: None,
+        });
+        drop(transition);
+        starting.await;
+
+        assert!(host.vms.calls().is_empty());
+        assert_eq!(host.state.record(&desired.app_id).await.unwrap(), running);
+    }
 
     #[tokio::test]
     async fn a_replacement_cannot_inherit_health_from_the_guest_that_exited() {

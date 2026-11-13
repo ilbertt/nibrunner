@@ -99,6 +99,7 @@ impl AppWaker {
 
     async fn boot(&self, app_id: &AppId) -> Outcome {
         let started = Instant::now();
+        let transition = self.host.state.transition(app_id).await;
         let wanted = {
             let cache = self.host.cache.lock().await;
             cache
@@ -130,6 +131,7 @@ impl AppWaker {
             });
         }
         if wanted.desired_state == DesiredInstanceState::Running {
+            drop(transition);
             return self.hold(app_id, &wanted).await;
         }
         if let Some(refusal) = self.refusal_for_room(app_id, &wanted.config.resources).await {
@@ -147,14 +149,8 @@ impl AppWaker {
             return Err(refusal);
         }
 
-        // The lock a sleep of this app holds while it is writing the guest out. A request that
-        // lands mid-snapshot waits here for the snapshot to finish and restores from it, rather
-        // than finding a paused guest or bringing up a second beside a half-written one. The
-        // restore is the whole of resume_instance, the volume attach that opens it included.
-        let outcome = {
-            let _transition = self.host.state.transition(app_id).await;
-            crate::domain::reconcile::instances::resume_instance(&self.host, &wanted).await?
-        };
+        let outcome = crate::domain::reconcile::instances::resume_instance(&self.host, &wanted).await?;
+        drop(transition);
 
         let Some(record) = self.host.state.record(app_id).await else {
             return Err(WakeRefusal::Failed {
@@ -472,6 +468,38 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use protocol::InstanceState;
+
+    #[tokio::test]
+    async fn a_wake_waiting_for_a_transition_reads_the_current_desired_state() {
+        let host = test_host().await;
+        host.state.modify(|snapshot| snapshot.isolated = true).await;
+        let mut desired = desired_state(|state| {
+            state.instances = vec![desired_instance(|instance| {
+                instance.desired_state = DesiredInstanceState::OnRequest;
+            })];
+        });
+        host.cache.lock().await.accept(desired.clone());
+        let id = app_id();
+        let transition = host.state.transition(&id).await;
+        let waker = AppWaker::new(host.arc().clone());
+        let waking = waker.wake(&id);
+        tokio::pin!(waking);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut waking)
+            .await
+            .is_err());
+
+        desired.instances[0].desired_state = DesiredInstanceState::Stopped;
+        host.cache.lock().await.accept(desired);
+        drop(transition);
+        assert!(matches!(
+            waking.await,
+            Err(WakeRefusal::Failed {
+                kind: WakeFailure::NotOnRequest,
+                ..
+            })
+        ));
+        assert!(host.vms.calls().is_empty());
+    }
 
     #[tokio::test]
     async fn concurrent_requests_to_one_app_cause_one_wake() {
