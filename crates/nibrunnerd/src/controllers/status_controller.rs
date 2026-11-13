@@ -39,7 +39,8 @@ impl StatusController {
 
         let now = crate::clock::now_ms();
         let settling = self.host.state.records().await.iter().any(|record| {
-            crate::domain::health::is_on_startup_grid(&record.health, &record.grace_inputs(now))
+            record.state == protocol::InstanceState::Starting
+                && crate::domain::health::is_on_startup_grid(&record.health, &record.grace_inputs(now))
         });
         if settling {
             SETTLING_TICK
@@ -105,6 +106,34 @@ mod tests {
             page.contains("nibrunner_refresh_seconds_count 1\n"),
             "the tick was timed"
         );
+    }
+
+    #[tokio::test]
+    async fn records_that_are_not_starting_leave_the_status_loop_on_its_normal_grid() {
+        let host = test_host().await;
+        let mut reconciler = MockReconcileService::new();
+        let mut reports = MockReportService::new();
+        reconciler.expect_refresh().returning(|| ());
+        reports.expect_publish().returning(|| ());
+        let controller = StatusController::new(host.arc().clone(), Arc::new(reconciler), Arc::new(reports));
+
+        for state in protocol::INSTANCE_STATES {
+            if state == protocol::InstanceState::Starting {
+                continue;
+            }
+            for started_at in [
+                None,
+                Some(protocol::Timestamp::from_epoch_ms(crate::clock::now_ms())),
+            ] {
+                host.state
+                    .put_record(instance_record(|record| {
+                        record.state = state;
+                        record.started_at = started_at;
+                    }))
+                    .await;
+                assert_eq!(controller.status_once().await, STATUS_TICK, "{state:?}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -80,6 +80,12 @@ async fn sync_desired(host: &Host, desired: &HostDesiredState) {
 
 async fn apply_stops(host: &Host, plan: &ReconcilePlan) {
     for action in &plan.instances {
+        let app_id = match action {
+            InstancePlan::Stop { app_id, .. } | InstancePlan::Forget { app_id } => app_id,
+            InstancePlan::Replace { desired } | InstancePlan::Recover { desired } => &desired.app_id,
+            _ => continue,
+        };
+        let _transition = host.state.transition(app_id).await;
         match action {
             InstancePlan::Stop { app_id, reason } => {
                 instances::stop_instance(host, app_id, reason.as_str()).await;
@@ -316,6 +322,31 @@ mod tests {
             started_this_boot: true,
             exit: None,
         }
+    }
+
+    #[tokio::test]
+    async fn replacing_a_guest_waits_for_its_in_flight_wake_before_stopping_and_discarding_it() {
+        let host = test_host().await;
+        let desired = desired_instance(|_| {});
+        let plan = ReconcilePlan {
+            instances: vec![InstancePlan::Replace {
+                desired: desired.clone(),
+            }],
+            ..ReconcilePlan::default()
+        };
+        let transition = host.state.transition(&desired.app_id).await;
+        let stopping = apply_stops(&host, &plan);
+        tokio::pin!(stopping);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut stopping)
+                .await
+                .is_err()
+        );
+        assert!(host.vms.calls().is_empty());
+
+        drop(transition);
+        stopping.await;
+        assert_eq!(host.vms.calls(), vec![VmCall::Stop, VmCall::Discard]);
     }
 
     fn stopped_vm() -> VmStatus {
