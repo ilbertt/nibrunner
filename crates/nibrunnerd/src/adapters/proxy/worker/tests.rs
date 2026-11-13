@@ -79,6 +79,15 @@ async fn a_replacement_accepts_requests_while_the_old_worker_finishes_its_respon
         existing.read_exact(&mut first).await.unwrap();
         assert_eq!(&first, b"before");
         assert_eq!(old.active().await.unwrap().get(&app_id()), Some(&1));
+        let sample = old.metrics().await.unwrap();
+        assert_eq!(sample.served.iter().sum::<u64>(), 1);
+        assert_eq!(sample.apps[&app_id()].request_count, 1);
+        assert_eq!(sample.apps[&app_id()].requests, [0, 1, 0, 0, 0]);
+        assert_eq!(sample.apps[&app_id()].open, 1);
+        assert_eq!(
+            sample.answered.buckets.iter().sum::<u64>() + sample.answered.above_every_bucket,
+            1
+        );
 
         let shared = old.listener().await.unwrap();
         let (replacement, new_worker) = worker(directory.path(), "replacement").await;
