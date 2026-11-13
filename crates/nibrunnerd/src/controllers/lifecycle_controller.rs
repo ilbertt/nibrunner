@@ -26,7 +26,7 @@ impl LifecycleController {
         Arc::new(Self { host, versions })
     }
 
-    pub async fn start(&self) {
+    pub async fn start(&self) -> std::io::Result<()> {
         self.host.load().await;
         let adopted = self.host.vms.adopted_app_ids().await;
         if !adopted.is_empty() {
@@ -39,9 +39,10 @@ impl LifecycleController {
         }
         crate::domain::reconcile::network::reclaim_stranded_taps(&self.host).await;
         crate::domain::reconcile::network::apply_activators(&self.host).await;
-        crate::run::serve_proxy(&self.host);
+        crate::run::serve_proxy(&self.host).await?;
         crate::run::serve_metrics(&self.host);
         crate::run::serve_filesystem(&self.host);
+        Ok(())
     }
 
     pub fn controllers(&self) -> Vec<Arc<dyn Controller>> {

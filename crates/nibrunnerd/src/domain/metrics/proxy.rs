@@ -137,6 +137,29 @@ pub struct AppProxy {
     pub raw_bytes_out: [u64; PROTOCOLS.len()],
 }
 
+impl AppProxy {
+    fn include(&mut self, other: &Self) {
+        for (total, count) in self.requests.iter_mut().zip(other.requests) {
+            *total += count;
+        }
+        self.request_count += other.request_count;
+        self.request_micros += other.request_micros;
+        self.unreachable += other.unreachable;
+        self.open += other.open;
+        for (total, counts) in self.raw_sessions.iter_mut().zip(other.raw_sessions) {
+            for (total, count) in total.iter_mut().zip(counts) {
+                *total += count;
+            }
+        }
+        for (total, count) in self.raw_bytes_in.iter_mut().zip(other.raw_bytes_in) {
+            *total += count;
+        }
+        for (total, count) in self.raw_bytes_out.iter_mut().zip(other.raw_bytes_out) {
+            *total += count;
+        }
+    }
+}
+
 fn position<T: PartialEq>(of: &[T], value: &T) -> usize {
     of.iter().position(|each| each == value).unwrap_or(0)
 }
@@ -172,6 +195,7 @@ pub struct ProxyMetrics {
     handshakes: [AtomicU64; HANDSHAKES.len()],
     apps: Apps,
     changed: Arc<tokio::sync::Notify>,
+    workers: Mutex<Vec<ProxySnapshot>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -192,13 +216,21 @@ impl Default for ProxyMetrics {
             handshakes: Default::default(),
             apps: Arc::new(Mutex::new(BTreeMap::new())),
             changed: Arc::new(tokio::sync::Notify::new()),
+            workers: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl ProxyMetrics {
+    pub fn worker_samples(&self, samples: Vec<ProxySnapshot>) {
+        *self
+            .workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = samples;
+    }
+
     pub fn snapshot(&self) -> ProxySnapshot {
-        ProxySnapshot {
+        let mut sample = ProxySnapshot {
             served: std::array::from_fn(|index| self.served[index].load(Ordering::Relaxed)),
             answered: self.answered.snapshot(),
             in_flight: self.in_flight.load(Ordering::Relaxed),
@@ -208,7 +240,30 @@ impl ProxyMetrics {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone(),
+        };
+        for worker in self
+            .workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+        {
+            for (total, count) in sample.served.iter_mut().zip(worker.served) {
+                *total += count;
+            }
+            for (total, count) in sample.handshakes.iter_mut().zip(worker.handshakes) {
+                *total += count;
+            }
+            for (total, count) in sample.answered.buckets.iter_mut().zip(&worker.answered.buckets) {
+                *total += count;
+            }
+            sample.answered.above_every_bucket += worker.answered.above_every_bucket;
+            sample.answered.total_micros += worker.answered.total_micros;
+            sample.in_flight += worker.in_flight;
+            for (app_id, app) in &worker.apps {
+                sample.apps.entry(app_id.clone()).or_default().include(app);
+            }
         }
+        sample
     }
 
     fn app(&self, app_id: &AppId, change: impl FnOnce(&mut AppProxy)) {
@@ -243,12 +298,11 @@ impl ProxyMetrics {
 
     /// The apps with a request open, and how many each.
     pub fn open_requests(&self) -> BTreeMap<AppId, u64> {
-        self.apps
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
+        self.snapshot()
+            .apps
+            .into_iter()
             .filter(|(_, app)| app.open > 0)
-            .map(|(app_id, app)| (app_id.clone(), app.open))
+            .map(|(app_id, app)| (app_id, app.open))
             .collect()
     }
 
@@ -314,12 +368,24 @@ impl ProxyMetrics {
     }
 
     pub fn of(&self, app_id: &AppId) -> AppProxy {
-        self.apps
+        let mut app = self
+            .apps
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(app_id)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for worker in self
+            .workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+        {
+            if let Some(other) = worker.apps.get(app_id) {
+                app.include(other);
+            }
+        }
+        app
     }
 }
 
@@ -407,6 +473,15 @@ pub(super) static DECLARED: &[&Metric] = &[
 ];
 
 pub(super) fn render(page: &mut Page, metrics: &ProxyMetrics, snapshot: &HostSnapshot) {
+    let sample = metrics.snapshot();
+    let metrics = ProxyMetrics {
+        served: sample.served.map(AtomicU64::new),
+        answered: Histogram::with_snapshot(&BUCKET_BOUNDS_SECONDS, sample.answered),
+        in_flight: AtomicU64::new(sample.in_flight),
+        handshakes: sample.handshakes.map(AtomicU64::new),
+        apps: Arc::new(Mutex::new(sample.apps)),
+        ..ProxyMetrics::default()
+    };
     page.declare(&PROXY_REQUESTS_TOTAL);
     for (index, outcome) in OUTCOMES.iter().enumerate() {
         page.value(
@@ -529,6 +604,33 @@ mod tests {
     use super::*;
     use crate::domain::metrics::tests::page;
     use crate::test_support::*;
+
+    #[test]
+    fn worker_samples_preserve_http_activity_and_counters_without_duplicating_local_raw_traffic() {
+        let metrics = ProxyMetrics::default();
+        metrics.raw_session(&app_id(), Protocol::Tcp, RawOutcome::Served);
+        metrics.raw_bytes(&app_id(), Protocol::Tcp, 10, 20);
+        metrics.answered(Outcome::Refused, Duration::from_millis(2), None);
+        let worker = ProxyMetrics::default();
+        worker.answered(Outcome::Served, Duration::from_millis(3), Some(&app_id()));
+        worker.app_answered(&app_id(), StatusCode::OK, true);
+        let open = worker.open(&app_id());
+        for _ in 0..2 {
+            metrics.worker_samples(vec![worker.snapshot()]);
+            assert_eq!(metrics.open_requests().get(&app_id()), Some(&1));
+            let app = metrics.of(&app_id());
+            assert_eq!(app.request_count, 1);
+            assert_eq!(app.raw_bytes_in, [10, 0]);
+            assert_eq!(app.raw_bytes_out, [20, 0]);
+            let sample = metrics.snapshot();
+            assert_eq!(sample.served.iter().sum::<u64>(), 2);
+            assert_eq!(sample.answered.buckets.iter().sum::<u64>(), 2);
+            assert_eq!(sample.answered.total_micros, 5000);
+        }
+        drop(open);
+        metrics.worker_samples(vec![worker.snapshot()]);
+        assert!(metrics.open_requests().is_empty());
+    }
 
     fn lines_for<'a>(page: &'a str, name: &str) -> Vec<&'a str> {
         page.lines()

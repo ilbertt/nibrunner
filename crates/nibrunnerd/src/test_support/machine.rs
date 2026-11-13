@@ -181,7 +181,10 @@ pub async fn started_with(edit: impl FnOnce(&mut crate::config::HostConfig)) -> 
     .await
     .expect("a host on this machine");
     let lifecycle = LifecycleController::new(host.clone(), crate::run::host_versions(&host));
-    lifecycle.start().await;
+    lifecycle
+        .start()
+        .await
+        .expect("the HTTP proxy starts with the host");
     let controllers = lifecycle
         .controllers()
         .into_iter()
@@ -248,6 +251,16 @@ impl Tenant {
 }
 
 impl RunningHost {
+    pub async fn open_requests(&self, tenant: &Tenant) -> u64 {
+        self.host
+            .open_http_requests()
+            .await
+            .expect("HTTP activity can be read")
+            .get(&tenant.app_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// `app-<number>`, on its own volume, reachable at `app-<number>.test`, running the tenant.
     pub fn tenant(&self, number: u32) -> Tenant {
         let app_id = AppId::parse(format!("app-{number}")).expect("an app id");
@@ -324,6 +337,10 @@ impl RunningHost {
     }
 
     pub async fn metrics(&self) -> String {
+        self.host
+            .refresh_http_metrics()
+            .await
+            .expect("HTTP metrics can be read");
         let report = self.report().await;
         let snapshot = self.host.state.snapshot().await;
         crate::domain::metrics::render(
@@ -521,7 +538,7 @@ impl RunningHost {
             snapshot.records.get(&tenant.app_id).and_then(|record| record.message.as_ref()),
             crate::adapters::vm::process::VmProcesses::new(self.host.config.runtime_dir.clone()).read_record(&tenant.app_id),
             std::fs::read_to_string(crate::adapters::vm::limits::cgroup_path(&tenant.app_id).join("memory.events")),
-            self.host.metrics.proxy.open_requests_for(&tenant.app_id),
+            self.open_requests(tenant).await,
             snapshot.failed_sleeps.get(&tenant.app_id),
             snapshot.last_active_at_ms.get(&tenant.app_id),
             snapshot.last_measured_at_ms.get(&tenant.app_id),
@@ -559,6 +576,7 @@ impl RunningHost {
             .map(|record| record.app_id)
             .collect();
         for app_id in app_ids {
+            self.host.close_http_connections_to(&app_id).await;
             let _ = self.host.cron_execution.stop(&app_id).await;
             let _ = self.host.vms.stop(&app_id).await;
         }
@@ -566,6 +584,9 @@ impl RunningHost {
             let _ = self.host.vms.delete_tap(&tap_name).await;
         }
         self.lifecycle.stop().await;
+        if let Some(proxy) = &self.host.http_proxy {
+            let _ = proxy.drain().await;
+        }
     }
 }
 

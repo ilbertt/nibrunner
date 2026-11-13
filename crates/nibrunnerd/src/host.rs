@@ -44,9 +44,7 @@ pub struct Host {
     pub commands: Arc<dyn CommandRunner>,
     pub firewall: Arc<HostFirewall>,
     pub router: Arc<Router>,
-    /// What `[proxy.http.tls]` names, read on the way up: a certificate file that is short or
-    /// wrong refuses the start, rather than every handshake after it.
-    pub tls: Option<tokio_rustls::TlsAcceptor>,
+    pub http_proxy: Option<Arc<crate::adapters::proxy::worker::process::DetachedHttpProxy>>,
     pub metrics: Arc<HostMetrics>,
     /// Brings an app up for whatever asked for it: a request at the proxy, a raw port, a question
     /// about a guest's files.
@@ -60,6 +58,36 @@ pub struct Host {
 }
 
 impl Host {
+    pub async fn refresh_http_metrics(&self) -> std::io::Result<()> {
+        if let Some(proxy) = &self.http_proxy {
+            self.metrics.proxy.worker_samples(proxy.metrics().await?);
+        }
+        Ok(())
+    }
+
+    pub async fn open_http_requests(&self) -> std::io::Result<std::collections::BTreeMap<AppId, u64>> {
+        self.refresh_http_metrics().await?;
+        Ok(self.metrics.proxy.open_requests())
+    }
+
+    pub async fn close_http_connections_to(&self, app_id: &AppId) {
+        self.router.close_connections_to(app_id).await;
+        if let Some(proxy) = &self.http_proxy {
+            if let Err(error) = proxy.close_connections_to(app_id).await {
+                tracing::warn!(%app_id, %error, "HTTP workers could not close the app's connections");
+            }
+        }
+    }
+
+    pub async fn discard_http_log(&self, app_id: &AppId) {
+        if let Some(proxy) = &self.http_proxy {
+            if let Err(error) = proxy.discard(app_id).await {
+                tracing::warn!(%app_id, %error, "HTTP workers could not discard the app's log");
+            }
+        }
+        self.router.discard_http_log(app_id).await;
+    }
+
     pub async fn slot_for(
         &self,
         app_id: &AppId,

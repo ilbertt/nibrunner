@@ -13,7 +13,7 @@ use crate::adapters::net::firewall::HostFirewall;
 use crate::adapters::net::tap::HostNetwork;
 use crate::adapters::proxy::activator::AppActivator;
 use crate::adapters::proxy::http_log::HttpRequestLog;
-use crate::adapters::proxy::{router, Router};
+use crate::adapters::proxy::Router;
 use crate::adapters::vm::layers::LayerImages;
 use crate::adapters::vm::manager::{verify_guest_image, VmManager};
 use crate::adapters::vm::process::{extract_firecracker, extract_jailer, VmProcesses, FIRECRACKER_VERSION};
@@ -199,14 +199,6 @@ pub async fn build_host(
         crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
     );
-    let tls = config
-        .proxy
-        .http
-        .as_ref()
-        .and_then(|http| http.tls.as_ref())
-        .map(|tls| router::tls_acceptor(&tls.certificate, &tls.key, tls.client_ca.as_deref()))
-        .transpose()
-        .map_err(|error| StartupError::Config(error.to_string()))?;
     let checkpoint_servers = config.volumes.zerofs().map(|settings| CheckpointServers {
         ready_timeout: crate::domain::exports::reader::DEFAULT_READY_TIMEOUT,
         binary: settings.binary.clone(),
@@ -215,10 +207,25 @@ pub async fn build_host(
         cache_dir: settings.checkpoint_cache_dir.clone(),
     });
 
+    let http_proxy = Arc::new(crate::adapters::proxy::worker::process::DetachedHttpProxy::new(
+        &config,
+        executable.clone(),
+    ));
+    let http_proxy = if config.proxy.http.is_some() {
+        Some(http_proxy)
+    } else {
+        http_proxy
+            .drain()
+            .await
+            .map_err(|error| StartupError::Unusable(error.to_string()))?;
+        None
+    };
+
     let host = Arc::new(Host {
         cron,
         cron_execution: Arc::new(crate::adapters::cron_worker::process::DetachedCronExecution::new(
-            &config, executable,
+            &config,
+            executable.clone(),
         )),
         cron_runs: Arc::new(crate::domain::cron::runs::CronRuns::default()),
         guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
@@ -238,7 +245,7 @@ pub async fn build_host(
         payloads,
         firewall,
         router: Router::with_http_config(metrics.clone(), Some(http_log), config.proxy.http.as_ref()),
-        tls,
+        http_proxy,
         metrics,
         waker: deferred(),
         activator,
@@ -294,30 +301,16 @@ pub fn host_versions(host: &Host) -> HostVersions {
     })
 }
 
-pub fn serve_proxy(host: &Arc<Host>) {
-    let Some(http) = host.config.proxy.http.clone() else {
-        return;
-    };
-    let router = host.router.clone();
-    let keys = router.clone();
-    tokio::spawn(async move { keys.refresh_jwks().await });
-    let acceptor = host.tls.clone();
-    let address = SocketAddr::new(http.listen_address, http.port);
-    tokio::spawn(async move {
-        // One listener, and what it is depends on whether this host was given the material to
-        // encrypt with. Nothing here redirects, so a second plain port beside a TLS one would
-        // serve every app both ways at once with nothing moving a visitor off the first.
-        let served = match acceptor {
-            None => router::serve_http(router, address).await,
-            Some(acceptor) => {
-                let trust_pool = http.tls.as_ref().and_then(|tls| tls.client_ca.as_deref());
-                router::serve_https(router, address, acceptor, trust_pool).await
-            }
-        };
-        if let Err(error) = served {
-            tracing::error!(%error, secure = http.tls.is_some(), "the proxy could not listen");
-        }
-    });
+pub async fn serve_proxy(host: &Arc<Host>) -> std::io::Result<()> {
+    if let Some(proxy) = &host.http_proxy {
+        proxy
+            .apply(crate::domain::report::routes::renderable_routes(
+                &host.state.records().await,
+            ))
+            .await?;
+        host.refresh_http_metrics().await?;
+    }
+    Ok(())
 }
 
 /// Absent from the configuration is a host nothing can ask what a guest holds.
@@ -380,6 +373,9 @@ async fn answer_scrape(host: &Arc<Host>, path: &str) -> hyper::Response<http_bod
                 b"Metrics are at /metrics.\n",
             )))
             .expect("a constant response is always buildable");
+    }
+    if let Err(error) = host.refresh_http_metrics().await {
+        tracing::warn!(%error, "HTTP worker metrics could not be read");
     }
     let report = crate::domain::report::writer::build(host, host_versions(host)).await;
     let snapshot = host.state.snapshot().await;

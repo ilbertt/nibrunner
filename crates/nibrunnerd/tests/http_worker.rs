@@ -103,7 +103,14 @@ async fn a_daemon_process_owns_the_http_proxy_controller() {
         &config,
         env!("CARGO_BIN_EXE_nibrunnerd").into(),
     );
-    proxy.apply(http_worker::routes(port)).await.unwrap();
+    let mut host = nibrunnerd::test_support::test_host().await;
+    std::sync::Arc::get_mut(&mut host.host).unwrap().http_proxy = Some(std::sync::Arc::new(proxy));
+    host.state
+        .put_record(nibrunnerd::test_support::instance_record(|record| {
+            record.host_port = Some(protocol::HostPort::new(port).unwrap());
+        }))
+        .await;
+    nibrunnerd::run::serve_proxy(host.arc()).await.unwrap();
     std::fs::write(path.with_extension("ready"), "ready").unwrap();
     std::future::pending::<()>().await;
 }

@@ -81,6 +81,20 @@ pub struct HistogramSnapshot {
 }
 
 impl Histogram {
+    pub(super) fn with_snapshot(bounds: &'static [f64], snapshot: HistogramSnapshot) -> Self {
+        let histogram = Self::over(bounds);
+        for (bucket, count) in histogram.buckets.iter().zip(snapshot.buckets) {
+            bucket.store(count, Ordering::Relaxed);
+        }
+        histogram
+            .above_every_bucket
+            .store(snapshot.above_every_bucket, Ordering::Relaxed);
+        histogram
+            .total_micros
+            .store(snapshot.total_micros, Ordering::Relaxed);
+        histogram
+    }
+
     pub fn snapshot(&self) -> HistogramSnapshot {
         HistogramSnapshot {
             buckets: self

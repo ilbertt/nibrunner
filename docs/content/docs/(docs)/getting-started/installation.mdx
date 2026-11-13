@@ -83,6 +83,11 @@ journalctl -u nibrunnerd -f
 
 ## Upgrade an existing host
 
+The HTTP listener runs in a separate worker. A daemon restart transfers the listener to its
+replacement while the old worker finishes responses already forwarded to running guests.
+Requests waiting for an idle app, or still forwarded through its wake activator, depend on the
+daemon and can be interrupted by a restart.
+
 After updating `nibrunnerd`, run `nibrunnerd install`, then `nibrunnerd start`. Existing microVMs
 keep serving until stopped or redeployed. Redeploy apps to move their next boot into a jail.
 Waking a snapshot from a direct launch cold boots the app while preserving its volume.

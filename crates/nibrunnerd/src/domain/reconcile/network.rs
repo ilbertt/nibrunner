@@ -97,8 +97,14 @@ pub async fn apply_activators(host: &Arc<Host>) {
 }
 
 pub async fn apply_routes(host: &Host) {
-    let table = RouteTable::from_targets(&renderable_routes(&host.state.records().await));
+    let routes = renderable_routes(&host.state.records().await);
+    let table = RouteTable::from_targets(&routes);
     host.router.apply(table).await;
+    if let Some(proxy) = &host.http_proxy {
+        if let Err(error) = proxy.apply(routes).await {
+            tracing::warn!(%error, "HTTP worker routes could not be applied");
+        }
+    }
 }
 
 // A tap is only ever made for a slot, so one no slot claims belongs to an app that is gone. That

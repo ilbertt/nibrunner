@@ -117,7 +117,10 @@ impl Worker {
             Request::Export => return self.export(stream).await,
             Request::Routes(routes) => self.router.apply(RouteTable::from_targets(&routes)).await,
             Request::Close(app_id) => self.router.close_connections_to(&app_id).await,
-            Request::Discard(app_id) => self.router.discard_http_log(&app_id).await,
+            Request::Discard(app_id) => {
+                self.router.discard_http_log(&app_id).await;
+                self.metrics.forget(&app_id);
+            }
             Request::Active => {
                 return wire::write(
                     stream.get_mut(),

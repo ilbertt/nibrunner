@@ -134,7 +134,13 @@ pub async fn record_activity(host: &Host) {
         }
     };
     let measured = taken.len();
-    let requests_open = host.metrics.proxy.open_requests();
+    let requests_open = match host.open_http_requests().await {
+        Ok(requests) => requests,
+        Err(error) => {
+            tracing::warn!(%error, "HTTP worker activity could not be read");
+            return;
+        }
+    };
     let next = activity_after(
         taken,
         &snapshot.app_traffic,
@@ -297,7 +303,13 @@ async fn let_sleep(host: &Host, app_id: &AppId, policy: &ActivationPolicy) -> bo
     let Some(record) = snapshot.records.get(app_id) else {
         return false;
     };
-    let requests_open = host.metrics.proxy.open_requests_for(app_id);
+    let requests_open = match host.open_http_requests().await {
+        Ok(requests) => requests.get(app_id).copied().unwrap_or(0),
+        Err(error) => {
+            tracing::warn!(%app_id, %error, "HTTP activity could not be verified before sleep");
+            return false;
+        }
+    };
     let signals = signals(&snapshot, record, requests_open);
     let Some(due) = due(policy, record, &signals, now) else {
         left_up(app_id, record, policy, &signals, now);
@@ -376,7 +388,13 @@ pub async fn apply_sleep(host: &std::sync::Arc<Host>) -> usize {
             .unwrap_or_default()
     };
     let snapshot = host.state.snapshot().await;
-    let requests_open = host.metrics.proxy.open_requests();
+    let requests_open = match host.open_http_requests().await {
+        Ok(requests) => requests,
+        Err(error) => {
+            tracing::warn!(%error, "idle sleep refused: HTTP worker activity is unknown");
+            return 0;
+        }
+    };
     let now = crate::clock::now_ms();
 
     let mut letting_go: Vec<(Due, AppId, ActivationPolicy)> = snapshot
@@ -775,6 +793,20 @@ mod sleep_tests {
         host.slot_for(&app_id()).await.unwrap();
         host.state.put_record(quiet_record()).await;
         host
+    }
+
+    #[tokio::test]
+    async fn unknown_worker_activity_refuses_idle_sleep() {
+        let mut host = on_request_host(None).await;
+        last_reached(&host, DEFAULT_IDLE_TIMEOUT_MS as i64 + 1).await;
+        let proxy = crate::adapters::proxy::worker::process::DetachedHttpProxy::new(
+            &host.config,
+            "/nowhere/nibrunnerd".into(),
+        );
+        std::sync::Arc::get_mut(&mut host.host).unwrap().http_proxy = Some(std::sync::Arc::new(proxy));
+        assert_eq!(apply_sleep(host.arc()).await, 0);
+        assert!(!let_sleep(&host, &app_id(), &default_idle_policy()).await);
+        assert!(host.vms.calls().is_empty());
     }
 
     async fn last_reached(host: &TestHost, ms_ago: i64) {

@@ -143,7 +143,7 @@ pub async fn stop_instance(host: &Host, app_id: &AppId, reason: &str) {
             record.stop_requested = true;
         })
         .await;
-    host.router.close_connections_to(app_id).await;
+    host.close_http_connections_to(app_id).await;
     host.activator.close_connections_to(app_id).await;
     settled(host, app_id, reason).await;
     match host.vms.stop(app_id).await {
@@ -178,7 +178,7 @@ pub async fn suspend_instance(host: &Host, app_id: &AppId, why: SleepReason) -> 
     crate::domain::reconcile::network::apply_network(host).await;
     // That handover reaches only the connections still to be opened, so what the proxy already
     // holds into this guest goes down with it.
-    host.router.close_connections_to(app_id).await;
+    host.close_http_connections_to(app_id).await;
     host.activator.close_connections_to(app_id).await;
     let started = std::time::Instant::now();
     settled(host, app_id, reason).await;
@@ -522,7 +522,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
                     return BootOutcome::NotStarted;
                 }
             };
-            host.router.close_connections_to(&desired.app_id).await;
+            host.close_http_connections_to(&desired.app_id).await;
             host.activator.close_connections_to(&desired.app_id).await;
             let boot = host
                 .vms
