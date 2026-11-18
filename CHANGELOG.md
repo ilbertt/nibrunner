@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.11.13] - 2026-11-18
+
+### Features
+
+- **access:** **Breaking:** Derive JWT algorithms from trusted signing keys (#363)
+
 ## [2026.11.12] - 2026-11-13
 
 ### Features
