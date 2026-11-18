@@ -38,9 +38,6 @@ To require a signed JWT:
 | [`audiences`](/docs/reference/desired#jwt-audiences) | At least one of these values must match the token's `aud` claim. |
 | [`publicKeys`](/docs/reference/desired#jwt-publicKeys) | One to eight PEM public keys, or `{ "url": "https://…" }` for a JWKS endpoint. |
 
-RSA keys use `RS256`, P-256 keys use `ES256`, and Ed25519 keys use `EdDSA`.
-A policy can contain keys of different supported types.
-
 The policy covers every platform and custom hostname of the app. A missing or invalid token
 receives `403` before the guest is contacted, so a rejected request cannot wake a sleeping app.
 Tokens must contain `iss`, `aud` and an unexpired `exp`. A supplied `nbf` must have passed.
