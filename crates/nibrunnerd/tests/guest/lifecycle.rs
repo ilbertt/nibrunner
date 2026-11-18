@@ -80,8 +80,9 @@ async fn until_http_status(
 #[tokio::test(flavor = "multi_thread")]
 async fn jwt_policy_updates_keep_the_vm_and_denied_requests_never_wake_it() {
     use nibrunnerd::adapters::vm::process::VmProcesses;
+    use nibrunnerd::test_support::jwt::JwtAlgorithm;
     use nibrunnerd::test_support::jwt::{claims, policy, token};
-    use protocol::{AccessPolicy, AppHostname, AppHostnameKind, Hostname, JwtAlgorithm};
+    use protocol::{AccessPolicy, AppHostname, AppHostnameKind, Hostname};
 
     let Some(host) = crate::host().await else {
         return;

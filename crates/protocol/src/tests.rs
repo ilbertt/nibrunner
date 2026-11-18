@@ -200,10 +200,13 @@ fn jwt_public_keys_are_supplied_pems_or_one_explicit_jwks_url() {
         "token": {"header": "Authorization", "format": "bearer"},
         "issuer": "https://issuer.example.com",
         "audiences": ["app-one"],
-        "algorithm": "RS256",
         "publicKeys": {"url": "https://issuer.example.com/keys"}
     });
     assert!(validator.is_valid(&document));
+    let mut legacy = document.clone();
+    legacy["instances"][0]["access"]["algorithm"] = serde_json::json!("RS256");
+    assert!(!validator.is_valid(&legacy));
+    assert!(serde_json::from_value::<HostDesiredState>(legacy).is_err());
     let parsed: HostDesiredState = serde_json::from_value(document.clone()).unwrap();
     assert_eq!(
         serde_json::to_value(parsed).unwrap()["instances"][0]["access"],
@@ -315,7 +318,6 @@ fn access_is_required_and_round_trips_as_public_or_jwt() {
         "token": { "header": "Authorization", "format": "bearer" },
         "issuer": "https://issuer.example.com",
         "audiences": ["app-one"],
-        "algorithm": "RS256",
         "publicKeys": ["a PEM public key"]
     });
     let mut document = desired_json();
@@ -1395,13 +1397,12 @@ fn jwt_policies_preserve_their_settings_and_refuse_unknown_options() {
         "token": { "header": "Authorization", "format": "bearer" },
         "issuer": "https://issuer.example.com",
         "audiences": ["app-one"],
-        "algorithm": "RS256",
         "publicKeys": ["a PEM public key"]
     });
     let parsed: crate::JwtAccessPolicy = serde_json::from_value(policy.clone()).unwrap();
     assert_eq!(serde_json::to_value(parsed).unwrap(), policy);
     for (key, value) in [
-        ("algorithm", serde_json::json!("HS256")),
+        ("algorithm", serde_json::json!("RS256")),
         ("unknown", serde_json::json!(true)),
     ] {
         let mut invalid = policy.clone();

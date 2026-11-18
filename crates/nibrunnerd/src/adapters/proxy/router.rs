@@ -737,8 +737,8 @@ mod tests {
     async fn jwt_access_is_checked_before_dialling_an_upstream_for_every_alias() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        use crate::test_support::jwt::JwtAlgorithm;
         use crate::test_support::jwt::{claims, policy, token};
-        use protocol::JwtAlgorithm;
 
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let host_port = HostPort::new(upstream.local_addr().unwrap().port()).unwrap();
@@ -806,8 +806,9 @@ mod tests {
 
     #[tokio::test]
     async fn jwks_fetches_run_in_the_background_and_unavailable_or_invalid_keys_never_contact_the_guest() {
+        use crate::test_support::jwt::JwtAlgorithm;
         use crate::test_support::jwt::{claims, jwk, policy, token_with_kid, JwksEndpoint};
-        use protocol::{JwtAlgorithm, JwtPublicKeys};
+        use protocol::JwtPublicKeys;
         use std::sync::atomic::Ordering;
 
         let endpoint =

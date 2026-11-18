@@ -36,7 +36,6 @@ Set [`access`](/docs/reference/desired#desiredinstance-access) on the existing i
   "token": { "header": "Cf-Access-Jwt-Assertion", "format": "raw" },
   "issuer": "https://your-team.cloudflareaccess.com",
   "audiences": ["YOUR_APP_AUD"],
-  "algorithm": "RS256",
   "publicKeys": {
     "url": "https://your-team.cloudflareaccess.com/cdn-cgi/access/certs"
   }
@@ -48,7 +47,6 @@ Set [`access`](/docs/reference/desired#desiredinstance-access) on the existing i
 | [`token`](/docs/reference/desired#jwt-token) | Cloudflare supplies the application token in `Cf-Access-Jwt-Assertion`, without a `Bearer` prefix. |
 | [`issuer`](/docs/reference/desired#jwt-issuer) | Replace `your-team` with your team name. Match the team domain exactly, without a trailing slash. |
 | [`audiences`](/docs/reference/desired#jwt-audiences) | Replace `YOUR_APP_AUD` with this application's AUD tag. |
-| [`algorithm`](/docs/reference/desired#jwt-algorithm) | `RS256`, the algorithm Cloudflare Access uses. |
 | [`publicKeys`](/docs/reference/desired#jwt-publicKeys) | Replace `your-team` in the JWKS URL with the same team name. |
 
 These values follow Cloudflare's

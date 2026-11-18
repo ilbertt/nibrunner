@@ -197,16 +197,17 @@ impl JwksCache {
 mod tests {
     use std::sync::atomic::Ordering;
 
+    use crate::test_support::jwt::JwtAlgorithm;
     use hyper::{HeaderMap, StatusCode};
-    use protocol::{JwtAlgorithm, JwtPublicKeys};
+    use protocol::JwtPublicKeys;
     use serde_json::json;
 
     use super::*;
     use crate::adapters::proxy::jwt::JwtVerifier;
     use crate::test_support::jwt::{claims, jwk, policy, token, token_with_kid, JwksEndpoint};
 
-    fn remote_verifier(algorithm: JwtAlgorithm) -> JwtVerifier {
-        let mut policy = policy(algorithm);
+    fn remote_verifier() -> JwtVerifier {
+        let mut policy = policy(JwtAlgorithm::EdDSA);
         policy.public_keys = JwtPublicKeys::Jwks {
             url: "https://issuer.example.com/keys".into(),
         };
@@ -231,7 +232,7 @@ mod tests {
             let keys =
                 JwksKeys::parse(&serde_json::to_vec(&json!({"keys": [jwk(algorithm, "current")]})).unwrap())
                     .unwrap();
-            let verifier = remote_verifier(algorithm);
+            let verifier = remote_verifier();
             assert!(verifier.permits(
                 &headers(&token_with_kid(algorithm, &claims(), "current")),
                 Some(&keys)
@@ -256,14 +257,28 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn a_mixed_key_set_binds_each_key_id_to_its_own_algorithm() {
         let keys = JwksKeys::parse(
-            &serde_json::to_vec(&json!({"keys": [jwk(JwtAlgorithm::ES256, "current")]})).unwrap(),
+            &serde_json::to_vec(&json!({"keys": [
+                jwk(JwtAlgorithm::RS256, "rsa"), jwk(JwtAlgorithm::ES256, "ec")
+            ]}))
+            .unwrap(),
         )
         .unwrap();
-        assert!(!remote_verifier(JwtAlgorithm::RS256).permits(
-            &headers(&token_with_kid(JwtAlgorithm::ES256, &claims(), "current")),
-            Some(&keys)
-        ));
+        let verifier = remote_verifier();
+        for (algorithm, kid, accepted) in [
+            (JwtAlgorithm::RS256, "rsa", true),
+            (JwtAlgorithm::ES256, "ec", true),
+            (JwtAlgorithm::ES256, "rsa", false),
+        ] {
+            assert_eq!(
+                verifier.permits(&headers(&token_with_kid(algorithm, &claims(), kid)), Some(&keys)),
+                accepted
+            );
+        }
     }
 
     #[test]
@@ -335,7 +350,7 @@ mod tests {
         ))
         .unwrap();
         let signed = jsonwebtoken::encode(&header, &claims(), &signing).unwrap();
-        assert!(remote_verifier(JwtAlgorithm::EdDSA).permits(&headers(&signed), Some(&keys)));
+        assert!(remote_verifier().permits(&headers(&signed), Some(&keys)));
 
         endpoint.respond(StatusCode::OK, json!({"keys": []}).to_string());
         elapse(REFRESH_INTERVAL).await;

@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn a_restored_records_policy_is_kept_for_running_idle_and_stopped_apps() {
-        let policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        let policy = crate::test_support::jwt::ed25519_policy();
         for state in [
             InstanceState::Running,
             InstanceState::Idle,

@@ -351,8 +351,7 @@ mod tests {
         let mut cache = DesiredStateCache::new();
         let mut desired = desired_state(|state| state.instances = vec![desired_instance(|_| {})]);
         cache.accept(desired.clone());
-        desired.instances[0].access =
-            AccessPolicy::Jwt(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
+        desired.instances[0].access = AccessPolicy::Jwt(crate::test_support::jwt::ed25519_policy());
         assert_eq!(cache.changes_in(&desired), Changes::default());
         assert!(cache.accept(desired));
     }
@@ -363,13 +362,12 @@ mod tests {
         let path = directory.path().join("desired.json");
         let mut desired = desired_state(|state| {
             state.instances = vec![desired_instance(|instance| {
-                instance.access =
-                    AccessPolicy::Jwt(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
+                instance.access = AccessPolicy::Jwt(crate::test_support::jwt::ed25519_policy());
             })];
         });
         write_desired_state(&path, &desired);
         assert_eq!(read_desired_state(&path).unwrap().unwrap().desired, desired);
-        let mut invalid_policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        let mut invalid_policy = crate::test_support::jwt::ed25519_policy();
         invalid_policy.public_keys = protocol::JwtPublicKeys::Pem(vec!["invalid".to_string()]);
         desired.instances[0].access = AccessPolicy::Jwt(invalid_policy);
         write_desired_state(&path, &desired);

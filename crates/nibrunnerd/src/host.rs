@@ -456,8 +456,7 @@ mod tests {
         let repositories = Repositories::sqlite(pool);
         let record = instance_record(|_| {});
         repositories.instances.replace_all(&[record]).await.unwrap();
-        let access =
-            protocol::AccessPolicy::Jwt(crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA));
+        let access = protocol::AccessPolicy::Jwt(crate::test_support::jwt::ed25519_policy());
         let document = accepted_document(desired_state(|state| {
             state.instances = vec![desired_instance(|instance| instance.access = access.clone())];
         }));

@@ -1,6 +1,13 @@
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use protocol::{JwtAccessPolicy, JwtAlgorithm, JwtTokenFormat, JwtTokenSource};
+use protocol::{JwtAccessPolicy, JwtTokenFormat, JwtTokenSource};
 use serde_json::{json, Value};
+
+#[derive(Clone, Copy)]
+pub enum JwtAlgorithm {
+    RS256,
+    ES256,
+    EdDSA,
+}
 
 pub struct JwksEndpoint {
     pub url: String,
@@ -93,6 +100,10 @@ impl Drop for JwksEndpoint {
 
 pub const OTHER_PUBLIC_KEY: &str = include_str!("other-ed-public.pem");
 
+pub fn ed25519_policy() -> JwtAccessPolicy {
+    policy(JwtAlgorithm::EdDSA)
+}
+
 pub fn policy(algorithm: JwtAlgorithm) -> JwtAccessPolicy {
     let public_key = match algorithm {
         JwtAlgorithm::RS256 => include_str!("rsa-public.pem"),
@@ -106,7 +117,6 @@ pub fn policy(algorithm: JwtAlgorithm) -> JwtAccessPolicy {
         },
         issuer: "https://issuer.example.com".to_string(),
         audiences: vec!["app-one".to_string()],
-        algorithm,
         public_keys: protocol::JwtPublicKeys::Pem(vec![public_key.to_string()]),
     }
 }

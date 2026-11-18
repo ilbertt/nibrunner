@@ -23,7 +23,6 @@ To require a signed JWT:
   "token": { "header": "Authorization", "format": "bearer" },
   "issuer": "https://identity.example.com",
   "audiences": ["internal-app"],
-  "algorithm": "RS256",
   "publicKeys": ["-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"]
 }
 ```
@@ -37,8 +36,10 @@ To require a signed JWT:
 | [`token`](/docs/reference/desired#jwt-token) | The header containing the token and its format: `raw` or `bearer`. |
 | [`issuer`](/docs/reference/desired#jwt-issuer) | The exact expected `iss` claim. |
 | [`audiences`](/docs/reference/desired#jwt-audiences) | At least one of these values must match the token's `aud` claim. |
-| [`algorithm`](/docs/reference/desired#jwt-algorithm) | The signing algorithm: `RS256`, `ES256` or `EdDSA`. |
 | [`publicKeys`](/docs/reference/desired#jwt-publicKeys) | One to eight PEM public keys, or `{ "url": "https://…" }` for a JWKS endpoint. |
+
+RSA keys use `RS256`, P-256 keys use `ES256`, and Ed25519 keys use `EdDSA`.
+A policy can contain keys of different supported types.
 
 The policy covers every platform and custom hostname of the app. A missing or invalid token
 receives `403` before the guest is contacted, so a rejected request cannot wake a sleeping app.
@@ -56,7 +57,7 @@ To follow the issuer's signing-key rotation, replace the PEM array with its HTTP
 "publicKeys": { "url": "https://identity.example.com/.well-known/jwks.json" }
 ```
 
-Keep the expected issuer, audiences and signing algorithm explicit. Tokens must include a `kid`
+Tokens must include a `kid`
 that matches a signing key in the fetched set. A missing or unknown `kid` receives `403`.
 
 The host fetches keys in the background when the endpoint is configured, then every five minutes.
@@ -83,6 +84,10 @@ old and new public keys together, switch the issuer to the new signing key, then
 public key when its tokens no longer need to be accepted.
 
 ## Upgrade existing documents
+
+Before starting the upgraded daemon, remove `access.algorithm` from JWT policies in desired state,
+persisted instance records, and the last accepted document. If an old algorithm pin excluded keys
+in a shared JWKS, configure a key source containing only signing keys trusted for this app.
 
 Set `"access": { "kind": "public" }` on every existing public instance before upgrading the
 daemon. Set `kind` to `jwt` on existing JWT policies. Missing, null and untagged access values are

@@ -1209,7 +1209,7 @@ mod tests {
     async fn a_policy_can_be_added_changed_and_removed_without_restarting_the_app() {
         let host = test_host().await;
         host.state.put_record(instance_record(|_| {})).await;
-        let mut policy = crate::test_support::jwt::policy(protocol::JwtAlgorithm::EdDSA);
+        let mut policy = crate::test_support::jwt::ed25519_policy();
         let first = policy.clone();
         policy.audiences = vec!["another-app".to_string()];
         for access in [
