@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026.11.14] - 2026-11-19
+
+### Features
+
+- **proxy:** **Breaking:** Require public addresses for JWKS endpoints (#365)
+
 ## [2026.11.13] - 2026-11-18
 
 ### Features
