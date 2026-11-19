@@ -62,7 +62,8 @@ Failed fetches retry every 30 seconds. Previously fetched keys remain usable for
 minutes after the last successful fetch. Until keys are available, or after they expire, requests
 receive `503` without contacting or waking the app. Requests never fetch keys themselves.
 
-The endpoint must use HTTPS with a trusted certificate. Redirects are refused. Each fetch has a
+The endpoint must use HTTPS with a trusted certificate and resolve exclusively to public unicast
+addresses. The host connects directly and refuses redirects. Each fetch has a
 10-second timeout and accepts at most 256 KiB containing up to 32 keys. Empty key sets revoke all
 keys. Unsupported key types and keys marked for another algorithm or for encryption are ignored.
 Malformed sets retain the previous keys until their original expiry. URLs in token headers do
@@ -81,6 +82,9 @@ old and new public keys together, switch the issuer to the new signing key, then
 public key when its tokens no longer need to be accepted.
 
 ## Upgrade existing documents
+
+Before upgrading, replace private JWKS URLs with a public HTTPS key endpoint or supply the issuer’s
+public keys as PEMs. Hosts that previously used an outbound proxy need direct access to the endpoint.
 
 Before starting the upgraded daemon, remove `access.algorithm` from JWT policies in desired state,
 persisted instance records, and the last accepted document. If an old algorithm pin excluded keys

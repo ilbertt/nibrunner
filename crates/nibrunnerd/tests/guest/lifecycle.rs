@@ -133,7 +133,7 @@ async fn jwt_policy_updates_keep_the_vm_and_denied_requests_never_wake_it() {
     }
     let mut unavailable = policy(JwtAlgorithm::EdDSA);
     unavailable.public_keys = protocol::JwtPublicKeys::Jwks {
-        url: "https://127.0.0.1:1/keys".into(),
+        url: "https://unavailable.invalid/keys".into(),
     };
     protected.instance.access = AccessPolicy::Jwt(unavailable);
     host.deploy(std::slice::from_ref(&protected)).await;

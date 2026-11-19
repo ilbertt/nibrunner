@@ -8,6 +8,7 @@ pub(crate) mod jwt;
 pub mod listener;
 mod listener_handoff;
 pub mod pem;
+mod public_dns;
 pub mod router;
 pub mod stream_activator;
 pub mod worker;

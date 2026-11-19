@@ -190,9 +190,16 @@ impl DetachedHttpProxy {
             .as_ref()
             .expect("a successful launch installs the current worker");
         HttpWorkerClient::new(path).apply(routes.clone()).await?;
+        // A draining worker may predate public-only DNS enforcement. Withdraw remote-key routes
+        // there before it receives a tenant URL; already forwarded requests can still finish.
+        let mut draining_routes = routes;
+        draining_routes.retain(|route| {
+            !matches!(&route.access, protocol::AccessPolicy::Jwt(jwt)
+            if matches!(jwt.public_keys, protocol::JwtPublicKeys::Jwks { .. }))
+        });
         for (previous, worker) in workers {
             if &previous != path {
-                allow_worker_exit(&previous, worker.apply(routes.clone()).await).await?;
+                allow_worker_exit(&previous, worker.apply(draining_routes.clone()).await).await?;
                 allow_worker_exit(&previous, worker.drain().await).await?;
             }
         }

@@ -37,7 +37,8 @@ impl JwksEndpoint {
             .unwrap();
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let url = format!("https://127.0.0.1:{}/keys", listener.local_addr().unwrap().port());
+        let listener_address = listener.local_addr().unwrap();
+        let url = format!("https://localhost:{}/keys", listener_address.port());
         let response = Arc::new(RwLock::new((hyper::StatusCode::OK, document.to_string())));
         let requests = Arc::new(AtomicUsize::new(0));
         let served = response.clone();
@@ -74,7 +75,7 @@ impl JwksEndpoint {
             }
         });
         let client = crate::adapters::proxy::jwks::client_builder()
-            .no_proxy()
+            .resolve("localhost", listener_address)
             .tls_certs_only([reqwest::Certificate::from_pem(include_bytes!("jwks-server-cert.pem")).unwrap()])
             .build()
             .unwrap();

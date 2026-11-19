@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::public_dns::{allows_literal, PublicDns};
 use futures::{stream, StreamExt};
 use jsonwebtoken::jwk::{
     AlgorithmParameters, EllipticCurve, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
@@ -20,6 +21,8 @@ const MAX_KEY_AGE: Duration = Duration::from_secs(900);
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum FetchError {
+    #[error("the JWKS address must be public")]
+    Address,
     #[error("the JWKS request failed: {0}")]
     Request(reqwest::Error),
     #[error("the JWKS endpoint returned HTTP {0}")]
@@ -97,12 +100,18 @@ impl JwksKeys {
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     crate::install_crypto_provider();
     reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicDns))
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(FETCH_TIMEOUT)
 }
 
 async fn fetch(client: &reqwest::Client, url: &str) -> Result<JwksKeys, FetchError> {
+    let url = reqwest::Url::parse(url).map_err(|_| FetchError::Address)?;
+    if !allows_literal(&url) {
+        return Err(FetchError::Address);
+    }
     let mut response = client
         .get(url)
         .send()
@@ -392,9 +401,11 @@ mod tests {
     #[tokio::test]
     async fn untrusted_tls_redirects_http_errors_and_oversized_responses_are_refused() {
         let endpoint = JwksEndpoint::new(json!({"keys": []})).await;
-        assert!(fetch(&client_builder().build().unwrap(), &endpoint.url)
-            .await
-            .is_err());
+        let untrusted = client_builder()
+            .resolve("localhost", ([127, 0, 0, 1], 0).into())
+            .build()
+            .unwrap();
+        assert!(fetch(&untrusted, &endpoint.url).await.is_err());
         for status in [
             StatusCode::FOUND,
             StatusCode::NOT_FOUND,
@@ -410,9 +421,27 @@ mod tests {
             fetch(&endpoint.client, &endpoint.url).await,
             Err(FetchError::BodySize)
         ));
-        assert!(fetch(&client_builder().build().unwrap(), "http://127.0.0.1/keys")
-            .await
-            .is_err());
+        assert!(fetch(&endpoint.client, "http://localhost/keys").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn jwks_fetches_reject_loopback_before_sending_an_http_request() {
+        let endpoint = JwksEndpoint::new(json!({"keys": []})).await;
+        let client = client_builder()
+            .tls_certs_only([reqwest::Certificate::from_pem(include_bytes!(
+                "../../test_support/jwt/jwks-server-cert.pem"
+            ))
+            .unwrap()])
+            .build()
+            .unwrap();
+        assert!(matches!(
+            fetch(&client, &endpoint.url.replace("localhost", "127.0.0.1")).await,
+            Err(FetchError::Address)
+        ));
+        assert!(fetch(&client, &endpoint.url).await.is_err());
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 0);
+        assert!(fetch(&endpoint.client, &endpoint.url).await.is_ok());
+        assert_eq!(endpoint.requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -428,6 +457,8 @@ mod tests {
             "not a URL",
             "https://user:pass@issuer.example.com/keys",
             "https://issuer.example.com/keys#fragment",
+            "https://127.0.0.1/keys",
+            "https://[fd00::1]/keys",
         ] {
             let mut policy = policy(JwtAlgorithm::EdDSA);
             policy.public_keys = JwtPublicKeys::Jwks { url: url.into() };

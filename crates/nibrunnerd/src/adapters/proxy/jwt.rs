@@ -31,7 +31,7 @@ pub(crate) enum PolicyError {
     KeyCount,
     #[error("a JWT public key is invalid or uses an unsupported signing algorithm")]
     PublicKey,
-    #[error("the JWKS URL must use HTTPS without credentials or a fragment")]
+    #[error("the JWKS URL must use public HTTPS without credentials or a fragment")]
     JwksUrl,
 }
 
@@ -77,7 +77,7 @@ impl JwtVerifier {
             JwtPublicKeys::Jwks { url } => {
                 let parsed = reqwest::Url::parse(url).map_err(|_| PolicyError::JwksUrl)?;
                 if parsed.scheme() != "https"
-                    || parsed.host_str().is_none()
+                    || !super::public_dns::allows_literal(&parsed)
                     || !parsed.username().is_empty()
                     || parsed.password().is_some()
                     || parsed.fragment().is_some()
