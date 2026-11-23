@@ -149,6 +149,10 @@ enabled = false
             .status,
         200
     );
+    assert_eq!(
+        host.get(&app, "/read?path=ownership").await.unwrap().body,
+        "independent-recovery"
+    );
     app.instance.desired_state = DesiredInstanceState::Stopped;
     host.deploy(std::slice::from_ref(&app)).await;
     host.until_state(&app.app_id, InstanceState::Stopped).await;
@@ -220,7 +224,37 @@ enabled = false
             "vol-1",
         ],
     );
-    let marker = run("debugfs", &["-R", "cat /upper/app/data/ownership", "/dev/nbd8"]);
+    let image = root.join("recovered.ext4");
+    let mut disk = std::fs::File::open("/dev/nbd8").unwrap();
+    let mut copy = std::fs::File::create_new(&image).unwrap();
+    assert_eq!(
+        std::io::copy(&mut disk, &mut copy).unwrap(),
+        app.volume.size_bytes
+    );
+    drop(disk);
+    drop(copy);
     run("nbd-client", &["-d", "/dev/nbd8"]);
-    assert_eq!(marker.trim(), "independent-recovery");
+    // Stopping a VM is a power cut. Replay its committed ext4 journal on the customer's
+    // disposable copy while the independently opened S3 image remains read-only.
+    let replay = std::process::Command::new("e2fsck")
+        .args(["-p", "-E", "journal_only"])
+        .arg(&image)
+        .output()
+        .unwrap();
+    assert!(
+        matches!(replay.status.code(), Some(0 | 1)),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let read = std::process::Command::new("debugfs")
+        .args(["-R", "cat /upper/app/data/ownership"])
+        .arg(&image)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(read.stdout).unwrap().trim(),
+        "independent-recovery",
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
 }
