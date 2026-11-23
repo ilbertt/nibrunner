@@ -18,6 +18,8 @@
 #[cfg(target_os = "linux")]
 mod cron;
 #[cfg(target_os = "linux")]
+mod customer_writer;
+#[cfg(target_os = "linux")]
 mod idle;
 #[cfg(target_os = "linux")]
 mod isolation;

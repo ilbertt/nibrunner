@@ -18,7 +18,7 @@ pub(crate) fn caches(config: &HostConfig) -> PathBuf {
     config.snapshot_dir.join(CACHE_DIRECTORY)
 }
 
-pub(super) fn units(
+pub(crate) fn units(
     config: &HostConfig,
     settings: &ZerofsSettings,
     file: &Path,

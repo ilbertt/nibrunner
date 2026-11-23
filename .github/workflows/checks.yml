@@ -118,6 +118,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - shard: customer-writer
+            families: customer_writer
           - shard: cron
             families: cron
           - shard: sleep
@@ -158,7 +160,12 @@ jobs:
       - name: Build the tests
         run: just integration-guest --build-only
 
+      - name: Verify independent customer bucket recovery
+        if: matrix.shard == 'customer-writer'
+        run: .github/scripts/test-customer-writer.sh
+
       - name: Run the tests
+        if: matrix.shard != 'customer-writer'
         env:
           FAMILIES: ${{ matrix.families }}
         run: |
