@@ -92,6 +92,10 @@ Rust workspace (`crates/*`) with the docs site under `docs/`.
   confirm that activation is still running before recording success. Preserve pending changes through
   separate `install` and `start` invocations and failed or interrupted activation. A running ZeroFS with
   pending or unverified inputs requires `start --restart-zerofs`, because its restart disconnects guest disks.
+- A customer volume owns one app, volume ID and S3 prefix. Its private ZeroFS writer outlives the
+  daemon and sleeping guests. Preserve the durable placement on restart and omission. Only explicit
+  deletion flushes removal and retires the writer. Recovery uses upstream ZeroFS and the customer's
+  bucket credentials and password. Linux guest CI exercises this against an isolated S3 server.
 - OCI registry pulls use `oci-client` over HTTPS with anonymous registry authentication. Desired
   layers use `kind: "oci"` with exactly one of `objectKey` (archive) or `repository` (registry),
   pinned by digest; image startup defaults do not override `config.command`. Retry transient

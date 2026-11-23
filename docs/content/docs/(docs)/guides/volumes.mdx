@@ -102,9 +102,88 @@ object-store credentials and the encryption password go in `host.env`.
   device under every guest. Raising `max_apps` on this backend therefore needs a reboot.
 
 <Callout type="warn" title="Warning">
-  `volumes.storage_prefix` is per host, not per app. Every volume on the host shares it. Deleting
-  the prefix destroys all of them.
+  Volumes with `"storage": null` share the host prefix. Deleting that prefix destroys those volumes.
 </Callout>
+
+## A customer-owned bucket
+
+On a ZeroFS host, set `storage` when declaring a **new** app volume. Run `nibrunnerd install` and
+`nibrunnerd start` after upgrading to install and load the per-app systemd units. Assign one app
+and one host exclusive write access to the bucket prefix. Keep the ZeroFS password with the
+customer's bucket credentials. Both are needed for independent recovery.
+
+```json
+{
+  "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present",
+  "storage": {
+    "endpoint": "https://objects.example.com", "bucket": "customer-bucket", "prefix": "apps/one",
+    "region": "us-east-1",
+    "auth": { "kind": "access-key", "accessKeyId": "<access key>", "secretAccessKey": "<secret>" },
+    "encryptionPassword": "<customer's ZeroFS password>"
+  }
+}
+```
+
+- The bucket must already exist. Use an HTTPS S3-compatible endpoint supporting the object
+  operations and conditional writes required by ZeroFS. Set `region` to the provider's signing
+  region, including `"auto"` where supported. `null` uses the writer's `us-east-1` default.
+  The host resolves the endpoint for the writer. Its systemd unit denies connections to private,
+  loopback, and link-local addresses by default. For a trusted private S3 service, the host
+  operator can allow its specific IP with an `IPAddressAllow=` drop-in on that app's writer unit.
+- Each app gets a separate writer, NBD client, and cache reservation of 4 GiB disk and 256 MiB
+  RAM. Sleeping or omitting the app keeps its writer and placement. An explicit volume deletion
+  removes the image, flushes the removal to the bucket, then releases the local cache.
+- The host persists the placement across restarts and refuses edits to its bucket or writer
+  credentials. Use credentials whose lifetime covers the deployment. Choose a new app and volume
+  ID for a different placement. Existing shared disks require a separate data migration.
+- S3 credentials and the password reach the host in the desired document. Restrict access to
+  that file and the host state directory. The writer has no need for the host's S3 identity.
+- The customer prefix contains encrypted ZeroFS objects. Keep the entire prefix, including
+  `zerofs.key`. Native host checkpoints and exports currently require host-backed ZeroFS storage.
+
+### Recover the disk independently
+
+Stop the original guest, flush its writer, and stop the original writer before moving ownership.
+On a Linux machine with ZeroFS v2.3.1 and `nbd-client`, set `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `VOLUME_PASSWORD` to the customer's values. Create `recovery.toml`
+using the original bucket, prefix, endpoint and signing region:
+
+```toml
+[storage]
+url = "s3://customer-bucket/apps/one"
+encryption_password = "${VOLUME_PASSWORD}"
+
+[aws]
+endpoint = "https://objects.example.com"
+region = "us-east-1"
+access_key_id = "${AWS_ACCESS_KEY_ID}"
+secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
+virtual_hosted_style_request = "false"
+
+[cache]
+dir = "/var/tmp/zerofs-recovery"
+disk_size_gb = 4.0
+memory_size_gb = 0.25
+
+[servers.nbd]
+unix_socket = "/run/zerofs-recovery.sock"
+```
+
+Start `zerofs run --read-only --config recovery.toml`. In another terminal, attach the export
+named after the volume ID to an unused NBD device. Copy it to a new local image and replay its ext4
+journal there before reading the files. This example assumes `/dev/nbd0` is free and enough
+local disk space is available for the full volume.
+
+```sh
+sudo nbd-client -unix /run/zerofs-recovery.sock /dev/nbd0 -N vol-1
+sudo dd if=/dev/nbd0 of=recovered.ext4 bs=4M conv=excl,fsync status=progress
+sudo nbd-client -d /dev/nbd0
+sudo e2fsck -p -E journal_only recovered.ext4
+sudo mkdir -p /mnt/recovered-volume
+sudo mount -t ext4 -o loop,ro,noload recovered.ext4 /mnt/recovered-volume
+ls /mnt/recovered-volume/upper
+sudo umount /mnt/recovered-volume
+```
 
 ## Checkpoints and exports
 
