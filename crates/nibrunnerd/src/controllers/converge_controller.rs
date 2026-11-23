@@ -33,6 +33,9 @@ impl ConvergeController {
         let Some(accepted) = self.host.accepted_document().await else {
             return false;
         };
+        if !self.supports_volume_storage(&accepted.desired).await {
+            return false;
+        }
         let Ok(Some(changes)) = self.accept(&accepted.desired).await else {
             return false;
         };
@@ -44,7 +47,9 @@ impl ConvergeController {
     pub async fn converge_once(&self) -> bool {
         match crate::desired::read_desired_state(&self.host.config.desired_state_file) {
             Ok(Some(document)) => {
-                // A readable document clears any refusal the report was still carrying.
+                if !self.supports_volume_storage(&document.desired).await {
+                    return false;
+                }
                 self.forget_refusal().await;
                 // Taken up before anything is converged on, and whether or not the ask moved: a
                 // document rewritten to the same ask is still the one the report answers for.
@@ -91,6 +96,19 @@ impl ConvergeController {
         };
         self.reconcile(&desired, trigger).await;
         true
+    }
+
+    async fn supports_volume_storage(&self, desired: &HostDesiredState) -> bool {
+        let Some(volume) = desired.volumes.iter().find(|volume| volume.storage.is_some()) else {
+            return true;
+        };
+        let reason = format!(
+            "volume {} requires a dedicated ZeroFS writer unavailable on this host",
+            volume.volume_id
+        );
+        tracing::warn!(volume_id = %volume.volume_id, "desired volume requires a dedicated ZeroFS writer");
+        self.note_refusal(reason).await;
+        false
     }
 
     /// Records that the last document was refused, so the next report carries it. The counter
@@ -181,6 +199,43 @@ mod tests {
 
     fn controller(host: &TestHost, reconciler: MockReconcileService) -> Arc<ConvergeController> {
         ConvergeController::new(host.arc().clone(), Arc::new(reconciler))
+    }
+
+    #[tokio::test]
+    async fn a_customer_bucket_is_readable_but_never_reconciled_on_shared_storage() {
+        let host = test_host().await;
+        let desired =
+            desired_state(|state| {
+                state.volumes.push(desired_volume(|volume| {
+                    volume.storage = Some(serde_json::from_value(serde_json::json!({
+                "endpoint": "https://s3.example.com", "bucket": "customer", "prefix": "vol-1",
+                "region": null, "auth": {"kind": "anonymous"}, "encryptionPassword": "customer-secret"
+            })).unwrap());
+                }))
+            });
+        write_desired_state(&host.config.desired_state_file, &desired);
+        let document = crate::desired::read_desired_state(&host.config.desired_state_file)
+            .unwrap()
+            .unwrap();
+        assert_eq!(document.desired, desired);
+
+        let previous = accepted_document(desired_state(|_| {}));
+        host.remember_accepted_document(&previous).await;
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().never();
+        let controller = controller(&host, reconciler);
+        assert!(!controller.converge_once().await);
+        assert_eq!(host.accepted_document().await.unwrap(), previous);
+        let refusal = host.state.snapshot().await.desired_refusal.unwrap();
+        assert!(refusal.as_str().contains("requires a dedicated ZeroFS writer"));
+        assert!(!refusal.as_str().contains("customer-secret"));
+        assert!(page(&host)
+            .await
+            .contains("nibrunner_desired_state_unreadable_total 0\n"));
+
+        host.remember_accepted_document(&document).await;
+        assert!(!controller.converge_accepted().await);
+        assert!(host.cache.lock().await.latest().is_none());
     }
 
     #[tokio::test]
