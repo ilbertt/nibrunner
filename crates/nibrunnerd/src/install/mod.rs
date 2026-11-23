@@ -8,6 +8,7 @@
 //! that lock is a single-instance unit. So this writes the unit and never becomes it — `start`
 //! asks systemd for it.
 
+pub(crate) mod customer_writer;
 pub mod guest_image;
 pub(crate) mod jailer_identities;
 pub mod kernel;
@@ -165,6 +166,9 @@ pub async fn run(
             force,
             &mut laid,
         )?;
+        for (name, contents) in customer_writer::units(config, settings, config_file) {
+            write_generated(&unit_path(name), &contents, force, &mut laid)?;
+        }
     }
 
     make_directories(config)?;
