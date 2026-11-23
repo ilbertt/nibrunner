@@ -129,6 +129,24 @@ impl ZerofsVolumes {
             .map(|slot| slot.nbd_device_path)
     }
 
+    pub(super) async fn flush_customer(
+        &self,
+        volume: &VolumeId,
+        app: &protocol::AppId,
+    ) -> Result<(), VolumeError> {
+        if let Some(device) = self.device_for(app).await {
+            self.devices
+                .flush_customer(&NbdTarget {
+                    device_path: &device,
+                    socket_path: &self.filesystem.nbd_socket_path.to_string_lossy(),
+                    volume_id: volume,
+                    image_path: None,
+                })
+                .await?;
+        }
+        self.flush(app).await
+    }
+
     fn dedicated(&self) -> bool {
         self.filesystem
             .nbd_socket_path

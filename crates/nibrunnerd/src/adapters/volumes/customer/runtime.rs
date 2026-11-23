@@ -205,7 +205,7 @@ impl CustomerVolumes {
         }
         if !retired.try_exists().map_err(io_error)? {
             let backend = self.active(p).await?;
-            backend.flush(&p.app).await?;
+            backend.flush_customer(&p.volume, &p.app).await?;
             backend.detach(&p.volume, &p.app).await?;
             super::images::remove(&backend.filesystem().mount_path, &p.volume)?;
             backend.flush(&p.app).await?;
@@ -293,7 +293,7 @@ impl VolumeBackend for CustomerVolumes {
             None => self.shared.flush(app).await,
             Some(p) => {
                 let _operation = self.operation(&p.app).await;
-                self.backend(&p).flush(app).await
+                self.backend(&p).flush_customer(&p.volume, app).await
             }
         }
     }
