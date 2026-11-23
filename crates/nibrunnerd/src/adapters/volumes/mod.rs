@@ -1,3 +1,4 @@
+pub mod customer;
 pub mod initial_contents;
 pub mod local_file;
 pub mod nbd;
