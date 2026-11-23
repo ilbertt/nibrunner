@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root=$(mktemp -d /var/tmp/nibrunner-customer-test.XXXXXXXX)
+root=$(sudo mktemp -d /opt/nibrunner-customer-test.XXXXXXXX)
+sudo chown "$(id -u):$(id -g)" "$root"
 container="nibrunner-customer-test-${GITHUB_RUN_ID:?}-$GITHUB_RUN_ATTEMPT"
 export NIBRUNNER_CUSTOMER_FIXTURE="$root"
 cleanup() {
