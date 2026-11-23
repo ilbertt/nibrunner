@@ -1410,3 +1410,54 @@ fn jwt_policies_preserve_their_settings_and_refuse_unknown_options() {
         assert!(serde_json::from_value::<crate::JwtAccessPolicy>(invalid).is_err());
     }
 }
+
+fn volume_with_storage(auth: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 4096, "desiredState": "present",
+        "storage": {
+            "endpoint": "https://s3.example.com", "bucket": "example", "prefix": "apps/one",
+            "auth": auth, "encryptionPassword": "private-password"
+        }
+    })
+}
+
+#[test]
+fn a_customer_volume_preserves_all_authentication_modes_without_logging_credentials() {
+    for auth in [
+        serde_json::json!({"kind":"anonymous"}),
+        serde_json::json!({"kind":"access-key", "accessKeyId":"private-id", "secretAccessKey":"private-key"}),
+        serde_json::json!({"kind":"session", "accessKeyId":"private-id", "secretAccessKey":"private-key", "sessionToken":"private-token"}),
+    ] {
+        let wire = volume_with_storage(auth);
+        let volume = serde_json::from_value::<DesiredVolume>(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&volume).unwrap(), wire);
+        assert!(!format!("{volume:?}").contains("private-"));
+    }
+}
+
+#[test]
+fn malformed_explicit_storage_is_never_read_as_host_storage_or_printed_in_an_error() {
+    let mut wire = volume_with_storage(serde_json::json!({"kind":"private-invalid"}));
+    for (field, invalid) in [
+        ("auth", serde_json::json!({"kind":"private-invalid"})),
+        (
+            "auth",
+            serde_json::json!({"kind":"anonymous","private-unexpected":true}),
+        ),
+        ("encryptionPassword", serde_json::json!("")),
+        ("region", serde_json::json!("")),
+        ("endpoint", serde_json::json!("http://private-host")),
+        ("bucket", serde_json::json!("/private-path")),
+    ] {
+        let mut invalid_wire = volume_with_storage(serde_json::json!({"kind":"anonymous"}));
+        invalid_wire["storage"][field] = invalid;
+        let error = serde_json::from_value::<DesiredVolume>(invalid_wire).unwrap_err();
+        assert!(!error.to_string().contains("private-"));
+    }
+    wire["storage"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<DesiredVolume>(wire.clone()).is_err());
+    wire.as_object_mut().unwrap().remove("storage");
+    let shared = serde_json::from_value::<DesiredVolume>(wire.clone()).unwrap();
+    assert!(shared.storage.is_none());
+    assert_eq!(serde_json::to_value(shared).unwrap(), wire);
+}

@@ -44,6 +44,15 @@ pub fn read_desired_state(path: &Path) -> Result<Option<AcceptedDocument>, Desir
             path: path.display().to_string(),
             reason: error.to_string(),
         })?;
+    if let Some(volume) = desired.volumes.iter().find(|volume| volume.storage.is_some()) {
+        return Err(DesiredStateError::Malformed {
+            path: path.display().to_string(),
+            reason: format!(
+                "this host does not support custom storage for volume {}",
+                volume.volume_id
+            ),
+        });
+    }
     for instance in &desired.instances {
         if let AccessPolicy::Jwt(policy) = &instance.access {
             crate::adapters::proxy::jwt::JwtVerifier::compile(policy).map_err(|error| {
@@ -286,6 +295,25 @@ mod tests {
             .unwrap_err()
             .message()
             .contains("cannot read"));
+    }
+
+    #[test]
+    fn a_private_bucket_cannot_be_silently_provisioned_on_host_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("desired.json");
+        let desired = desired_state(|state| state.volumes.push(crate::test_support::desired_volume(|_| {})));
+        let mut wire = serde_json::to_value(desired).unwrap();
+        wire["volumes"][0]["storage"] = serde_json::json!({
+            "endpoint":"https://s3.example.com", "bucket":"customer", "prefix":"vol-1",
+            "auth":{"kind":"anonymous"}, "encryptionPassword":"customer-secret",
+        });
+        std::fs::write(&path, wire.to_string()).unwrap();
+        let error = read_desired_state(&path).unwrap_err().message();
+        assert!(
+            error.contains("does not support custom storage for volume vol-1"),
+            "{error}"
+        );
+        assert!(!error.contains("customer-secret"));
     }
 
     #[test]

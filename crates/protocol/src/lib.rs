@@ -9,12 +9,14 @@ mod domain;
 mod logs;
 #[cfg(feature = "schema")]
 pub mod schema;
+mod storage;
 
 pub use access::*;
 pub use control::*;
 pub use cron::*;
 pub use domain::*;
 pub use logs::*;
+pub use storage::*;
 pub use wire::*;
 
 #[cfg(test)]

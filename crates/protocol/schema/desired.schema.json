@@ -517,6 +517,10 @@
           "format": "uint64",
           "minimum": 0
         },
+        "storage": {
+          "description": "Dedicated S3-compatible storage for this volume. Omit to use the host backend.",
+          "$ref": "#/$defs/S3VolumeStorage"
+        },
         "volumeId": {
           "$ref": "#/$defs/VolumeId"
         }
@@ -856,6 +860,115 @@
       "description": "between 1 and 128 printable characters, without spaces",
       "type": "string",
       "pattern": "^[\\x21-\\x7e]{1,128}$"
+    },
+    "S3VolumeAuth": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "anonymous"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "accessKeyId": {
+              "type": "string",
+              "maxLength": 32768,
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "access-key"
+            },
+            "secretAccessKey": {
+              "type": "string",
+              "maxLength": 32768,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "accessKeyId",
+            "secretAccessKey"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "accessKeyId": {
+              "type": "string",
+              "maxLength": 32768,
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "session"
+            },
+            "secretAccessKey": {
+              "type": "string",
+              "maxLength": 32768,
+              "minLength": 1
+            },
+            "sessionToken": {
+              "type": "string",
+              "maxLength": 32768,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "accessKeyId",
+            "secretAccessKey",
+            "sessionToken"
+          ]
+        }
+      ]
+    },
+    "S3VolumeStorage": {
+      "type": "object",
+      "properties": {
+        "auth": {
+          "$ref": "#/$defs/S3VolumeAuth"
+        },
+        "bucket": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+        },
+        "encryptionPassword": {
+          "type": "string",
+          "maxLength": 32768,
+          "minLength": 1
+        },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^https://[^\\s]+$"
+        },
+        "prefix": {
+          "$ref": "#/$defs/ObjectKey"
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "endpoint",
+        "bucket",
+        "prefix",
+        "auth",
+        "encryptionPassword"
+      ]
     },
     "Sha256Digest": {
       "description": "a lowercase hex sha-256",

@@ -397,6 +397,14 @@ pub struct DesiredVolume {
     pub app_id: AppId,
     pub size_bytes: u64,
     pub desired_state: DesiredPresence,
+    /// Dedicated S3-compatible storage for this volume. Omit to use the host backend.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::storage::storage"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "crate::S3VolumeStorage"))]
+    pub storage: Option<crate::S3VolumeStorage>,
     /// Absent for a volume that starts empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_contents: Option<InitialContents>,

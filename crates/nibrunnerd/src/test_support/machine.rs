@@ -273,6 +273,7 @@ impl RunningHost {
                 app_id: app_id.clone(),
                 size_bytes: 64 * 1024 * 1024,
                 desired_state: DesiredPresence::Present,
+                storage: None,
                 initial_contents: None,
             },
             instance: DesiredInstance {

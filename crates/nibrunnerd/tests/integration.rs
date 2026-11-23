@@ -222,6 +222,7 @@ async fn a_volume_is_formatted_holding_the_contents_the_document_gave_it() {
         app_id: protocol::AppId::parse("app-1").unwrap(),
         size_bytes: 16 * 1024 * 1024,
         desired_state: protocol::DesiredPresence::Present,
+        storage: None,
         initial_contents: Some(nibrunnerd::test_support::initial_contents(&archive, "/app/data")),
     };
 
@@ -332,6 +333,7 @@ async fn a_volume_is_formatted_by_the_real_tool_and_read_back_as_formatted() {
         app_id: protocol::AppId::parse("app-1").unwrap(),
         size_bytes: 16 * 1024 * 1024,
         desired_state: protocol::DesiredPresence::Present,
+        storage: None,
         initial_contents: None,
     };
 
@@ -367,6 +369,7 @@ async fn volumes_the_real_tool_formats_carry_a_filesystem_that_names_one_apart_f
         app_id: protocol::AppId::parse("app-1").unwrap(),
         size_bytes: 16 * 1024 * 1024,
         desired_state: protocol::DesiredPresence::Present,
+        storage: None,
         initial_contents: None,
     };
 

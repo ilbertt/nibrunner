@@ -172,6 +172,7 @@ pub fn desired_volume(edit: impl FnOnce(&mut DesiredVolume)) -> DesiredVolume {
         app_id: app_id(),
         size_bytes: VOLUME_SIZE_BYTES,
         desired_state: DesiredPresence::Present,
+        storage: None,
         initial_contents: None,
     };
     edit(&mut value);
