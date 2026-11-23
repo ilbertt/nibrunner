@@ -43,7 +43,7 @@ impl EndpointHosts {
         let Ok(mut last) = self.refreshed.try_lock() else {
             return;
         };
-        if !last.is_some_and(|time| time.elapsed() >= REFRESH) {
+        if last.is_some_and(|time| time.elapsed() < REFRESH) || !self.path.is_file() {
             return;
         }
         *last = Some(Instant::now());
