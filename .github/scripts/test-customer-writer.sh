@@ -5,6 +5,11 @@ root=$(mktemp -d /var/tmp/nibrunner-customer-test.XXXXXXXX)
 container="nibrunner-customer-test-${GITHUB_RUN_ID:?}-$GITHUB_RUN_ATTEMPT"
 export NIBRUNNER_CUSTOMER_FIXTURE="$root"
 cleanup() {
+    result=$?
+    if (( result != 0 )); then
+        sudo journalctl --no-pager -n 80 -u nibrunner-fixture-writer -u nibrunner-fixture-mount \
+            -u nibrunner-customer-zerofs@app-1 -u nibrunner-customer-mount@app-1 -u nibrunner-fixture-recovery
+    fi
     sudo systemctl stop nibrunner-customer-mount@app-1.service nibrunner-customer-zerofs@app-1.service 2>/dev/null || true
     sudo systemctl stop nibrunner-fixture-mount.service nibrunner-fixture-writer.service nibrunner-fixture-recovery.service 2>/dev/null || true
     docker rm -fv "$container" >/dev/null 2>&1 || true
@@ -30,4 +35,4 @@ printf '%s' "$endpoint" > "$root/endpoint"
 signed=(curl --fail --silent --show-error --retry-all-errors --retry 12 --retry-delay 1 --max-time 5 --cacert "$root/ca.crt" --aws-sigv4 aws:amz:us-east-1:s3 -u fixture-access:fixture-secret)
 "${signed[@]}" -X PUT "$endpoint/customer-bucket"
 just integration-guest customer_writer::
-"${signed[@]}" "$endpoint/customer-bucket?list-type=2" | grep -q 'zerofs.key'
+"${signed[@]}" "$endpoint/customer-bucket?list-type=2" | grep 'zerofs.key' >/dev/null

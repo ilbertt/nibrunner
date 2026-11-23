@@ -57,7 +57,7 @@ async fn a_guest_disk_is_recovered_from_only_the_customer_bucket_and_password() 
             r#"
 [storage]
 url = "file://{path}/objects"
-encryption_password = "shared"
+encryption_password = "shared-fixture-password"
 [cache]
 dir = "{path}/shared-cache"
 disk_size_gb = 1.0
