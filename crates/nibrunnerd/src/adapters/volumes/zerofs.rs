@@ -305,10 +305,25 @@ impl VolumeBackend for ZerofsVolumes {
         })
     }
 
-    async fn detach(&self, _volume_id: &VolumeId, app_id: &protocol::AppId) -> Result<(), VolumeError> {
+    async fn detach(&self, volume_id: &VolumeId, app_id: &protocol::AppId) -> Result<(), VolumeError> {
         let Some(device_path) = self.device_for(app_id).await else {
             return Ok(());
         };
+        if self
+            .filesystem
+            .nbd_socket_path
+            .starts_with(crate::install::customer_writer::SOCKET_ROOT)
+        {
+            return self
+                .devices
+                .stop_customer(&NbdTarget {
+                    socket_path: &self.filesystem.nbd_socket_path.to_string_lossy(),
+                    device_path: &device_path,
+                    volume_id,
+                    image_path: None,
+                })
+                .await;
+        }
         self.devices.detach(&device_path).await
     }
 
