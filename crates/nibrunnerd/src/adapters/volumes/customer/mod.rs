@@ -1,3 +1,4 @@
+mod dns;
 pub(super) mod images;
 mod profile;
 mod runtime;

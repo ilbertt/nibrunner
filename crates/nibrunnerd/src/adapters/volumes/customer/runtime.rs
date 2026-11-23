@@ -21,6 +21,7 @@ pub(crate) struct CustomerVolumes {
     pub(crate) placements: CustomerPlacements,
     shared: ZerofsVolumes,
     operations: std::sync::Mutex<BTreeMap<AppId, Arc<tokio::sync::Mutex<()>>>>,
+    resolver: std::sync::Mutex<BTreeMap<AppId, Arc<super::dns::EndpointHosts>>>,
     caches: PathBuf,
     cache_owner: (u32, u32),
     commands: Arc<dyn CommandRunner>,
@@ -37,6 +38,7 @@ impl CustomerVolumes {
         Self {
             placements,
             operations: std::sync::Mutex::new(BTreeMap::new()),
+            resolver: Default::default(),
             shared,
             caches,
             cache_owner,
@@ -144,6 +146,19 @@ impl CustomerVolumes {
         Ok(())
     }
 
+    fn resolver(&self, p: &Placement) -> Result<Arc<super::dns::EndpointHosts>, VolumeError> {
+        let mut resolvers = self.resolver.lock().expect("customer endpoint resolver lock");
+        if let Some(held) = resolvers.get(&p.app) {
+            return Ok(held.clone());
+        }
+        let hosts = Arc::new(super::dns::EndpointHosts::new(
+            &p.endpoint,
+            &p.directory(&self.placements.root),
+        )?);
+        resolvers.insert(p.app.clone(), hosts.clone());
+        Ok(hosts)
+    }
+
     async fn active(&self, p: &Placement) -> Result<ZerofsVolumes, VolumeError> {
         if p.directory(&self.placements.root)
             .join(RETIRED)
@@ -152,6 +167,7 @@ impl CustomerVolumes {
         {
             return Err(failed("this customer writer has been retired"));
         }
+        self.resolver(p)?.prepare().await?;
         let cache = self.caches.join(p.app.as_str());
         crate::json_store::make_directory(&self.caches, 0o700).map_err(io_error)?;
         crate::json_store::make_directory(&cache, 0o700).map_err(io_error)?;
@@ -300,6 +316,9 @@ impl VolumeBackend for CustomerVolumes {
             observed.retain(|o| o.volume_id != p.volume);
             if p.directory(&self.placements.root).join("released").is_file() {
                 continue;
+            }
+            if let Ok(resolver) = self.resolver(&p) {
+                resolver.refresh();
             }
             let backend = self.backend(&p);
             let disk = if mounted(&backend.filesystem().mount_path).unwrap_or(false) {

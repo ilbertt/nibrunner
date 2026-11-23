@@ -43,6 +43,7 @@ LoadCredential=zerofs.toml:{profile}/%i/writer.toml
 ExecStart=\"{binary}\" run --config %d/zerofs.toml
 RuntimeDirectory=nibrunner-customer/%i
 RuntimeDirectoryMode=0700
+BindReadOnlyPaths=\"{profile}/%i/s3.hosts:/etc/hosts\"
 BindPaths=\"{cache}/%i:/var/cache/nibrunner-customer\"
 ReadWritePaths=/var/cache/nibrunner-customer
 Environment=AWS_EC2_METADATA_DISABLED=true
