@@ -35,5 +35,6 @@ endpoint="https://$(docker port "$container" 9000/tcp)"
 printf '%s' "$endpoint" > "$root/endpoint"
 signed=(curl --fail --silent --show-error --retry-all-errors --retry 12 --retry-delay 1 --max-time 5 --cacert "$root/ca.crt" --aws-sigv4 aws:amz:us-east-1:s3 -u fixture-access:fixture-secret)
 "${signed[@]}" -X PUT "$endpoint/customer-bucket"
+"${signed[@]}" -X PUT "$endpoint/shared-bucket"
 just integration-guest customer_writer::
 "${signed[@]}" "$endpoint/customer-bucket?list-type=2" | grep 'zerofs.key' >/dev/null

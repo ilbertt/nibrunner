@@ -49,15 +49,20 @@ async fn a_guest_disk_is_recovered_from_only_the_customer_bucket_and_password() 
     let endpoint = std::fs::read_to_string(root.join("endpoint")).unwrap();
     let shared_mount = root.join("shared-mount");
     std::fs::create_dir(&shared_mount).unwrap();
-    std::fs::create_dir(root.join("objects")).unwrap();
     let shared_config = root.join("shared.toml");
     std::fs::write(
         &shared_config,
         format!(
             r#"
 [storage]
-url = "file://{path}/objects"
+url = "s3://shared-bucket/host-1"
 encryption_password = "shared-fixture-password"
+[aws]
+endpoint = "{endpoint}"
+region = "us-east-1"
+access_key_id = "fixture-access"
+secret_access_key = "fixture-secret"
+virtual_hosted_style_request = "false"
 [cache]
 dir = "{path}/shared-cache"
 disk_size_gb = 1.0
@@ -79,6 +84,7 @@ enabled = false
         &[
             "--unit=nibrunner-fixture-writer",
             "--collect",
+            &format!("--setenv=SSL_CERT_FILE={path}/ca.crt"),
             binary.to_str().unwrap(),
             "run",
             "-c",
@@ -101,22 +107,34 @@ enabled = false
     );
     until(&shared_mount, true).await;
     let mut host = crate::host_with(|config| {
-        let settings = zerofs_settings(|s| {
-            s.binary= binary.clone(); s.mount_path=shared_mount.clone(); s.config_file=shared_config.clone();
-            s.nbd_socket_path=root.join("shared-nbd.sock"); s.storage_url=format!("file://{path}/objects");
+        let settings = zerofs_settings(|settings| {
+            settings.binary = binary.clone();
+            settings.mount_path = shared_mount.clone();
+            settings.config_file = shared_config.clone();
+            settings.nbd_socket_path = root.join("shared-nbd.sock");
+            settings.storage_url = "s3://shared-bucket/host-1".into();
         });
-        for (name,contents) in customer_writer_units(config,&settings) {
-            let file=Path::new("/run/systemd/system").join(name);
-            std::fs::write(file,contents).unwrap();
+        for (name, contents) in customer_writer_units(config, &settings) {
+            let file = Path::new("/run/systemd/system").join(name);
+            std::fs::write(file, contents).unwrap();
         }
-        let dropin=Path::new("/run/systemd/system/nibrunner-customer-zerofs@.service.d");
+        let dropin = Path::new("/run/systemd/system/nibrunner-customer-zerofs@.service.d");
         std::fs::create_dir_all(dropin).unwrap();
-        std::fs::write(dropin.join("fixture.conf"),format!("[Service]\nIPAddressAllow=127.0.0.1/32\nEnvironment=SSL_CERT_FILE={path}/ca.crt\nStandardError=journal\n")).unwrap();
-        run("systemctl",&["daemon-reload"]);
+        let fixture = format!("[Service]\nIPAddressAllow=127.0.0.1/32\nEnvironment=SSL_CERT_FILE={path}/ca.crt\nStandardError=journal\n");
+        std::fs::write(dropin.join("fixture.conf"), fixture).unwrap();
+        run("systemctl", &["daemon-reload"]);
         config.volumes = VolumeBackend::Zerofs(Box::new(settings));
     }).await.unwrap();
     let mut app = host.tenant(1).running();
-    let storage: S3VolumeStorage=serde_json::from_value(serde_json::json!({"endpoint":endpoint,"bucket":"customer-bucket","prefix":"my-app","region":"us-east-1","encryptionPassword":"customer-password","auth":{"kind":"access-key","accessKeyId":"fixture-access","secretAccessKey":"fixture-secret"}})).unwrap();
+    let storage: S3VolumeStorage = serde_json::from_value(serde_json::json!({
+        "endpoint": endpoint,
+        "bucket": "customer-bucket",
+        "prefix": "my-app",
+        "region": "us-east-1",
+        "encryptionPassword": "customer-password",
+        "auth": { "kind": "access-key", "accessKeyId": "fixture-access", "secretAccessKey": "fixture-secret" }
+    }))
+    .unwrap();
     app.volume.storage = Some(storage);
     host.deploy(std::slice::from_ref(&app)).await;
     host.until_state(&app.app_id, InstanceState::Running).await;
