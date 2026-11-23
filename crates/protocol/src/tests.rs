@@ -1456,31 +1456,33 @@ fn malformed_explicit_storage_is_never_read_as_host_storage_or_printed_in_an_err
 }
 
 #[test]
-fn missing_and_null_volume_settings_are_written_as_explicit_nulls() {
+fn missing_volume_storage_is_read_as_host_storage_and_written_as_null() {
+    let validator = jsonschema::validator_for(&schemars::schema_for!(DesiredVolume).to_value()).unwrap();
+    let mut shared = volume_with_storage(serde_json::json!({"kind":"anonymous"}));
+    shared["storage"] = serde_json::Value::Null;
+    let mut legacy = shared.clone();
+    legacy.as_object_mut().unwrap().remove("storage");
+    for input in [&legacy, &shared] {
+        assert!(validator.is_valid(input));
+        let volume: DesiredVolume = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(volume).unwrap(), shared);
+    }
+}
+
+#[test]
+fn customer_storage_requires_region_even_when_its_value_is_null() {
     let validator = jsonschema::validator_for(&schemars::schema_for!(DesiredVolume).to_value()).unwrap();
     let mut customer = volume_with_storage(serde_json::json!({"kind":"anonymous"}));
-    let mut shared = customer.clone();
-    shared["storage"] = serde_json::Value::Null;
-    for (canonical, field) in [(&shared, "storage"), (&customer, "region")] {
-        let mut legacy = canonical.clone();
-        let parent = if field == "region" {
-            &mut legacy["storage"]
-        } else {
-            &mut legacy
-        };
-        parent.as_object_mut().unwrap().remove(field);
-        for input in [&legacy, canonical] {
-            assert!(validator.is_valid(input));
-            let volume: DesiredVolume = serde_json::from_value(input.clone()).unwrap();
-            assert_eq!(&serde_json::to_value(volume).unwrap(), canonical);
-        }
-    }
-    for region in ["auto", "eu-central-1"] {
+    for region in [None, Some("auto"), Some("eu-central-1")] {
         customer["storage"]["region"] = serde_json::json!(region);
         assert!(validator.is_valid(&customer));
         let volume: DesiredVolume = serde_json::from_value(customer.clone()).unwrap();
         assert_eq!(serde_json::to_value(volume).unwrap(), customer);
     }
+    customer["storage"].as_object_mut().unwrap().remove("region");
+    assert!(!validator.is_valid(&customer));
+    assert!(serde_json::from_value::<DesiredVolume>(customer.clone()).is_err());
     customer["storage"]["region"] = serde_json::json!("");
     assert!(!validator.is_valid(&customer));
+    assert!(serde_json::from_value::<DesiredVolume>(customer).is_err());
 }

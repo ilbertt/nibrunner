@@ -970,7 +970,6 @@
             "string",
             "null"
           ],
-          "default": null,
           "minLength": 1
         }
       },
@@ -979,6 +978,7 @@
         "endpoint",
         "bucket",
         "prefix",
+        "region",
         "auth",
         "encryptionPassword"
       ]

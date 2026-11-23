@@ -17,8 +17,11 @@ pub struct S3VolumeStorage {
     pub bucket: String,
     pub prefix: ObjectKey,
     /// Null leaves the signing region unspecified.
-    #[serde(default, deserialize_with = "region")]
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[serde(deserialize_with = "region")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "Option::<String>::json_schema", length(min = 1))
+    )]
     pub region: Option<String>,
     pub auth: S3VolumeAuth,
     #[serde(deserialize_with = "credential")]

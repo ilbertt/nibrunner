@@ -304,7 +304,7 @@ mod tests {
         let desired = desired_state(|state| state.volumes.push(crate::test_support::desired_volume(|_| {})));
         let mut wire = serde_json::to_value(desired).unwrap();
         wire["volumes"][0]["storage"] = serde_json::json!({
-            "endpoint":"https://s3.example.com", "bucket":"customer", "prefix":"vol-1",
+            "endpoint":"https://s3.example.com", "bucket":"customer", "prefix":"vol-1", "region":null,
             "auth":{"kind":"anonymous"}, "encryptionPassword":"customer-secret",
         });
         std::fs::write(&path, wire.to_string()).unwrap();
