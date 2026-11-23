@@ -210,6 +210,9 @@ pub fn read_snapshot_bytes(snapshot_dir: &Path) -> u64 {
             return;
         };
         for entry in entries.filter_map(Result::ok) {
+            if entry.file_name() == crate::install::customer_writer::CACHE_DIRECTORY {
+                continue;
+            }
             match entry.metadata() {
                 Ok(info) if info.is_file() => *held += info.len(),
                 Ok(info) if info.is_dir() => walk(&entry.path(), held),
@@ -242,6 +245,9 @@ pub fn reap_stale_snapshots(snapshot_dir: &Path, host_boot_id: &str) -> Reaped {
     };
     for entry in entries.filter_map(Result::ok) {
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        if entry.file_name() == crate::install::customer_writer::CACHE_DIRECTORY {
             continue;
         }
         let directory = entry.path();

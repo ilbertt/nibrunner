@@ -12,8 +12,10 @@ pub(crate) fn profiles(config: &HostConfig) -> PathBuf {
     config.state_dir.join("customer-volumes")
 }
 
+pub(crate) const CACHE_DIRECTORY: &str = ".customer-zerofs-cache";
+
 pub(crate) fn caches(config: &HostConfig) -> PathBuf {
-    config.snapshot_dir.join(".customer-zerofs-cache")
+    config.snapshot_dir.join(CACHE_DIRECTORY)
 }
 
 pub(super) fn units(

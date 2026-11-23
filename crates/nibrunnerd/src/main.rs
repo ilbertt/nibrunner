@@ -229,7 +229,7 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
     tracing::info!(
         state_dir = %host.config.state_dir.display(),
         desired_state_file = %host.config.desired_state_file.display(),
-        guest_memory_mib = host.guest_memory_mib,
+        guest_memory_mib = host.guest_memory_budget_mib(),
         firecracker = nibrunnerd::adapters::vm::process::FIRECRACKER_VERSION,
         "nibrunnerd starting"
     );

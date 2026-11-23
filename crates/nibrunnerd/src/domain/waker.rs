@@ -101,8 +101,11 @@ impl AppWaker {
             .into_iter()
             .filter(|record| &record.app_id != app_id)
             .collect();
-        let shortfall =
-            memory_shortfall_mib(self.host.guest_memory_mib, &committed_resources(&others), wanted);
+        let shortfall = memory_shortfall_mib(
+            self.host.guest_memory_budget_mib(),
+            &committed_resources(&others),
+            wanted,
+        );
         (shortfall > 0).then_some(WakeRefusal::NoRoom {
             shortfall_mib: shortfall,
         })

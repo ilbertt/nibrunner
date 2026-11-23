@@ -169,7 +169,7 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
     for desired in starts {
         let wanted = &desired.config.resources;
         if let Some(shortfall_mib) =
-            memory_shortfall_for(host.guest_memory_mib, &records, &desired.app_id, wanted)
+            memory_shortfall_for(host.guest_memory_budget_mib(), &records, &desired.app_id, wanted)
         {
             instances::wait_for_room(host, desired, shortfall_mib).await;
             waiting += 1;
@@ -184,7 +184,7 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
         tracing::warn!(
             waiting,
             memory_mib = waiting_mib,
-            guest_memory_mib = host.guest_memory_mib,
+            guest_memory_mib = host.guest_memory_budget_mib(),
             "instance starts wait for room on this host"
         );
         host.metrics
@@ -1312,7 +1312,7 @@ mod tests {
     /// How many apps of the default size the test host has memory for: four.
     fn apps_that_fit(host: &TestHost) -> usize {
         crate::domain::report::capacity::apps_up_at_once(
-            host.guest_memory_mib,
+            host.guest_memory_budget_mib(),
             protocol::DEFAULT_INSTANCE_RESOURCES.memory_mib,
         ) as usize
     }

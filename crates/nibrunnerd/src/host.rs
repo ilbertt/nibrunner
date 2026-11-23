@@ -33,6 +33,7 @@ pub struct Host {
     /// What every tenant's output is written to, held here as well as behind the receiver so that
     /// a pass can let an app's output go once the app itself is no longer on this host.
     pub logs: Arc<FileLogSink>,
+    pub(crate) customer_volumes: Option<Arc<crate::adapters::volumes::customer::CustomerVolumes>>,
     pub volumes: Arc<dyn VolumeBackend>,
     pub artifacts: Arc<dyn ArtifactStore>,
     pub payloads: Arc<dyn PayloadBuilder>,
@@ -56,6 +57,14 @@ pub struct Host {
 }
 
 impl Host {
+    pub fn guest_memory_budget_mib(&self) -> u64 {
+        self.guest_memory_mib.saturating_sub(
+            self.customer_volumes
+                .as_ref()
+                .map_or(0, |customer| customer.reservation().memory_mib()),
+        )
+    }
+
     pub async fn refresh_http_metrics(&self) -> std::io::Result<()> {
         if let Some(proxy) = &self.http_proxy {
             self.metrics.proxy.worker_samples(proxy.metrics().await?);

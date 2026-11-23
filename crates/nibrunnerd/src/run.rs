@@ -79,20 +79,54 @@ pub async fn build_host(
     let storage_prefix = ObjectKey::parse(&config.storage_prefix)
         .map_err(|_| StartupError::Config("volumes.storage_prefix is not a key".into()))?;
     let contents = ContentsStaging::new(artifacts.clone(), config.initial_contents_dir());
-    let volumes: Arc<dyn crate::adapters::volumes::VolumeBackend> = match config.volumes.zerofs() {
-        None => Arc::new(LocalFileVolumes::new(
-            config.volumes_dir(),
-            storage_prefix,
-            commands.clone(),
-            contents,
-        )),
-        Some(settings) => Arc::new(ZerofsVolumes::new(
-            ZerofsFilesystem::new(storage_prefix, settings),
-            allocator.clone(),
-            commands.clone(),
-            contents,
-        )),
-    };
+    let shared_cache_mib;
+    let customer_volumes;
+    let volumes: Arc<dyn crate::adapters::volumes::VolumeBackend> =
+        if let Some(settings) = config.volumes.zerofs() {
+            use crate::adapters::volumes::VolumeBackend;
+            let shared = ZerofsVolumes::new(
+                ZerofsFilesystem::new(storage_prefix, settings),
+                allocator.clone(),
+                commands.clone(),
+                contents,
+            );
+            shared_cache_mib = shared.reserved_cache().memory_mib();
+            let placements = crate::adapters::volumes::customer::CustomerPlacements::open(&config)
+                .map_err(|e| StartupError::Config(e.message()))?;
+            let owner = crate::install::service_user::ids(crate::install::service_user::ZEROFS_USER)
+                .ok_or_else(|| StartupError::Config("the ZeroFS service account is missing".into()))?;
+            let volumes = Arc::new(crate::adapters::volumes::customer::CustomerVolumes::new(
+                placements,
+                shared,
+                crate::install::customer_writer::caches(&config),
+                owner,
+                commands.clone(),
+            ));
+            customer_volumes = Some(volumes.clone());
+            volumes
+        } else {
+            let profiles = crate::install::customer_writer::profiles(&config);
+            if profiles
+                .try_exists()
+                .map_err(|e| StartupError::Config(e.to_string()))?
+                && std::fs::read_dir(profiles)
+                    .map_err(|e| StartupError::Config(e.to_string()))?
+                    .next()
+                    .is_some()
+            {
+                return Err(StartupError::Config(
+                    "this host has customer ZeroFS placements and cannot switch to local-file storage".into(),
+                ));
+            }
+            shared_cache_mib = 0;
+            customer_volumes = None;
+            Arc::new(LocalFileVolumes::new(
+                config.volumes_dir(),
+                storage_prefix,
+                commands.clone(),
+                contents,
+            ))
+        };
     let metrics = Arc::new(crate::domain::metrics::HostMetrics::new());
     let payloads = LayerImages::new(
         artifacts.clone(),
@@ -213,7 +247,8 @@ pub async fn build_host(
             executable.clone(),
         )),
         cron_runs: Arc::new(crate::domain::cron::runs::CronRuns::default()),
-        guest_memory_mib: guest_memory_mib(read_host_memory_mib(), volumes.reserved_cache().memory_mib()),
+        customer_volumes,
+        guest_memory_mib: guest_memory_mib(read_host_memory_mib(), shared_cache_mib),
         guest_image_version,
         state,
         allocator: allocator.clone(),

@@ -1,4 +1,7 @@
+pub(super) mod images;
 mod profile;
+mod runtime;
+pub(crate) use runtime::CustomerVolumes;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

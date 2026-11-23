@@ -21,7 +21,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     let space = read_filesystem_space(&host.config.state_dir).unwrap_or_default();
     let capacity = HostCapacity {
         vcpu_count: read_vcpu_count(),
-        memory_mib: host.guest_memory_mib,
+        memory_mib: host.guest_memory_budget_mib(),
         cache_bytes: space.total_bytes,
     };
     let allocatable = allocatable_capacity(&capacity, &committed_resources(&records), space.available_bytes);
@@ -160,10 +160,10 @@ mod tests {
         assert_eq!(report.instances.len(), 1);
         assert_eq!(report.instances[0].app_id, app_id());
         assert_eq!(report.instances[0].state, InstanceState::Running);
-        assert_eq!(report.capacity.memory_mib, host.guest_memory_mib);
+        assert_eq!(report.capacity.memory_mib, host.guest_memory_budget_mib());
         assert_eq!(
             report.allocatable.memory_mib,
-            host.guest_memory_mib - u64::from(protocol::DEFAULT_INSTANCE_RESOURCES.memory_mib)
+            host.guest_memory_budget_mib() - u64::from(protocol::DEFAULT_INSTANCE_RESOURCES.memory_mib)
         );
     }
 

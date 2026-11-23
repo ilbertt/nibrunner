@@ -27,6 +27,7 @@ const ZIP_MAGICS: [[u8; 4]; 2] = [*b"PK\x03\x04", *b"PK\x05\x06"];
 /// What a zip entry gets when the zip does not say: one made on Windows says nothing.
 const ZIP_FILE_MODE: u32 = 0o644;
 
+#[derive(Clone)]
 pub struct ContentsStaging {
     artifacts: Arc<dyn ArtifactStore>,
     directory: PathBuf,

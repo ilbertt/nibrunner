@@ -28,7 +28,7 @@ pub struct ZerofsFilesystem {
     pub storage_prefix: ObjectKey,
     pub mount_path: PathBuf,
     pub nbd_socket_path: PathBuf,
-    pub readers: crate::domain::exports::reader::CheckpointServers,
+    pub readers: Option<crate::domain::exports::reader::CheckpointServers>,
     pub binary: PathBuf,
     pub config_file: PathBuf,
 }
@@ -41,13 +41,13 @@ impl ZerofsFilesystem {
             nbd_socket_path: settings.nbd_socket_path.clone(),
             binary: settings.binary.clone(),
             config_file: settings.config_file.clone(),
-            readers: crate::domain::exports::reader::CheckpointServers {
+            readers: Some(crate::domain::exports::reader::CheckpointServers {
                 binary: settings.binary.clone(),
                 config_file: settings.checkpoint_config_file.clone(),
                 runtime_dir: settings.checkpoint_runtime_dir.clone(),
                 cache_dir: settings.checkpoint_cache_dir.clone(),
                 ready_timeout: crate::domain::exports::reader::DEFAULT_READY_TIMEOUT,
-            },
+            }),
         }
     }
 
@@ -84,6 +84,19 @@ impl ZerofsVolumes {
         }
     }
 
+    pub(super) fn filesystem(&self) -> &ZerofsFilesystem {
+        &self.filesystem
+    }
+
+    pub(super) fn on_filesystem(&self, filesystem: ZerofsFilesystem) -> Self {
+        Self::new(
+            filesystem,
+            self.allocator.clone(),
+            self.commands.clone(),
+            self.contents.clone(),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn with_devices(mut self, devices: NbdDevices) -> Self {
         self.devices = devices;
@@ -110,7 +123,23 @@ impl ZerofsVolumes {
             .map(|slot| slot.nbd_device_path)
     }
 
+    fn dedicated(&self) -> bool {
+        self.filesystem
+            .nbd_socket_path
+            .starts_with(crate::install::customer_writer::SOCKET_ROOT)
+    }
+
+    fn image_size(&self, volume_id: &VolumeId) -> Result<Option<u64>, VolumeError> {
+        if self.dedicated() {
+            return super::customer::images::image_size(&self.filesystem.mount_path, volume_id);
+        }
+        Ok(device_file_size(&self.filesystem.device_file_for(volume_id)))
+    }
+
     fn ensure_device_file(&self, volume_id: &VolumeId, size_bytes: u64) -> Result<u64, VolumeError> {
+        if self.dedicated() {
+            return super::customer::images::ensure(&self.filesystem.mount_path, volume_id, size_bytes);
+        }
         let path = self.filesystem.device_file_for(volume_id);
         let target = align_to_sector(size_bytes);
         if let Some(current) = device_file_size(&path) {
@@ -276,7 +305,7 @@ impl VolumeBackend for ZerofsVolumes {
         app_id: &protocol::AppId,
     ) -> Result<AttachedVolume, VolumeError> {
         let image_path = self.filesystem.device_file_for(volume_id);
-        let Some(size_bytes) = device_file_size(&image_path) else {
+        let Some(size_bytes) = self.image_size(volume_id)? else {
             return Err(VolumeError::NotHere {
                 volume_id: volume_id.clone(),
             });
@@ -366,7 +395,14 @@ impl VolumeBackend for ZerofsVolumes {
         _volume_id: &VolumeId,
         checkpoint_id: &protocol::CheckpointId,
     ) -> Result<crate::domain::exports::reader::CheckpointServer, VolumeError> {
-        self.filesystem.readers.start(checkpoint_id).await
+        self.filesystem
+            .readers
+            .as_ref()
+            .ok_or(VolumeError::NoCheckpoints {
+                what: "a customer volume",
+            })?
+            .start(checkpoint_id)
+            .await
     }
 
     async fn observe_checkpoints(&self) -> Vec<protocol::CheckpointId> {
@@ -402,20 +438,25 @@ impl VolumeBackend for ZerofsVolumes {
         &self,
         owners: &std::collections::BTreeMap<VolumeId, protocol::AppId>,
     ) -> Vec<ObservedBacking> {
-        let Ok(entries) = std::fs::read_dir(self.filesystem.nbd_directory()) else {
-            tracing::warn!(
-                directory = %self.filesystem.nbd_directory().display(),
-                "the zerofs nbd directory would not list; this host reports no volumes"
-            );
-            return Vec::new();
+        let ids = if self.dedicated() {
+            owners.keys().cloned().collect()
+        } else {
+            let Ok(entries) = std::fs::read_dir(self.filesystem.nbd_directory()) else {
+                tracing::warn!(
+                    directory = %self.filesystem.nbd_directory().display(),
+                    "the zerofs nbd directory would not list; this host reports no volumes"
+                );
+                return Vec::new();
+            };
+            entries
+                .flatten()
+                .filter_map(|entry| VolumeId::parse(entry.file_name().to_string_lossy().as_ref()).ok())
+                .collect::<Vec<_>>()
         };
         let socket_path = self.filesystem.nbd_socket_path.display().to_string();
         let mut observed = Vec::new();
-        for entry in entries.flatten() {
-            let Ok(volume_id) = VolumeId::parse(entry.file_name().to_string_lossy().as_ref()) else {
-                continue;
-            };
-            let Some(size_bytes) = device_file_size(&entry.path()) else {
+        for volume_id in ids {
+            let Ok(Some(size_bytes)) = self.image_size(&volume_id) else {
                 continue;
             };
             let device_path = match owners.get(&volume_id) {
@@ -429,7 +470,7 @@ impl VolumeBackend for ZerofsVolumes {
                             socket_path: &socket_path,
                             device_path: path,
                             volume_id: &volume_id,
-                            image_path: Some(&entry.path()),
+                            image_path: Some(&self.filesystem.device_file_for(&volume_id)),
                         })
                         .await
                 }

@@ -99,14 +99,24 @@ impl ConvergeController {
     }
 
     async fn supports_volume_storage(&self, desired: &HostDesiredState) -> bool {
-        let Some(volume) = desired.volumes.iter().find(|volume| volume.storage.is_some()) else {
+        let error = if let Some(volumes) = &self.host.customer_volumes {
+            let state = self.host.state.snapshot().await;
+            volumes
+                .prepare(desired, self.host.guest_memory_budget_mib(), &state.records)
+                .err()
+                .map(|error| error.message())
+        } else {
+            desired.volumes.iter().find(|v| v.storage.is_some()).map(|v| {
+                format!(
+                    "volume {} requires a dedicated ZeroFS writer unavailable on this host",
+                    v.volume_id
+                )
+            })
+        };
+        let Some(reason) = error else {
             return true;
         };
-        let reason = format!(
-            "volume {} requires a dedicated ZeroFS writer unavailable on this host",
-            volume.volume_id
-        );
-        tracing::warn!(volume_id = %volume.volume_id, "desired volume requires a dedicated ZeroFS writer");
+        tracing::warn!(%reason, "desired volume storage was refused");
         self.note_refusal(reason).await;
         false
     }
