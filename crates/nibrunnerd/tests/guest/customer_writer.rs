@@ -40,6 +40,10 @@ async fn a_guest_disk_is_recovered_from_only_the_customer_bucket_and_password() 
     let Some(root) = std::env::var_os("NIBRUNNER_CUSTOMER_FIXTURE").filter(|path| !path.is_empty()) else {
         return;
     };
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
     let root = Path::new(&root);
     let path = root.to_str().unwrap();
     let binary = root.join("zerofs");

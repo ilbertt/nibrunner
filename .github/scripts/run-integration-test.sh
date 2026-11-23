@@ -3,7 +3,8 @@ set -euo pipefail
 
 fixture_environment=()
 if [[ -n "${NIBRUNNER_CUSTOMER_FIXTURE:-}" ]]; then
-    fixture_environment+=("NIBRUNNER_CUSTOMER_FIXTURE=$NIBRUNNER_CUSTOMER_FIXTURE" "TMPDIR=$NIBRUNNER_CUSTOMER_FIXTURE")
+    # The jail uses Unix sockets under this path. Keep it as short as /tmp, but visible to PrivateTmp units.
+    fixture_environment+=("NIBRUNNER_CUSTOMER_FIXTURE=$NIBRUNNER_CUSTOMER_FIXTURE" "TMPDIR=/opt")
 fi
 exec sudo --non-interactive env \
     "${fixture_environment[@]}" \
