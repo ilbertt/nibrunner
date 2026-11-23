@@ -112,7 +112,13 @@ impl ZerofsVolumes {
         self.commands
             .stdout_of(CommandRequest::new(&command))
             .await
-            .map_err(|error| VolumeError::Unusable(error.message()))
+            .map_err(|error| {
+                if self.dedicated() {
+                    VolumeError::Unusable("the customer writer refused its admin operation".into())
+                } else {
+                    VolumeError::Unusable(error.message())
+                }
+            })
     }
 
     async fn device_for(&self, app_id: &protocol::AppId) -> Option<String> {

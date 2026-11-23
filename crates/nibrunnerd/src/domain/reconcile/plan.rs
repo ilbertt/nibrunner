@@ -375,13 +375,14 @@ fn plan_volumes(desired: &HostDesiredState, observed: &ObservedState) -> Vec<Vol
                         blocked_by: holders,
                     };
                 }
-                return match current {
-                    Some(_) => VolumePlan::Teardown {
+                return if current.is_some() || wanted.storage.is_some() {
+                    VolumePlan::Teardown {
                         desired: wanted.clone(),
-                    },
-                    None => VolumePlan::None {
+                    }
+                } else {
+                    VolumePlan::None {
                         volume_id: wanted.volume_id.clone(),
-                    },
+                    }
                 };
             }
             // An attached device with no filesystem on it is provisioned again rather than left

@@ -20,6 +20,7 @@ use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 pub(crate) struct CustomerVolumes {
     pub(crate) placements: CustomerPlacements,
     shared: ZerofsVolumes,
+    operations: std::sync::Mutex<BTreeMap<AppId, Arc<tokio::sync::Mutex<()>>>>,
     caches: PathBuf,
     cache_owner: (u32, u32),
     commands: Arc<dyn CommandRunner>,
@@ -35,6 +36,7 @@ impl CustomerVolumes {
     ) -> Self {
         Self {
             placements,
+            operations: std::sync::Mutex::new(BTreeMap::new()),
             shared,
             caches,
             cache_owner,
@@ -93,6 +95,17 @@ impl CustomerVolumes {
             drop(held);
         }
         self.placements.prepare(desired)
+    }
+
+    async fn operation(&self, app: &AppId) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .operations
+            .lock()
+            .expect("customer writer operation lock")
+            .entry(app.clone())
+            .or_default()
+            .clone();
+        lock.lock_owned().await
     }
 
     fn placement(&self, app: &AppId, volume: &VolumeId) -> Result<Option<Arc<Placement>>, VolumeError> {
@@ -214,7 +227,10 @@ impl VolumeBackend for CustomerVolumes {
             desired.storage.as_ref(),
         ) {
             (None, None) => self.shared.provision(desired).await,
-            (Some(p), Some(_)) => self.active(&p).await?.provision(desired).await,
+            (Some(p), Some(_)) => {
+                let _operation = self.operation(&p.app).await;
+                self.active(&p).await?.provision(desired).await
+            }
             _ => Err(failed("volume storage does not match its placement")),
         }
     }
@@ -222,21 +238,30 @@ impl VolumeBackend for CustomerVolumes {
     async fn attach(&self, volume: &VolumeId, app: &AppId) -> Result<AttachedVolume, VolumeError> {
         match self.placement(app, volume)? {
             None => self.shared.attach(volume, app).await,
-            Some(p) => self.active(&p).await?.attach(volume, app).await,
+            Some(p) => {
+                let _operation = self.operation(&p.app).await;
+                self.active(&p).await?.attach(volume, app).await
+            }
         }
     }
 
     async fn detach(&self, volume: &VolumeId, app: &AppId) -> Result<(), VolumeError> {
         match self.placement(app, volume)? {
             None => self.shared.detach(volume, app).await,
-            Some(p) => self.backend(&p).detach(volume, app).await,
+            Some(p) => {
+                let _operation = self.operation(&p.app).await;
+                self.backend(&p).detach(volume, app).await
+            }
         }
     }
 
     async fn teardown(&self, volume: &VolumeId, app: &AppId) -> Result<(), VolumeError> {
         match self.placement(app, volume)? {
             None => self.shared.teardown(volume, app).await,
-            Some(p) => self.retire(&p).await,
+            Some(p) => {
+                let _operation = self.operation(&p.app).await;
+                self.retire(&p).await
+            }
         }
     }
 
@@ -250,7 +275,10 @@ impl VolumeBackend for CustomerVolumes {
             .cloned();
         match p {
             None => self.shared.flush(app).await,
-            Some(p) => self.backend(&p).flush(app).await,
+            Some(p) => {
+                let _operation = self.operation(&p.app).await;
+                self.backend(&p).flush(app).await
+            }
         }
     }
 

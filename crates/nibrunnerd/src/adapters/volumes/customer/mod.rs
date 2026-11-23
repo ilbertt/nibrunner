@@ -181,3 +181,50 @@ fn mounted(path: &Path) -> Result<bool, VolumeError> {
         Ok(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{desired_state, desired_volume, zerofs_settings};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_reopened_customer_placement_refuses_shared_fallback_and_destination_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::under(root.path());
+        config.volumes = crate::config::VolumeBackend::Zerofs(Box::new(zerofs_settings(|_| {})));
+        let storage = serde_json::from_value(serde_json::json!({
+            "endpoint":"https://objects.example.com", "bucket":"example", "prefix":"app-1",
+            "region":null, "auth":{"kind":"anonymous"}, "encryptionPassword":"private"
+        }))
+        .unwrap();
+        let volume = desired_volume(|volume| volume.storage = Some(storage));
+        let registry = CustomerPlacements::open(&config).unwrap();
+        let storage = volume.storage.as_ref().unwrap();
+        let placement = Placement::requested(&volume.app_id, &volume.volume_id, storage).unwrap();
+        placement
+            .stage(&registry.root, &placement.config(storage).unwrap())
+            .unwrap();
+        let profile = placement.directory(&registry.root);
+        assert_eq!(
+            std::fs::metadata(profile.join(WRITER_CONFIG))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(registry);
+
+        let recovered = CustomerPlacements::open(&config).unwrap();
+        let mut desired = desired_state(|desired| desired.volumes.push(volume));
+        recovered.prepare(&desired).unwrap();
+        desired.volumes[0].storage.as_mut().unwrap().bucket = "different".into();
+        assert!(recovered.prepare(&desired).is_err());
+        desired.volumes[0].storage = None;
+        assert!(recovered.prepare(&desired).is_err());
+        desired.volumes.clear();
+        recovered.prepare(&desired).unwrap();
+        assert!(profile.join(WRITER_CONFIG).exists());
+    }
+}

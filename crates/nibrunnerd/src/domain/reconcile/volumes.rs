@@ -240,6 +240,17 @@ pub async fn apply_teardowns(host: &Host, plan: &ReconcilePlan) {
 }
 
 async fn tear_down_volume(host: &Host, desired: &protocol::DesiredVolume) {
+    // A retired private writer can be gone before its deletion receipt reaches SQLite.
+    if desired.storage.is_some()
+        && host
+            .state
+            .snapshot()
+            .await
+            .deleted_volumes
+            .contains_key(&desired.volume_id)
+    {
+        return;
+    }
     let tearing_down = std::time::Instant::now();
     let torn_down = host.volumes.teardown(&desired.volume_id, &desired.app_id).await;
     host.metrics.resources.done(
