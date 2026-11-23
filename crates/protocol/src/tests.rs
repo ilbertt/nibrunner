@@ -233,6 +233,7 @@ fn desired_json() -> serde_json::Value {
             "volumeId": "vol-1",
             "appId": "app-1",
             "sizeBytes": 4096,
+            "storage": null,
             "desiredState": "present",
             "initialContents": {
                 "digest": "c".repeat(64),
@@ -1456,14 +1457,15 @@ fn malformed_explicit_storage_is_never_read_as_host_storage_or_printed_in_an_err
 }
 
 #[test]
-fn missing_volume_storage_is_read_as_host_storage_and_written_as_null() {
+fn the_schema_requires_storage_but_legacy_volumes_still_round_trip_to_explicit_null() {
     let validator = jsonschema::validator_for(&schemars::schema_for!(DesiredVolume).to_value()).unwrap();
     let mut shared = volume_with_storage(serde_json::json!({"kind":"anonymous"}));
     shared["storage"] = serde_json::Value::Null;
     let mut legacy = shared.clone();
     legacy.as_object_mut().unwrap().remove("storage");
+    assert!(!validator.is_valid(&legacy));
+    assert!(validator.is_valid(&shared));
     for input in [&legacy, &shared] {
-        assert!(validator.is_valid(input));
         let volume: DesiredVolume = serde_json::from_value(input.clone()).unwrap();
         assert_eq!(serde_json::to_value(volume).unwrap(), shared);
     }

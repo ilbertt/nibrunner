@@ -9,7 +9,7 @@ instance at it with `volumeId`.
 
 ```json
 "volumes": [
-  { "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present" }
+  { "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "storage": null, "desiredState": "present" }
 ]
 ```
 
@@ -21,7 +21,7 @@ content, name an archive in the artifact store and where to unpack it:
 ```json
 "volumes": [
   {
-    "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "desiredState": "present",
+    "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 8589934592, "storage": null, "desiredState": "present",
     "initialContents": {
       "digest": "<sha256 of the archive, lowercase hex>",
       "objectKey": "seeds/app-1",

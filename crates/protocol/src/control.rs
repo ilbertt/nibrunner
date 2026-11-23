@@ -398,7 +398,9 @@ pub struct DesiredVolume {
     pub size_bytes: u64,
     pub desired_state: DesiredPresence,
     /// Dedicated S3-compatible storage for this volume. Null selects the host backend.
+    // Earlier desired documents predate this field. New writers must select storage explicitly.
     #[serde(default, deserialize_with = "crate::storage::storage")]
+    #[cfg_attr(feature = "schema", schemars(!default, schema_with = "Option::<crate::S3VolumeStorage>::json_schema"))]
     pub storage: Option<crate::S3VolumeStorage>,
     /// Absent for a volume that starts empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]

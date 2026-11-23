@@ -526,8 +526,7 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "volumeId": {
           "$ref": "#/$defs/VolumeId"
@@ -537,7 +536,8 @@
         "volumeId",
         "appId",
         "sizeBytes",
-        "desiredState"
+        "desiredState",
+        "storage"
       ]
     },
     "ExecutablePath": {
