@@ -100,7 +100,7 @@ enabled = false
         ],
     );
     until(&shared_mount, true).await;
-    let host = crate::host_with(|config| {
+    let mut host = crate::host_with(|config| {
         let settings = zerofs_settings(|s| {
             s.binary= binary.clone(); s.mount_path=shared_mount.clone(); s.config_file=shared_config.clone();
             s.nbd_socket_path=root.join("shared-nbd.sock"); s.storage_url=format!("file://{path}/objects");
@@ -130,13 +130,13 @@ enabled = false
     app.instance.desired_state = DesiredInstanceState::Stopped;
     host.deploy(std::slice::from_ref(&app)).await;
     host.until_state(&app.app_id, InstanceState::Stopped).await;
+    host.pause_controllers().await;
     host.host.volumes.flush(&app.app_id).await.unwrap();
     host.host
         .volumes
         .detach(&app.volume_id, &app.app_id)
         .await
         .unwrap();
-    host.stop().await;
     run(
         "systemctl",
         &[
@@ -145,6 +145,7 @@ enabled = false
             "nibrunner-customer-zerofs@app-1.service",
         ],
     );
+    host.stop().await;
     assert!(!shared_mount.join(".nbd/vol-1").exists());
 
     let config = root.join("recovery.toml");

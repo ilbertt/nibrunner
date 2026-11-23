@@ -8,7 +8,7 @@ cleanup() {
     result=$?
     if (( result != 0 )); then
         sudo journalctl --no-pager -n 80 -u nibrunner-fixture-writer -u nibrunner-fixture-mount \
-            -u nibrunner-customer-zerofs@app-1 -u nibrunner-customer-mount@app-1 -u nibrunner-fixture-recovery
+            -u nibrunner-customer-zerofs@app-1 -u nibrunner-customer-mount@app-1 -u 'nibrunner-customer-nbd-*' -u nibrunner-fixture-recovery
     fi
     sudo systemctl stop nibrunner-customer-mount@app-1.service nibrunner-customer-zerofs@app-1.service 2>/dev/null || true
     sudo systemctl stop nibrunner-fixture-mount.service nibrunner-fixture-writer.service nibrunner-fixture-recovery.service 2>/dev/null || true
