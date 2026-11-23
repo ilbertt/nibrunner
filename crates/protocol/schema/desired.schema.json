@@ -518,8 +518,16 @@
           "minimum": 0
         },
         "storage": {
-          "description": "Dedicated S3-compatible storage for this volume. Omit to use the host backend.",
-          "$ref": "#/$defs/S3VolumeStorage"
+          "description": "Dedicated S3-compatible storage for this volume. Null selects the host backend.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/S3VolumeStorage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "volumeId": {
           "$ref": "#/$defs/VolumeId"
@@ -957,7 +965,12 @@
           "$ref": "#/$defs/ObjectKey"
         },
         "region": {
-          "type": "string",
+          "description": "Null leaves the signing region unspecified.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
           "minLength": 1
         }
       },

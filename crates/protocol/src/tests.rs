@@ -1416,7 +1416,7 @@ fn volume_with_storage(auth: serde_json::Value) -> serde_json::Value {
         "volumeId": "vol-1", "appId": "app-1", "sizeBytes": 4096, "desiredState": "present",
         "storage": {
             "endpoint": "https://s3.example.com", "bucket": "example", "prefix": "apps/one",
-            "auth": auth, "encryptionPassword": "private-password"
+            "region": null, "auth": auth, "encryptionPassword": "private-password"
         }
     })
 }
@@ -1437,7 +1437,6 @@ fn a_customer_volume_preserves_all_authentication_modes_without_logging_credenti
 
 #[test]
 fn malformed_explicit_storage_is_never_read_as_host_storage_or_printed_in_an_error() {
-    let mut wire = volume_with_storage(serde_json::json!({"kind":"private-invalid"}));
     for (field, invalid) in [
         ("auth", serde_json::json!({"kind":"private-invalid"})),
         (
@@ -1454,10 +1453,34 @@ fn malformed_explicit_storage_is_never_read_as_host_storage_or_printed_in_an_err
         let error = serde_json::from_value::<DesiredVolume>(invalid_wire).unwrap_err();
         assert!(!error.to_string().contains("private-"));
     }
-    wire["storage"] = serde_json::Value::Null;
-    assert!(serde_json::from_value::<DesiredVolume>(wire.clone()).is_err());
-    wire.as_object_mut().unwrap().remove("storage");
-    let shared = serde_json::from_value::<DesiredVolume>(wire.clone()).unwrap();
-    assert!(shared.storage.is_none());
-    assert_eq!(serde_json::to_value(shared).unwrap(), wire);
+}
+
+#[test]
+fn missing_and_null_volume_settings_are_written_as_explicit_nulls() {
+    let validator = jsonschema::validator_for(&schemars::schema_for!(DesiredVolume).to_value()).unwrap();
+    let mut customer = volume_with_storage(serde_json::json!({"kind":"anonymous"}));
+    let mut shared = customer.clone();
+    shared["storage"] = serde_json::Value::Null;
+    for (canonical, field) in [(&shared, "storage"), (&customer, "region")] {
+        let mut legacy = canonical.clone();
+        let parent = if field == "region" {
+            &mut legacy["storage"]
+        } else {
+            &mut legacy
+        };
+        parent.as_object_mut().unwrap().remove(field);
+        for input in [&legacy, canonical] {
+            assert!(validator.is_valid(input));
+            let volume: DesiredVolume = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(&serde_json::to_value(volume).unwrap(), canonical);
+        }
+    }
+    for region in ["auto", "eu-central-1"] {
+        customer["storage"]["region"] = serde_json::json!(region);
+        assert!(validator.is_valid(&customer));
+        let volume: DesiredVolume = serde_json::from_value(customer.clone()).unwrap();
+        assert_eq!(serde_json::to_value(volume).unwrap(), customer);
+    }
+    customer["storage"]["region"] = serde_json::json!("");
+    assert!(!validator.is_valid(&customer));
 }

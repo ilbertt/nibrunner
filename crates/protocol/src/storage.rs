@@ -16,8 +16,9 @@ pub struct S3VolumeStorage {
     )]
     pub bucket: String,
     pub prefix: ObjectKey,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "region")]
-    #[cfg_attr(feature = "schema", schemars(with = "String", length(min = 1)))]
+    /// Null leaves the signing region unspecified.
+    #[serde(default, deserialize_with = "region")]
+    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
     pub region: Option<String>,
     pub auth: S3VolumeAuth,
     #[serde(deserialize_with = "credential")]
@@ -84,11 +85,11 @@ fn bucket_name<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::
 }
 
 fn region<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
-    let region = String::deserialize(deserializer)?;
-    if region.is_empty() {
+    let region = Option::<String>::deserialize(deserializer)?;
+    if region.as_deref() == Some("") {
         Err(D::Error::custom("volume storage region is empty"))
     } else {
-        Ok(Some(region))
+        Ok(region)
     }
 }
 
@@ -104,7 +105,6 @@ fn credential<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SecretString
 pub(crate) fn storage<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<S3VolumeStorage>, D::Error> {
-    S3VolumeStorage::deserialize(deserializer)
-        .map(Some)
+    Option::<S3VolumeStorage>::deserialize(deserializer)
         .map_err(|_| D::Error::custom("invalid volume storage configuration"))
 }
