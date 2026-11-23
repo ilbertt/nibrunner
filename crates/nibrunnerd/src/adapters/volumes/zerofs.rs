@@ -28,12 +28,29 @@ pub struct ZerofsFilesystem {
     pub storage_prefix: ObjectKey,
     pub mount_path: PathBuf,
     pub nbd_socket_path: PathBuf,
-    pub checkpoint_runtime_dir: PathBuf,
+    pub readers: crate::domain::exports::reader::CheckpointServers,
     pub binary: PathBuf,
     pub config_file: PathBuf,
 }
 
 impl ZerofsFilesystem {
+    pub fn new(storage_prefix: ObjectKey, settings: &crate::config::ZerofsSettings) -> Self {
+        Self {
+            storage_prefix,
+            mount_path: settings.mount_path.clone(),
+            nbd_socket_path: settings.nbd_socket_path.clone(),
+            binary: settings.binary.clone(),
+            config_file: settings.config_file.clone(),
+            readers: crate::domain::exports::reader::CheckpointServers {
+                binary: settings.binary.clone(),
+                config_file: settings.checkpoint_config_file.clone(),
+                runtime_dir: settings.checkpoint_runtime_dir.clone(),
+                cache_dir: settings.checkpoint_cache_dir.clone(),
+                ready_timeout: crate::domain::exports::reader::DEFAULT_READY_TIMEOUT,
+            },
+        }
+    }
+
     pub fn device_file_for(&self, volume_id: &VolumeId) -> PathBuf {
         self.mount_path.join(NBD_DIRECTORY).join(volume_id.as_str())
     }
@@ -329,6 +346,14 @@ impl VolumeBackend for ZerofsVolumes {
             .map(|_| ())
     }
 
+    async fn open_checkpoint(
+        &self,
+        _volume_id: &VolumeId,
+        checkpoint_id: &protocol::CheckpointId,
+    ) -> Result<crate::domain::exports::reader::CheckpointServer, VolumeError> {
+        self.filesystem.readers.start(checkpoint_id).await
+    }
+
     async fn observe_checkpoints(&self) -> Vec<protocol::CheckpointId> {
         let Ok(listed) = self.admin(&["checkpoint", "list"]).await else {
             return Vec::new();
@@ -426,14 +451,14 @@ mod tests {
     }
 
     fn filesystem(root: &Path) -> ZerofsFilesystem {
-        ZerofsFilesystem {
-            storage_prefix: ObjectKey::parse("volumes").unwrap(),
-            mount_path: root.join("mnt"),
-            nbd_socket_path: PathBuf::from("/run/zerofs/nbd.sock"),
-            checkpoint_runtime_dir: PathBuf::from("/run/zerofs-checkpoint"),
-            binary: PathBuf::from("/opt/nibrun/bin/zerofs/zerofs"),
-            config_file: root.join("zerofs.toml"),
-        }
+        ZerofsFilesystem::new(
+            protocol::ObjectKey::parse("volumes").unwrap(),
+            &crate::test_support::zerofs_settings(|settings| {
+                settings.mount_path = root.join("mnt");
+                settings.binary = "/opt/nibrun/bin/zerofs/zerofs".into();
+                settings.config_file = root.join("zerofs.toml");
+            }),
+        )
     }
 
     #[test]

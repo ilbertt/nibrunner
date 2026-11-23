@@ -446,6 +446,14 @@ impl VolumeBackend for HeldProvisions {
         self.volumes.delete_checkpoint(checkpoint_id).await
     }
 
+    async fn open_checkpoint(
+        &self,
+        volume_id: &protocol::VolumeId,
+        checkpoint_id: &protocol::CheckpointId,
+    ) -> Result<crate::domain::exports::reader::CheckpointServer, VolumeError> {
+        self.volumes.open_checkpoint(volume_id, checkpoint_id).await
+    }
+
     async fn observe_checkpoints(&self) -> Vec<protocol::CheckpointId> {
         self.volumes.observe_checkpoints().await
     }

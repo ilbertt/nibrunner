@@ -26,6 +26,7 @@ const READY_POLL: Duration = Duration::from_millis(100);
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointServers {
     pub binary: PathBuf,
     pub config_file: PathBuf,

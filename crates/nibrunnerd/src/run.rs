@@ -23,7 +23,6 @@ use crate::adapters::volumes::local_file::LocalFileVolumes;
 use crate::adapters::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
 use crate::config::HostConfig;
 use crate::desired::DesiredStateCache;
-use crate::domain::exports::reader::CheckpointServers;
 use crate::domain::report::capacity::{guest_memory_mib, read_host_memory_mib};
 use crate::domain::restarts::RestartRecorder;
 use crate::domain::waker::{AppWaker, QueuedWaker};
@@ -88,14 +87,7 @@ pub async fn build_host(
             contents,
         )),
         Some(settings) => Arc::new(ZerofsVolumes::new(
-            ZerofsFilesystem {
-                storage_prefix,
-                mount_path: settings.mount_path.clone(),
-                nbd_socket_path: settings.nbd_socket_path.clone(),
-                checkpoint_runtime_dir: settings.checkpoint_runtime_dir.clone(),
-                binary: settings.binary.clone(),
-                config_file: settings.config_file.clone(),
-            },
+            ZerofsFilesystem::new(storage_prefix, settings),
             allocator.clone(),
             commands.clone(),
             contents,
@@ -200,14 +192,6 @@ pub async fn build_host(
         crate::domain::exports::store::ObjectExportStore::open(&config.export_store_url)
             .map_err(|error| StartupError::Config(error.message()))?,
     );
-    let checkpoint_servers = config.volumes.zerofs().map(|settings| CheckpointServers {
-        ready_timeout: crate::domain::exports::reader::DEFAULT_READY_TIMEOUT,
-        binary: settings.binary.clone(),
-        config_file: settings.checkpoint_config_file.clone(),
-        runtime_dir: settings.checkpoint_runtime_dir.clone(),
-        cache_dir: settings.checkpoint_cache_dir.clone(),
-    });
-
     let http_proxy = Arc::new(crate::adapters::proxy::worker::process::DetachedHttpProxy::new(
         &config,
         executable.clone(),
@@ -235,7 +219,6 @@ pub async fn build_host(
         allocator: allocator.clone(),
         repositories,
         exports,
-        checkpoint_servers,
         nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),
         commands: commands.clone(),
         cache: Mutex::new(DesiredStateCache::new()),

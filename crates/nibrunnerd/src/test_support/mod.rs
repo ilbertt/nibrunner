@@ -533,7 +533,6 @@ async fn test_host_over(
         ),
         repositories,
         exports,
-        checkpoint_servers: None,
         nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),
         commands: commands.clone(),
         firewall: Arc::new(HostFirewall::new(commands.clone())),

@@ -185,6 +185,16 @@ impl VolumeBackend for LocalFileVolumes {
         })
     }
 
+    async fn open_checkpoint(
+        &self,
+        _volume_id: &VolumeId,
+        _checkpoint_id: &protocol::CheckpointId,
+    ) -> Result<crate::domain::exports::reader::CheckpointServer, VolumeError> {
+        Err(VolumeError::NoCheckpoints {
+            what: "a volume kept as a file on this host's own disk",
+        })
+    }
+
     async fn observe_checkpoints(&self) -> Vec<protocol::CheckpointId> {
         Vec::new()
     }

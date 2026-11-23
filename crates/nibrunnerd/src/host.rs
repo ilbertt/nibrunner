@@ -14,7 +14,6 @@ use crate::adapters::volumes::nbd::NbdDevices;
 use crate::adapters::volumes::VolumeBackend;
 use crate::config::HostConfig;
 use crate::desired::{AcceptedDocument, DesiredStateCache};
-use crate::domain::exports::reader::CheckpointServers;
 use crate::domain::exports::store::ExportStore;
 use crate::domain::metrics::HostMetrics;
 use crate::ports::{ArtifactStore, CommandRunner, PayloadBuilder, Vmm};
@@ -39,7 +38,6 @@ pub struct Host {
     pub payloads: Arc<dyn PayloadBuilder>,
     pub repositories: crate::repositories::Repositories,
     pub exports: Arc<dyn ExportStore>,
-    pub checkpoint_servers: Option<CheckpointServers>,
     pub nbd: NbdDevices,
     pub commands: Arc<dyn CommandRunner>,
     pub firewall: Arc<HostFirewall>,

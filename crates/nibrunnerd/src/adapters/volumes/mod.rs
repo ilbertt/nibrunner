@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use protocol::{AppId, CheckpointId, DesiredVolume, ObjectKey, VolumeId};
 
 use crate::adapters::volumes::initial_contents::StagedRoot;
+use crate::domain::exports::reader::CheckpointServer;
 use crate::ports::CommandRequest;
 
 pub const SECTOR_SIZE_BYTES: u64 = 512;
@@ -92,6 +93,12 @@ pub trait VolumeBackend: Send + Sync {
     async fn create_checkpoint(&self, checkpoint_id: &CheckpointId) -> Result<(), VolumeError>;
 
     async fn delete_checkpoint(&self, checkpoint_id: &CheckpointId) -> Result<(), VolumeError>;
+
+    async fn open_checkpoint(
+        &self,
+        volume_id: &VolumeId,
+        checkpoint_id: &CheckpointId,
+    ) -> Result<CheckpointServer, VolumeError>;
 
     async fn observe_checkpoints(&self) -> Vec<CheckpointId>;
 

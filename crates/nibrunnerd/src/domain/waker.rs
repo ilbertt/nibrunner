@@ -934,14 +934,14 @@ mod tests {
         use crate::adapters::volumes::zerofs::{ZerofsFilesystem, ZerofsVolumes};
 
         let root = tempfile::tempdir().unwrap();
-        let filesystem = ZerofsFilesystem {
-            storage_prefix: protocol::ObjectKey::parse("volumes").unwrap(),
-            mount_path: root.path().join("mnt"),
-            nbd_socket_path: "/run/zerofs/nbd.sock".into(),
-            checkpoint_runtime_dir: "/run/zerofs-checkpoint".into(),
-            binary: "/opt/nibrun/bin/zerofs/zerofs".into(),
-            config_file: root.path().join("zerofs.toml"),
-        };
+        let filesystem = ZerofsFilesystem::new(
+            protocol::ObjectKey::parse("volumes").unwrap(),
+            &crate::test_support::zerofs_settings(|settings| {
+                settings.mount_path = root.path().join("mnt");
+                settings.binary = "/opt/nibrun/bin/zerofs/zerofs".into();
+                settings.config_file = root.path().join("zerofs.toml");
+            }),
+        );
         std::fs::create_dir_all(filesystem.nbd_directory()).unwrap();
         std::fs::write(filesystem.device_file_for(&volume_id()), vec![0u8; 4096]).unwrap();
 

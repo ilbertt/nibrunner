@@ -194,12 +194,9 @@ async fn read_into_staging(
     checkpoint_id: &CheckpointId,
     staging_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let servers = host
-        .checkpoint_servers
-        .as_ref()
-        .ok_or_else(|| "this host serves no checkpoints".to_string())?;
-    let server = servers
-        .start(checkpoint_id)
+    let server = host
+        .volumes
+        .open_checkpoint(&desired.volume_id, checkpoint_id)
         .await
         .map_err(|error| error.message())?;
     let reader = match ReaderDevice::attach(
@@ -298,6 +295,33 @@ mod tests {
             environment: None,
             desired_state: state,
         }
+    }
+
+    #[tokio::test]
+    async fn an_export_opens_its_checkpoint_on_the_volume_it_was_requested_for() {
+        let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
+        let mut export = wanted(DesiredPresence::Present);
+        export.volume_id = VolumeId::parse("customer-volume").unwrap();
+        let checkpoint = export_checkpoint_id(&export.export_id).unwrap();
+        volumes
+            .expect_open_checkpoint()
+            .with(
+                mockall::predicate::eq(export.volume_id.clone()),
+                mockall::predicate::eq(checkpoint.clone()),
+            )
+            .once()
+            .returning(|_, _| {
+                Err(crate::adapters::volumes::VolumeError::Unusable(
+                    "reader unavailable".into(),
+                ))
+            });
+        let host = host_over(volumes).await;
+        let staging = tempfile::tempdir().unwrap();
+
+        let reason = read_into_staging(host.arc(), &export, &checkpoint, staging.path())
+            .await
+            .unwrap_err();
+        assert!(reason.contains("reader unavailable"), "{reason}");
     }
 
     #[tokio::test]
