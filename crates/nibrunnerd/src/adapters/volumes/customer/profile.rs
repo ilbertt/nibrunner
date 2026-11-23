@@ -38,6 +38,10 @@ impl Placement {
         volume: &VolumeId,
         storage: &S3VolumeStorage,
     ) -> Result<Self, VolumeError> {
+        let password = storage.encryption_password.expose();
+        if password.len() < 8 || password == "CHANGEME" {
+            return Err(failed("ZeroFS requires an encryption password of at least eight bytes other than its example password"));
+        }
         let url =
             reqwest::Url::parse(&storage.endpoint).map_err(|_| failed("invalid customer S3 endpoint"))?;
         if url.scheme() != "https"

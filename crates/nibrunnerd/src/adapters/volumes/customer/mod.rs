@@ -196,7 +196,7 @@ mod tests {
         config.volumes = crate::config::VolumeBackend::Zerofs(Box::new(zerofs_settings(|_| {})));
         let storage = serde_json::from_value(serde_json::json!({
             "endpoint":"https://objects.example.com", "bucket":"example", "prefix":"app-1",
-            "region":null, "auth":{"kind":"anonymous"}, "encryptionPassword":"private"
+            "region":null, "auth":{"kind":"anonymous"}, "encryptionPassword":"private-password"
         }))
         .unwrap();
         let volume = desired_volume(|volume| volume.storage = Some(storage));
