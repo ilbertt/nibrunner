@@ -693,7 +693,7 @@ mod tests {
             });
             volumes.expect_provision().returning(|_| Ok(attached()));
             volumes.expect_attach().returning(|_, _| Ok(attached()));
-            volumes.expect_flush().returning(|| Ok(()));
+            volumes.expect_flush().returning(|_| Ok(()));
             volumes.expect_observe_checkpoints().returning(Vec::new);
             (volumes, usable)
         }

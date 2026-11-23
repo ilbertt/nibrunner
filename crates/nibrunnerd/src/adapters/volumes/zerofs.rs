@@ -296,7 +296,7 @@ impl VolumeBackend for ZerofsVolumes {
     }
 
     async fn teardown(&self, volume_id: &VolumeId, app_id: &protocol::AppId) -> Result<(), VolumeError> {
-        let _ = self.flush().await;
+        let _ = self.flush(app_id).await;
         let _ = self.detach(volume_id, app_id).await;
         let path = self.filesystem.device_file_for(volume_id);
         match std::fs::remove_file(&path) {
@@ -306,7 +306,7 @@ impl VolumeBackend for ZerofsVolumes {
         }
     }
 
-    async fn flush(&self) -> Result<(), VolumeError> {
+    async fn flush(&self, _app_id: &protocol::AppId) -> Result<(), VolumeError> {
         self.admin(&["flush"]).await.map(|_| ())
     }
 
@@ -564,7 +564,7 @@ mod tests {
         );
         let volume_id = VolumeId::parse("vol-1").unwrap();
         volumes.ensure_device_file(&volume_id, 1024).unwrap();
-        let _ = volumes.flush().await;
+        let _ = volumes.flush(&app_id()).await;
         let _ = volumes
             .create_checkpoint(&crate::test_support::checkpoint_id())
             .await;
@@ -973,7 +973,7 @@ mod tests {
             volumes
                 .delete_checkpoint(&crate::test_support::checkpoint_id())
                 .await,
-            volumes.flush().await,
+            volumes.flush(&app_id()).await,
         ] {
             let error = refused.unwrap_err();
             assert!(matches!(error, VolumeError::Unusable(_)), "{error}");

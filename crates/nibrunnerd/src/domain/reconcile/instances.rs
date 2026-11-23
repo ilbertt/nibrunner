@@ -127,7 +127,7 @@ async fn report_no_slot(host: &Host, desired: &DesiredInstance, said: StateMessa
 }
 
 async fn settled(host: &Host, app_id: &AppId, reason: &str) {
-    if let Err(error) = host.volumes.flush().await {
+    if let Err(error) = host.volumes.flush(app_id).await {
         tracing::warn!(%app_id, reason, error = %error.message(), "stopping a guest whose disk would not flush");
     }
 }

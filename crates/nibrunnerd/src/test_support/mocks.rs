@@ -434,8 +434,8 @@ impl VolumeBackend for HeldProvisions {
         self.volumes.teardown(volume_id, app_id).await
     }
 
-    async fn flush(&self) -> Result<(), VolumeError> {
-        self.volumes.flush().await
+    async fn flush(&self, app_id: &AppId) -> Result<(), VolumeError> {
+        self.volumes.flush(app_id).await
     }
 
     async fn create_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {

@@ -117,7 +117,10 @@ async fn write_inner(
     // cut could be of a moment before the freeze rather than inside it: up to half a minute of a
     // tenant's writes missing from their own bundle, and on a volume young enough not to have been
     // flushed yet, no device in the checkpoint to read at all.
-    host.volumes.flush().await.map_err(|error| error.message())?;
+    host.volumes
+        .flush(&desired.app_id)
+        .await
+        .map_err(|error| error.message())?;
     host.volumes
         .create_checkpoint(checkpoint_id)
         .await
@@ -761,9 +764,10 @@ mod tests {
         volumes.expect_observe_checkpoints().returning(Vec::new);
         volumes
             .expect_flush()
+            .with(mockall::predicate::eq(app_id()))
             .times(1)
             .in_sequence(&mut sequence)
-            .returning(|| Ok(()));
+            .returning(|_| Ok(()));
         // Refused here only to end the pass: what is under test is that the flush came first.
         volumes
             .expect_create_checkpoint()
@@ -789,7 +793,7 @@ mod tests {
     async fn a_store_that_would_not_flush_is_not_checkpointed_over() {
         let mut volumes = crate::adapters::volumes::MockVolumeBackend::new();
         volumes.expect_observe_checkpoints().returning(Vec::new);
-        volumes.expect_flush().returning(|| {
+        volumes.expect_flush().returning(|_| {
             Err(crate::adapters::volumes::VolumeError::Unusable(
                 "the store would not flush".to_string(),
             ))
@@ -821,7 +825,7 @@ mod tests {
         volumes
             .expect_observe_checkpoints()
             .returning(|| vec![CheckpointId::parse("export-exp-1").unwrap()]);
-        volumes.expect_flush().returning(|| Ok(()));
+        volumes.expect_flush().returning(|_| Ok(()));
         volumes.expect_create_checkpoint().returning(|_| {
             Err(crate::adapters::volumes::VolumeError::NoCheckpoints {
                 what: "a volume kept as a file on this host's own disk",

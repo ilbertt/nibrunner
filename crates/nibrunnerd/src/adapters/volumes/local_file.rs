@@ -169,7 +169,7 @@ impl VolumeBackend for LocalFileVolumes {
         }
     }
 
-    async fn flush(&self) -> Result<(), VolumeError> {
+    async fn flush(&self, _app_id: &protocol::AppId) -> Result<(), VolumeError> {
         Ok(())
     }
 
@@ -435,7 +435,7 @@ mod tests {
         let volumes = backend(directory.path(), mocks::commands_succeeding().0);
         assert!(volumes.create_checkpoint(&checkpoint_id()).await.is_err());
         assert!(volumes.observe_checkpoints().await.is_empty());
-        volumes.flush().await.unwrap();
+        volumes.flush(&app_id()).await.unwrap();
     }
 
     #[tokio::test]

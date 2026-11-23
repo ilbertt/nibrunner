@@ -620,7 +620,7 @@ impl Vmm for VmManager {
         let api = self.api(&request.app_id);
 
         self.discard_snapshot(&request.app_id);
-        if let Err(error) = self.volumes.flush().await {
+        if let Err(error) = self.volumes.flush(&request.app_id).await {
             tracing::warn!(app_id = %request.app_id, error = %error.message(), "the volume backend would not flush");
         }
 

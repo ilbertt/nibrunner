@@ -87,7 +87,7 @@ pub trait VolumeBackend: Send + Sync {
 
     async fn teardown(&self, volume_id: &VolumeId, app_id: &AppId) -> Result<(), VolumeError>;
 
-    async fn flush(&self) -> Result<(), VolumeError>;
+    async fn flush(&self, app_id: &AppId) -> Result<(), VolumeError>;
 
     async fn create_checkpoint(&self, checkpoint_id: &CheckpointId) -> Result<(), VolumeError>;
 
