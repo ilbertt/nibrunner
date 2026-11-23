@@ -55,6 +55,13 @@ pub fn zerofs_settings(
     settings
 }
 
+pub fn customer_writer_units(
+    config: &crate::config::HostConfig,
+    settings: &crate::config::ZerofsSettings,
+) -> [(&'static str, String); 2] {
+    crate::install::customer_writer::units(config, settings, &config.state_dir.join("config.toml"))
+}
+
 pub fn app_id() -> AppId {
     AppId::parse("app-1").unwrap()
 }
@@ -653,11 +660,4 @@ mod logging_tests {
             }
         });
     }
-}
-
-pub fn customer_writer_units(
-    config: &crate::config::HostConfig,
-    settings: &crate::config::ZerofsSettings,
-) -> [(&'static str, String); 2] {
-    crate::install::customer_writer::units(config, settings, &config.state_dir.join("config.toml"))
 }
