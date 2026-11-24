@@ -577,8 +577,10 @@ impl Vmm for VmManager {
             .jail
             .root
             .join(guest_contract::vsock::GUEST_VSOCK_FILENAME);
-        if let Err(error) =
-            super::startup::initialized(&control, || self.processes.status(&app_id).active).await
+        if let Err(error) = super::startup::initialized(&control, prepared.jail.uid, || {
+            self.processes.status(&app_id).active
+        })
+        .await
         {
             let error = self.startup_failure(&app_id, error);
             self.processes.stop(&app_id).await;
