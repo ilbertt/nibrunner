@@ -67,9 +67,9 @@ pub async fn build_host(
             .await
             .map_err(|error| StartupError::Unusable(error.message()))?,
     );
-    if let Err(error) = crate::domain::store::import::import_documents(&repositories, &config).await {
-        tracing::warn!(error = %error.message(), "what an earlier daemon wrote could not be carried over");
-    }
+    crate::domain::store::import::import_documents(&repositories, &config)
+        .await
+        .map_err(|error| StartupError::Unusable(format!("could not restore host state: {error}")))?;
     let allocator = Arc::new(Mutex::new(SlotAllocator::addressing(config.max_apps)));
 
     let artifacts = Arc::new(

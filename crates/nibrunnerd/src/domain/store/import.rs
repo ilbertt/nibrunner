@@ -10,23 +10,25 @@ pub async fn import_documents(
         return Ok(());
     }
 
-    let records = crate::domain::report::instance_record::read_instance_records(
-        crate::json_store::read_json(&config.instances_file())
-            .ok()
-            .flatten(),
-    );
-    let assignments = crate::adapters::net::allocator::assignments_from(
-        crate::json_store::read_json(&config.slots_file())
-            .ok()
-            .flatten()
-            .unwrap_or_default(),
-        config.max_apps,
-    );
-    let cursor = crate::adapters::net::allocator::read_slot_cursor(
-        crate::json_store::read_json(&config.slot_cursor_file())
-            .ok()
-            .flatten(),
-    );
+    let records =
+        crate::json_store::read_json::<Vec<crate::domain::report::InstanceRecord>>(&config.instances_file())
+            .map_err(|_| StoreError::Unreadable("could not read the legacy instance records".into()))?
+            .unwrap_or_default();
+    let raw = crate::json_store::read_json::<std::collections::BTreeMap<String, serde_json::Value>>(
+        &config.slots_file(),
+    )
+    .map_err(|_| StoreError::Unreadable("could not read the legacy slot assignments".into()))?
+    .unwrap_or_default();
+    let count = raw.len();
+    let assignments = crate::adapters::net::allocator::assignments_from(raw, config.max_apps);
+    if assignments.len() != count {
+        return Err(StoreError::Unreadable(
+            "invalid or conflicting legacy slot assignments".into(),
+        ));
+    }
+    let cursor = crate::json_store::read_json::<i64>(&config.slot_cursor_file())
+        .map_err(|_| StoreError::Unreadable("could not read the legacy slot cursor".into()))?
+        .unwrap_or_default();
     let deleted: Vec<_> =
         crate::json_store::read_json::<Vec<serde_json::Value>>(&config.deleted_volumes_file())
             .ok()

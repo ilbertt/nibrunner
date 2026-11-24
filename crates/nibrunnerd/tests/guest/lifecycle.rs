@@ -680,3 +680,44 @@ async fn a_ready_guest_reports_its_kernel_init_and_first_exec_checkpoints() {
     .expect("the host records guest startup phases after observing readiness");
     host.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_slot_ownership_leaves_a_live_guests_tap_and_process_serving() {
+    let Some(mut host) = crate::host().await else {
+        return;
+    };
+    let app = host.tenant(1).running();
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, protocol::InstanceState::Running)
+        .await;
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "1");
+    host.pause_controllers().await;
+    host.host.persist().await;
+    let slot = host.host.slot_of(&app.app_id).await.unwrap();
+    let index = std::path::Path::new("/sys/class/net")
+        .join(&slot.tap_name)
+        .join("ifindex");
+    let before = std::fs::read_to_string(&index).unwrap();
+
+    let options = sqlx::sqlite::SqliteConnectOptions::new().filename(host.host.config.state_db_file());
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    sqlx::query("alter table slots rename to unavailable_slots")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let lifecycle = nibrunnerd::controllers::lifecycle_controller::LifecycleController::new(
+        host.host.clone(),
+        nibrunnerd::run::host_versions(&host.host),
+    );
+    let result = lifecycle.start().await;
+    sqlx::query("alter table unavailable_slots rename to slots")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert!(result.is_err());
+    assert_eq!(host.host.slot_of(&app.app_id).await.unwrap(), slot);
+    assert_eq!(std::fs::read_to_string(index).unwrap(), before);
+    assert_eq!(host.get(&app, "/remember").await.unwrap().body, "2");
+    host.stop().await;
+}
