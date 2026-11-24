@@ -132,7 +132,8 @@ former app can finish its window independently. The host keeps up to `max_apps` 
 alongside the active leases. Higher churn leaves a gap for that window.
 
 The outbound metrics expose only app IDs and aggregate counts. To deduplicate addresses, nftables
-keeps destination IPs in kernel memory for five minutes after their most recent new attempt.
+keeps destination IPs in kernel sets. Entries expire five minutes after their most recent new
+attempt and disappear from listings. The kernel reclaims their storage during garbage collection.
 Reading these sets requires host network-administration privileges. The daemon reads them to
 count entries and discards the addresses. It writes no connection log and collects no packet
 payloads. Keep the metrics listener on loopback or an operator-only network. Historical aggregate
