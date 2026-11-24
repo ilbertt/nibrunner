@@ -1,5 +1,36 @@
 # Changelog
 
+## [2026.11.15] - 2026-11-24
+
+### Features
+
+- **report:** Retain a sanitized boot failure across retry exhaustion (#382)
+- **metrics:** Report outbound connections per app (#385)
+- **volumes:** Run and recover customer disks on dedicated ZeroFS writers (#373)
+- **volumes:** Stage durable customer writer configurations by app (#372)
+- **volumes:** Bind customer NBD attachments to their writer and export (#371)
+- **install:** Install isolated per-app ZeroFS service templates (#376)
+- **protocol:** Recognize explicit customer volume storage (#369)
+
+### Fixes
+
+- **proxy:** Bind cold HTTP listeners in the serving worker (#381)
+- **reconcile:** Commit desired state before acknowledging its revision (#380)
+- **host:** Refuse startup when persisted ownership is unreadable (#379)
+
+### Refactoring
+
+- **exports:** Open checkpoint readers through the owning volume backend (#368)
+- **volumes:** Identify the app whose filesystem must flush (#367)
+
+### Documentation
+
+- **volumes:** Document customer bucket ownership and independent recovery (#377)
+
+### Maintenance
+
+- **volumes:** Recover a guest disk independently from its S3 bucket (#374)
+
 ## [2026.11.14] - 2026-11-19
 
 ### Features
