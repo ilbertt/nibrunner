@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert or replace into slot_cursor (only_row, cursor) values (0, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6e854e33b1611061a84b0a3e51267e1bdbc0b858c875355c9446b7f3c9b50096"
+}

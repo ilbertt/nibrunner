@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert or ignore into activity (app_id, last_active_at_ms) values (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4160460c6543c37eaaf92c209a0a5b57d0d16a2e02b450e6720238164792f76a"
+}

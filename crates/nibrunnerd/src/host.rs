@@ -169,19 +169,14 @@ impl Host {
             .await
     }
 
-    pub async fn load(&self) {
-        let records = self.repositories.instances.all().await.unwrap_or_default();
-        let last_active = self.repositories.activity.all().await.unwrap_or_default();
-        let meters = self.repositories.meters.all().await.unwrap_or_default();
-        let deleted = self.repositories.deleted_volumes.all().await.unwrap_or_default();
-        let assignments = self.repositories.slots.all().await.unwrap_or_default();
-        let cursor = self.repositories.slots.cursor().await.unwrap_or_default();
-        let accepted = self
-            .repositories
-            .accepted_document
-            .read()
-            .await
-            .unwrap_or_default();
+    pub async fn load(&self) -> Result<(), crate::domain::store::StoreError> {
+        let records = self.repositories.instances.all().await?;
+        let last_active = self.repositories.activity.all().await?;
+        let meters = self.repositories.meters.all().await?;
+        let deleted = self.repositories.deleted_volumes.all().await?;
+        let assignments = self.repositories.slots.all().await?;
+        let cursor = self.repositories.slots.cursor().await?;
+        let accepted = self.repositories.accepted_document.read().await?;
         if let Some(document) = &accepted {
             self.remember_host_id(document.desired.host_id.as_str()).await;
         }
@@ -214,6 +209,7 @@ impl Host {
             slots = self.slots().await.len(),
             "host state loaded"
         );
+        Ok(())
     }
 
     pub async fn accepted_document(&self) -> Option<AcceptedDocument> {
@@ -469,7 +465,7 @@ mod tests {
             .returning(|| Ok(BTreeMap::from([(volume_id(), reported_volume(|_| {}))])));
 
         let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
-        host.load().await;
+        host.load().await.unwrap();
 
         assert!(host.state.record(&app_id()).await.is_some());
         assert_eq!(host.slot_of(&app_id()).await.map(|slot| slot.slot), Some(4));
@@ -490,7 +486,7 @@ mod tests {
         }));
         repositories.accepted_document.remember(&document).await.unwrap();
         let host = test_host_with(repositories).await;
-        host.load().await;
+        host.load().await.unwrap();
         let records = host.state.records().await;
         assert_eq!(records[0].access, access);
         let routes = crate::domain::report::routes::renderable_routes(&records);
@@ -498,18 +494,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_host_whose_notes_will_not_be_read_comes_up_knowing_nothing_rather_than_not_at_all() {
+    async fn unreadable_slots_stop_startup_before_a_running_guest_or_its_tap_is_touched() {
         let (mut instances, mut slots, mut activity, mut deleted, identity) = mocked();
-        let unreadable = || StoreError::Unreadable("the file is not a database".into());
-        instances.expect_all().returning(move || Err(unreadable()));
-        slots.expect_all().returning(move || Err(unreadable()));
-        slots.expect_cursor().returning(move || Err(unreadable()));
-        activity.expect_all().returning(move || Err(unreadable()));
-        deleted.expect_all().returning(move || Err(unreadable()));
-
+        instances
+            .expect_all()
+            .returning(|| Ok(vec![instance_record(|_| {})]));
+        activity.expect_all().returning(|| Ok(BTreeMap::new()));
+        deleted.expect_all().returning(|| Ok(BTreeMap::new()));
+        slots
+            .expect_all()
+            .returning(|| Err(StoreError::Unreadable("slot table unreadable".into())));
         let host = test_host_with(bundle(instances, slots, activity, deleted, identity)).await;
-        host.load().await;
-        assert!(host.state.records().await.is_empty());
+        let slot = host.slot_for(&app_id()).await.unwrap();
+        host.state.put_record(instance_record(|_| {})).await;
+        let lifecycle = crate::controllers::lifecycle_controller::LifecycleController::new(
+            host.arc().clone(),
+            crate::run::host_versions(&host),
+        );
+
+        let error = lifecycle.start().await.unwrap_err();
+        assert!(error.to_string().contains("slot table unreadable"));
+        assert_eq!(host.slot_of(&app_id()).await, Some(slot));
+        assert!(host.state.record(&app_id()).await.is_some());
+        assert!(host.vms.calls().is_empty());
+        assert!(host.commands.calls().is_empty());
     }
 
     #[tokio::test]

@@ -236,7 +236,7 @@ async fn serve(config: HostConfig) -> std::process::ExitCode {
 
     let lifecycle = LifecycleController::new(host.clone(), run::host_versions(&host));
     if let Err(error) = lifecycle.start().await {
-        tracing::error!(%error, "the HTTP proxy could not be brought up");
+        tracing::error!(%error, "host startup failed");
         return std::process::ExitCode::FAILURE;
     }
     let running: Vec<_> = lifecycle

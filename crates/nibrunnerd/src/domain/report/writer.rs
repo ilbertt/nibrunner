@@ -222,7 +222,7 @@ mod tests {
             .unwrap();
         assert_eq!(host.known_host_id().await, None);
 
-        host.load().await;
+        host.load().await.unwrap();
 
         assert_eq!(host.known_host_id().await, Some(document.desired.host_id.clone()));
         let report = build(&host, versions()).await;
@@ -244,7 +244,7 @@ mod tests {
             .await
             .unwrap();
 
-        host.load().await;
+        host.load().await.unwrap();
         assert_eq!(build(&host, versions()).await.host_id.as_str(), "host-7");
 
         host.remember_accepted_document(&document).await;

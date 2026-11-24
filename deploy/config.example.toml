@@ -86,7 +86,7 @@ listen_address = "10.0.5.18"
 max_ports_per_guest = 1
 
 [metrics]
-outbound_monitoring = false
+outbound_monitoring = true
 port = 9100
 listen_address = "127.0.0.1"
 

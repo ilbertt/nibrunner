@@ -1024,7 +1024,7 @@ impl HostConfig {
                 }),
             },
             metrics: Some(MetricsConfig {
-                outbound_monitoring: false,
+                outbound_monitoring: true,
                 port: 9100,
                 listen_address: IpAddr::from([127, 0, 0, 1]),
             }),
@@ -1141,7 +1141,7 @@ impl HostConfig {
                 }),
             }),
             metrics: self.metrics.as_ref().map(|metrics| file::Metrics {
-                outbound_monitoring: Some(metrics.outbound_monitoring),
+                outbound_monitoring: metrics.outbound_monitoring.then_some(true),
                 port: Some(metrics.port),
                 listen_address: Some(metrics.listen_address.to_string()),
             }),

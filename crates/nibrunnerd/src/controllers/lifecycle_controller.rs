@@ -27,7 +27,7 @@ impl LifecycleController {
     }
 
     pub async fn start(&self) -> std::io::Result<()> {
-        self.host.load().await;
+        self.host.load().await.map_err(std::io::Error::other)?;
         if !self.host.outbound_monitoring() {
             crate::adapters::net::egress::remove(self.host.commands.as_ref()).await;
         }

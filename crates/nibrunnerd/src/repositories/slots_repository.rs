@@ -44,15 +44,18 @@ impl SqliteSlots {
 #[async_trait]
 impl SlotRepository for SqliteSlots {
     async fn all(&self) -> Result<BTreeMap<AppId, u32>, StoreError> {
-        Ok(self
-            .stored()
+        self.stored()
             .await?
             .into_iter()
-            .filter_map(|(app_id, slot)| {
-                let app_id = AppId::parse(app_id).ok()?;
-                Some((app_id, u32::try_from(slot).ok()?))
+            .map(|(app_id, slot)| {
+                let app = AppId::parse(app_id).map_err(|_| {
+                    StoreError::Unreadable("invalid app ID in a stored slot assignment".into())
+                })?;
+                let number = u32::try_from(slot)
+                    .map_err(|_| StoreError::Unreadable(format!("invalid stored slot for {app}")))?;
+                Ok((app, number))
             })
-            .collect())
+            .collect()
     }
 
     async fn cursor(&self) -> Result<i64, StoreError> {
@@ -177,13 +180,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_slot_no_app_id_names_is_left_out_rather_than_refusing_the_load() {
+    async fn an_invalid_slot_owner_refuses_the_load() {
         let pool = in_memory().await;
         sqlx::query("insert into slots (app_id, slot) values ('not an app id', 3)")
             .execute(&pool)
             .await
             .unwrap();
-        assert!(SqliteSlots::new(pool).all().await.unwrap().is_empty());
+        assert!(SqliteSlots::new(pool).all().await.is_err());
     }
 
     #[tokio::test]

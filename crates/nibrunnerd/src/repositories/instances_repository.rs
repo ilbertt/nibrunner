@@ -43,12 +43,20 @@ impl SqliteInstances {
 #[async_trait]
 impl InstanceRepository for SqliteInstances {
     async fn all(&self) -> Result<Vec<InstanceRecord>, StoreError> {
-        Ok(self
-            .stored()
+        self.stored()
             .await?
-            .into_values()
-            .filter_map(|record| serde_json::from_str(&record).ok())
-            .collect())
+            .into_iter()
+            .map(|(id, json)| {
+                let record: InstanceRecord = serde_json::from_str(&json)
+                    .map_err(|_| StoreError::Unreadable("a stored instance record is invalid".into()))?;
+                if record.app_id.as_str() != id {
+                    return Err(StoreError::Unreadable(
+                        "a stored instance record has a different owner from its row".into(),
+                    ));
+                }
+                Ok(record)
+            })
+            .collect()
     }
 
     async fn replace_all(&self, records: &[InstanceRecord]) -> Result<(), StoreError> {
@@ -180,13 +188,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_record_this_daemon_cannot_read_is_left_out_rather_than_failing_the_load() {
+    async fn an_unreadable_instance_record_refuses_the_load() {
         let pool = in_memory().await;
         sqlx::query("insert into instances (app_id, record) values ('app-9', '{\"nonsense\":true}')")
             .execute(&pool)
             .await
             .unwrap();
-        assert!(SqliteInstances::new(pool).all().await.unwrap().is_empty());
+        assert!(SqliteInstances::new(pool).all().await.is_err());
     }
 
     #[tokio::test]

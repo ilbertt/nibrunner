@@ -46,17 +46,6 @@ impl Repositories {
             accepted_document: Arc::new(SqliteAcceptedDocument::new(pool)),
         }
     }
-
-    pub async fn holds_nothing(&self) -> bool {
-        let slots = self.slots.all().await.map(|held| held.len()).unwrap_or_default();
-        let instances = self
-            .instances
-            .all()
-            .await
-            .map(|held| held.len())
-            .unwrap_or_default();
-        slots + instances == 0
-    }
 }
 
 #[cfg(test)]
@@ -197,26 +186,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_host_that_has_written_nothing_holds_nothing() {
-        let repositories = Repositories::sqlite(in_memory().await);
-        assert!(repositories.holds_nothing().await);
-        repositories
-            .instances
-            .replace_all(&[crate::test_support::instance_record(|_| {})])
-            .await
-            .unwrap();
-        assert!(!repositories.holds_nothing().await);
-    }
-
-    #[tokio::test]
     async fn a_slot_an_older_daemon_allocated_is_carried_over_rather_than_reissued() {
         let directory = tempfile::tempdir().unwrap();
         let config = crate::config::HostConfig::under(directory.path());
         crate::json_store::write_json(&config.slots_file(), &serde_json::json!({ "app-1": 3 })).unwrap();
         crate::json_store::write_json(&config.slot_cursor_file(), &serde_json::json!(4)).unwrap();
 
-        let repositories = Repositories::sqlite(in_memory().await);
-        import_documents(&repositories, &config).await.unwrap();
+        let pool = in_memory().await;
+        let repositories = Repositories::sqlite(pool.clone());
+        import_documents(&pool, &config).await.unwrap();
         assert_eq!(
             repositories
                 .slots
@@ -235,7 +213,8 @@ mod tests {
         let config = crate::config::HostConfig::under(directory.path());
         crate::json_store::write_json(&config.slots_file(), &serde_json::json!({ "app-1": 3 })).unwrap();
 
-        let repositories = Repositories::sqlite(in_memory().await);
+        let pool = in_memory().await;
+        let repositories = Repositories::sqlite(pool.clone());
         repositories
             .slots
             .replace_all(
@@ -244,7 +223,7 @@ mod tests {
             )
             .await
             .unwrap();
-        import_documents(&repositories, &config).await.unwrap();
+        import_documents(&pool, &config).await.unwrap();
         assert_eq!(
             repositories
                 .slots
@@ -257,11 +236,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_interrupted_legacy_import_leaves_the_whole_ownership_record_for_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::config::HostConfig::under(root.path());
+        let record = crate::test_support::instance_record(|_| {});
+        crate::json_store::write_json(&config.instances_file(), &vec![record.clone()]).unwrap();
+        crate::json_store::write_json(&config.slots_file(), &serde_json::json!({"app-1":3})).unwrap();
+        let pool = in_memory().await;
+        let repositories = Repositories::sqlite(pool.clone());
+        sqlx::query("create trigger refuse_import before insert on instances begin select raise(fail, 'interrupted'); end")
+            .execute(&pool).await.unwrap();
+        assert!(import_documents(&pool, &config).await.is_err());
+        assert!(repositories.slots.all().await.unwrap().is_empty());
+        sqlx::query("drop trigger refuse_import")
+            .execute(&pool)
+            .await
+            .unwrap();
+        import_documents(&pool, &config).await.unwrap();
+        assert_eq!(repositories.instances.all().await.unwrap(), vec![record]);
+        assert_eq!(
+            repositories
+                .slots
+                .all()
+                .await
+                .unwrap()
+                .get(&crate::test_support::app_id()),
+            Some(&3)
+        );
+    }
+
+    #[tokio::test]
     async fn a_host_with_no_documents_to_carry_over_imports_nothing() {
         let directory = tempfile::tempdir().unwrap();
         let config = crate::config::HostConfig::under(directory.path());
-        let repositories = Repositories::sqlite(in_memory().await);
-        import_documents(&repositories, &config).await.unwrap();
-        assert!(repositories.holds_nothing().await);
+        let pool = in_memory().await;
+        let repositories = Repositories::sqlite(pool.clone());
+        import_documents(&pool, &config).await.unwrap();
+        assert!(repositories.slots.all().await.unwrap().is_empty());
+        assert!(repositories.instances.all().await.unwrap().is_empty());
     }
 }
