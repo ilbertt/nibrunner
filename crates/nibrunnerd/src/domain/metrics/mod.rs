@@ -676,7 +676,7 @@ pub(crate) mod tests {
             ready_at: None,
             message: None,
         }];
-        *metrics.egress.lock().unwrap() = Some(egress::Window {
+        *metrics.egress.lock().unwrap() = Some(super::egress::Window {
             closed: std::time::Instant::now(),
             counts: [(app_id(), Default::default())].into(),
         });
