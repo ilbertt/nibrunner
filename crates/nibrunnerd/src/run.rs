@@ -62,14 +62,13 @@ pub async fn build_host(
     );
     let commands: Arc<dyn crate::ports::CommandRunner> = Arc::new(HostCommands);
     let state = HostState::shared();
-    let repositories = crate::repositories::Repositories::sqlite(
-        crate::domain::store::open(&config.state_db_file())
-            .await
-            .map_err(|error| StartupError::Unusable(error.message()))?,
-    );
-    crate::domain::store::import::import_documents(&repositories, &config)
+    let pool = crate::domain::store::open(&config.state_db_file())
+        .await
+        .map_err(|error| StartupError::Unusable(error.message()))?;
+    crate::domain::store::import::import_documents(&pool, &config)
         .await
         .map_err(|error| StartupError::Unusable(format!("could not restore host state: {error}")))?;
+    let repositories = crate::repositories::Repositories::sqlite(pool);
     let allocator = Arc::new(Mutex::new(SlotAllocator::addressing(config.max_apps)));
 
     let artifacts = Arc::new(

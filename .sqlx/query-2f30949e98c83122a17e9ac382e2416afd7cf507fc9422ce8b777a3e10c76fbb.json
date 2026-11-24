@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "select exists(select 1 from slots) or exists(select 1 from instances) as \"held!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "held!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2f30949e98c83122a17e9ac382e2416afd7cf507fc9422ce8b777a3e10c76fbb"
+}
