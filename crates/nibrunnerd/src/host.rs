@@ -102,7 +102,14 @@ impl Host {
     ) -> Result<nft_render::AppSlot, crate::adapters::net::allocator::SlotExhausted> {
         let mut allocator = self.allocator.lock().await;
         let slot = allocator.allocate(app_id)?;
-        self.bind_egress(&allocator).await;
+        if self.outbound_monitoring() {
+            let mut monitor = self.egress.lock().await;
+            if !monitor.bound_to(&slot) {
+                monitor
+                    .bind(self.commands.as_ref(), allocator.assignments(), allocator.limit())
+                    .await;
+            }
+        }
         Ok(slot)
     }
 

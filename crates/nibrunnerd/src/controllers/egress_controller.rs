@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::adapters::net::egress::EgressMonitor;
 use crate::controllers::Controller;
 use crate::domain::metrics::egress::{Window, INTERVAL};
 use crate::host::Host;
@@ -25,13 +26,13 @@ impl Controller for EgressController {
             let bound = monitor
                 .bind(host.commands.as_ref(), allocator.assignments(), allocator.limit())
                 .await;
+            drop(monitor);
             drop(allocator);
             let window = if bound {
-                monitor.close_window(host.commands.as_ref()).await
+                EgressMonitor::close_window(&host.egress, host.commands.as_ref()).await
             } else {
                 None
             };
-            drop(monitor);
             let closed = Instant::now();
             let elapsed = closed.duration_since(last);
             last = closed;

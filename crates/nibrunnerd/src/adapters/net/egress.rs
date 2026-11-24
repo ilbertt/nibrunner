@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::sync::Mutex;
 
 use nft_render::egress::{
     egress_listing, egress_transaction, parse_egress, EgressBindings, EgressCounts, EGRESS_TABLE,
@@ -10,12 +13,19 @@ use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
 #[derive(Default)]
 pub(crate) struct EgressMonitor {
-    installed: Option<EgressBindings>,
+    installed: Option<Arc<EgressBindings>>,
     baseline: BTreeMap<AppId, EgressCounts>,
     complete: bool,
 }
 
 impl EgressMonitor {
+    pub(crate) fn bound_to(&self, slot: &nft_render::AppSlot) -> bool {
+        self.installed
+            .as_ref()
+            .and_then(|bindings| bindings.get(&slot.app_id))
+            == Some(&Some(slot.slot))
+    }
+
     pub(crate) async fn bind(
         &mut self,
         commands: &dyn CommandRunner,
@@ -42,7 +52,7 @@ impl EgressMonitor {
     }
 
     async fn install(&mut self, commands: &dyn CommandRunner, bindings: EgressBindings) -> bool {
-        if self.installed.as_ref() == Some(&bindings) {
+        if self.installed.as_deref() == Some(&bindings) {
             return true;
         }
         // A cancelled or failed write has no trustworthy baseline. Recreate the observer before
@@ -53,12 +63,12 @@ impl EgressMonitor {
             self.complete = false;
         }
         self.baseline.retain(|app, _| bindings.contains_key(app));
-        let batch = egress_transaction(previous.as_ref(), &bindings);
+        let batch = egress_transaction(previous.as_deref(), &bindings);
         let mut request = CommandRequest::new(&["nft", "-f", "-"]).with_stdin(batch);
         request.timeout = Duration::from_secs(5);
         match commands.stdout_of(request).await {
             Ok(_) => {
-                self.installed = Some(bindings);
+                self.installed = Some(Arc::new(bindings));
                 true
             }
             Err(error) => {
@@ -68,8 +78,10 @@ impl EgressMonitor {
         }
     }
 
-    async fn read(&mut self, commands: &dyn CommandRunner) -> Option<BTreeMap<AppId, EgressCounts>> {
-        let leases = self.installed.as_ref()?;
+    async fn read(
+        commands: &dyn CommandRunner,
+        leases: &EgressBindings,
+    ) -> Option<BTreeMap<AppId, EgressCounts>> {
         let mut counts = BTreeMap::new();
         let apps: Vec<_> = leases.keys().collect();
         for group in apps.chunks(16) {
@@ -77,28 +89,44 @@ impl EgressMonitor {
             let mut request =
                 CommandRequest::new(&["nft", "-j", "-f", "-"]).with_stdin(egress_listing(&expected));
             request.timeout = Duration::from_secs(5);
-            let rows = commands
-                .stdout_of(request)
-                .await
-                .ok()
-                .and_then(|json| parse_egress(&json, &expected));
-            let Some(rows) = rows else {
-                self.installed = None;
-                tracing::warn!("outbound monitoring could not read a complete set of counters");
-                return None;
-            };
+            let json = commands.stdout_of(request).await.ok()?;
+            let rows = parse_egress(&json, &expected)?;
             counts.extend(rows);
         }
         Some(counts)
     }
 
     pub(crate) async fn close_window(
-        &mut self,
+        monitor: &Mutex<Self>,
         commands: &dyn CommandRunner,
     ) -> Option<BTreeMap<AppId, EgressCounts>> {
-        let mut current = self.read(commands).await?;
+        // Reading the sets can take several batches. Slot allocation must be able to rebind a
+        // TAP meanwhile, and a reading assembled across two binding transactions is ambiguous.
+        for _ in 0..2 {
+            let bindings = monitor.lock().await.installed.clone()?;
+            let counts = Self::read(commands, &bindings).await;
+            let mut monitor = monitor.lock().await;
+            if !Arc::ptr_eq(monitor.installed.as_ref()?, &bindings) {
+                continue;
+            }
+            let Some(counts) = counts else {
+                monitor.installed = None;
+                tracing::warn!("outbound monitoring could not read a complete set of counters");
+                return None;
+            };
+            return monitor.finish(commands, counts).await;
+        }
+        monitor.lock().await.complete = false;
+        None
+    }
+
+    async fn finish(
+        &mut self,
+        commands: &dyn CommandRunner,
+        mut current: BTreeMap<AppId, EgressCounts>,
+    ) -> Option<BTreeMap<AppId, EgressCounts>> {
         let previous = std::mem::replace(&mut self.baseline, current.clone());
-        let mut active = self.installed.clone()?;
+        let mut active = self.installed.as_deref()?.clone();
         active.retain(|_, slot| slot.is_some());
         if !self.install(commands, active).await {
             return None;
@@ -130,7 +158,7 @@ mod tests {
     use super::*;
     use crate::ports::CommandResult;
     use crate::test_support::mocks::commands_answering;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex as StdMutex;
 
     fn listing(attempts: u64, passed: u64, missed: u64) -> String {
         let counter = |prefix: &str, packets| serde_json::json!({"counter": {"name": format!("{prefix}_app"), "packets": packets}});
@@ -140,7 +168,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_window_uses_deltas_and_a_failed_read_starts_another_warmup() {
-        let reply = Arc::new(Mutex::new(listing(10, 7, 1)));
+        let reply = Arc::new(StdMutex::new(listing(10, 7, 1)));
         let (commands, _) = commands_answering({
             let reply = reply.clone();
             move |request| {
@@ -153,11 +181,15 @@ mod tests {
         });
         let app = AppId::parse("app").unwrap();
         let leases = [(app.clone(), 0)].into();
-        let mut monitor = EgressMonitor::default();
-        assert!(monitor.bind(commands.as_ref(), &leases, 1).await);
-        assert!(monitor.close_window(commands.as_ref()).await.is_none());
+        let monitor = Mutex::new(EgressMonitor::default());
+        assert!(monitor.lock().await.bind(commands.as_ref(), &leases, 1).await);
+        assert!(EgressMonitor::close_window(&monitor, commands.as_ref())
+            .await
+            .is_none());
         *reply.lock().unwrap() = listing(15, 10, 2);
-        let window = monitor.close_window(commands.as_ref()).await.unwrap();
+        let window = EgressMonitor::close_window(&monitor, commands.as_ref())
+            .await
+            .unwrap();
         assert_eq!(
             window[&app],
             EgressCounts {
@@ -168,11 +200,17 @@ mod tests {
             }
         );
         *reply.lock().unwrap() = "{}".into();
-        assert!(monitor.close_window(commands.as_ref()).await.is_none());
-        assert!(monitor.bind(commands.as_ref(), &leases, 1).await);
+        assert!(EgressMonitor::close_window(&monitor, commands.as_ref())
+            .await
+            .is_none());
+        assert!(monitor.lock().await.bind(commands.as_ref(), &leases, 1).await);
         *reply.lock().unwrap() = listing(8, 5, 0);
-        assert!(monitor.close_window(commands.as_ref()).await.is_none());
-        let quiet = monitor.close_window(commands.as_ref()).await.unwrap();
+        assert!(EgressMonitor::close_window(&monitor, commands.as_ref())
+            .await
+            .is_none());
+        let quiet = EgressMonitor::close_window(&monitor, commands.as_ref())
+            .await
+            .unwrap();
         assert_eq!(quiet[&app].attempts, 0);
         assert_eq!(quiet[&app].unrecorded, 0);
     }
