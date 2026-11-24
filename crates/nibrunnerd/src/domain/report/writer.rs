@@ -198,7 +198,7 @@ mod tests {
             state.host_id = HostId::parse("hetzner-test").unwrap();
             state.revision = protocol::Revision::parse("deploy-4821").unwrap();
         }));
-        host.remember_accepted_document(&document).await;
+        host.remember_accepted_document(&document).await.unwrap();
         let report = build(&host, versions()).await;
         assert_eq!(report.host_id.as_str(), "hetzner-test");
         assert_eq!(report.accepted_digest, Some(document.digest));
@@ -247,7 +247,7 @@ mod tests {
         host.load().await.unwrap();
         assert_eq!(build(&host, versions()).await.host_id.as_str(), "host-7");
 
-        host.remember_accepted_document(&document).await;
+        host.remember_accepted_document(&document).await.unwrap();
         assert_eq!(build(&host, versions()).await.host_id.as_str(), "host-7");
     }
 

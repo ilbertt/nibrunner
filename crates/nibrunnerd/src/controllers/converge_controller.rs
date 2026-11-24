@@ -50,10 +50,14 @@ impl ConvergeController {
                 if !self.supports_volume_storage(&document.desired).await {
                     return false;
                 }
-                self.forget_refusal().await;
                 // Taken up before anything is converged on, and whether or not the ask moved: a
                 // document rewritten to the same ask is still the one the report answers for.
-                self.host.remember_accepted_document(&document).await;
+                if let Err(error) = self.host.remember_accepted_document(&document).await {
+                    tracing::error!(%error, "the desired revision could not be persisted");
+                    self.note_refusal(error.message()).await;
+                    return false;
+                }
+                self.forget_refusal().await;
                 let desired = document.desired;
                 let trigger = match self.accept(&desired).await {
                     Ok(Some(changes)) => {
@@ -212,6 +216,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_revision_write_is_retried_and_only_the_committed_revision_survives_restart() {
+        let pool = crate::domain::store::in_memory().await;
+        let host = test_host_with(crate::repositories::Repositories::sqlite(pool.clone())).await;
+        let mut reconciler = MockReconcileService::new();
+        reconciler.expect_reconcile().times(2).returning(|_, _| ());
+        let controller = controller(&host, reconciler);
+        let previous = desired_state(|_| {});
+        write_desired_state(&host.config.desired_state_file, &previous);
+        assert!(controller.converge_once().await);
+        sqlx::query("create trigger refuse_revision before update on accepted_document begin select raise(fail, 'write refused'); end")
+            .execute(&pool).await.unwrap();
+        let next = desired_state(|state| {
+            state.revision = protocol::Revision::parse("next").unwrap();
+            state.instances.push(desired_instance(|_| {}));
+        });
+        write_desired_state(&host.config.desired_state_file, &next);
+        assert!(!controller.converge_once().await);
+        assert_eq!(
+            host.state.snapshot().await.accepted_revision,
+            Some(previous.revision.clone())
+        );
+        assert_eq!(host.cache.lock().await.latest(), Some(&previous));
+        assert_eq!(host.accepted_document().await.unwrap().desired, previous);
+        sqlx::query("drop trigger refuse_revision")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(controller.converge_once().await);
+        let restarted = test_host_with(crate::repositories::Repositories::sqlite(pool)).await;
+        restarted.load().await.unwrap();
+        assert_eq!(
+            restarted.state.snapshot().await.accepted_revision,
+            Some(next.revision.clone())
+        );
+        assert_eq!(restarted.accepted_document().await.unwrap().desired, next);
+    }
+
+    #[tokio::test]
     async fn a_customer_bucket_is_readable_but_never_reconciled_on_shared_storage() {
         let host = test_host().await;
         let desired =
@@ -230,7 +272,7 @@ mod tests {
         assert_eq!(document.desired, desired);
 
         let previous = accepted_document(desired_state(|_| {}));
-        host.remember_accepted_document(&previous).await;
+        host.remember_accepted_document(&previous).await.unwrap();
         let mut reconciler = MockReconcileService::new();
         reconciler.expect_reconcile().never();
         let controller = controller(&host, reconciler);
@@ -243,7 +285,7 @@ mod tests {
             .await
             .contains("nibrunner_desired_state_unreadable_total 0\n"));
 
-        host.remember_accepted_document(&document).await;
+        host.remember_accepted_document(&document).await.unwrap();
         assert!(!controller.converge_accepted().await);
         assert!(host.cache.lock().await.latest().is_none());
     }

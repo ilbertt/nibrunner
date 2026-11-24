@@ -163,15 +163,14 @@ mod tests {
     #[test]
     fn unexpected_extra_descriptors_are_closed_when_the_message_is_refused() {
         let (sender, receiver) = UnixStream::pair().unwrap();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let address = listener.local_addr().unwrap();
+        use std::io::Read;
+        let (sent, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         sendmsg::<()>(
             sender.as_raw_fd(),
             &[IoSlice::new(LISTENER)],
-            &[ControlMessage::ScmRights(&[
-                listener.as_raw_fd(),
-                listener.as_raw_fd(),
-            ])],
+            &[ControlMessage::ScmRights(&[sent.as_raw_fd(), sent.as_raw_fd()])],
             MsgFlags::empty(),
             None,
         )
@@ -180,7 +179,11 @@ mod tests {
             receive(&receiver).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
-        drop(listener);
-        assert!(std::net::TcpStream::connect(address).is_err());
+        drop(sent);
+        assert_eq!(
+            peer.read(&mut [0]).unwrap(),
+            0,
+            "all copies of the rejected descriptor must close"
+        );
     }
 }

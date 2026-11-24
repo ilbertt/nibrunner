@@ -256,6 +256,7 @@ pub async fn build_host(
         exports,
         nbd: crate::adapters::volumes::nbd::NbdDevices::new(commands.clone()),
         commands: commands.clone(),
+        accepting_document: Default::default(),
         cache: Mutex::new(DesiredStateCache::new()),
         vms,
         logs: files,

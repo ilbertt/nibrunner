@@ -521,6 +521,7 @@ async fn test_host_over(
         guest_image_version: "6.1.180-test".to_string(),
         state: state.clone(),
         allocator: Arc::new(Mutex::new(SlotAllocator::addressing(config.max_apps))),
+        accepting_document: Default::default(),
         cache: Mutex::new(DesiredStateCache::new()),
         vms,
         logs,
