@@ -104,7 +104,7 @@ impl VmManager {
         }
     }
 
-    fn startup_failure(&self, app_id: &AppId, error: VmError) -> VmError {
+    fn startup_failure(&self, app_id: &AppId, error: super::startup::InitializationError) -> VmError {
         let status = self.processes.status(app_id);
         let process = status
             .exit
@@ -114,7 +114,11 @@ impl VmManager {
             .processes
             .console_tail(app_id)
             .unwrap_or_else(|error| format!("could not read the console: {error}"));
-        VmError::Host(format!("{error}; VMM {process}; console tail:\n{console}"))
+        let summary = protocol::StateMessage::new(format!("{error}; VMM {process}"));
+        VmError::Boot {
+            detail: format!("{summary}; console tail:\n{console}"),
+            summary,
+        }
     }
 
     fn current_stamp(&self, request: &SuspendRequest) -> SnapshotStamp {
@@ -552,7 +556,10 @@ impl Vmm for VmManager {
         let app_id = request.desired.app_id.clone();
         self.discard_snapshot(&app_id);
         let staged = std::time::Instant::now();
-        let prepared = self.stage(&request).await?;
+        let prepared = self.stage(&request).await.map_err(|error| VmError::Boot {
+            summary: protocol::StateMessage::new("could not stage the guest drives or prepare its jail"),
+            detail: error.message(),
+        })?;
         let staged_for = staged.elapsed();
 
         let starting = std::time::Instant::now();
@@ -570,7 +577,13 @@ impl Vmm for VmManager {
         if let Err(error) = started {
             self.cron_registration.detach(&app_id).await;
             let _ = self.logs.detach(&app_id).await;
-            return Err(VmError::Host(error.to_string()));
+            return Err(VmError::Boot {
+                summary: protocol::StateMessage::new(format!(
+                    "could not launch the jailed VMM ({})",
+                    error.kind()
+                )),
+                detail: error.to_string(),
+            });
         }
         let spawned_at = staged.elapsed();
         let control = prepared

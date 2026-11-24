@@ -132,6 +132,11 @@ pub struct SuspendRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VmError {
+    #[error("{detail}")]
+    Boot {
+        summary: protocol::StateMessage,
+        detail: String,
+    },
     #[error("this host is busy starting other microVMs; retry later")]
     StartBusy,
     #[error("the saved microVM state cannot be restored: {reason}")]

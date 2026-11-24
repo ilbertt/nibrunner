@@ -266,10 +266,19 @@ fn start_refused(
 // the tenant's restarts inside the guest. So the sentence carries both, because an instance out
 // of restarts is otherwise indistinguishable from one that has never been restarted at all.
 async fn say_it_is_out_of_restarts(host: &Host, app_id: &AppId, attempted: u32, allowed: u32) {
-    let said = StateMessage::new(format!(
+    let mut text = format!(
         "out of restarts: {attempted} starts attempted against a budget of {allowed}, and this instance will not be started again until it is deployed afresh"
-    ));
-    if say(host, app_id, said).await {
+    );
+    if let Some(reason) = host
+        .state
+        .record(app_id)
+        .await
+        .and_then(|record| record.last_start_failure)
+    {
+        text.push_str(". Last failure: ");
+        text.push_str(reason.as_str());
+    }
+    if say(host, app_id, StateMessage::new(text)).await {
         host.metrics.health.failed(app_id, Failure::OutOfRestarts);
     }
 }
@@ -504,7 +513,16 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
     host.state.mark_active(&desired.app_id, now).await;
 
     let booted = match host.payloads.prepare(&desired.layers).await {
-        Err(error) => Err((Failure::Layers, error.message())),
+        Err(error) => {
+            use crate::ports::ArtifactError;
+            let summary = match error {
+                ArtifactError::Transfer(_) => "could not fetch the requested layer",
+                ArtifactError::DigestMismatch { .. } => "layer digest verification failed",
+                ArtifactError::NotAnImage { .. } => "the layer has an unsupported image format",
+                ArtifactError::Unpackable(_) => "could not build the layer filesystem",
+            };
+            Err((Failure::Layers, error.message(), StateMessage::new(summary)))
+        }
         Ok(payload) => {
             let attaching = std::time::Instant::now();
             let attached = host.volumes.attach(&desired.volume_id, &desired.app_id).await;
@@ -525,6 +543,8 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
                         .update_record(&desired.app_id, |record| {
                             record.state = InstanceState::Failed;
                             record.message = Some(StateMessage::new(error.message()));
+                            record.last_start_failure =
+                                Some(StateMessage::new("could not attach the app volume"));
                         })
                         .await;
                     host.metrics.health.failed(&desired.app_id, Failure::Volume);
@@ -560,7 +580,17 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
                     .await;
                 return BootOutcome::StartBusy;
             }
-            boot.map_err(|error| (Failure::Boot, error.message()))
+            boot.map_err(|error| {
+                let summary = match &error {
+                    VmError::Boot { summary, .. } => summary.clone(),
+                    VmError::Rejected { status, .. } => {
+                        StateMessage::new(format!("VMM API rejected startup with status {status}"))
+                    }
+                    VmError::Unreachable { .. } => StateMessage::new("could not connect to the VMM API"),
+                    _ => StateMessage::new("could not start the microVM"),
+                };
+                (Failure::Boot, error.message(), summary)
+            })
         }
     };
 
@@ -577,6 +607,7 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
                     // counted was that guest's, and the host's own boots are the attempts.
                     record.restart_count = 0;
                     record.last_restart = None;
+                    record.last_start_failure = None;
                     record.message = None;
                 })
                 .await;
@@ -588,11 +619,16 @@ async fn boot_instance(host: &Host, desired: &DesiredInstance, reason: BootReaso
             tracing::info!(app_id = %desired.app_id, host_port = ?attempted.host_port, guest_ipv4 = ?attempted.guest_ipv4, "instance started");
             BootOutcome::Started
         }
-        Err((failure, reason)) => {
+        Err((failure, reason, summary)) => {
             host.state
                 .update_record(&desired.app_id, |record| {
                     record.state = InstanceState::Failed;
-                    record.message = Some(StateMessage::new(reason.clone()));
+                    record.message = Some(if matches!(failure, Failure::Boot) {
+                        summary.clone()
+                    } else {
+                        StateMessage::new(reason.clone())
+                    });
+                    record.last_start_failure = Some(summary);
                 })
                 .await;
             host.metrics.health.failed(&desired.app_id, failure);
@@ -863,6 +899,12 @@ async fn settle(
             let first_ready = state == InstanceState::Running && !latest.health.ever_healthy;
             latest.health = health;
             latest.state = state;
+            if exited && record.started_at.is_some() {
+                latest.last_start_failure = Some(StateMessage::new(status.exit.map_or_else(
+                    || "the guest stopped before it could stay healthy".into(),
+                    |exit| format!("VMM {}", exit.describe()),
+                )));
+            }
             if let Some(exit) = status.exit.filter(|_| !status.active) {
                 // A microVM killed under a signal has no exit code, and the code of an earlier
                 // exit is not this one's.
@@ -1384,6 +1426,39 @@ mod tests {
         assert_eq!(record.start_attempts.attempts, 2);
         assert!(record.started_at.is_some());
         assert!(record.message.is_none());
+    }
+
+    #[tokio::test]
+    async fn exhausting_the_restart_budget_after_reload_retains_only_the_safe_boot_cause() {
+        let host = test_host().await;
+        host.volumes.provision(&desired_volume(|_| {})).await.unwrap();
+        let desired = desired_instance(|instance| instance.config.restart_policy.max_restarts = 0);
+        host.vms.boot_error(Some(VmError::Boot {
+            summary: StateMessage::new("the guest did not initialize within 60s"),
+            detail: "console tail: private-tenant-output".into(),
+        }));
+        start_instance(&host, &desired).await;
+        assert!(!host
+            .state
+            .record(&app_id())
+            .await
+            .unwrap()
+            .message
+            .unwrap()
+            .as_str()
+            .contains("private-tenant-output"));
+        host.persist().await;
+        host.state.drop_record(&app_id()).await;
+        host.load().await.unwrap();
+        start_instance(&host, &desired).await;
+        let record = host.state.record(&app_id()).await.unwrap();
+        let reported = crate::domain::report::build_report::to_reported_instance(&record);
+        let message = reported.message.unwrap();
+        assert!(message.as_str().contains("1 starts attempted"));
+        assert!(message
+            .as_str()
+            .contains("the guest did not initialize within 60s"));
+        assert!(!message.as_str().contains("private-tenant-output"));
     }
 
     #[tokio::test]

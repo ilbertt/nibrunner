@@ -59,3 +59,7 @@ until it is deployed again with a new `deploymentId`.
 
 The [reference](/docs/reference/desired) lists every field of a health check and a restart
 policy.
+
+When an instance exhausts its restart budget, its report includes the number of attempted starts
+and the last known failure cause. The daemon keeps this cause across restarts. Guest console output
+and upstream response bodies are excluded from the retained cause.
