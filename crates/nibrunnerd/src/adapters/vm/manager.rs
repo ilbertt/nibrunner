@@ -148,7 +148,10 @@ impl VmManager {
 
     async fn stage_inputs(&self, request: &BootRequest) -> Result<PathBuf, VmError> {
         let slot = &request.slot;
-        let host = |error: crate::adapters::net::tap::NetworkError| VmError::Host(error.message());
+        let host = |error: crate::adapters::net::tap::NetworkError| VmError::Boot {
+            summary: protocol::StateMessage::new(format!("could not configure {} for the guest", error.what)),
+            detail: error.message(),
+        };
         let network = self.network.clone();
         let tap = TapInterface {
             tap_name: slot.tap_name.clone(),
@@ -556,9 +559,12 @@ impl Vmm for VmManager {
         let app_id = request.desired.app_id.clone();
         self.discard_snapshot(&app_id);
         let staged = std::time::Instant::now();
-        let prepared = self.stage(&request).await.map_err(|error| VmError::Boot {
-            summary: protocol::StateMessage::new("could not stage the guest drives or prepare its jail"),
-            detail: error.message(),
+        let prepared = self.stage(&request).await.map_err(|error| match error {
+            specific @ VmError::Boot { .. } => specific,
+            other => VmError::Boot {
+                summary: protocol::StateMessage::new("could not stage the guest drives or prepare its jail"),
+                detail: other.message(),
+            },
         })?;
         let staged_for = staged.elapsed();
 
@@ -1790,7 +1796,10 @@ mod tests {
             .boot(boot_request(desired_instance(|_| {})))
             .await
             .unwrap_err();
-        assert!(matches!(error, VmError::Host(_)), "{error}");
+        assert!(
+            matches!(&error, VmError::Boot { summary, .. } if summary.as_str().contains("a tap device")),
+            "{error}"
+        );
         assert!(error.message().contains("operation not permitted"), "{error}");
         assert!(fixture.manager.processes.read_record(&app_id()).is_none());
         assert!(fixture.manager.logs.attached().await.is_empty());
@@ -1830,7 +1839,10 @@ mod tests {
             .boot(boot_request(desired_instance(|_| {})))
             .await
             .unwrap_err();
-        assert!(matches!(error, VmError::Host(_)), "{error}");
+        assert!(
+            matches!(&error, VmError::Boot { summary, .. } if summary.as_str().contains("could not launch the jailed VMM")),
+            "{error}"
+        );
         assert!(
             fixture.manager.logs.attached().await.is_empty(),
             "a socket nothing will write to is not left listening"
