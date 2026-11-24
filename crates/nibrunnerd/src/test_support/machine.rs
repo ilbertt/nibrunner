@@ -116,7 +116,7 @@ fn tenant_binary() -> Option<PathBuf> {
 
 /// A port nothing is listening on. Racy in principle; in a suite that runs one test at a time
 /// against a machine that is otherwise idle, it is the shortest way to a free port.
-fn free_port() -> u16 {
+pub fn free_port() -> u16 {
     std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .and_then(|listener| listener.local_addr())
         .map_or(0, |address| address.port())

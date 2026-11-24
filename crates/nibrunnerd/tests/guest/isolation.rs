@@ -159,7 +159,7 @@ async fn outbound_flows_stay_with_the_app_across_wake_and_redeployment() {
 
     let Some(host) = crate::host_with(|config| {
         config.metrics = Some(nibrunnerd::config::MetricsConfig {
-            port: 0,
+            port: nibrunnerd::test_support::machine::free_port(),
             listen_address: Ipv4Addr::LOCALHOST.into(),
             outbound_monitoring: true,
         });
