@@ -103,7 +103,10 @@ pub(crate) async fn connect(path: &Path) -> std::io::Result<UnixStream> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("a guest socket has no parent"))?;
-    let expected_uid = std::fs::metadata(parent)?.uid();
+    connect_to_uid(path, std::fs::metadata(parent)?.uid()).await
+}
+
+pub(crate) async fn connect_to_uid(path: &Path, expected_uid: u32) -> std::io::Result<UnixStream> {
     let stream = UnixStream::connect(path).await?;
     verify_peer(&stream, expected_uid)?;
     Ok(stream)
