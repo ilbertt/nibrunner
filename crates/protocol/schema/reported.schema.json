@@ -31,6 +31,9 @@
       "description": "What is left once every booted app is taken off.",
       "$ref": "#/$defs/HostCapacity"
     },
+    "capabilities": {
+      "$ref": "#/$defs/HostCapabilities"
+    },
     "capacity": {
       "description": "What the machine has.",
       "$ref": "#/$defs/HostCapacity"
@@ -99,6 +102,7 @@
     "state",
     "capacity",
     "allocatable",
+    "capabilities",
     "versions",
     "cron",
     "volumes",
@@ -234,6 +238,46 @@
         "totalBytes",
         "usedBytes",
         "measuredAt"
+      ]
+    },
+    "HostCapabilities": {
+      "description": "Placement features advertised by this host. A daemon predating this report field\nhas advertised none, even if its version happens to support one of them.",
+      "type": "object",
+      "properties": {
+        "customerVolumes": {
+          "description": "Accepts a new app volume with its own S3-compatible storage.",
+          "type": "boolean"
+        },
+        "hostVolumeCheckpoints": {
+          "description": "Can checkpoint volumes on the host's default backend.",
+          "type": "boolean"
+        },
+        "http": {
+          "description": "Whether the host routes HTTP requests, including over TLS.",
+          "type": "boolean"
+        },
+        "https": {
+          "description": "Whether the HTTP listener terminates TLS.",
+          "type": "boolean"
+        },
+        "maxRawPortsPerApp": {
+          "description": "Combined TCP and UDP port limit per app. Zero means raw ingress is disabled.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ociLayers": {
+          "description": "Accepts digest-pinned OCI layers.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "http",
+        "https",
+        "maxRawPortsPerApp",
+        "ociLayers",
+        "customerVolumes",
+        "hostVolumeCheckpoints"
       ]
     },
     "HostCapacity": {

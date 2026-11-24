@@ -150,3 +150,11 @@ consuming the restored VM's running limit. This also applies to snapshots on tmp
 The host must provide the cgroup v2 CPU and memory controllers. If limits cannot
 be applied, the VM fails to start. Existing VMs keep their current limits until
 their next boot or restore; restarting the daemon readopts them.
+
+## Placing an app
+
+Read `capabilities` in the host's latest report before assigning a deployment. It advertises
+HTTP routing, TLS termination, the combined raw TCP/UDP port limit per app, OCI layers,
+customer-owned volumes and checkpoints on the host's default volume backend. A report without
+`capabilities` comes from an older daemon. Treat those features as unadvertised.
+Use `allocatable` separately to check how much capacity remains.

@@ -965,6 +965,7 @@ mod schema {
             cache_bytes: 1 << 40,
         };
         let state = HostReportedState {
+            capabilities: Default::default(),
             cron: None,
             host_id: HostId::parse("host-1").unwrap(),
             reported_at: now.clone(),
@@ -1382,6 +1383,17 @@ mod schema {
             );
             assert!(!validator.is_valid(&document), "the schema took {document}");
         }
+    }
+
+    #[test]
+    fn new_reports_advertise_capabilities_and_older_reports_claim_none() {
+        let schema = validator(crate::schema::reported_state());
+        let mut document = reported_json();
+        assert!(schema.is_valid(&document));
+        document.as_object_mut().unwrap().remove("capabilities");
+        assert!(!schema.is_valid(&document));
+        let legacy: HostReportedState = serde_json::from_value(document).unwrap();
+        assert_eq!(legacy.capabilities, HostCapabilities::default());
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub struct ReportInputs<'a> {
     pub state: HostState,
     pub capacity: HostCapacity,
     pub allocatable: HostCapacity,
+    pub capabilities: protocol::HostCapabilities,
     pub versions: HostVersions,
     pub records: &'a [InstanceRecord],
     pub volumes: Vec<ReportedVolume>,
@@ -47,6 +48,7 @@ pub fn build_reported_state(inputs: ReportInputs<'_>) -> HostReportedState {
         state: inputs.state,
         capacity: inputs.capacity,
         allocatable: inputs.allocatable,
+        capabilities: inputs.capabilities,
         versions: inputs.versions,
         volumes: inputs.volumes,
         instances: inputs.records.iter().map(to_reported_instance).collect(),
@@ -75,6 +77,7 @@ mod tests {
             cache_bytes: 1000,
         };
         build_reported_state(ReportInputs {
+            capabilities: Default::default(),
             host_id: host_id(),
             reported_at: observed_at(),
             state: HostState::Ready,

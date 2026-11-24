@@ -15,6 +15,22 @@ pub async fn host_id_of(host: &Host) -> HostId {
         .unwrap_or_else(|| HostId::parse("host-local").expect("a constant identifier"))
 }
 
+fn capabilities(config: &crate::config::HostConfig) -> protocol::HostCapabilities {
+    let zerofs = config.volumes.zerofs().is_some();
+    protocol::HostCapabilities {
+        http: config.proxy.http.is_some(),
+        https: config
+            .proxy
+            .http
+            .as_ref()
+            .is_some_and(|listener| listener.tls.is_some()),
+        max_raw_ports_per_app: config.proxy.raw.as_ref().map_or(0, |raw| raw.max_ports_per_guest),
+        oci_layers: true,
+        customer_volumes: zerofs,
+        host_volume_checkpoints: zerofs,
+    }
+}
+
 pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     let snapshot = host.state.snapshot().await;
     let records: Vec<_> = snapshot.records.values().cloned().collect();
@@ -27,6 +43,7 @@ pub async fn build(host: &Host, versions: HostVersions) -> HostReportedState {
     let allocatable = allocatable_capacity(&capacity, &committed_resources(&records), space.available_bytes);
 
     let mut report = build_reported_state(ReportInputs {
+        capabilities: capabilities(&host.config),
         host_id: host_id_of(host).await,
         reported_at: now_timestamp(),
         state: if snapshot.converged {
@@ -104,6 +121,36 @@ mod tests {
 
     fn versions() -> HostVersions {
         crate::domain::report::versions::compiled_versions("v1.16.1", "6.1.180-test")
+    }
+
+    #[test]
+    fn advertised_features_follow_the_configured_listeners_and_volume_backend() {
+        let mut config = crate::config::HostConfig::example();
+        let full = capabilities(&config);
+        assert!(
+            full.http
+                && full.https
+                && full.oci_layers
+                && full.customer_volumes
+                && full.host_volume_checkpoints
+        );
+        assert_eq!(
+            full.max_raw_ports_per_app,
+            config.proxy.raw.as_ref().unwrap().max_ports_per_guest
+        );
+        config.proxy.http.as_mut().unwrap().tls = None;
+        assert!(capabilities(&config).http);
+        assert!(!capabilities(&config).https);
+        config.proxy.http = None;
+        config.proxy.raw = None;
+        config.volumes = crate::config::VolumeBackend::LocalFile;
+        assert_eq!(
+            capabilities(&config),
+            protocol::HostCapabilities {
+                oci_layers: true,
+                ..Default::default()
+            }
+        );
     }
 
     #[tokio::test]

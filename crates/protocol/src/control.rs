@@ -559,6 +559,26 @@ pub struct ReportedExport {
     pub message: Option<StateMessage>,
 }
 
+/// Placement features advertised by this host. A daemon predating this report field
+/// has advertised none, even if its version happens to support one of them.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct HostCapabilities {
+    /// Whether the host routes HTTP requests, including over TLS.
+    pub http: bool,
+    /// Whether the HTTP listener terminates TLS.
+    pub https: bool,
+    /// Combined TCP and UDP port limit per app. Zero means raw ingress is disabled.
+    pub max_raw_ports_per_app: usize,
+    /// Accepts digest-pinned OCI layers.
+    pub oci_layers: bool,
+    /// Accepts a new app volume with its own S3-compatible storage.
+    pub customer_volumes: bool,
+    /// Can checkpoint volumes on the host's default backend.
+    pub host_volume_checkpoints: bool,
+}
+
 /// What one host is running, as the daemon last wrote it to `reported.json` in its
 /// `paths.state_dir`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -572,6 +592,9 @@ pub struct HostReportedState {
     pub capacity: HostCapacity,
     /// What is left once every booted app is taken off.
     pub allocatable: HostCapacity,
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(!default))]
+    pub capabilities: HostCapabilities,
     pub versions: HostVersions,
     #[serde(deserialize_with = "Option::deserialize")]
     #[cfg_attr(
