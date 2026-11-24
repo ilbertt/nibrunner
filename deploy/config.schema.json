@@ -222,6 +222,10 @@
           "description": "An IP address to bind.",
           "type": "string"
         },
+        "outbound_monitoring": {
+          "description": "Count outbound TCP and UDP flows and distinct destinations per app in five-minute windows. Disabled when omitted.",
+          "type": "boolean"
+        },
         "port": {
           "description": "A free port, outside the range the slots take from 21000, other than `proxy.http.port`,\nand not 9091 on a zerofs host, which ZeroFS holds.",
           "type": "integer",

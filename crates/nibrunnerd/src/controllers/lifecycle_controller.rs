@@ -28,6 +28,9 @@ impl LifecycleController {
 
     pub async fn start(&self) -> std::io::Result<()> {
         self.host.load().await;
+        if !self.host.outbound_monitoring() {
+            crate::adapters::net::egress::remove(self.host.commands.as_ref()).await;
+        }
         let adopted = self.host.vms.adopted_app_ids().await;
         if !adopted.is_empty() {
             tracing::info!(adopted = adopted.len(), "microVMs from an earlier daemon adopted");
@@ -51,7 +54,7 @@ impl LifecycleController {
         let measurements = VsockMeasurements::new(self.host.clone());
         let idle = HostIdle::new(self.host.clone());
 
-        let held: Vec<Arc<dyn Controller>> = vec![
+        let mut held: Vec<Arc<dyn Controller>> = vec![
             crate::controllers::cron_controller::CronController::new(
                 self.host.clone(),
                 self.host.cron.clone(),
@@ -62,10 +65,18 @@ impl LifecycleController {
             IdleController::new(idle),
             MeasurementController::new(HostUsage::new(self.host.clone(), measurements)),
         ];
+        if self.host.outbound_monitoring() {
+            held.push(Arc::new(super::egress_controller::EgressController(
+                self.host.clone(),
+            )));
+        }
         held
     }
 
     pub async fn stop(&self) {
+        if self.host.outbound_monitoring() {
+            crate::adapters::net::egress::remove(self.host.commands.as_ref()).await;
+        }
         self.host.cron_runs.shutdown().await;
         self.host.persist().await;
         HostReporter::new(self.host.clone(), self.versions.clone())

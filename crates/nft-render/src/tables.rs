@@ -43,19 +43,21 @@ fn remember(table: &mut Table, kind: &str, body: &Map<String, Value>) -> Option<
 }
 
 pub fn parse_kernel_ruleset(json: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(json).ok()?;
-    let entries = parsed.get("nftables")?.as_array()?;
     let mut tables = BTreeMap::<String, Table>::new();
-    for item in entries {
-        let Some((kind, body)) = entry(item) else { continue };
-        let family = body.get("family")?.as_str()?;
-        if !NFTABLES_FAMILIES.contains(&family) {
-            continue;
+    for document in serde_json::Deserializer::from_str(json).into_iter::<Value>() {
+        let parsed = document.ok()?;
+        let entries = parsed.get("nftables")?.as_array()?;
+        for item in entries {
+            let Some((kind, body)) = entry(item) else { continue };
+            let family = body.get("family")?.as_str()?;
+            if !NFTABLES_FAMILIES.contains(&family) {
+                continue;
+            }
+            if kind == "table" {
+                tables.insert(family.into(), Table::default());
+            }
+            remember(tables.get_mut(family)?, kind, body)?;
         }
-        if kind == "table" {
-            tables.insert(family.into(), Table::default());
-        }
-        remember(tables.get_mut(family)?, kind, body)?;
     }
     for family in NFTABLES_FAMILIES {
         let table = tables.get(family)?;

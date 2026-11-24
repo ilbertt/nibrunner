@@ -42,6 +42,7 @@ pub struct Host {
     pub nbd: NbdDevices,
     pub commands: Arc<dyn CommandRunner>,
     pub firewall: Arc<HostFirewall>,
+    pub(crate) egress: Mutex<crate::adapters::net::egress::EgressMonitor>,
     pub router: Arc<Router>,
     pub http_proxy: Option<Arc<crate::adapters::proxy::worker::process::DetachedHttpProxy>>,
     pub metrics: Arc<HostMetrics>,
@@ -99,7 +100,27 @@ impl Host {
         &self,
         app_id: &AppId,
     ) -> Result<nft_render::AppSlot, crate::adapters::net::allocator::SlotExhausted> {
-        self.allocator.lock().await.allocate(app_id)
+        let mut allocator = self.allocator.lock().await;
+        let slot = allocator.allocate(app_id)?;
+        self.bind_egress(&allocator).await;
+        Ok(slot)
+    }
+
+    pub(crate) fn outbound_monitoring(&self) -> bool {
+        self.config
+            .metrics
+            .as_ref()
+            .is_some_and(|metrics| metrics.outbound_monitoring)
+    }
+
+    pub(crate) async fn bind_egress(&self, allocator: &SlotAllocator) {
+        if self.outbound_monitoring() {
+            self.egress
+                .lock()
+                .await
+                .bind(self.commands.as_ref(), allocator.assignments(), allocator.limit())
+                .await;
+        }
     }
 
     pub async fn slot_of(&self, app_id: &AppId) -> Option<nft_render::AppSlot> {

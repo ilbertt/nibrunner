@@ -45,7 +45,11 @@ impl HostFirewall {
 
     async fn inspect(&self) -> Result<String, CommandError> {
         let output = self
-            .run(CommandRequest::new(&["nft", "-j", "list", "ruleset"]))
+            .run(CommandRequest::new(&[
+                "nft",
+                "-j",
+                "list ruleset ip; list ruleset ip6",
+            ]))
             .await?;
         parse_kernel_ruleset(&output).ok_or_else(unverified)
     }

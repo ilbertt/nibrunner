@@ -158,6 +158,7 @@ pub struct RawPorts {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetricsConfig {
+    pub outbound_monitoring: bool,
     pub port: u16,
     pub listen_address: IpAddr,
 }
@@ -639,6 +640,9 @@ mod file {
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "metrics")]
     pub(super) struct Metrics {
+        /// Count outbound TCP and UDP flows and distinct destinations per app in five-minute windows. Disabled when omitted.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) outbound_monitoring: Option<bool>,
         /// A free port, outside the range the slots take from 21000, other than `proxy.http.port`,
         /// and not 9091 on a zerofs host, which ZeroFS holds.
         #[schemars(range(min = 1))]
@@ -905,6 +909,7 @@ impl HostConfig {
         // What an app has used is published here and nowhere else, so a host laid out from
         // nothing still has somewhere to read it. On loopback, because it is this host's to read.
         starter.metrics = Some(MetricsConfig {
+            outbound_monitoring: false,
             port: 9100,
             listen_address: IpAddr::from([127, 0, 0, 1]),
         });
@@ -1019,6 +1024,7 @@ impl HostConfig {
                 }),
             },
             metrics: Some(MetricsConfig {
+                outbound_monitoring: false,
                 port: 9100,
                 listen_address: IpAddr::from([127, 0, 0, 1]),
             }),
@@ -1135,6 +1141,7 @@ impl HostConfig {
                 }),
             }),
             metrics: self.metrics.as_ref().map(|metrics| file::Metrics {
+                outbound_monitoring: Some(metrics.outbound_monitoring),
                 port: Some(metrics.port),
                 listen_address: Some(metrics.listen_address.to_string()),
             }),
@@ -1440,6 +1447,7 @@ fn metrics(
     // A scrape surface names every app this host runs and what each is using, so where it is bound
     // is said out loud rather than guessed at.
     Ok(Some(MetricsConfig {
+        outbound_monitoring: document.outbound_monitoring.unwrap_or(false),
         port,
         listen_address: bind_address("metrics.listen_address", &document.listen_address)?,
     }))
@@ -2293,6 +2301,7 @@ denied_egress_addresses_v6 = []
         assert_eq!(
             on.metrics,
             Some(MetricsConfig {
+                outbound_monitoring: false,
                 port: 9100,
                 listen_address: IpAddr::from([0, 0, 0, 0]),
             })
@@ -2752,6 +2761,7 @@ keep_mib_per_app = 64
         assert_eq!(
             config.metrics,
             Some(MetricsConfig {
+                outbound_monitoring: false,
                 port: 9100,
                 listen_address: IpAddr::from([127, 0, 0, 1]),
             })

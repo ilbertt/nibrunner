@@ -107,6 +107,37 @@ app and nothing else, which is what to filter on for a per-app dashboard. They c
 - Each app's CPU, memory, disk and network, both what it is using now and what it has used.
 - The host's slots, memory and capacity.
 
+### Review outbound connections
+
+Set [`metrics.outbound_monitoring`](/docs/reference/config#metrics-outbound_monitoring) to
+`true` and restart the daemon. The host publishes the last completed five-minute window
+as gauges labelled by app. For example, to review the busiest apps, query
+`topk(10, nibrunner_app_outbound_destination_ips_5m)`.
+
+| Metric | What it counts |
+| --- | --- |
+| `nibrunner_app_outbound_connections_5m` | New TCP and UDP flows admitted by the host filter. A TCP handshake can still fail downstream. |
+| `nibrunner_app_outbound_blocked_attempts_5m` | New attempts seen before the host filter that did not pass it. A retry after a rejection counts as another attempt. |
+| `nibrunner_app_outbound_destination_ips_5m` | Distinct original destination IPs across admitted and blocked attempts, up to 256 each for IPv4 and IPv6. |
+| `nibrunner_app_outbound_destination_limit_reached_5m` | A value of 1 means the distinct count is a lower bound because a destination could not be recorded. |
+
+The observer identifies the app by its incoming guest TAP and reads the original destination
+from conntrack before source NAT. Replies to inbound connections and later packets of a tracked
+flow are excluded. The counters bracket the input and forward filters at priority zero, including
+other firewall rules at that priority. Packets discarded before those hooks are outside the count.
+A flow in flight at a sample boundary can affect adjacent windows.
+The first window after startup or an observer reset takes five minutes. A missing or late reading
+leaves a gap. Sleep and redeployment keep the app's counters. When a slot changes owners, the
+former app can finish its window independently. The host keeps up to `max_apps` departed apps
+alongside the active leases. Higher churn leaves a gap for that window.
+
+The outbound metrics expose only app IDs and aggregate counts. To deduplicate addresses, nftables
+keeps destination IPs in kernel memory for five minutes after their most recent new attempt.
+Reading these sets requires host network-administration privileges. The daemon reads them to
+count entries and discards the addresses. It writes no connection log and collects no packet
+payloads. Keep the metrics listener on loopback or an operator-only network. Historical aggregate
+retention follows the scraper's configuration.
+
 ### Bill from the totals, not from a rate
 
 `nibrunner_app_cpu_seconds_total`, `_network_bytes_total`, `_disk_mib_seconds_total` and

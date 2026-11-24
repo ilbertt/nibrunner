@@ -152,6 +152,58 @@ async fn an_address_the_configuration_denies_cannot_be_reached() {
     closed.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn outbound_flows_stay_with_the_app_across_wake_and_redeployment() {
+    use nft_render::egress::{egress_listing, parse_egress};
+    use nibrunnerd::ports::{CommandRequest, CommandRunnerExt};
+
+    let Some(host) = crate::host_with(|config| {
+        config.metrics = Some(nibrunnerd::config::MetricsConfig {
+            port: 0,
+            listen_address: Ipv4Addr::LOCALHOST.into(),
+            outbound_monitoring: true,
+        });
+    })
+    .await
+    else {
+        return;
+    };
+    let endpoint = EgressEndpoint::start();
+    let target = endpoint.address().to_string();
+    let app = host.tenant(1).on_request(60_000);
+    host.deploy(std::slice::from_ref(&app)).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    host.until_routed(&app).await;
+    assert!(reaching(&host, &app, &target).await.starts_with("reached"));
+    host.let_sleep(&app).await;
+    assert!(reaching(&host, &app, &target).await.starts_with("reached"));
+
+    let next = app.redeployed("next");
+    host.deploy(std::slice::from_ref(&next)).await;
+    host.until("the replacement to be running", |report| {
+        report.instances.iter().any(|instance| {
+            instance.app_id == next.app_id
+                && instance.deployment_id == next.instance.deployment_id
+                && instance.state == InstanceState::Running
+        })
+    })
+    .await;
+    host.until_routed(&next).await;
+    assert!(reaching(&host, &next, &target).await.starts_with("reached"));
+
+    let apps = [next.app_id.clone()].into();
+    let reading = host
+        .host
+        .commands
+        .stdout_of(CommandRequest::new(&["nft", "-j", "-f", "-"]).with_stdin(egress_listing(&apps)))
+        .await
+        .unwrap();
+    let counts = parse_egress(&reading, &apps).unwrap()[&next.app_id];
+    assert_eq!(counts.passed, 3);
+    assert_eq!(counts.destinations, 1);
+    host.stop().await;
+}
+
 const JAILER_IDLE_TIMEOUT_MS: u64 = 60_000;
 
 #[tokio::test(flavor = "multi_thread")]

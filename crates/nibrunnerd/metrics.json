@@ -633,5 +633,37 @@
       "of"
     ],
     "name": "nibrunner_conntrack_entries"
+  },
+  {
+    "help": "New guest TCP or UDP flows admitted through the host filter during the last completed five-minute window.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_outbound_connections_5m"
+  },
+  {
+    "help": "New guest TCP or UDP attempts stopped at the host filter during the last completed five-minute window.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_outbound_blocked_attempts_5m"
+  },
+  {
+    "help": "Distinct original destination IPs observed on new attempts in five minutes, capped at 256 per address family.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_outbound_destination_ips_5m"
+  },
+  {
+    "help": "Whether a new destination could not be recorded during the window.",
+    "kind": "gauge",
+    "labels": [
+      "app"
+    ],
+    "name": "nibrunner_app_outbound_destination_limit_reached_5m"
   }
 ]

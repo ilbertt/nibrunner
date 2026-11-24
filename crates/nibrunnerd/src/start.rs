@@ -1356,6 +1356,7 @@ mod tests {
             max_ports_per_guest: 1,
         });
         config.metrics = Some(crate::config::MetricsConfig {
+            outbound_monitoring: false,
             port: 9100,
             listen_address: "127.0.0.1".parse().unwrap(),
         });

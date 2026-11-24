@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
 
 pub mod counters;
+pub mod egress;
 pub mod firewall;
 pub mod slot;
 pub mod tables;

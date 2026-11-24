@@ -1,5 +1,6 @@
 pub mod conntrack;
 pub mod converge;
+pub(crate) mod egress;
 pub mod health;
 pub mod layers;
 pub mod passes;
@@ -38,6 +39,7 @@ pub struct HostMetrics {
     pub resources: ResourceMetrics,
     pub layers: std::sync::Arc<layers::LayerMetrics>,
     pub conntrack: ConntrackWatch,
+    pub(crate) egress: std::sync::Mutex<Option<egress::Window>>,
 }
 
 /// What a scrape is rendered from besides what the daemon counted: the report as it stands, the
@@ -394,6 +396,7 @@ pub fn declared() -> Vec<&'static Metric> {
         resources::DECLARED,
         layers::DECLARED,
         conntrack::DECLARED,
+        egress::DECLARED,
     ]
     .concat()
 }
@@ -427,6 +430,10 @@ pub fn render(metrics: &HostMetrics, scrape: &Scrape<'_>) -> String {
     startup::render(&mut page, &metrics.startup);
     start_capacity::render(&mut page, &metrics.start_capacity);
 
+    egress::render(
+        &mut page,
+        metrics.egress.lock().expect("egress window lock").as_ref(),
+    );
     page.declare(&UP);
     page.value(&UP, &[], 1);
 
@@ -669,6 +676,10 @@ pub(crate) mod tests {
             ready_at: None,
             message: None,
         }];
+        *metrics.egress.lock().unwrap() = Some(egress::Window {
+            closed: std::time::Instant::now(),
+            counts: [(app_id(), Default::default())].into(),
+        });
         let snapshot = HostSnapshot {
             records: [(
                 app_id(),

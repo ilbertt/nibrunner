@@ -166,16 +166,13 @@ pub async fn apply_volumes(
 /// only an app that is leaving gives them up. Taking it here is also what stops the slot the
 /// cursor hands out next from inheriting a live device.
 async fn give_back_slot(host: &Host, app_id: &AppId) {
-    let tap_name = {
-        let mut allocator = host.allocator.lock().await;
-        let held = allocator.lookup(app_id).map(|slot| slot.tap_name);
-        allocator.release(app_id);
-        held
-    };
-    if let Some(tap_name) = tap_name {
-        if let Err(error) = host.vms.delete_tap(&tap_name).await {
-            tracing::warn!(%tap_name, error = %error.message(), "a tap outlived the app it was made for");
+    let mut allocator = host.allocator.lock().await;
+    if let Some(slot) = allocator.lookup(app_id) {
+        if let Err(error) = host.vms.delete_tap(&slot.tap_name).await {
+            tracing::warn!(tap_name = %slot.tap_name, error = %error.message(), "a tap outlived the app it was made for");
         }
+        allocator.release(app_id);
+        host.bind_egress(&allocator).await;
     }
 }
 

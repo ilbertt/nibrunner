@@ -509,6 +509,7 @@ async fn test_host_over(
         config.logs.keep_bytes_per_app,
     ));
     let host = Arc::new(Host {
+        egress: Default::default(),
         cron,
         cron_execution: Arc::new(crate::adapters::cron_execution::VsockCronExecution::new(
             logs.clone(),
