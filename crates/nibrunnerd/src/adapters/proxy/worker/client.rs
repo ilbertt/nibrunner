@@ -75,6 +75,10 @@ impl HttpWorkerClient {
         self.acknowledged(Request::Discard(app_id.clone())).await
     }
 
+    pub(super) async fn bind(&self) -> io::Result<()> {
+        self.acknowledged(Request::Bind).await
+    }
+
     pub async fn attach(&self, listener: std::net::TcpListener) -> io::Result<()> {
         let (stream, reply) = self.request(Request::Attach).await?;
         Self::ready(reply)?;
@@ -84,6 +88,9 @@ impl HttpWorkerClient {
 
     pub async fn listener(&self) -> io::Result<std::net::TcpListener> {
         let (mut stream, reply) = self.request(Request::Export).await?;
+        if matches!(&reply, Reply::Failed(message) if message == super::wire::NOT_LISTENING) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
         Self::ready(reply)?;
         // A normal read can consume the descriptor's payload and discard its ancillary data.
         stream.write_all(&[wire::DESCRIPTOR_READY]).await?;

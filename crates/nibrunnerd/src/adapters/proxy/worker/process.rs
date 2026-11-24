@@ -136,7 +136,7 @@ impl DetachedHttpProxy {
         Ok(workers)
     }
 
-    async fn listener(&self, workers: &[(PathBuf, HttpWorkerClient)]) -> io::Result<TcpListener> {
+    async fn listener(&self, workers: &[(PathBuf, HttpWorkerClient)]) -> io::Result<Option<TcpListener>> {
         let http = self
             .config
             .proxy
@@ -144,16 +144,24 @@ impl DetachedHttpProxy {
             .as_ref()
             .ok_or(io::ErrorKind::InvalidInput)?;
         let address = SocketAddr::new(http.listen_address, http.port);
-        for (_, worker) in workers {
-            if let Ok(listener) = worker.listener().await {
-                if listener.local_addr()? == address {
-                    return Ok(listener);
+        for (path, worker) in workers {
+            match worker.listener().await {
+                Ok(listener) if listener.local_addr()? == address => return Ok(Some(listener)),
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotConnected => {}
+                Err(_) if worker_exited(path).await => {}
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "could not retrieve the HTTP listener from {}: {error}",
+                            path.display()
+                        ),
+                    ))
                 }
             }
         }
-        let listener = TcpListener::bind(address)?;
-        listener.set_nonblocking(true)?;
-        Ok(listener)
+        Ok(None)
     }
 
     pub async fn apply(&self, routes: Vec<RouteTarget>) -> io::Result<()> {
@@ -177,7 +185,10 @@ impl DetachedHttpProxy {
             let worker = self.launch(&path).await?;
             let ready = async {
                 worker.apply(routes.clone()).await?;
-                worker.attach(listener).await
+                match listener {
+                    Some(listener) => worker.attach(listener).await,
+                    None => worker.bind().await,
+                }
             }
             .await;
             if let Err(error) = ready {

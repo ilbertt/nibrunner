@@ -11,6 +11,7 @@ use tokio::net::UnixStream;
 
 use crate::domain::report::routes::RouteTarget;
 
+pub(super) const NOT_LISTENING: &str = "the worker is not accepting requests";
 pub(super) const DESCRIPTOR_READY: u8 = b'R';
 pub(super) const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const MESSAGE_LIMIT: u64 = 8 * 1024 * 1024;
@@ -19,6 +20,7 @@ const MESSAGE_LIMIT: u64 = 8 * 1024 * 1024;
 pub(super) enum Request {
     Routes(Vec<RouteTarget>),
     Attach,
+    Bind,
     Export,
     Active,
     Metrics,
