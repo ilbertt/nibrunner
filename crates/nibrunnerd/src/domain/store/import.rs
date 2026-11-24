@@ -6,7 +6,7 @@ pub async fn import_documents(
     repositories: &Repositories,
     config: &crate::config::HostConfig,
 ) -> Result<(), StoreError> {
-    if !repositories.holds_nothing().await {
+    if !repositories.holds_nothing().await? {
         return Ok(());
     }
 

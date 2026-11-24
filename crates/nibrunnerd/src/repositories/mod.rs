@@ -47,15 +47,8 @@ impl Repositories {
         }
     }
 
-    pub async fn holds_nothing(&self) -> bool {
-        let slots = self.slots.all().await.map(|held| held.len()).unwrap_or_default();
-        let instances = self
-            .instances
-            .all()
-            .await
-            .map(|held| held.len())
-            .unwrap_or_default();
-        slots + instances == 0
+    pub async fn holds_nothing(&self) -> Result<bool, crate::domain::store::StoreError> {
+        Ok(self.slots.all().await?.is_empty() && self.instances.all().await?.is_empty())
     }
 }
 
@@ -199,13 +192,13 @@ mod tests {
     #[tokio::test]
     async fn a_host_that_has_written_nothing_holds_nothing() {
         let repositories = Repositories::sqlite(in_memory().await);
-        assert!(repositories.holds_nothing().await);
+        assert!(repositories.holds_nothing().await.unwrap());
         repositories
             .instances
             .replace_all(&[crate::test_support::instance_record(|_| {})])
             .await
             .unwrap();
-        assert!(!repositories.holds_nothing().await);
+        assert!(!repositories.holds_nothing().await.unwrap());
     }
 
     #[tokio::test]
@@ -262,6 +255,6 @@ mod tests {
         let config = crate::config::HostConfig::under(directory.path());
         let repositories = Repositories::sqlite(in_memory().await);
         import_documents(&repositories, &config).await.unwrap();
-        assert!(repositories.holds_nothing().await);
+        assert!(repositories.holds_nothing().await.unwrap());
     }
 }

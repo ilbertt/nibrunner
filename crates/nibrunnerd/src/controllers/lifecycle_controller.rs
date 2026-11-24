@@ -27,7 +27,7 @@ impl LifecycleController {
     }
 
     pub async fn start(&self) -> std::io::Result<()> {
-        self.host.load().await;
+        self.host.load().await.map_err(std::io::Error::other)?;
         let adopted = self.host.vms.adopted_app_ids().await;
         if !adopted.is_empty() {
             tracing::info!(adopted = adopted.len(), "microVMs from an earlier daemon adopted");
