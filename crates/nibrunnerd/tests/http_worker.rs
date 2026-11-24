@@ -149,10 +149,12 @@ async fn killing_the_daemon_controller_keeps_the_listener_and_its_response_for_t
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let replacement = DetachedHttpProxy::new(&config, env!("CARGO_BIN_EXE_nibrunnerd").into());
+        let (forwarded, mut first_forward) = oneshot::channel();
         let (finish, finished) = oneshot::channel();
         let guest = tokio::spawn(async move {
             let (mut stream, _) = guest.accept().await.unwrap();
-            http_worker::read_headers(&mut stream).await.unwrap();
+            let headers = http_worker::read_headers(&mut stream).await.unwrap();
+            forwarded.send(headers).unwrap();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nbefore")
                 .await
@@ -171,7 +173,14 @@ async fn killing_the_daemon_controller_keeps_the_listener_and_its_response_for_t
             )
             .await
             .unwrap();
-        http_worker::read_headers(&mut request).await.unwrap();
+        let headers = match http_worker::read_headers(&mut request).await {
+            Ok(headers) => headers,
+            Err(error) => panic!(
+                "first response failed before handoff: {error}; controller={:?}; upstream saw headers={}; worker metrics={:?}",
+                owner.try_wait().unwrap(), first_forward.try_recv().is_ok(), replacement.metrics().await
+            ),
+        };
+        assert!(headers.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&headers));
         let mut first = [0; 6];
         request.read_exact(&mut first).await.unwrap();
         assert_eq!(&first, b"before");

@@ -64,6 +64,15 @@ impl Worker {
             )
             .await;
         }
+        self.serve_listener(&mut state, listener)?;
+        wire::write(&mut stream, &Reply::Ready).await
+    }
+
+    fn serve_listener(
+        self: &Arc<Self>,
+        state: &mut Listening,
+        listener: std::net::TcpListener,
+    ) -> io::Result<()> {
         let serving = HttpListener::from_listener(
             self.router.clone(),
             tokio::net::TcpListener::from_std(listener)?,
@@ -78,7 +87,7 @@ impl Worker {
             *worker.listener.lock().await = Listening::Draining;
             worker.drained.notify_one();
         });
-        wire::write(&mut stream, &Reply::Ready).await
+        Ok(())
     }
 
     async fn export(&self, mut stream: BufReader<UnixStream>) -> io::Result<()> {
@@ -90,11 +99,7 @@ impl Worker {
             }
         };
         let Some(listener) = listener else {
-            return wire::write(
-                stream.get_mut(),
-                &Reply::Failed("the worker is not accepting requests".into()),
-            )
-            .await;
+            return wire::write(stream.get_mut(), &Reply::Failed(wire::NOT_LISTENING.into())).await;
         };
         wire::write(stream.get_mut(), &Reply::Ready).await?;
         if stream.read_u8().await? != wire::DESCRIPTOR_READY {
@@ -113,6 +118,22 @@ impl Worker {
             }
         };
         match request {
+            Request::Bind => {
+                let mut state = self.listener.lock().await;
+                let result = if matches!(*state, Listening::Waiting) {
+                    tokio::net::TcpListener::bind(self.address)
+                        .await
+                        .and_then(|listener| self.serve_listener(&mut state, listener.into_std()?))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "this worker already has a listener",
+                    ))
+                };
+                if let Err(error) = result {
+                    return wire::write(stream.get_mut(), &Reply::Failed(error.to_string())).await;
+                }
+            }
             Request::Attach => return self.attach(stream).await,
             Request::Export => return self.export(stream).await,
             Request::Routes(routes) => self.router.apply(RouteTable::from_targets(&routes)).await,
