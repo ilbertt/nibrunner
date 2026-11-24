@@ -209,15 +209,17 @@ impl Host {
         document: &AcceptedDocument,
     ) -> Result<(), crate::domain::store::StoreError> {
         let _accepting = self.accepting_document.lock().await;
-        self.remember_host_id(document.desired.host_id.as_str()).await;
-        if self
+        let already_accepted = self
             .state
             .modify(|snapshot| snapshot.accepted_digest.as_ref() == Some(&document.digest))
-            .await
-        {
+            .await;
+        if !already_accepted {
+            self.repositories.accepted_document.remember(document).await?;
+        }
+        self.remember_host_id(document.desired.host_id.as_str()).await;
+        if already_accepted {
             return Ok(());
         }
-        self.repositories.accepted_document.remember(document).await?;
         self.state
             .modify(|snapshot| {
                 snapshot.accepted_digest = Some(document.digest.clone());
