@@ -326,10 +326,8 @@ mod file {
     const CIDR_V4: &str = r"^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$";
     const CIDR_V6: &str = "^[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*/[0-9]{1,3}$";
 
-    /// A host's `config.toml`. No key has a default: a key its section declares and the file
-    /// omits is refused by name, and so is a key no section declares. What may be absent is a whole
-    /// section — `[proxy]`, `[metrics]`, `[volumes.zerofs]` — and one that is present is filled in
-    /// completely.
+    /// A host's `config.toml`. Each configured section names its required keys. The reader
+    /// rejects unknown keys and accepts older metrics sections with outbound monitoring disabled.
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "HostConfig")]
@@ -640,9 +638,10 @@ mod file {
     #[serde(deny_unknown_fields)]
     #[schemars(rename = "metrics")]
     pub(super) struct Metrics {
-        /// Count outbound TCP and UDP flows and distinct destinations per app in five-minute windows. Disabled when omitted.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub(super) outbound_monitoring: Option<bool>,
+        /// Count outbound TCP and UDP flows and distinct destinations per app in five-minute windows.
+        /// Older configurations that omit this field keep monitoring disabled.
+        #[serde(default)]
+        pub(super) outbound_monitoring: bool,
         /// A free port, outside the range the slots take from 21000, other than `proxy.http.port`,
         /// and not 9091 on a zerofs host, which ZeroFS holds.
         #[schemars(range(min = 1))]
@@ -1050,9 +1049,9 @@ impl HostConfig {
 
     /// The file as a JSON Schema, for an editor and for the reference the docs site renders from
     /// it. It is the *serialize* contract of the document [`Self::to_document`] writes: every key
-    /// written is one [`Self::from_document`] requires, and the only keys skipped are the sections
-    /// that may be absent, so what is required here is what the round trip already holds to. TOML
-    /// has no null, so the null every `Option` would admit is taken back out.
+    /// written unconditionally is required in the schema. The reader also accepts older metrics
+    /// sections that omit outbound monitoring. TOML has no null, so the null every `Option` would
+    /// admit is taken back out.
     pub fn schema() -> schemars::Schema {
         let mut schema = schemars::generate::SchemaSettings::draft2020_12()
             .for_serialize()
@@ -1063,9 +1062,6 @@ impl HostConfig {
         schema
     }
 
-    /// [`Self::from_document`] run backwards. Every key is required on the way in and every
-    /// unknown one refused, so a key written here that is not read there, or read there that is
-    /// not written here, fails the round trip by name rather than drifting.
     fn to_document(&self) -> file::ConfigFile {
         let text = |path: &std::path::Path| Some(path.display().to_string());
         file::ConfigFile {
@@ -1141,7 +1137,7 @@ impl HostConfig {
                 }),
             }),
             metrics: self.metrics.as_ref().map(|metrics| file::Metrics {
-                outbound_monitoring: metrics.outbound_monitoring.then_some(true),
+                outbound_monitoring: metrics.outbound_monitoring,
                 port: Some(metrics.port),
                 listen_address: Some(metrics.listen_address.to_string()),
             }),
@@ -1447,7 +1443,7 @@ fn metrics(
     // A scrape surface names every app this host runs and what each is using, so where it is bound
     // is said out loud rather than guessed at.
     Ok(Some(MetricsConfig {
-        outbound_monitoring: document.outbound_monitoring.unwrap_or(false),
+        outbound_monitoring: document.outbound_monitoring,
         port,
         listen_address: bind_address("metrics.listen_address", &document.listen_address)?,
     }))
@@ -2563,7 +2559,7 @@ checkpoint_cache_dir = "/data/zerofs-checkpoint"
             document(
                 &[],
                 &bound(
-                    "\n[proxy.http]\nport = 80\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n\n[logs]\nkeep_mib_per_app = 256\n"
+                    "\n[proxy.http]\nport = 80\n\n[metrics]\noutbound_monitoring = false\nport = 9100\nlisten_address = \"127.0.0.1\"\n\n[logs]\nkeep_mib_per_app = 256\n"
                 )
             )
         );
@@ -2792,7 +2788,18 @@ keep_mib_per_app = 64
         }
 
         #[test]
-        fn the_schema_accepts_what_the_parser_accepts() {
+        fn an_older_metrics_section_reads_as_disabled_and_writes_the_required_field() {
+            let legacy = document(&[], "[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n");
+            let validator = validator();
+            assert!(!validator.is_valid(&json(&legacy)));
+
+            let written = json(&parsed(&legacy).to_toml());
+            assert_eq!(written["metrics"]["outbound_monitoring"], false);
+            assert!(validator.is_valid(&written));
+        }
+
+        #[test]
+        fn the_schema_accepts_current_configurations() {
             let validator = validator();
             let accepted = [
                 whole(),
@@ -2811,7 +2818,7 @@ keep_mib_per_app = 64
                         ("network.denied_egress_addresses_v6", "[\"fd00::/8\"]"),
                     ],
                     &bound(
-                        "[proxy.http]\nport = 443\n\n[proxy.http.tls]\ncertificate = \"/etc/nibrunner/origin.crt\"\nkey = \"/etc/nibrunner/origin.key\"\n\n[proxy.http.tls.client_ca]\ncertificate = \"/etc/nibrunner/origin-pull-ca.pem\"\n\n[proxy.raw]\nmax_ports_per_guest = 7\n\n[metrics]\nport = 9100\nlisten_address = \"127.0.0.1\"\n",
+                        "[proxy.http]\nport = 443\n\n[proxy.http.tls]\ncertificate = \"/etc/nibrunner/origin.crt\"\nkey = \"/etc/nibrunner/origin.key\"\n\n[proxy.http.tls.client_ca]\ncertificate = \"/etc/nibrunner/origin-pull-ca.pem\"\n\n[proxy.raw]\nmax_ports_per_guest = 7\n\n[metrics]\noutbound_monitoring = true\nport = 9100\nlisten_address = \"127.0.0.1\"\n",
                     ),
                 ),
             ];

@@ -32,8 +32,9 @@ files; it does not permit a ZeroFS restart.
 
 ## Validation rules
 
-- **No key has a default.** If a section is present, every key in it must be set. A missing key
-  is an error that names the key.
+- **Set each required key.** The schema requires `outbound_monitoring` in `[metrics]`. The daemon
+  accepts older files that omit it and uses `false`. Other missing required keys produce an error
+  naming the key.
 - **Unknown keys are errors.** A typo is reported as an unknown key, not as a missing one.
 - **Only whole sections are optional.** `[proxy.http.tls]`, `[proxy.raw]`, `[metrics]` and
   `[logs]` can be omitted. If present, they must be complete. Optional

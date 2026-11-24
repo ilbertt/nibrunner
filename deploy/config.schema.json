@@ -2,7 +2,7 @@
   "$id": "https://raw.githubusercontent.com/ilbertt/nibrunner/main/deploy/config.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "HostConfig",
-  "description": "A host's `config.toml`. No key has a default: a key its section declares and the file\nomits is refused by name, and so is a key no section declares. What may be absent is a whole\nsection — `[proxy]`, `[metrics]`, `[volumes.zerofs]` — and one that is present is filled in\ncompletely.",
+  "description": "A host's `config.toml`. Each configured section names its required keys. The reader\nrejects unknown keys and accepts older metrics sections with outbound monitoring disabled.",
   "type": "object",
   "properties": {
     "artifacts": {
@@ -223,8 +223,9 @@
           "type": "string"
         },
         "outbound_monitoring": {
-          "description": "Count outbound TCP and UDP flows and distinct destinations per app in five-minute windows. Disabled when omitted.",
-          "type": "boolean"
+          "description": "Count outbound TCP and UDP flows and distinct destinations per app in five-minute windows.\nOlder configurations that omit this field keep monitoring disabled.",
+          "type": "boolean",
+          "default": false
         },
         "port": {
           "description": "A free port, outside the range the slots take from 21000, other than `proxy.http.port`,\nand not 9091 on a zerofs host, which ZeroFS holds.",
@@ -236,6 +237,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "outbound_monitoring",
         "port",
         "listen_address"
       ]
