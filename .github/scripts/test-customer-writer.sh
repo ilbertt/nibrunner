@@ -11,6 +11,8 @@ cleanup() {
         sudo journalctl --no-pager -n 80 -u nibrunner-fixture-writer -u nibrunner-fixture-mount \
             -u nibrunner-customer-zerofs@app-1 -u nibrunner-customer-mount@app-1 -u 'nibrunner-customer-nbd-*' -u nibrunner-fixture-recovery
     fi
+    sudo systemctl unmask --runtime nibrunner-customer-mount@app-2.service 2>/dev/null || true
+    sudo systemctl stop nibrunner-customer-mount@app-2.service nibrunner-customer-zerofs@app-2.service 2>/dev/null || true
     sudo systemctl stop nibrunner-customer-mount@app-1.service nibrunner-customer-zerofs@app-1.service 2>/dev/null || true
     sudo systemctl stop nibrunner-fixture-mount.service nibrunner-fixture-writer.service nibrunner-fixture-recovery.service 2>/dev/null || true
     docker rm -fv "$container" >/dev/null 2>&1 || true
