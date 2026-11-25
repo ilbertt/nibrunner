@@ -1,5 +1,23 @@
 # Changelog
 
+## [2026.11.17] - 2026-11-25
+
+### Features
+
+- **volumes:** Retry rejected migrations with corrected writer settings (#396)
+- **volumes:** Probe the destination writer before stopping the source (#393)
+
+### Fixes
+
+- **volumes:** Release failed placements on withdrawal or deletion (#400)
+- **volumes:** Serve the committed disk while shared cleanup retries (#399)
+- **volumes:** Recover the shared source on pre-commit cutover failure (#395)
+- **volumes:** Serve the shared disk during migration preflight (#394)
+
+### Maintenance
+
+- **guest:** Verify shared data survives invalid bucket credentials (#397)
+
 ## [2026.11.16] - 2026-11-25
 
 ### Features
