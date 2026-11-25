@@ -96,6 +96,21 @@ impl CustomerVolumes {
                 effective.to_mut().instances[i].desired_state = DesiredInstanceState::Stopped;
             }
         }
+        // A checkpoint on the former shared writer cannot be recreated on the new disk.
+        // Explicit releases of older untracked checkpoints wait for the verified cutover.
+        let suppress = |checkpoint: &protocol::DesiredCheckpoint| {
+            desired
+                .volumes
+                .iter()
+                .find(|v| v.volume_id == checkpoint.volume_id && v.storage.is_some())
+                .is_some_and(|v| {
+                    checkpoint.desired_state == protocol::DesiredPresence::Present
+                        || self.migrating(&v.app_id)
+                })
+        };
+        if desired.checkpoints.iter().any(suppress) {
+            effective.to_mut().checkpoints.retain(|c| !suppress(c));
+        }
         effective
     }
 
@@ -130,6 +145,18 @@ impl CustomerVolumes {
                 let _operation = operation;
                 if let Err(error) = volumes.migrate(&host, &p).await {
                     tracing::warn!(app_id = %p.app, %error, "volume migration will retry");
+                    host.state
+                        .modify(|state| {
+                            if let Some(report) =
+                                state.volume_reports.iter_mut().find(|v| v.volume_id == p.volume)
+                            {
+                                report.message = Some(protocol::StateMessage::new(format!(
+                                    "volume migration will retry: {error}"
+                                )));
+                            }
+                        })
+                        .await;
+                    host.state.signal_report();
                 }
             });
         }

@@ -144,7 +144,7 @@ customer's bucket credentials. Both are needed for independent recovery.
 
 1. Assign an exclusive customer bucket prefix and keep the existing app ID and volume ID.
    In the desired document, change that volume’s `storage` from `null` to the customer settings.
-   Withdraw requests for new exports and checkpoints on that volume in the same revision.
+   Finish in-flight exports first. Existing checkpoint declarations may remain during the move.
 2. Allow downtime for the copy. The host drains cron runs, freezes the guest filesystem, and
    stops the guest. It streams the disk through the two ZeroFS writers, checks the bytes,
    and flushes the destination. A conflicting destination image leaves the source intact.
@@ -156,7 +156,8 @@ Shared ZeroFS checkpoints cover every volume on that writer. Cleanup deletes che
 whose recorded volume and generation match the source. The guest can run on its new disk
 while the volume report says that historical shared checkpoints remain. Checkpoints owned
 by other volumes, and older checkpoints with unknown ownership, must be released by their
-owners before cleanup finishes. ZeroFS garbage collection then reclaims unreferenced storage.
+owners before cleanup finishes. For a legacy checkpoint you own, set its desired state to
+`absent` to explicitly release it. ZeroFS garbage collection then reclaims unreferenced storage.
 Previously exported archives and S3 versions have their own retention policies.
 
 ### Recover the disk independently

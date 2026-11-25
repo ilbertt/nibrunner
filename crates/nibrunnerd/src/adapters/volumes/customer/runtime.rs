@@ -99,15 +99,16 @@ impl CustomerVolumes {
         } else {
             drop(held);
         }
+        let claims: std::collections::BTreeSet<_> = new.iter().map(|v| &v.volume_id).collect();
         let mut owners = BTreeMap::new();
         if let Some(previous) = previous {
-            for v in &previous.volumes {
+            for v in previous.volumes.iter().filter(|v| claims.contains(&v.volume_id)) {
                 if v.storage.is_none() && v.desired_state == protocol::DesiredPresence::Present {
                     owners.insert(v.volume_id.clone(), v.app_id.clone());
                 }
             }
         }
-        for r in records.values() {
+        for r in records.values().filter(|r| claims.contains(&r.volume_id)) {
             if owners
                 .insert(r.volume_id.clone(), r.app_id.clone())
                 .is_some_and(|owner| owner != r.app_id)
@@ -115,7 +116,7 @@ impl CustomerVolumes {
                 return Err(failed("shared image ownership is ambiguous"));
             }
         }
-        self.placements.prepare(desired, &owners)
+        self.placements.prepare(desired, &owners, previous)
     }
 
     fn operation_lock(&self, app: &AppId) -> Arc<tokio::sync::Mutex<()>> {

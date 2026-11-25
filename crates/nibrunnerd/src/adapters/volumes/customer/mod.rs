@@ -72,6 +72,7 @@ impl CustomerPlacements {
         &self,
         desired: &HostDesiredState,
         source_owners: &BTreeMap<protocol::VolumeId, AppId>,
+        previous: Option<&HostDesiredState>,
     ) -> Result<(), VolumeError> {
         let mut held = self.held.write().expect("placement lock");
         let mut additions = Vec::new();
@@ -156,14 +157,14 @@ impl CustomerPlacements {
                     "a customer volume belongs exclusively to its assigned app",
                 ));
             }
-            if desired
-                .checkpoints
+            if desired.checkpoints.iter().any(|c| {
+                c.volume_id == placement.volume
+                    && c.desired_state == DesiredPresence::Present
+                    && !previous.is_some_and(|old| old.checkpoints.contains(c))
+            }) || desired
+                .exports
                 .iter()
-                .any(|c| c.volume_id == placement.volume && c.desired_state == DesiredPresence::Present)
-                || desired
-                    .exports
-                    .iter()
-                    .any(|e| e.app_id == placement.app || e.volume_id == placement.volume)
+                .any(|e| e.app_id == placement.app || e.volume_id == placement.volume)
             {
                 return Err(failed(
                     "this host does not yet serve checkpoints or exports for customer volumes",
@@ -234,13 +235,13 @@ mod tests {
 
         let recovered = CustomerPlacements::open(&config).unwrap();
         let mut desired = desired_state(|desired| desired.volumes.push(volume));
-        recovered.prepare(&desired, &BTreeMap::new()).unwrap();
+        recovered.prepare(&desired, &BTreeMap::new(), None).unwrap();
         desired.volumes[0].storage.as_mut().unwrap().bucket = "different".into();
-        assert!(recovered.prepare(&desired, &BTreeMap::new()).is_err());
+        assert!(recovered.prepare(&desired, &BTreeMap::new(), None).is_err());
         desired.volumes[0].storage = None;
-        assert!(recovered.prepare(&desired, &BTreeMap::new()).is_err());
+        assert!(recovered.prepare(&desired, &BTreeMap::new(), None).is_err());
         desired.volumes.clear();
-        recovered.prepare(&desired, &BTreeMap::new()).unwrap();
+        recovered.prepare(&desired, &BTreeMap::new(), None).unwrap();
         assert!(profile.join(WRITER_CONFIG).exists());
     }
 }
