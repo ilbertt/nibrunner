@@ -1,5 +1,6 @@
 mod dns;
 pub(super) mod images;
+mod migration;
 mod profile;
 mod runtime;
 pub mod transfer;
@@ -54,6 +55,7 @@ impl CustomerPlacements {
             if !path.join(RETIRED).try_exists().map_err(io_error)? && !path.join(WRITER_CONFIG).is_file() {
                 return Err(failed("customer writer configuration is missing"));
             }
+            migration::Migration::load(&path)?;
             held.insert(placement.app.clone(), Arc::new(placement));
         }
         Ok(Self {
@@ -65,9 +67,13 @@ impl CustomerPlacements {
         })
     }
 
-    pub fn prepare(&self, desired: &HostDesiredState) -> Result<(), VolumeError> {
+    pub(crate) fn prepare(
+        &self,
+        desired: &HostDesiredState,
+        source_owners: &BTreeMap<protocol::VolumeId, AppId>,
+    ) -> Result<(), VolumeError> {
         let mut held = self.held.write().expect("placement lock");
-        let mut additions = Vec::<(Arc<Placement>, String)>::new();
+        let mut additions = Vec::new();
         for volume in &desired.volumes {
             let existing = held.get(&volume.app_id);
             let Some(storage) = &volume.storage else {
@@ -109,26 +115,33 @@ impl CustomerPlacements {
             }
             if held
                 .values()
-                .chain(additions.iter().map(|(p, _)| p))
+                .chain(additions.iter().map(|(p, _, _)| p))
                 .any(|p| p.app == placement.app || p.volume == placement.volume || p.overlaps(&placement))
             {
                 return Err(failed("the customer app, volume or prefix already has a writer"));
             }
-            if !mounted(&self.shared_mount)?
-                || self
-                    .shared_mount
-                    .join(super::zerofs::NBD_DIRECTORY)
-                    .join(placement.volume.as_str())
-                    .try_exists()
-                    .map_err(io_error)?
-            {
+            if !mounted(&self.shared_mount)? {
                 return Err(failed(
-                    "cannot claim a customer volume until its absence on shared storage is confirmed",
+                    "cannot confirm shared image placement while the shared writer is unmounted",
                 ));
             }
-            additions.push((Arc::new(placement), config));
+            let source = images::image_size(&self.shared_mount, &placement.volume)?;
+            let migration = match (source, source_owners.get(&placement.volume)) {
+                (Some(bytes), Some(owner))
+                    if owner == &placement.app && bytes > 0 && bytes <= volume.size_bytes =>
+                {
+                    Some(migration::Migration::new())
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(failed(
+                        "shared image ownership or size does not match the requested volume",
+                    ))
+                }
+            };
+            additions.push((Arc::new(placement), config, migration));
         }
-        for placement in held.values().chain(additions.iter().map(|(p, _)| p)) {
+        for placement in held.values().chain(additions.iter().map(|(p, _, _)| p)) {
             if desired
                 .instances
                 .iter()
@@ -156,8 +169,8 @@ impl CustomerPlacements {
                 ));
             }
         }
-        for (placement, config) in additions {
-            placement.stage(&self.root, &config)?;
+        for (placement, config, migration) in additions {
+            placement.stage(&self.root, &config, migration.as_ref())?;
             held.insert(placement.app.clone(), placement);
         }
         Ok(())
@@ -205,7 +218,7 @@ mod tests {
         let storage = volume.storage.as_ref().unwrap();
         let placement = Placement::requested(&volume.app_id, &volume.volume_id, storage).unwrap();
         placement
-            .stage(&registry.root, &placement.config(storage).unwrap())
+            .stage(&registry.root, &placement.config(storage).unwrap(), None)
             .unwrap();
         let profile = placement.directory(&registry.root);
         assert_eq!(
@@ -220,13 +233,13 @@ mod tests {
 
         let recovered = CustomerPlacements::open(&config).unwrap();
         let mut desired = desired_state(|desired| desired.volumes.push(volume));
-        recovered.prepare(&desired).unwrap();
+        recovered.prepare(&desired, &BTreeMap::new()).unwrap();
         desired.volumes[0].storage.as_mut().unwrap().bucket = "different".into();
-        assert!(recovered.prepare(&desired).is_err());
+        assert!(recovered.prepare(&desired, &BTreeMap::new()).is_err());
         desired.volumes[0].storage = None;
-        assert!(recovered.prepare(&desired).is_err());
+        assert!(recovered.prepare(&desired, &BTreeMap::new()).is_err());
         desired.volumes.clear();
-        recovered.prepare(&desired).unwrap();
+        recovered.prepare(&desired, &BTreeMap::new()).unwrap();
         assert!(profile.join(WRITER_CONFIG).exists());
     }
 }

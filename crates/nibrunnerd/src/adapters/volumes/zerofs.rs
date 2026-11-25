@@ -129,6 +129,42 @@ impl ZerofsVolumes {
             .map(|slot| slot.nbd_device_path)
     }
 
+    pub(super) async fn quiesce_source(
+        &self,
+        volume: &VolumeId,
+        app: &protocol::AppId,
+    ) -> Result<(), VolumeError> {
+        if let Some(device) = self.device_for(app).await {
+            if self.devices.migration_attached(&device)? {
+                let image = self.filesystem.device_file_for(volume);
+                let socket = self.filesystem.nbd_socket_path.to_string_lossy();
+                let target = NbdTarget {
+                    socket_path: &socket,
+                    device_path: &device,
+                    volume_id: volume,
+                    image_path: Some(&image),
+                };
+                if self.devices.is_customer_client(&device) || self.devices.proven(&target).await.is_none() {
+                    return Err(VolumeError::Unusable(
+                        "the shared device does not prove it holds the migration source".into(),
+                    ));
+                }
+                let path = device.clone();
+                tokio::task::spawn_blocking(move || std::fs::File::open(path)?.sync_all())
+                    .await
+                    .map_err(|e| VolumeError::Unusable(e.to_string()))?
+                    .map_err(|e| VolumeError::Unusable(e.to_string()))?;
+                self.devices.detach(&device).await?;
+                if self.devices.migration_attached(&device)? {
+                    return Err(VolumeError::Unusable(
+                        "waiting for the shared NBD attachment to close".into(),
+                    ));
+                }
+            }
+        }
+        self.flush(app).await
+    }
+
     pub(super) async fn flush_customer(
         &self,
         volume: &VolumeId,

@@ -198,6 +198,11 @@ async fn apply_starts(host: &Host, plan: &ReconcilePlan) {
 /// timer runs one whether or not anything moved: that is how a volume whose device died under a
 /// standing document gets noticed.
 pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Trigger) {
+    let effective = host
+        .customer_volumes
+        .as_ref()
+        .map(|customer| customer.during_migrations(desired));
+    let desired = effective.as_deref().unwrap_or(desired);
     let deployments = desired
         .instances
         .iter()
@@ -215,7 +220,22 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
         .collect::<Vec<_>>();
     host.cron_runs.synchronize(&enabled).await;
     let observed = observe(host, desired).await;
-    let plan = plan_reconcile(desired, &observed);
+    let mut plan = plan_reconcile(desired, &observed);
+    if let Some(customer) = &host.customer_volumes {
+        plan.instances.retain(|action| {
+            let app = match action {
+                InstancePlan::Stop { app_id, .. }
+                | InstancePlan::Forget { app_id }
+                | InstancePlan::None { app_id } => app_id,
+                InstancePlan::Start { desired }
+                | InstancePlan::Hold { desired }
+                | InstancePlan::Recover { desired }
+                | InstancePlan::Replace { desired }
+                | InstancePlan::Sleep { desired } => &desired.app_id,
+            };
+            !customer.migrating(app)
+        });
+    }
     host.state
         .modify(|snapshot| snapshot.deferred_work = plan.has_deferred_work())
         .await;
@@ -243,6 +263,9 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
 
     host.cron_runs.synchronize(&enabled).await;
     host.state.modify(|snapshot| snapshot.converged = true).await;
+    if let Some(customer) = &host.customer_volumes {
+        customer.resume_migrations(host, desired);
+    }
     host.state.signal_refresh();
     host.state.signal_report();
 }

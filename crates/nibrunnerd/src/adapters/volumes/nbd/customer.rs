@@ -85,7 +85,7 @@ impl NbdDevices {
         Ok(true)
     }
 
-    pub(super) fn is_customer_client(&self, device: &str) -> bool {
+    pub(in crate::adapters::volumes) fn is_customer_client(&self, device: &str) -> bool {
         self.attribute(device, "pid")
             .and_then(|value| value.trim().parse::<u32>().ok())
             .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok())

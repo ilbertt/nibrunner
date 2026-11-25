@@ -19,7 +19,7 @@ use crate::ports::{CommandRequest, CommandRunner, CommandRunnerExt};
 
 pub(crate) struct CustomerVolumes {
     pub(crate) placements: CustomerPlacements,
-    shared: ZerofsVolumes,
+    pub(super) shared: ZerofsVolumes,
     operations: std::sync::Mutex<BTreeMap<AppId, Arc<tokio::sync::Mutex<()>>>>,
     resolver: std::sync::Mutex<BTreeMap<AppId, Arc<super::dns::EndpointHosts>>>,
     caches: PathBuf,
@@ -51,6 +51,7 @@ impl CustomerVolumes {
         desired: &protocol::HostDesiredState,
         guest_budget_mib: u64,
         records: &BTreeMap<AppId, crate::domain::report::InstanceRecord>,
+        previous: Option<&protocol::HostDesiredState>,
     ) -> Result<(), VolumeError> {
         use crate::domain::report::capacity::committed_resources;
         let held = self.placements.held.read().expect("placement lock");
@@ -63,11 +64,9 @@ impl CustomerVolumes {
             if new.iter().any(|v| {
                 records
                     .values()
-                    .any(|r| r.app_id == v.app_id || r.volume_id == v.volume_id)
+                    .any(|r| (r.app_id == v.app_id) != (r.volume_id == v.volume_id))
             }) {
-                return Err(failed(
-                    "moving an existing guest to customer storage requires migration",
-                ));
+                return Err(failed("the guest and source volume have different owners"));
             }
             let instances: Vec<_> = records.values().cloned().collect();
             let committed: u64 = committed_resources(&instances)
@@ -96,21 +95,46 @@ impl CustomerVolumes {
         } else {
             drop(held);
         }
-        self.placements.prepare(desired)
+        let mut owners = BTreeMap::new();
+        if let Some(previous) = previous {
+            for v in &previous.volumes {
+                if v.storage.is_none() && v.desired_state == protocol::DesiredPresence::Present {
+                    owners.insert(v.volume_id.clone(), v.app_id.clone());
+                }
+            }
+        }
+        for r in records.values() {
+            if owners
+                .insert(r.volume_id.clone(), r.app_id.clone())
+                .is_some_and(|owner| owner != r.app_id)
+            {
+                return Err(failed("shared image ownership is ambiguous"));
+            }
+        }
+        self.placements.prepare(desired, &owners)
     }
 
-    async fn operation(&self, app: &AppId) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = self
-            .operations
+    fn operation_lock(&self, app: &AppId) -> Arc<tokio::sync::Mutex<()>> {
+        self.operations
             .lock()
             .expect("customer writer operation lock")
             .entry(app.clone())
             .or_default()
-            .clone();
-        lock.lock_owned().await
+            .clone()
+    }
+
+    pub(super) fn try_operation(&self, app: &AppId) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.operation_lock(app).try_lock_owned().ok()
+    }
+
+    async fn operation(&self, app: &AppId) -> tokio::sync::OwnedMutexGuard<()> {
+        self.operation_lock(app).lock_owned().await
     }
 
     fn placement(&self, app: &AppId, volume: &VolumeId) -> Result<Option<Arc<Placement>>, VolumeError> {
+        if self.migrating(app) {
+            return Err(failed("volume migration in progress"));
+        }
         let held = self.placements.held.read().expect("placement lock");
         match held.get(app) {
             Some(p) if &p.volume == volume => Ok(Some(p.clone())),
@@ -159,7 +183,7 @@ impl CustomerVolumes {
         Ok(hosts)
     }
 
-    async fn active(&self, p: &Placement) -> Result<ZerofsVolumes, VolumeError> {
+    pub(super) async fn active(&self, p: &Placement) -> Result<ZerofsVolumes, VolumeError> {
         if p.directory(&self.placements.root)
             .join(RETIRED)
             .try_exists()
@@ -282,6 +306,9 @@ impl VolumeBackend for CustomerVolumes {
     }
 
     async fn flush(&self, app: &AppId) -> Result<(), VolumeError> {
+        if self.migrating(app) {
+            return self.shared.flush(app).await;
+        }
         let p = self
             .placements
             .held
