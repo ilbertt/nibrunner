@@ -163,7 +163,7 @@ impl CustomerVolumes {
         }
     }
 
-    fn backend(&self, p: &Placement) -> ZerofsVolumes {
+    pub(super) fn backend(&self, p: &Placement) -> ZerofsVolumes {
         let directory = p.directory(&self.placements.root);
         let mount = Path::new(MOUNT_ROOT).join(p.app.as_str());
         self.shared.on_filesystem(ZerofsFilesystem {

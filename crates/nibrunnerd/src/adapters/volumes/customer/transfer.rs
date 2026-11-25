@@ -62,7 +62,47 @@ fn remove_stage(dir: &File, stage: &str) -> Result<(), VolumeError> {
 /// Both writers must be exclusively held and the source detached for the entire transfer.
 /// The caller flushes the destination writer's RPC before committing placement.
 pub fn copy_image(source: &Path, target: &Path, volume: &VolumeId, attempt: Uuid) -> Result<(), VolumeError> {
+    let to = directory(target)?;
+    copy_between(&directory(source)?, &to, volume.as_str(), attempt)?;
+    remove_stage(&to, &format!(".migration-{attempt}"))
+}
+
+pub(super) fn stage_image(
+    source: &Path,
+    target: &Path,
+    volume: &VolumeId,
+    attempt: Uuid,
+) -> Result<(), VolumeError> {
     copy_between(&directory(source)?, &directory(target)?, volume.as_str(), attempt)
+}
+
+pub(super) fn finish_attempt(
+    mount: &Path,
+    volume: &VolumeId,
+    attempt: Uuid,
+    committed: bool,
+) -> Result<(), VolumeError> {
+    clean_links(&directory(mount)?, volume.as_str(), attempt, committed)
+}
+
+fn clean_links(to: &File, name: &str, attempt: Uuid, committed: bool) -> Result<(), VolumeError> {
+    let stage = format!(".migration-{attempt}");
+    let stat = |path: &str| match nix::sys::stat::fstatat(to, path, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(st) => Ok(Some(st)),
+        Err(nix::errno::Errno::ENOENT) => Ok(None),
+        Err(e) => Err(io_error(e.into())),
+    };
+    if !committed {
+        if let (Some(owned), Some(published)) = (stat(&stage)?, stat(name)?) {
+            // A pre-existing volume can have identical contents. Only our exclusive hard link proves ownership.
+            if owned.st_mode & libc::S_IFMT == libc::S_IFREG
+                && (owned.st_dev, owned.st_ino) == (published.st_dev, published.st_ino)
+            {
+                remove_stage(to, name)?;
+            }
+        }
+    }
+    remove_stage(to, &stage)
 }
 
 fn copy_between(from: &File, to: &File, name: &str, attempt: Uuid) -> Result<(), VolumeError> {
@@ -75,7 +115,7 @@ fn copy_between(from: &File, to: &File, name: &str, attempt: Uuid) -> Result<(),
     match image(to, name, OFlag::O_RDONLY) {
         Ok(mut target) => {
             verify(&mut source, &mut target, size)?;
-            return remove_stage(to, &stage);
+            return Ok(());
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
@@ -103,12 +143,29 @@ fn copy_between(from: &File, to: &File, name: &str, attempt: Uuid) -> Result<(),
     verify(&mut source, &mut target, size)?;
     // Hard-link publication is exclusive even on 9P mounts without RENAME_NOREPLACE.
     linkat(to, stage.as_str(), to, name, AtFlags::empty()).map_err(|e| io_error(e.into()))?;
-    remove_stage(to, &stage)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_unlinks_only_the_image_published_by_this_attempt() {
+        let dst = tempfile::tempdir().unwrap();
+        let dir = File::open(dst.path()).unwrap();
+        let attempt = Uuid::new_v4();
+        let stage = dst.path().join(format!(".migration-{attempt}"));
+        let disk = dst.path().join("vol");
+        std::fs::write(&stage, "old").unwrap();
+        std::fs::hard_link(&stage, &disk).unwrap();
+        clean_links(&dir, "vol", attempt, false).unwrap();
+        assert!(!disk.exists());
+        std::fs::write(&stage, "old").unwrap();
+        std::fs::write(&disk, "old").unwrap();
+        clean_links(&dir, "vol", attempt, false).unwrap();
+        assert!(disk.exists());
+    }
 
     #[test]
     fn retries_replace_only_private_scratch_and_never_overwrite_a_different_destination() {
@@ -124,6 +181,8 @@ mod tests {
         std::fs::write(&stage, "interrupted").unwrap();
         copy_between(&source, &target, "vol", attempt).unwrap();
         assert_eq!(std::fs::read(dst.path().join("vol")).unwrap(), bytes);
+        assert!(stage.exists());
+        clean_links(&target, "vol", attempt, true).unwrap();
         assert!(!stage.exists());
         copy_between(&source, &target, "vol", attempt).unwrap();
         bytes[BUFFER + 7] = 1;
