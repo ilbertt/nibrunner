@@ -328,15 +328,19 @@ impl VolumeBackend for CustomerVolumes {
             None => self.shared.teardown(volume, app).await,
             Some(p) => {
                 let _operation = self.operation(&p.app).await;
+                if super::migration::Migration::load(&p.directory(&self.placements.root))?
+                    .is_some_and(|m| m.removing_shared_source())
+                {
+                    return Err(failed(
+                        "shared source cleanup must finish before deleting the committed customer disk",
+                    ));
+                }
                 self.retire(&p).await
             }
         }
     }
 
     async fn flush(&self, app: &AppId) -> Result<(), VolumeError> {
-        if self.migrating(app) || self.shared_source(app) {
-            return self.shared.flush(app).await;
-        }
         let p = self
             .placements
             .held
@@ -346,6 +350,12 @@ impl VolumeBackend for CustomerVolumes {
             .cloned();
         match p {
             None => self.shared.flush(app).await,
+            Some(p)
+                if super::migration::Migration::load(&p.directory(&self.placements.root))?
+                    .is_some_and(|m| m.serves_shared() || m.fenced()) =>
+            {
+                self.shared.flush(app).await
+            }
             Some(p) => {
                 let _operation = self.operation(&p.app).await;
                 self.backend(&p).flush_customer(&p.volume, app).await
