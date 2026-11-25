@@ -77,3 +77,22 @@ pub(super) async fn check(writer: &ZerofsVolumes, app: &AppId) -> Result<(), Vol
     writer.flush(app).await?;
     checked
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelling_a_check_unlinks_its_probe_from_the_pinned_directory() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = File::open(scratch.path()).unwrap();
+        let path = scratch.path().join("probe");
+        std::fs::write(&path, "challenge").unwrap();
+        drop(ProbeFile {
+            root: &root,
+            name: "probe",
+            removed: false,
+        });
+        assert!(!path.exists());
+    }
+}
