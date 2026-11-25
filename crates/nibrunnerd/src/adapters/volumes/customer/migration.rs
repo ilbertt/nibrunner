@@ -17,6 +17,8 @@ pub(super) const JOURNAL: &str = "migration.json";
 pub(super) struct Migration {
     attempt: String,
     verified: bool,
+    #[serde(default)]
+    needs_guest_freeze: bool,
 }
 
 impl Migration {
@@ -24,6 +26,7 @@ impl Migration {
         Self {
             attempt: uuid::Uuid::new_v4().to_string(),
             verified: false,
+            needs_guest_freeze: false,
         }
     }
 
@@ -108,80 +111,98 @@ impl CustomerVolumes {
         }
     }
 
+    async fn stop_source(
+        &self,
+        host: &Host,
+        p: &Placement,
+        dir: &Path,
+        migration: &mut Migration,
+    ) -> Result<(), VolumeError> {
+        let _transition = host.state.transition(&p.app).await;
+        host.cron_runs.stop(&p.app).await;
+        host.cron_execution
+            .stop(&p.app)
+            .await
+            .map_err(|_| failed("could not drain guest cron runs"))?;
+        host.close_http_connections_to(&p.app).await;
+        host.activator.close_connections_to(&p.app).await;
+        let active = |states: &std::collections::BTreeMap<_, crate::adapters::vm::VmStatus>| {
+            states
+                .get(&p.app)
+                .map(|s| s.active)
+                .ok_or_else(|| failed("source VM status is unavailable"))
+        };
+        let running = active(&host.vms.statuses(std::slice::from_ref(&p.app)).await)?;
+        let snapshot = crate::adapters::vm::snapshot::snapshot_paths(&host.config.snapshot_dir, &p.app);
+        let sleeping = !running && snapshot.stamp_path.try_exists().map_err(io_error)?;
+        if running || sleeping {
+            migration.needs_guest_freeze = true;
+            migration.save(dir)?;
+        } else if migration.needs_guest_freeze {
+            return Err(failed(
+                "the source guest must be recovered and frozen before its disk can migrate",
+            ));
+        }
+        if sleeping {
+            let record = host
+                .state
+                .record(&p.app)
+                .await
+                .ok_or_else(|| failed("sleeping source has no deployment record"))?;
+            let slot = host
+                .slot_of(&p.app)
+                .await
+                .ok_or_else(|| failed("sleeping source has no device slot"))?;
+            self.shared.attach(&p.volume, &p.app).await?;
+            host.vms
+                .wake(crate::ports::SuspendRequest {
+                    app_id: p.app.clone(),
+                    deployment_id: record.deployment_id,
+                    slot,
+                })
+                .await
+                .map_err(|e| failed(format!("could not wake the source for migration: {e}")))?;
+        }
+        let _lease = if running || sleeping {
+            let socket = crate::domain::filesystem::reader::guest_vsock_path(host, &p.app);
+            let lease = crate::domain::exports::freeze::frozen(&p.app, &socket)
+                .await
+                .map_err(|e| failed(e.message()))?;
+            lease.require_running_guest().map_err(|e| failed(e.message()))?;
+            migration.needs_guest_freeze = false;
+            migration.save(dir)?;
+            Some(lease)
+        } else {
+            None
+        };
+        host.vms
+            .stop(&p.app)
+            .await
+            .map_err(|_| failed("could not stop the source guest"))?;
+        let states = host.vms.statuses(std::slice::from_ref(&p.app)).await;
+        if states.get(&p.app).is_none_or(|vm| vm.active) {
+            return Err(failed("source guest is still running"));
+        }
+        host.vms
+            .discard(&p.app)
+            .await
+            .map_err(|_| failed("could not discard source VM state"))?;
+        host.state
+            .update_record(&p.app, |record| {
+                record.state = protocol::InstanceState::Stopped;
+                record.stop_requested = true;
+            })
+            .await;
+        Ok(())
+    }
+
     async fn migrate(&self, host: &Host, p: &Placement) -> Result<(), VolumeError> {
         let dir = p.directory(&self.placements.root);
         let Some(mut migration) = Migration::load(&dir)? else {
             return Ok(());
         };
         if !migration.verified {
-            {
-                let _transition = host.state.transition(&p.app).await;
-                host.cron_runs.stop(&p.app).await;
-                host.cron_execution
-                    .stop(&p.app)
-                    .await
-                    .map_err(|_| failed("could not drain guest cron runs"))?;
-                host.close_http_connections_to(&p.app).await;
-                host.activator.close_connections_to(&p.app).await;
-                let active = |states: &std::collections::BTreeMap<_, crate::adapters::vm::VmStatus>| {
-                    states
-                        .get(&p.app)
-                        .map(|s| s.active)
-                        .ok_or_else(|| failed("source VM status is unavailable"))
-                };
-                let running = active(&host.vms.statuses(std::slice::from_ref(&p.app)).await)?;
-                let snapshot =
-                    crate::adapters::vm::snapshot::snapshot_paths(&host.config.snapshot_dir, &p.app);
-                let sleeping = !running && snapshot.stamp_path.try_exists().map_err(io_error)?;
-                if sleeping {
-                    let record = host
-                        .state
-                        .record(&p.app)
-                        .await
-                        .ok_or_else(|| failed("sleeping source has no deployment record"))?;
-                    let slot = host
-                        .slot_of(&p.app)
-                        .await
-                        .ok_or_else(|| failed("sleeping source has no device slot"))?;
-                    self.shared.attach(&p.volume, &p.app).await?;
-                    host.vms
-                        .wake(crate::ports::SuspendRequest {
-                            app_id: p.app.clone(),
-                            deployment_id: record.deployment_id,
-                            slot,
-                        })
-                        .await
-                        .map_err(|e| failed(format!("could not wake the source for migration: {e}")))?;
-                }
-                let _lease = if running || sleeping {
-                    let socket = crate::domain::filesystem::reader::guest_vsock_path(host, &p.app);
-                    let lease = crate::domain::exports::freeze::frozen(&p.app, &socket)
-                        .await
-                        .map_err(|e| failed(e.message()))?;
-                    lease.require_running_guest().map_err(|e| failed(e.message()))?;
-                    Some(lease)
-                } else {
-                    None
-                };
-                host.vms
-                    .stop(&p.app)
-                    .await
-                    .map_err(|_| failed("could not stop the source guest"))?;
-                let states = host.vms.statuses(std::slice::from_ref(&p.app)).await;
-                if states.get(&p.app).is_none_or(|vm| vm.active) {
-                    return Err(failed("source guest is still running"));
-                }
-                host.vms
-                    .discard(&p.app)
-                    .await
-                    .map_err(|_| failed("could not discard source VM state"))?;
-                host.state
-                    .update_record(&p.app, |record| {
-                        record.state = protocol::InstanceState::Stopped;
-                        record.stop_requested = true;
-                    })
-                    .await;
-            }
+            self.stop_source(host, p, &dir, &mut migration).await?;
             self.shared.quiesce_source(&p.volume, &p.app).await?;
             let destination = self.active(p).await?;
             let from = self.shared.filesystem().mount_path.clone();
@@ -196,6 +217,10 @@ impl CustomerVolumes {
             migration.verified = true;
             migration.save(&dir)?;
         }
+        self.active(p)
+            .await?
+            .verify_migrated_disk(&p.volume, &p.app)
+            .await?;
         super::images::remove(&self.shared.filesystem().mount_path, &p.volume)?;
         self.shared.flush(&p.app).await?;
         std::fs::remove_file(dir.join(JOURNAL)).map_err(io_error)?;

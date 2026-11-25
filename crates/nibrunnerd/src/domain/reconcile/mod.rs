@@ -235,6 +235,13 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
             };
             !customer.migrating(app)
         });
+        plan.volumes.retain(|action| match action {
+            VolumePlan::Provision { desired }
+            | VolumePlan::Teardown { desired }
+            | VolumePlan::Blocked { desired, .. } => !customer.migrating(&desired.app_id),
+            VolumePlan::Detach { app_id, .. } => !customer.migrating(app_id),
+            VolumePlan::None { .. } => true,
+        });
     }
     host.state
         .modify(|snapshot| snapshot.deferred_work = plan.has_deferred_work())
