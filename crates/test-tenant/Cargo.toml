@@ -12,6 +12,7 @@ name = "test-tenant"
 path = "src/main.rs"
 
 [dependencies]
+sha2.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Only for the one syscall sequence std does not wrap: allocating a PTY, to prove a guest's
