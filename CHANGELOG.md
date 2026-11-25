@@ -1,5 +1,17 @@
 # Changelog
 
+## [2026.11.16] - 2026-11-25
+
+### Features
+
+- **volumes:** Retire shared checkpoints after customer bucket cutover (#389)
+- **volumes:** Migrate a shared disk to its requested customer writer (#388)
+- **volumes:** Copy and verify detached images between ZeroFS writers (#387)
+
+### Maintenance
+
+- **guest:** Exercise sleeping volume migration during a writer outage (#391)
+
 ## [2026.11.15] - 2026-11-24
 
 ### Features
