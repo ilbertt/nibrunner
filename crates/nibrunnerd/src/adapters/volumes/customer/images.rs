@@ -10,7 +10,7 @@ use protocol::VolumeId;
 use super::profile::{failed, io_error};
 use crate::adapters::volumes::{align_to_sector, VolumeError};
 
-pub(super) fn directory(mount: &Path) -> Result<File, VolumeError> {
+fn mounted_root(mount: &Path) -> Result<File, VolumeError> {
     // Pin the mount across lookup. Losing a FUSE mount must never turn a disk operation into
     // an operation on the underlying host directory, or follow a customer's symlink as root.
     let root = File::options()
@@ -26,21 +26,32 @@ pub(super) fn directory(mount: &Path) -> Result<File, VolumeError> {
     {
         return Err(failed("customer disk images require an active ZeroFS mount"));
     }
+    Ok(root)
+}
+
+fn image_directory(root: &File) -> nix::Result<File> {
     openat(
-        &root,
+        root,
         super::super::zerofs::NBD_DIRECTORY,
         OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
-    .map_err(|e| io_error(e.into()))
+}
+
+pub(super) fn directory(mount: &Path) -> Result<File, VolumeError> {
+    image_directory(&mounted_root(mount)?).map_err(|e| io_error(e.into()))
 }
 
 pub(in crate::adapters::volumes) fn image_size(
     mount: &Path,
     id: &VolumeId,
 ) -> Result<Option<u64>, VolumeError> {
-    let dir = directory(mount)?;
+    let dir = match image_directory(&mounted_root(mount)?) {
+        Ok(dir) => dir,
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(e) => return Err(io_error(e.into())),
+    };
     match nix::sys::stat::fstatat(&dir, id.as_str(), nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW) {
         Ok(meta) if meta.st_mode & libc::S_IFMT == libc::S_IFREG => u64::try_from(meta.st_size)
             .map(Some)

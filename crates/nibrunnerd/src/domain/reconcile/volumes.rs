@@ -121,7 +121,21 @@ pub async fn apply_volumes(
     let existing: Vec<ReportedVolume> = observed
         .volumes
         .iter()
-        .map(|volume| to_reported_volume(volume, last_refusals.get(&volume.volume_id)))
+        .map(|volume| {
+            let mut report = to_reported_volume(volume, last_refusals.get(&volume.volume_id));
+            if host
+                .customer_volumes
+                .as_ref()
+                .is_some_and(|v| v.migrating(&report.app_id))
+            {
+                report.state = VolumeState::Pending;
+                report.device_path = None;
+                report.message = Some(StateMessage::new(
+                    "migrating the shared volume to its customer bucket",
+                ));
+            }
+            report
+        })
         .collect();
     host.state
         .modify(|snapshot| {

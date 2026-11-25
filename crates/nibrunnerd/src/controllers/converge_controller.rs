@@ -105,8 +105,14 @@ impl ConvergeController {
     async fn supports_volume_storage(&self, desired: &HostDesiredState) -> bool {
         let error = if let Some(volumes) = &self.host.customer_volumes {
             let state = self.host.state.snapshot().await;
+            let previous = self.host.accepted_document().await;
             volumes
-                .prepare(desired, self.host.guest_memory_budget_mib(), &state.records)
+                .prepare(
+                    desired,
+                    self.host.guest_memory_budget_mib(),
+                    &state.records,
+                    previous.as_ref().map(|d| &d.desired),
+                )
                 .err()
                 .map(|error| error.message())
         } else {

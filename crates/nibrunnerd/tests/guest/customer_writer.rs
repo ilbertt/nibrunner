@@ -139,9 +139,40 @@ enabled = false
         "auth": { "kind": "access-key", "accessKeyId": "fixture-access", "secretAccessKey": "fixture-secret" }
     }))
     .unwrap();
-    app.volume.storage = Some(storage);
-    host.deploy(std::slice::from_ref(&app)).await;
+    let neighbour = host.tenant(2).running();
+    host.deploy(&[app.clone(), neighbour.clone()]).await;
     host.until_state(&app.app_id, InstanceState::Running).await;
+    host.until_state(&neighbour.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(&app, "/write?path=before&body=from-shared")
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+    assert_eq!(
+        host.get(&neighbour, "/write?path=neighbour&body=still-shared")
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+    app.volume.storage = Some(storage);
+    host.deploy(&[app.clone(), neighbour.clone()]).await;
+    host.until("the dedicated disk to replace the shared disk", |_| {
+        !shared_mount.join(".nbd/vol-1").exists()
+            && Path::new("/run/nibrunner-customer-mounts/app-1/.nbd/vol-1").is_file()
+    })
+    .await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(&app, "/read?path=before").await.unwrap().body,
+        "from-shared"
+    );
+    assert_eq!(
+        host.get(&neighbour, "/read?path=neighbour").await.unwrap().body,
+        "still-shared"
+    );
     let copy_id = protocol::VolumeId::parse("copy-fixture").unwrap();
     let device = Path::new(".nbd").join(copy_id.as_str());
     let customer_mount = Path::new("/run/nibrunner-customer-mounts/app-1");

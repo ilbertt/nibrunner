@@ -161,7 +161,12 @@ enabled = false
         Ok(config)
     }
 
-    pub(super) fn stage(&self, root: &Path, config: &str) -> Result<(), VolumeError> {
+    pub(super) fn stage(
+        &self,
+        root: &Path,
+        config: &str,
+        migration: Option<&super::migration::Migration>,
+    ) -> Result<(), VolumeError> {
         let staging = tempfile::Builder::new()
             .prefix(".stage-")
             .tempdir_in(root)
@@ -169,6 +174,9 @@ enabled = false
         let placement = toml::to_string(self).map_err(|_| failed("cannot encode customer placement"))?;
         write_new(&staging.path().join(PROFILE), &placement)?;
         write_new(&staging.path().join(WRITER_CONFIG), config)?;
+        if let Some(migration) = migration {
+            migration.save(staging.path())?;
+        }
         sync_dir(staging.path())?;
         std::fs::rename(staging.path(), self.directory(root)).map_err(io_error)?;
         sync_dir(root)

@@ -34,6 +34,15 @@ pub struct FreezeLease {
 }
 
 impl FreezeLease {
+    pub(crate) fn require_running_guest(&self) -> Result<(), FreezeError> {
+        if self.held.is_none() {
+            return Err(FreezeError::Lost {
+                app_id: self.app_id.clone(),
+            });
+        }
+        self.assert_held()
+    }
+
     pub fn assert_held(&self) -> Result<(), FreezeError> {
         let Some(stream) = &self.held else {
             return Ok(());

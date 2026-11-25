@@ -129,6 +129,42 @@ impl ZerofsVolumes {
             .map(|slot| slot.nbd_device_path)
     }
 
+    pub(super) async fn quiesce_source(
+        &self,
+        volume: &VolumeId,
+        app: &protocol::AppId,
+    ) -> Result<(), VolumeError> {
+        if let Some(device) = self.device_for(app).await {
+            if self.devices.migration_attached(&device)? {
+                let image = self.filesystem.device_file_for(volume);
+                let socket = self.filesystem.nbd_socket_path.to_string_lossy();
+                let target = NbdTarget {
+                    socket_path: &socket,
+                    device_path: &device,
+                    volume_id: volume,
+                    image_path: Some(&image),
+                };
+                if self.devices.is_customer_client(&device) || self.devices.proven(&target).await.is_none() {
+                    return Err(VolumeError::Unusable(
+                        "the shared device does not prove it holds the migration source".into(),
+                    ));
+                }
+                let path = device.clone();
+                tokio::task::spawn_blocking(move || std::fs::File::open(path)?.sync_all())
+                    .await
+                    .map_err(|e| VolumeError::Unusable(e.to_string()))?
+                    .map_err(|e| VolumeError::Unusable(e.to_string()))?;
+                self.devices.detach(&device).await?;
+                if self.devices.migration_attached(&device)? {
+                    return Err(VolumeError::Unusable(
+                        "waiting for the shared NBD attachment to close".into(),
+                    ));
+                }
+            }
+        }
+        self.flush(app).await
+    }
+
     pub(super) async fn flush_customer(
         &self,
         volume: &VolumeId,
@@ -187,6 +223,48 @@ impl ZerofsVolumes {
         file.set_len(target)
             .map_err(|error| VolumeError::Unusable(error.to_string()))?;
         Ok(target)
+    }
+
+    async fn provision_device(
+        &self,
+        volume: &VolumeId,
+        app: &protocol::AppId,
+    ) -> Result<ProvenDevice, VolumeError> {
+        let slot = self
+            .allocator
+            .lock()
+            .await
+            .allocate(app)
+            .map_err(|error| VolumeError::Unusable(error.message()))?;
+        let socket_path = self.filesystem.nbd_socket_path.display().to_string();
+        let image_path = self.filesystem.device_file_for(volume);
+        self.devices
+            .ready(&NbdTarget {
+                socket_path: &socket_path,
+                device_path: &slot.nbd_device_path,
+                volume_id: volume,
+                image_path: Some(&image_path),
+            })
+            .await
+    }
+
+    pub(super) async fn verify_migrated_disk(
+        &self,
+        volume: &VolumeId,
+        app: &protocol::AppId,
+    ) -> Result<(), VolumeError> {
+        if self.image_size(volume)?.is_none() {
+            return Err(VolumeError::NotHere {
+                volume_id: volume.clone(),
+            });
+        }
+        let device = self.provision_device(volume, app).await?;
+        if !self.is_formatted(&device).await? {
+            return Err(VolumeError::Unusable(
+                "the migrated disk does not contain an ext4 superblock".into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn is_formatted(&self, device: &ProvenDevice) -> Result<bool, VolumeError> {
@@ -288,23 +366,7 @@ pub fn parse_checkpoint_names(output: &str) -> Vec<String> {
 impl VolumeBackend for ZerofsVolumes {
     async fn provision(&self, desired: &DesiredVolume) -> Result<AttachedVolume, VolumeError> {
         let size_bytes = self.ensure_device_file(&desired.volume_id, desired.size_bytes)?;
-        let slot = self
-            .allocator
-            .lock()
-            .await
-            .allocate(&desired.app_id)
-            .map_err(|error| VolumeError::Unusable(error.message()))?;
-        let socket_path = self.filesystem.nbd_socket_path.display().to_string();
-        let image_path = self.filesystem.device_file_for(&desired.volume_id);
-        let device = self
-            .devices
-            .ready(&NbdTarget {
-                socket_path: &socket_path,
-                device_path: &slot.nbd_device_path,
-                volume_id: &desired.volume_id,
-                image_path: Some(&image_path),
-            })
-            .await?;
+        let device = self.provision_device(&desired.volume_id, &desired.app_id).await?;
         if !self.is_formatted(&device).await? {
             let contents = self.contents.stage_for(desired).await?;
             self.format(&device, contents.as_ref()).await?;

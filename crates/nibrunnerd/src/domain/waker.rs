@@ -114,6 +114,17 @@ impl AppWaker {
     async fn boot(&self, app_id: &AppId) -> Outcome {
         let started = Instant::now();
         let transition = self.host.state.transition(app_id).await;
+        if self
+            .host
+            .customer_volumes
+            .as_ref()
+            .is_some_and(|v| v.migrating(app_id))
+        {
+            return Err(WakeRefusal::Failed {
+                kind: WakeFailure::VolumeUnusable,
+                reason: "volume migration in progress".into(),
+            });
+        }
         let wanted = {
             let cache = self.host.cache.lock().await;
             cache
