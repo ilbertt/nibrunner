@@ -77,9 +77,21 @@ impl CustomerPlacements {
     ) -> Result<(), VolumeError> {
         let mut held = self.held.write().expect("placement lock");
         let mut additions = Vec::new();
+        let mut withdrawals = std::collections::BTreeSet::new();
         for volume in &desired.volumes {
             let existing = held.get(&volume.app_id);
             let Some(storage) = &volume.storage else {
+                if let Some(p) = existing {
+                    let dir = p.directory(&self.root);
+                    let deleted_source = volume.desired_state == DesiredPresence::Absent
+                        && std::fs::read_to_string(dir.join(RETIRED)).is_ok_and(|s| s == "shared");
+                    if p.volume == volume.volume_id
+                        && (deleted_source || migration::Migration::load(&dir)?.is_some_and(|m| m.rejected()))
+                    {
+                        withdrawals.insert(p.volume.clone());
+                        continue;
+                    }
+                }
                 if existing.is_some() || held.values().any(|p| p.volume == volume.volume_id) {
                     return Err(failed("a customer volume cannot switch to host storage"));
                 }
@@ -153,7 +165,9 @@ impl CustomerPlacements {
                 .any(|i| (i.app_id == placement.app) != (i.volume_id == placement.volume))
                 || desired.volumes.iter().any(|v| {
                     (v.app_id == placement.app) != (v.volume_id == placement.volume)
-                        || (v.volume_id == placement.volume && v.storage.is_none())
+                        || (v.volume_id == placement.volume
+                            && v.storage.is_none()
+                            && !withdrawals.contains(&placement.volume))
                 })
             {
                 return Err(failed(

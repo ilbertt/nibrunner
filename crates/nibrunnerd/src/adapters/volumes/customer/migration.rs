@@ -222,14 +222,46 @@ impl CustomerVolumes {
                     continue;
                 }
             };
+            if migration.rejected()
+                && desired.volumes.iter().any(|v| {
+                    v.app_id == p.app
+                        && v.volume_id == p.volume
+                        && v.storage.is_none()
+                        && v.desired_state == DesiredPresence::Present
+                })
+            {
+                if let Some(_guard) = self.try_operation(&p.app) {
+                    if let Err(error) = self.withdraw_rejected(&p) {
+                        tracing::warn!(app_id = %p.app, %error, "failed migration withdrawal will retry");
+                    }
+                }
+                continue;
+            }
             let mut request = None;
-            if !migration.verified {
+            if !migration.verified && !matches!(migration.source, SourceState::Restoring { .. }) {
                 let Some(storage) = desired
                     .volumes
                     .iter()
                     .find(|v| v.app_id == p.app && v.desired_state == DesiredPresence::Present)
                     .and_then(|v| v.storage.as_ref())
                 else {
+                    if migration.fenced()
+                        && desired
+                            .volumes
+                            .iter()
+                            .any(|v| v.app_id == p.app && v.desired_state == DesiredPresence::Absent)
+                    {
+                        if let Some(_guard) = self.try_operation(&p.app) {
+                            let mut cancelled = migration;
+                            cancelled.source = SourceState::Restoring {
+                                deployment: deployment.clone(),
+                                reason: StateMessage::new("migration cancelled by volume deletion"),
+                            };
+                            if let Err(error) = cancelled.save(&p.directory(&self.placements.root)) {
+                                tracing::warn!(app_id = %p.app, %error, "migration cancellation will retry");
+                            }
+                        }
+                    }
                     continue;
                 };
                 let Ok(config) = p.config(storage) else { continue };

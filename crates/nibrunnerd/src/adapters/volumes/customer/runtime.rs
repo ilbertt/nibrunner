@@ -242,6 +242,39 @@ impl CustomerVolumes {
         self.service("stop", "zerofs", &p.app).await
     }
 
+    pub(super) fn withdraw_rejected(&self, p: &Placement) -> Result<(), VolumeError> {
+        // A rejected attempt has stopped its private writer and released its dedicated attachment.
+        if super::images::image_size(&self.shared.filesystem().mount_path, &p.volume)?
+            .is_none_or(|bytes| bytes == 0)
+        {
+            return Err(failed("cannot withdraw a migration whose shared disk is missing"));
+        }
+        self.clear_cache(p)?;
+        let mut held = self.placements.held.write().expect("placement lock");
+        let dir = p.directory(&self.placements.root);
+        let discarded = tempfile::Builder::new()
+            .prefix(".stage-")
+            .tempdir_in(&self.placements.root)
+            .map_err(io_error)?;
+        let target = discarded.path().join("withdrawn");
+        std::fs::rename(&dir, target).map_err(io_error)?;
+        held.remove(&p.app);
+        self.resolver
+            .lock()
+            .expect("customer endpoint resolver lock")
+            .remove(&p.app);
+        sync_dir(&self.placements.root)?;
+        discarded.close().map_err(io_error)
+    }
+
+    fn clear_cache(&self, p: &Placement) -> Result<(), VolumeError> {
+        match std::fs::remove_dir_all(self.caches.join(p.app.as_str())) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
     async fn retire(&self, p: &Placement) -> Result<(), VolumeError> {
         let dir = p.directory(&self.placements.root);
         let retired = dir.join(RETIRED);
@@ -263,10 +296,7 @@ impl CustomerVolumes {
         if mounted(&Path::new(MOUNT_ROOT).join(p.app.as_str()))? {
             return Err(failed("the retired writer is still mounted"));
         }
-        match std::fs::remove_dir_all(self.caches.join(p.app.as_str())) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io_error(error)),
-            _ => {}
-        }
+        self.clear_cache(p)?;
         remove_file(&dir.join(WRITER_CONFIG))?;
         write_new(&released, "")?;
         sync_dir(&dir)
@@ -324,10 +354,37 @@ impl VolumeBackend for CustomerVolumes {
     }
 
     async fn teardown(&self, volume: &VolumeId, app: &AppId) -> Result<(), VolumeError> {
+        let _operation = self.operation(app).await;
+        let staged = self
+            .placements
+            .held
+            .read()
+            .expect("placement lock")
+            .get(app)
+            .cloned();
+        if let Some(p) = staged.filter(|p| &p.volume == volume) {
+            let dir = p.directory(&self.placements.root);
+            if super::migration::Migration::load(&dir)?.is_some_and(|m| m.serves_shared()) {
+                self.stop_writer(&p).await?;
+                self.shared.quiesce_source(volume, app).await?;
+                super::images::remove(&self.shared.filesystem().mount_path, volume)?;
+                self.shared.flush(app).await?;
+                if !dir.join(RETIRED).try_exists().map_err(io_error)? {
+                    write_new(&dir.join(RETIRED), "shared")?;
+                    sync_dir(&dir)?;
+                }
+                self.clear_cache(&p)?;
+                remove_file(&dir.join(WRITER_CONFIG))?;
+                if !dir.join("released").try_exists().map_err(io_error)? {
+                    write_new(&dir.join("released"), "")?;
+                }
+                remove_file(&dir.join(super::migration::JOURNAL))?;
+                return sync_dir(&dir);
+            }
+        }
         match self.placement(app, volume)? {
             None => self.shared.teardown(volume, app).await,
             Some(p) => {
-                let _operation = self.operation(&p.app).await;
                 if super::migration::Migration::load(&p.directory(&self.placements.root))?
                     .is_some_and(|m| m.removing_shared_source())
                 {
