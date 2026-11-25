@@ -271,6 +271,17 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
     host.cron_runs.synchronize(&enabled).await;
     host.state.modify(|snapshot| snapshot.converged = true).await;
     if let Some(customer) = &host.customer_volumes {
+        host.state
+            .modify(|state| {
+                for volume in &mut state.volume_reports {
+                    if volume.message.is_none() && customer.cleanup_pending(&volume.app_id) {
+                        volume.message = Some(protocol::StateMessage::new(
+                            "customer volume active; waiting for historical shared checkpoints to expire",
+                        ));
+                    }
+                }
+            })
+            .await;
         customer.resume_migrations(host, desired);
     }
     host.state.signal_refresh();

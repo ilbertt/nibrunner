@@ -157,8 +157,31 @@ enabled = false
             .status,
         200
     );
+    let owner_checkpoint = protocol::CheckpointId::parse("owner-snapshot").unwrap();
+    let neighbour_checkpoint = protocol::CheckpointId::parse("neighbour-snapshot").unwrap();
+    let mut desired = host.document(&[app.clone(), neighbour.clone()]);
+    let checkpoint = |id: &protocol::CheckpointId, volume: &protocol::VolumeId| protocol::DesiredCheckpoint {
+        checkpoint_id: id.clone(),
+        volume_id: volume.clone(),
+        desired_state: protocol::DesiredPresence::Present,
+    };
+    desired.checkpoints = vec![
+        checkpoint(&owner_checkpoint, &app.volume_id),
+        checkpoint(&neighbour_checkpoint, &neighbour.volume_id),
+    ];
+    host.write(&desired).await;
+    host.until("both shared checkpoints ready", |report| {
+        report
+            .checkpoints
+            .iter()
+            .filter(|c| c.state == protocol::CheckpointState::Ready)
+            .count()
+            == 2
+    })
+    .await;
     app.volume.storage = Some(storage);
-    host.deploy(&[app.clone(), neighbour.clone()]).await;
+    desired.volumes[0] = app.volume.clone();
+    host.write(&desired).await;
     host.until("the dedicated disk to replace the shared disk", |_| {
         !shared_mount.join(".nbd/vol-1").exists()
             && Path::new("/run/nibrunner-customer-mounts/app-1/.nbd/vol-1").is_file()
@@ -173,6 +196,33 @@ enabled = false
         host.get(&neighbour, "/read?path=neighbour").await.unwrap().body,
         "still-shared"
     );
+    host.until(
+        "shared history is reported while the other tenant retains its checkpoint",
+        |report| {
+            report.volumes.iter().any(|v| {
+                v.volume_id == app.volume_id
+                    && v.message
+                        .as_ref()
+                        .is_some_and(|m| m.as_str().contains("historical shared checkpoints"))
+            })
+        },
+    )
+    .await;
+    let checkpoints = host.host.volumes.observe_checkpoints().await;
+    assert!(!checkpoints.contains(&owner_checkpoint));
+    assert!(checkpoints.contains(&neighbour_checkpoint));
+    desired.checkpoints[1].desired_state = protocol::DesiredPresence::Absent;
+    host.write(&desired).await;
+    let journal = host
+        .host
+        .config
+        .state_dir
+        .join("customer-volumes/app-1/migration.json");
+    host.until(
+        "the detached source and shared checkpoint history to be released",
+        |_| !journal.exists(),
+    )
+    .await;
     let copy_id = protocol::VolumeId::parse("copy-fixture").unwrap();
     let device = Path::new(".nbd").join(copy_id.as_str());
     let customer_mount = Path::new("/run/nibrunner-customer-mounts/app-1");

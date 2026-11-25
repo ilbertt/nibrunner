@@ -173,7 +173,11 @@ impl VolumeBackend for LocalFileVolumes {
         Ok(())
     }
 
-    async fn create_checkpoint(&self, _checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+    async fn create_checkpoint(
+        &self,
+        _checkpoint_id: &protocol::CheckpointId,
+        _volume: &VolumeId,
+    ) -> Result<(), VolumeError> {
         Err(VolumeError::NoCheckpoints {
             what: "a volume kept as a file on this host's own disk",
         })
@@ -443,7 +447,10 @@ mod tests {
     async fn a_volume_kept_as_a_local_file_says_it_cannot_be_checkpointed() {
         let directory = tempfile::tempdir().unwrap();
         let volumes = backend(directory.path(), mocks::commands_succeeding().0);
-        assert!(volumes.create_checkpoint(&checkpoint_id()).await.is_err());
+        assert!(volumes
+            .create_checkpoint(&checkpoint_id(), &crate::test_support::volume_id())
+            .await
+            .is_err());
         assert!(volumes.observe_checkpoints().await.is_empty());
         volumes.flush(&app_id()).await.unwrap();
     }
@@ -453,7 +460,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let volumes = backend(directory.path(), mocks::commands_succeeding().0);
         for refused in [
-            volumes.create_checkpoint(&checkpoint_id()).await,
+            volumes
+                .create_checkpoint(&checkpoint_id(), &crate::test_support::volume_id())
+                .await,
             volumes.delete_checkpoint(&checkpoint_id()).await,
         ] {
             let error = refused.unwrap_err();

@@ -103,6 +103,12 @@ impl ZerofsVolumes {
         self
     }
 
+    pub(super) async fn checkpoint_inventory(
+        &self,
+    ) -> Result<super::customer::checkpoints::Inventory, VolumeError> {
+        super::customer::checkpoints::inventory(&self.admin(&["checkpoint", "list"]).await?)
+    }
+
     async fn admin(&self, args: &[&str]) -> Result<String, VolumeError> {
         let binary = self.filesystem.binary.display().to_string();
         let config = self.filesystem.config_file.display().to_string();
@@ -457,7 +463,11 @@ impl VolumeBackend for ZerofsVolumes {
         self.admin(&["flush"]).await.map(|_| ())
     }
 
-    async fn create_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
+    async fn create_checkpoint(
+        &self,
+        checkpoint_id: &protocol::CheckpointId,
+        _volume: &VolumeId,
+    ) -> Result<(), VolumeError> {
         // A checkpoint is named after the export that owns it, so one already under this name is
         // the last attempt at this same export and is what a retry is retrying. Creating over it
         // is refused rather than ignored, which would make the second attempt fail where the
@@ -733,7 +743,10 @@ mod tests {
         volumes.ensure_device_file(&volume_id, 1024).unwrap();
         let _ = volumes.flush(&app_id()).await;
         let _ = volumes
-            .create_checkpoint(&crate::test_support::checkpoint_id())
+            .create_checkpoint(
+                &crate::test_support::checkpoint_id(),
+                &crate::test_support::volume_id(),
+            )
             .await;
         let _ = volumes.observe_checkpoints().await;
         let _ = volumes
@@ -1135,7 +1148,10 @@ mod tests {
         );
         for refused in [
             volumes
-                .create_checkpoint(&crate::test_support::checkpoint_id())
+                .create_checkpoint(
+                    &crate::test_support::checkpoint_id(),
+                    &crate::test_support::volume_id(),
+                )
                 .await,
             volumes
                 .delete_checkpoint(&crate::test_support::checkpoint_id())
@@ -1166,7 +1182,10 @@ mod tests {
             staging(root.path()),
         );
         volumes
-            .create_checkpoint(&crate::test_support::checkpoint_id())
+            .create_checkpoint(
+                &crate::test_support::checkpoint_id(),
+                &crate::test_support::volume_id(),
+            )
             .await
             .unwrap();
         volumes

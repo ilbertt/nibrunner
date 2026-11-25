@@ -19,6 +19,8 @@ pub(super) struct Migration {
     verified: bool,
     #[serde(default)]
     needs_guest_freeze: bool,
+    #[serde(default)]
+    retained: Option<super::checkpoints::Inventory>,
 }
 
 impl Migration {
@@ -27,6 +29,7 @@ impl Migration {
             attempt: uuid::Uuid::new_v4().to_string(),
             verified: false,
             needs_guest_freeze: false,
+            retained: None,
         }
     }
 
@@ -56,17 +59,30 @@ impl Migration {
 }
 
 impl CustomerVolumes {
-    pub(crate) fn migrating(&self, app: &AppId) -> bool {
+    pub(crate) fn cleanup_pending(&self, app: &AppId) -> bool {
         self.placements
             .held
             .read()
             .expect("placement lock")
             .get(app)
             .is_some_and(|p| {
-                p.directory(&self.placements.root)
-                    .join(JOURNAL)
-                    .try_exists()
-                    .unwrap_or(true)
+                Migration::load(&p.directory(&self.placements.root))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.retained.is_some())
+            })
+    }
+
+    pub(crate) fn migrating(&self, app: &AppId) -> bool {
+        self.placements
+            .held
+            .read()
+            .expect("placement lock")
+            .get(app)
+            .is_some_and(|p| match Migration::load(&p.directory(&self.placements.root)) {
+                Ok(Some(migration)) => migration.retained.is_none(),
+                Ok(None) => false,
+                Err(_) => true,
             })
     }
 
@@ -80,24 +96,47 @@ impl CustomerVolumes {
                 effective.to_mut().instances[i].desired_state = DesiredInstanceState::Stopped;
             }
         }
+        // A checkpoint on the former shared writer cannot be recreated on the new disk.
+        // Explicit releases of older untracked checkpoints wait for the verified cutover.
+        let suppress = |checkpoint: &protocol::DesiredCheckpoint| {
+            desired
+                .volumes
+                .iter()
+                .find(|v| v.volume_id == checkpoint.volume_id && v.storage.is_some())
+                .is_some_and(|v| {
+                    checkpoint.desired_state == protocol::DesiredPresence::Present
+                        || self.migrating(&v.app_id)
+                })
+        };
+        if desired.checkpoints.iter().any(suppress) {
+            effective.to_mut().checkpoints.retain(|c| !suppress(c));
+        }
         effective
     }
 
     pub(crate) fn resume_migrations(self: &Arc<Self>, host: &Arc<Host>, desired: &HostDesiredState) {
-        for v in &desired.volumes {
-            if v.storage.is_none() || !self.migrating(&v.app_id) {
-                continue;
+        let placements: Vec<_> = self
+            .placements
+            .held
+            .read()
+            .expect("placement lock")
+            .values()
+            .cloned()
+            .collect();
+        for p in placements {
+            match Migration::load(&p.directory(&self.placements.root)) {
+                Ok(Some(migration))
+                    if migration.verified
+                        || desired
+                            .volumes
+                            .iter()
+                            .any(|v| v.app_id == p.app && v.storage.is_some()) => {}
+                Err(error) => {
+                    tracing::error!(app_id = %p.app, %error, "cannot resume volume migration");
+                    continue;
+                }
+                _ => continue,
             }
-            let Some(p) = self
-                .placements
-                .held
-                .read()
-                .expect("placement lock")
-                .get(&v.app_id)
-                .cloned()
-            else {
-                continue;
-            };
             let Some(operation) = self.try_operation(&p.app) else {
                 continue;
             };
@@ -106,6 +145,18 @@ impl CustomerVolumes {
                 let _operation = operation;
                 if let Err(error) = volumes.migrate(&host, &p).await {
                     tracing::warn!(app_id = %p.app, %error, "volume migration will retry");
+                    host.state
+                        .modify(|state| {
+                            if let Some(report) =
+                                state.volume_reports.iter_mut().find(|v| v.volume_id == p.volume)
+                            {
+                                report.message = Some(protocol::StateMessage::new(format!(
+                                    "volume migration will retry: {error}"
+                                )));
+                            }
+                        })
+                        .await;
+                    host.state.signal_report();
                 }
             });
         }
@@ -217,15 +268,44 @@ impl CustomerVolumes {
             migration.verified = true;
             migration.save(&dir)?;
         }
-        self.active(p)
-            .await?
-            .verify_migrated_disk(&p.volume, &p.app)
-            .await?;
-        super::images::remove(&self.shared.filesystem().mount_path, &p.volume)?;
-        self.shared.flush(&p.app).await?;
+        let _checkpoints = self.checkpoint_lock.lock().await;
+        if migration.retained.is_none() {
+            self.active(p)
+                .await?
+                .verify_migrated_disk(&p.volume, &p.app)
+                .await?;
+            super::images::remove(&self.shared.filesystem().mount_path, &p.volume)?;
+            self.shared.flush(&p.app).await?;
+            migration.retained = Some(self.shared.checkpoint_inventory().await?);
+            migration.save(&dir)?;
+        }
+        let inventory = self.shared.checkpoint_inventory().await?;
+        let retained = migration
+            .retained
+            .as_mut()
+            .expect("inventory recorded after unlink");
+        retained.retain(|name, generation| inventory.get(name) == Some(generation));
+        let mut released = Vec::new();
+        for (name, generation) in retained.iter() {
+            let Ok(id) = protocol::CheckpointId::parse(name) else {
+                continue;
+            };
+            if super::checkpoints::belongs_to(&self.checkpoint_owners, &id, &p.volume, generation)? {
+                self.shared.delete_checkpoint(&id).await?;
+                super::runtime::remove_file(&self.checkpoint_owners.join(name))?;
+                released.push(name.clone());
+            }
+        }
+        for name in released {
+            retained.remove(&name);
+        }
+        if !retained.is_empty() {
+            tracing::debug!(app_id = %p.app, remaining = retained.len(), "historical shared checkpoints still retain the source");
+            return Ok(());
+        }
         std::fs::remove_file(dir.join(JOURNAL)).map_err(io_error)?;
         sync_dir(&dir)?;
-        tracing::info!(app_id = %p.app, "customer volume committed and shared image removed");
+        tracing::info!(app_id = %p.app, "customer volume migration and shared checkpoint cleanup complete");
         Ok(())
     }
 }

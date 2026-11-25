@@ -438,8 +438,12 @@ impl VolumeBackend for HeldProvisions {
         self.volumes.flush(app_id).await
     }
 
-    async fn create_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {
-        self.volumes.create_checkpoint(checkpoint_id).await
+    async fn create_checkpoint(
+        &self,
+        checkpoint_id: &protocol::CheckpointId,
+        volume: &protocol::VolumeId,
+    ) -> Result<(), VolumeError> {
+        self.volumes.create_checkpoint(checkpoint_id, volume).await
     }
 
     async fn delete_checkpoint(&self, checkpoint_id: &protocol::CheckpointId) -> Result<(), VolumeError> {

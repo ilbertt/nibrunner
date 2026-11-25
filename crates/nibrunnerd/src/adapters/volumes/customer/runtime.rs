@@ -22,6 +22,8 @@ pub(crate) struct CustomerVolumes {
     pub(super) shared: ZerofsVolumes,
     operations: std::sync::Mutex<BTreeMap<AppId, Arc<tokio::sync::Mutex<()>>>>,
     resolver: std::sync::Mutex<BTreeMap<AppId, Arc<super::dns::EndpointHosts>>>,
+    pub(super) checkpoint_owners: PathBuf,
+    pub(super) checkpoint_lock: tokio::sync::Mutex<()>,
     caches: PathBuf,
     cache_owner: (u32, u32),
     commands: Arc<dyn CommandRunner>,
@@ -36,6 +38,8 @@ impl CustomerVolumes {
         commands: Arc<dyn CommandRunner>,
     ) -> Self {
         Self {
+            checkpoint_owners: placements.root.with_file_name("checkpoint-owners"),
+            checkpoint_lock: Default::default(),
             placements,
             operations: std::sync::Mutex::new(BTreeMap::new()),
             resolver: Default::default(),
@@ -95,15 +99,16 @@ impl CustomerVolumes {
         } else {
             drop(held);
         }
+        let claims: std::collections::BTreeSet<_> = new.iter().map(|v| &v.volume_id).collect();
         let mut owners = BTreeMap::new();
         if let Some(previous) = previous {
-            for v in &previous.volumes {
+            for v in previous.volumes.iter().filter(|v| claims.contains(&v.volume_id)) {
                 if v.storage.is_none() && v.desired_state == protocol::DesiredPresence::Present {
                     owners.insert(v.volume_id.clone(), v.app_id.clone());
                 }
             }
         }
-        for r in records.values() {
+        for r in records.values().filter(|r| claims.contains(&r.volume_id)) {
             if owners
                 .insert(r.volume_id.clone(), r.app_id.clone())
                 .is_some_and(|owner| owner != r.app_id)
@@ -111,7 +116,7 @@ impl CustomerVolumes {
                 return Err(failed("shared image ownership is ambiguous"));
             }
         }
-        self.placements.prepare(desired, &owners)
+        self.placements.prepare(desired, &owners, previous)
     }
 
     fn operation_lock(&self, app: &AppId) -> Arc<tokio::sync::Mutex<()>> {
@@ -251,7 +256,7 @@ impl CustomerVolumes {
     }
 }
 
-fn remove_file(path: &Path) -> Result<(), VolumeError> {
+pub(super) fn remove_file(path: &Path) -> Result<(), VolumeError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -379,11 +384,25 @@ impl VolumeBackend for CustomerVolumes {
         }
     }
 
-    async fn create_checkpoint(&self, checkpoint: &CheckpointId) -> Result<(), VolumeError> {
-        self.shared.create_checkpoint(checkpoint).await
+    async fn create_checkpoint(
+        &self,
+        checkpoint: &CheckpointId,
+        volume: &VolumeId,
+    ) -> Result<(), VolumeError> {
+        let _guard = self.checkpoint_lock.lock().await;
+        self.shared.create_checkpoint(checkpoint, volume).await?;
+        let generation = self
+            .shared
+            .checkpoint_inventory()
+            .await?
+            .remove(checkpoint.as_str())
+            .ok_or_else(|| failed("created checkpoint missing from shared writer"))?;
+        super::checkpoints::record(&self.checkpoint_owners, checkpoint, volume, generation)
     }
     async fn delete_checkpoint(&self, checkpoint: &CheckpointId) -> Result<(), VolumeError> {
-        self.shared.delete_checkpoint(checkpoint).await
+        let _guard = self.checkpoint_lock.lock().await;
+        self.shared.delete_checkpoint(checkpoint).await?;
+        remove_file(&self.checkpoint_owners.join(checkpoint.as_str()))
     }
     async fn observe_checkpoints(&self) -> Vec<CheckpointId> {
         self.shared.observe_checkpoints().await
