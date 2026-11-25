@@ -179,7 +179,7 @@ enabled = false
             == 2
     })
     .await;
-    app.volume.storage = Some(storage);
+    app.volume.storage = Some(storage.clone());
     desired.volumes[0] = app.volume.clone();
     host.write(&desired).await;
     host.until("the dedicated disk to replace the shared disk", |_| {
@@ -248,6 +248,7 @@ enabled = false
         host.get(&app, "/read?path=ownership").await.unwrap().body,
         "independent-recovery"
     );
+    migrate_sleeping_guest_after_writer_outage(&host, &app, neighbour, storage, &shared_mount).await;
     app.instance.desired_state = DesiredInstanceState::Stopped;
     host.deploy(std::slice::from_ref(&app)).await;
     host.until_state(&app.app_id, InstanceState::Stopped).await;
@@ -352,4 +353,62 @@ enabled = false
         "{}",
         String::from_utf8_lossy(&read.stderr)
     );
+}
+
+async fn migrate_sleeping_guest_after_writer_outage(
+    host: &nibrunnerd::test_support::machine::RunningHost,
+    app: &nibrunnerd::test_support::machine::Tenant,
+    neighbour: nibrunnerd::test_support::machine::Tenant,
+    mut storage: S3VolumeStorage,
+    shared_mount: &Path,
+) {
+    let mut sleeping = neighbour.on_request(60_000);
+    host.deploy(&[app.clone(), sleeping.clone()]).await;
+    host.let_sleep(&sleeping).await;
+    host.until_state(&sleeping.app_id, InstanceState::Idle).await;
+    let unit = "nibrunner-customer-mount@app-2.service";
+    run("systemctl", &["mask", "--runtime", unit]);
+    storage.prefix = protocol::ObjectKey::parse("second-app").unwrap();
+    sleeping.volume.storage = Some(storage);
+    sleeping.instance.desired_state = DesiredInstanceState::Running;
+    sleeping.instance.idle_timeout_ms = None;
+    host.deploy(&[app.clone(), sleeping.clone()]).await;
+    host.until("the masked writer to refuse a migration attempt", |report| {
+        report.volumes.iter().any(|v| {
+            v.volume_id == sleeping.volume_id
+                && v.message
+                    .as_ref()
+                    .is_some_and(|m| m.as_str().contains("volume migration will retry"))
+        })
+    })
+    .await;
+    let source = shared_mount.join(".nbd/vol-2");
+    assert!(source.is_file());
+    assert!(!Path::new("/run/nibrunner-customer-mounts/app-2/.nbd/vol-2").exists());
+    assert_eq!(
+        host.get(app, "/read?path=ownership").await.unwrap().body,
+        "independent-recovery"
+    );
+    run("systemctl", &["unmask", "--runtime", unit]);
+    host.until("sleeping disk to migrate on retry", |_| !source.exists())
+        .await;
+    host.until_state(&sleeping.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(&sleeping, "/read?path=neighbour").await.unwrap().body,
+        "still-shared"
+    );
+    sleeping.instance.desired_state = DesiredInstanceState::Stopped;
+    host.deploy(&[app.clone(), sleeping.clone()]).await;
+    host.until_state(&sleeping.app_id, InstanceState::Stopped).await;
+    let mut retire = host.document(std::slice::from_ref(app));
+    sleeping.volume.desired_state = protocol::DesiredPresence::Absent;
+    retire.volumes.push(sleeping.volume);
+    host.write(&retire).await;
+    host.until("the fixture's second writer to retire", |report| {
+        report
+            .volumes
+            .iter()
+            .any(|v| v.volume_id == sleeping.volume_id && v.state == protocol::VolumeState::Deleted)
+    })
+    .await;
 }
