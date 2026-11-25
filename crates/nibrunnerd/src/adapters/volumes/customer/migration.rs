@@ -38,6 +38,9 @@ pub(super) struct Migration {
     #[serde(default)]
     request_hash: Option<String>,
     verified: bool,
+    // v2026.11.16 could persist a verified copy before checking its NBD attachment.
+    #[serde(default)]
+    committed: bool,
     #[serde(default)]
     checking_device: bool,
     #[serde(default)]
@@ -55,6 +58,7 @@ impl Migration {
             source: SourceState::Checking,
             request_hash: None,
             verified: false,
+            committed: false,
             checking_device: false,
             discard_candidate: false,
             needs_guest_freeze: false,
@@ -66,12 +70,17 @@ impl Migration {
         self.serves_shared() && matches!(self.source, SourceState::Failed { .. })
     }
 
+    pub(super) fn removing_shared_source(&self) -> bool {
+        self.committed && self.retained.is_none()
+    }
+
     pub(super) fn fenced(&self) -> bool {
-        self.retained.is_none() && !self.serves_shared()
+        self.retained.is_none() && !self.committed && !self.serves_shared()
     }
 
     pub(super) fn serves_shared(&self) -> bool {
         !self.verified
+            && !self.committed
             && self.retained.is_none()
             && matches!(self.source, SourceState::Checking | SourceState::Failed { .. })
     }
@@ -127,18 +136,26 @@ impl CustomerVolumes {
         }
     }
 
-    pub(crate) fn cleanup_pending(&self, app: &AppId) -> bool {
-        self.placements
+    pub(crate) fn cleanup_message(&self, app: &AppId) -> Option<StateMessage> {
+        let p = self
+            .placements
             .held
             .read()
             .expect("placement lock")
-            .get(app)
-            .is_some_and(|p| {
-                Migration::load(&p.directory(&self.placements.root))
-                    .ok()
-                    .flatten()
-                    .is_some_and(|m| m.retained.is_some())
-            })
+            .get(app)?
+            .clone();
+        let migration = Migration::load(&p.directory(&self.placements.root)).ok()??;
+        if migration.retained.is_some() {
+            Some(StateMessage::new(
+                "customer volume active; waiting for historical shared checkpoints to expire",
+            ))
+        } else if migration.committed {
+            Some(StateMessage::new(
+                "customer volume active; shared source cleanup pending",
+            ))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn migrating(&self, app: &AppId) -> bool {
@@ -462,12 +479,17 @@ impl CustomerVolumes {
                 return self.restore_source(p, &dir, &mut migration).await;
             }
             migration.verified = true;
-            migration.save(&dir)?;
+            migration.committed = true;
+            return migration.save(&dir);
         }
         let _checkpoints = self.checkpoint_lock.lock().await;
         if migration.retained.is_none() {
             let destination = self.active(p).await?;
-            destination.verify_migrated_disk(&p.volume, &p.app).await?;
+            if !migration.committed {
+                destination.verify_migrated_disk(&p.volume, &p.app).await?;
+                migration.committed = true;
+                return migration.save(&dir);
+            }
             super::transfer::finish_attempt(&destination.filesystem().mount_path, &p.volume, attempt, true)?;
             destination.flush(&p.app).await?;
             super::images::remove(&self.shared.filesystem().mount_path, &p.volume)?;
@@ -527,6 +549,9 @@ mod tests {
         reopened.verified = true;
         assert!(!reopened.serves_shared());
         assert!(reopened.fenced());
+        reopened.committed = true;
+        assert!(!reopened.serves_shared());
+        assert!(!reopened.fenced());
         reopened.retained = Some(Default::default());
         assert!(!reopened.serves_shared());
         assert!(!reopened.fenced());

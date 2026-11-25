@@ -274,10 +274,8 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
         host.state
             .modify(|state| {
                 for volume in &mut state.volume_reports {
-                    if volume.message.is_none() && customer.cleanup_pending(&volume.app_id) {
-                        volume.message = Some(protocol::StateMessage::new(
-                            "customer volume active; waiting for historical shared checkpoints to expire",
-                        ));
+                    if volume.message.is_none() {
+                        volume.message = customer.cleanup_message(&volume.app_id);
                     }
                 }
             })
