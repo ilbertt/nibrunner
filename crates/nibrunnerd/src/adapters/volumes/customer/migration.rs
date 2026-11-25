@@ -19,6 +19,10 @@ enum SourceState {
     // Existing journals may already have stopped the guest or detached the source.
     #[default]
     Fenced,
+    Restoring {
+        deployment: Option<DeploymentId>,
+        reason: StateMessage,
+    },
     Failed {
         deployment: Option<DeploymentId>,
         reason: StateMessage,
@@ -32,6 +36,10 @@ pub(super) struct Migration {
     source: SourceState,
     verified: bool,
     #[serde(default)]
+    checking_device: bool,
+    #[serde(default)]
+    discard_candidate: bool,
+    #[serde(default)]
     needs_guest_freeze: bool,
     #[serde(default)]
     retained: Option<super::checkpoints::Inventory>,
@@ -43,6 +51,8 @@ impl Migration {
             attempt: uuid::Uuid::new_v4().to_string(),
             source: SourceState::Checking,
             verified: false,
+            checking_device: false,
+            discard_candidate: false,
             needs_guest_freeze: false,
             retained: None,
         }
@@ -311,6 +321,59 @@ impl CustomerVolumes {
         Ok(())
     }
 
+    async fn copy_and_attach(
+        &self,
+        host: &Host,
+        p: &Placement,
+        dir: &Path,
+        migration: &mut Migration,
+        attempt: uuid::Uuid,
+    ) -> Result<(), VolumeError> {
+        let destination = self.active(p).await?;
+        if !migration.checking_device {
+            self.stop_source(host, p, dir, migration).await?;
+            self.shared.quiesce_source(&p.volume, &p.app).await?;
+            let from = self.shared.filesystem().mount_path.clone();
+            let to = destination.filesystem().mount_path.clone();
+            let id = p.volume.clone();
+            tokio::task::spawn_blocking(move || super::transfer::stage_image(&from, &to, &id, attempt))
+                .await
+                .map_err(|_| failed("migration copy was interrupted"))??;
+            destination.flush(&p.app).await?;
+            // Verification can acquire the shared slot's NBD device before returning an error.
+            migration.checking_device = true;
+            migration.save(dir)?;
+        }
+        destination.verify_migrated_disk(&p.volume, &p.app).await
+    }
+
+    async fn restore_source(
+        &self,
+        p: &Placement,
+        dir: &Path,
+        migration: &mut Migration,
+    ) -> Result<(), VolumeError> {
+        let SourceState::Restoring { deployment, reason } = &migration.source else {
+            return Ok(());
+        };
+        if super::images::image_size(&self.shared.filesystem().mount_path, &p.volume)?
+            .is_none_or(|bytes| bytes == 0)
+        {
+            return Err(failed("cannot resume a missing shared source"));
+        }
+        if migration.checking_device {
+            self.backend(p).detach(&p.volume, &p.app).await?;
+        }
+        self.stop_writer(p).await?;
+        migration.source = SourceState::Failed {
+            deployment: deployment.clone(),
+            reason: reason.clone(),
+        };
+        migration.checking_device = false;
+        migration.discard_candidate = true;
+        migration.save(dir)
+    }
+
     async fn migrate(
         &self,
         host: &Host,
@@ -321,10 +384,25 @@ impl CustomerVolumes {
         let Some(mut migration) = Migration::load(&dir)? else {
             return Ok(());
         };
+        let attempt =
+            uuid::Uuid::parse_str(&migration.attempt).map_err(|_| failed("invalid migration attempt"))?;
+        if !migration.verified && matches!(migration.source, SourceState::Restoring { .. }) {
+            return self.restore_source(p, &dir, &mut migration).await;
+        }
         if migration.serves_shared() {
             let probe = async {
                 let writer = self.active(p).await?;
-                super::preflight::check(&writer, &p.app).await
+                super::preflight::check(&writer, &p.app).await?;
+                if migration.discard_candidate {
+                    super::transfer::finish_attempt(
+                        &writer.filesystem().mount_path,
+                        &p.volume,
+                        attempt,
+                        false,
+                    )?;
+                    writer.flush(&p.app).await?;
+                }
+                Ok::<(), VolumeError>(())
             };
             // systemd may keep restarting a writer with invalid credentials while its mount waits.
             let checked = tokio::time::timeout(std::time::Duration::from_secs(30), probe)
@@ -344,27 +422,22 @@ impl CustomerVolumes {
             return migration.save(&dir);
         }
         if !migration.verified {
-            let destination = self.active(p).await?;
-            self.stop_source(host, p, &dir, &mut migration).await?;
-            self.shared.quiesce_source(&p.volume, &p.app).await?;
-            let from = self.shared.filesystem().mount_path.clone();
-            let to = destination.filesystem().mount_path.clone();
-            let id = p.volume.clone();
-            let attempt =
-                uuid::Uuid::parse_str(&migration.attempt).map_err(|_| failed("invalid migration attempt"))?;
-            tokio::task::spawn_blocking(move || super::transfer::copy_image(&from, &to, &id, attempt))
-                .await
-                .map_err(|_| failed("migration copy was interrupted"))??;
-            destination.flush(&p.app).await?;
+            if let Err(error) = self.copy_and_attach(host, p, &dir, &mut migration, attempt).await {
+                let reason =
+                    StateMessage::new(format!("migration failed; serving the shared volume: {error}"));
+                migration.source = SourceState::Restoring { deployment, reason };
+                migration.save(&dir)?;
+                return self.restore_source(p, &dir, &mut migration).await;
+            }
             migration.verified = true;
             migration.save(&dir)?;
         }
         let _checkpoints = self.checkpoint_lock.lock().await;
         if migration.retained.is_none() {
-            self.active(p)
-                .await?
-                .verify_migrated_disk(&p.volume, &p.app)
-                .await?;
+            let destination = self.active(p).await?;
+            destination.verify_migrated_disk(&p.volume, &p.app).await?;
+            super::transfer::finish_attempt(&destination.filesystem().mount_path, &p.volume, attempt, true)?;
+            destination.flush(&p.app).await?;
             super::images::remove(&self.shared.filesystem().mount_path, &p.volume)?;
             self.shared.flush(&p.app).await?;
             migration.retained = Some(self.shared.checkpoint_inventory().await?);
@@ -398,5 +471,32 @@ impl CustomerVolumes {
         sync_dir(&dir)?;
         tracing::info!(app_id = %p.app, "customer volume migration and shared checkpoint cleanup complete");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_and_legacy_fenced_journals_never_route_to_shared_by_default() {
+        let legacy: Migration = serde_json::from_str(r#"{"attempt":"legacy","verified":false}"#).unwrap();
+        assert!(legacy.fenced());
+        let dir = tempfile::tempdir().unwrap();
+        let mut migration = Migration::new();
+        assert!(migration.serves_shared());
+        migration.source = SourceState::Failed {
+            deployment: None,
+            reason: StateMessage::new("test"),
+        };
+        migration.save(dir.path()).unwrap();
+        let mut reopened = Migration::load(dir.path()).unwrap().unwrap();
+        assert!(reopened.serves_shared());
+        reopened.verified = true;
+        assert!(!reopened.serves_shared());
+        assert!(reopened.fenced());
+        reopened.retained = Some(Default::default());
+        assert!(!reopened.serves_shared());
+        assert!(!reopened.fenced());
     }
 }
