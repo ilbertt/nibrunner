@@ -134,6 +134,15 @@ pub async fn apply_volumes(
                     "migrating the shared volume to its customer bucket",
                 ));
             }
+            if let Some(reason) = host
+                .customer_volumes
+                .as_ref()
+                .and_then(|v| v.source_failure(&report.app_id))
+            {
+                if report.state == VolumeState::Ready {
+                    report.message = Some(reason);
+                }
+            }
             report
         })
         .collect();
