@@ -142,6 +142,20 @@ enabled = false
     app.volume.storage = Some(storage);
     host.deploy(std::slice::from_ref(&app)).await;
     host.until_state(&app.app_id, InstanceState::Running).await;
+    let copy_id = protocol::VolumeId::parse("copy-fixture").unwrap();
+    let device = Path::new(".nbd").join(copy_id.as_str());
+    let customer_mount = Path::new("/run/nibrunner-customer-mounts/app-1");
+    let bytes = vec![0x57; 4096];
+    std::fs::create_dir_all(shared_mount.join(".nbd")).unwrap();
+    std::fs::write(shared_mount.join(&device), &bytes).unwrap();
+    nibrunnerd::adapters::volumes::customer::transfer::copy_image(
+        &shared_mount,
+        customer_mount,
+        &copy_id,
+        uuid::Uuid::new_v4(),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(customer_mount.join(&device)).unwrap(), bytes);
     assert_eq!(
         host.get(&app, "/write?path=ownership&body=independent-recovery")
             .await
