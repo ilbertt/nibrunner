@@ -378,7 +378,7 @@ async fn migrate_sleeping_guest_after_writer_outage(
             v.volume_id == sleeping.volume_id
                 && v.message
                     .as_ref()
-                    .is_some_and(|m| m.as_str().contains("volume migration will retry"))
+                    .is_some_and(|m| m.as_str().contains("serving the shared volume"))
         })
     })
     .await;
@@ -389,7 +389,13 @@ async fn migrate_sleeping_guest_after_writer_outage(
         host.get(app, "/read?path=ownership").await.unwrap().body,
         "independent-recovery"
     );
+    assert_eq!(
+        host.get(&sleeping, "/read?path=neighbour").await.unwrap().body,
+        "still-shared"
+    );
     run("systemctl", &["unmask", "--runtime", unit]);
+    sleeping.instance.deployment_id = protocol::DeploymentId::parse("dep-2-retry").unwrap();
+    host.deploy(&[app.clone(), sleeping.clone()]).await;
     host.until("sleeping disk to migrate on retry", |_| !source.exists())
         .await;
     host.until_state(&sleeping.app_id, InstanceState::Running).await;

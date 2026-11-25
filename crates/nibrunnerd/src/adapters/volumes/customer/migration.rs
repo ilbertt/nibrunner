@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use protocol::{AppId, DesiredInstanceState, HostDesiredState};
+use protocol::{AppId, DeploymentId, DesiredInstanceState, DesiredPresence, HostDesiredState, StateMessage};
 use serde::{Deserialize, Serialize};
 
 use super::profile::{failed, io_error, sync_dir, Placement};
@@ -13,9 +13,23 @@ use crate::host::Host;
 
 pub(super) const JOURNAL: &str = "migration.json";
 
+#[derive(Default, Deserialize, Serialize)]
+enum SourceState {
+    Checking,
+    // Existing journals may already have stopped the guest or detached the source.
+    #[default]
+    Fenced,
+    Failed {
+        deployment: Option<DeploymentId>,
+        reason: StateMessage,
+    },
+}
+
 #[derive(Deserialize, Serialize)]
 pub(super) struct Migration {
     attempt: String,
+    #[serde(default)]
+    source: SourceState,
     verified: bool,
     #[serde(default)]
     needs_guest_freeze: bool,
@@ -27,10 +41,21 @@ impl Migration {
     pub(super) fn new() -> Self {
         Self {
             attempt: uuid::Uuid::new_v4().to_string(),
+            source: SourceState::Checking,
             verified: false,
             needs_guest_freeze: false,
             retained: None,
         }
+    }
+
+    pub(super) fn fenced(&self) -> bool {
+        self.retained.is_none() && !self.serves_shared()
+    }
+
+    pub(super) fn serves_shared(&self) -> bool {
+        !self.verified
+            && self.retained.is_none()
+            && matches!(self.source, SourceState::Checking | SourceState::Failed { .. })
     }
 
     pub(super) fn load(dir: &Path) -> Result<Option<Self>, VolumeError> {
@@ -59,6 +84,31 @@ impl Migration {
 }
 
 impl CustomerVolumes {
+    pub(super) fn serves_shared(&self, p: &Placement) -> bool {
+        Migration::load(&p.directory(&self.placements.root))
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.serves_shared())
+    }
+
+    pub(crate) fn source_failure(&self, app: &AppId) -> Option<StateMessage> {
+        let p = self
+            .placements
+            .held
+            .read()
+            .expect("placement lock")
+            .get(app)?
+            .clone();
+        let migration = Migration::load(&p.directory(&self.placements.root)).ok()??;
+        if !migration.serves_shared() {
+            return None;
+        }
+        match migration.source {
+            SourceState::Failed { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
     pub(crate) fn cleanup_pending(&self, app: &AppId) -> bool {
         self.placements
             .held
@@ -80,7 +130,7 @@ impl CustomerVolumes {
             .expect("placement lock")
             .get(app)
             .is_some_and(|p| match Migration::load(&p.directory(&self.placements.root)) {
-                Ok(Some(migration)) => migration.retained.is_none(),
+                Ok(Some(migration)) => migration.fenced(),
                 Ok(None) => false,
                 Err(_) => true,
             })
@@ -124,13 +174,27 @@ impl CustomerVolumes {
             .cloned()
             .collect();
         for p in placements {
+            let deployment = desired
+                .instances
+                .iter()
+                .find(|i| i.app_id == p.app)
+                .map(|i| i.deployment_id.clone());
             match Migration::load(&p.directory(&self.placements.root)) {
+                Ok(Some(Migration {
+                    source:
+                        SourceState::Failed {
+                            deployment: previous, ..
+                        },
+                    verified: false,
+                    ..
+                })) if previous == deployment => continue,
                 Ok(Some(migration))
                     if migration.verified
-                        || desired
-                            .volumes
-                            .iter()
-                            .any(|v| v.app_id == p.app && v.storage.is_some()) => {}
+                        || desired.volumes.iter().any(|v| {
+                            v.app_id == p.app
+                                && v.storage.is_some()
+                                && v.desired_state == DesiredPresence::Present
+                        }) => {}
                 Err(error) => {
                     tracing::error!(app_id = %p.app, %error, "cannot resume volume migration");
                     continue;
@@ -143,7 +207,7 @@ impl CustomerVolumes {
             let (host, volumes) = (host.clone(), self.clone());
             tokio::spawn(async move {
                 let _operation = operation;
-                if let Err(error) = volumes.migrate(&host, &p).await {
+                if let Err(error) = volumes.migrate(&host, &p, deployment).await {
                     tracing::warn!(app_id = %p.app, %error, "volume migration will retry");
                     host.state
                         .modify(|state| {
@@ -247,14 +311,40 @@ impl CustomerVolumes {
         Ok(())
     }
 
-    async fn migrate(&self, host: &Host, p: &Placement) -> Result<(), VolumeError> {
+    async fn migrate(
+        &self,
+        host: &Host,
+        p: &Placement,
+        deployment: Option<DeploymentId>,
+    ) -> Result<(), VolumeError> {
         let dir = p.directory(&self.placements.root);
         let Some(mut migration) = Migration::load(&dir)? else {
             return Ok(());
         };
+        if migration.serves_shared() {
+            let probe = async {
+                let writer = self.active(p).await?;
+                super::preflight::check(&writer, &p.app).await
+            };
+            // systemd may keep restarting a writer with invalid credentials while its mount waits.
+            let checked = tokio::time::timeout(std::time::Duration::from_secs(30), probe)
+                .await
+                .unwrap_or_else(|_| Err(failed("customer writer preflight timed out")));
+            migration.source = match checked {
+                Ok(()) => SourceState::Fenced,
+                Err(error) => {
+                    let reason =
+                        StateMessage::new(format!("migration failed; serving the shared volume: {error}"));
+                    tracing::warn!(app_id = %p.app, %error, "customer writer preflight failed");
+                    self.stop_writer(p).await?;
+                    SourceState::Failed { deployment, reason }
+                }
+            };
+            // Start the offline copy on a subsequent pass, after reconciliation has fenced the source.
+            return migration.save(&dir);
+        }
         if !migration.verified {
             let destination = self.active(p).await?;
-            super::preflight::check(&destination, &p.app).await?;
             self.stop_source(host, p, &dir, &mut migration).await?;
             self.shared.quiesce_source(&p.volume, &p.app).await?;
             let from = self.shared.filesystem().mount_path.clone();

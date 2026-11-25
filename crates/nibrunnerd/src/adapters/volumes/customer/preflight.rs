@@ -12,6 +12,28 @@ use super::profile::{failed, io_error};
 use crate::adapters::volumes::zerofs::ZerofsVolumes;
 use crate::adapters::volumes::{VolumeBackend, VolumeError};
 
+struct ProbeFile<'a> {
+    root: &'a File,
+    name: &'a str,
+    removed: bool,
+}
+
+impl ProbeFile<'_> {
+    fn remove(&mut self) -> Result<(), VolumeError> {
+        unlinkat(self.root, self.name, UnlinkatFlags::NoRemoveDir).map_err(|e| io_error(e.into()))?;
+        self.removed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ProbeFile<'_> {
+    fn drop(&mut self) {
+        if !self.removed {
+            let _ = self.remove();
+        }
+    }
+}
+
 /// The customer mount ignores fsync. Its writer RPC is the durability barrier for both changes.
 pub(super) async fn check(writer: &ZerofsVolumes, app: &AppId) -> Result<(), VolumeError> {
     let root = mounted_root(&writer.filesystem().mount_path)?;
@@ -24,6 +46,11 @@ pub(super) async fn check(writer: &ZerofsVolumes, app: &AppId) -> Result<(), Vol
         Mode::S_IRUSR | Mode::S_IWUSR,
     )
     .map_err(|e| io_error(e.into()))?;
+    let mut probe = ProbeFile {
+        root: &root,
+        name: &name,
+        removed: false,
+    };
     let checked = async {
         File::from(fd).write_all(challenge.as_bytes()).map_err(io_error)?;
         writer.flush(app).await?;
@@ -46,7 +73,26 @@ pub(super) async fn check(writer: &ZerofsVolumes, app: &AppId) -> Result<(), Vol
         Ok(())
     }
     .await;
-    unlinkat(&root, name.as_str(), UnlinkatFlags::NoRemoveDir).map_err(|e| io_error(e.into()))?;
+    probe.remove()?;
     writer.flush(app).await?;
     checked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelling_a_check_unlinks_its_probe_from_the_pinned_directory() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = File::open(scratch.path()).unwrap();
+        let path = scratch.path().join("probe");
+        std::fs::write(&path, "challenge").unwrap();
+        drop(ProbeFile {
+            root: &root,
+            name: "probe",
+            removed: false,
+        });
+        assert!(!path.exists());
+    }
 }

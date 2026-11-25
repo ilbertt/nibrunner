@@ -136,13 +136,25 @@ impl CustomerVolumes {
         self.operation_lock(app).lock_owned().await
     }
 
+    fn shared_source(&self, app: &AppId) -> bool {
+        self.placements
+            .held
+            .read()
+            .expect("placement lock")
+            .get(app)
+            .is_some_and(|p| self.serves_shared(p))
+    }
+
     fn placement(&self, app: &AppId, volume: &VolumeId) -> Result<Option<Arc<Placement>>, VolumeError> {
-        if self.migrating(app) {
-            return Err(failed("volume migration in progress"));
-        }
         let held = self.placements.held.read().expect("placement lock");
         match held.get(app) {
-            Some(p) if &p.volume == volume => Ok(Some(p.clone())),
+            Some(p) if &p.volume == volume => {
+                match super::migration::Migration::load(&p.directory(&self.placements.root))? {
+                    Some(m) if m.serves_shared() => Ok(None),
+                    Some(m) if m.fenced() => Err(failed("volume migration in progress")),
+                    _ => Ok(Some(p.clone())),
+                }
+            }
             Some(_) => Err(failed("this customer app owns a different volume")),
             None if held.values().any(|p| &p.volume == volume) => {
                 Err(failed("this customer volume belongs to a different app"))
@@ -225,6 +237,11 @@ impl CustomerVolumes {
         }
     }
 
+    pub(super) async fn stop_writer(&self, p: &Placement) -> Result<(), VolumeError> {
+        self.service("stop", "mount", &p.app).await?;
+        self.service("stop", "zerofs", &p.app).await
+    }
+
     async fn retire(&self, p: &Placement) -> Result<(), VolumeError> {
         let dir = p.directory(&self.placements.root);
         let retired = dir.join(RETIRED);
@@ -272,6 +289,12 @@ impl VolumeBackend for CustomerVolumes {
             desired.storage.as_ref(),
         ) {
             (None, None) => self.shared.provision(desired).await,
+            (None, Some(_)) if self.shared_source(&desired.app_id) => {
+                self.shared
+                    .verify_migrated_disk(&desired.volume_id, &desired.app_id)
+                    .await?;
+                self.shared.provision(desired).await
+            }
             (Some(p), Some(_)) => {
                 let _operation = self.operation(&p.app).await;
                 self.active(&p).await?.provision(desired).await
@@ -311,7 +334,7 @@ impl VolumeBackend for CustomerVolumes {
     }
 
     async fn flush(&self, app: &AppId) -> Result<(), VolumeError> {
-        if self.migrating(app) {
+        if self.migrating(app) || self.shared_source(app) {
             return self.shared.flush(app).await;
         }
         let p = self
@@ -337,6 +360,7 @@ impl VolumeBackend for CustomerVolumes {
             .read()
             .expect("placement lock")
             .values()
+            .filter(|p| !self.serves_shared(p))
             .cloned()
             .collect();
         let mut shared_owners = owners.clone();
