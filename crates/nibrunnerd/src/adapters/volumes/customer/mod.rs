@@ -2,6 +2,7 @@ mod dns;
 pub(super) mod images;
 mod profile;
 mod runtime;
+pub mod transfer;
 pub(crate) use runtime::CustomerVolumes;
 
 use std::collections::BTreeMap;
