@@ -183,6 +183,9 @@ enabled = false
     rejected_credentials_preserve_the_shared_guest(&host, &app, &mut desired, &storage, &expected_db).await;
     app.volume.storage = Some(storage.clone());
     desired.volumes[0] = app.volume.clone();
+    conflicting_image_restores_the_source(&host, &app, &mut desired).await;
+    app.instance.deployment_id = protocol::DeploymentId::parse("dep-1-after-conflict").unwrap();
+    desired.instances[0] = app.instance.clone();
     host.write(&desired).await;
     host.until("the dedicated disk to replace the shared disk", |_| {
         !shared_mount.join(".nbd/vol-1").exists()
@@ -524,4 +527,49 @@ async fn rejected_credentials_preserve_the_shared_guest(
         host.get(app, "/checksum?path=fixture.sqlite").await.unwrap().body,
         expected_db
     );
+}
+
+async fn conflicting_image_restores_the_source(
+    host: &nibrunnerd::test_support::machine::RunningHost,
+    app: &nibrunnerd::test_support::machine::Tenant,
+    desired: &mut protocol::HostDesiredState,
+) {
+    let unit = "nibrunner-customer-mount@app-1.service";
+    let dropin = Path::new("/run/systemd/system/nibrunner-customer-mount@app-1.service.d");
+    std::fs::create_dir_all(dropin).unwrap();
+    let hook = dropin.join("conflict.conf");
+    let other = Path::new("/run/nibrunner-customer-mounts/app-1/.nbd/vol-1");
+    std::fs::write(&hook, "[Service]\nExecStartPost=/bin/sh -ec 'set -C; echo foreign-image > /run/nibrunner-customer-mounts/app-1/.nbd/vol-1'\n").unwrap();
+    run("systemctl", &["daemon-reload"]);
+    host.write(desired).await;
+    host.until(
+        "a conflicting image to return the guest to the shared disk",
+        |report| {
+            report.volumes.iter().any(|v| {
+                v.volume_id == app.volume_id
+                    && v.state == protocol::VolumeState::Ready
+                    && v.message
+                        .as_ref()
+                        .is_some_and(|m| m.as_str().contains("migrated image length differs"))
+            })
+        },
+    )
+    .await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(app, "/read?path=after-refusal").await.unwrap().body,
+        "still-writable"
+    );
+    assert_eq!(
+        host.get(app, "/write?path=after-copy-failure&body=recovered")
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+    std::fs::remove_file(hook).unwrap();
+    run("systemctl", &["daemon-reload"]);
+    run("systemctl", &["start", unit]);
+    assert_eq!(std::fs::read_to_string(other).unwrap(), "foreign-image\n");
+    std::fs::remove_file(other).unwrap();
 }
