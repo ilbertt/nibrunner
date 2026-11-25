@@ -157,6 +157,18 @@ enabled = false
             .status,
         200
     );
+    let owner_checkpoint = protocol::CheckpointId::parse("owner-snapshot").unwrap();
+    let neighbour_checkpoint = protocol::CheckpointId::parse("neighbour-snapshot").unwrap();
+    host.host
+        .volumes
+        .create_checkpoint(&owner_checkpoint, &app.volume_id)
+        .await
+        .unwrap();
+    host.host
+        .volumes
+        .create_checkpoint(&neighbour_checkpoint, &neighbour.volume_id)
+        .await
+        .unwrap();
     app.volume.storage = Some(storage);
     host.deploy(&[app.clone(), neighbour.clone()]).await;
     host.until("the dedicated disk to replace the shared disk", |_| {
@@ -173,6 +185,36 @@ enabled = false
         host.get(&neighbour, "/read?path=neighbour").await.unwrap().body,
         "still-shared"
     );
+    host.until(
+        "shared history is reported while the other tenant retains its checkpoint",
+        |report| {
+            report.volumes.iter().any(|v| {
+                v.volume_id == app.volume_id
+                    && v.message
+                        .as_ref()
+                        .is_some_and(|m| m.as_str().contains("historical shared checkpoints"))
+            })
+        },
+    )
+    .await;
+    let checkpoints = host.host.volumes.observe_checkpoints().await;
+    assert!(!checkpoints.contains(&owner_checkpoint));
+    assert!(checkpoints.contains(&neighbour_checkpoint));
+    host.host
+        .volumes
+        .delete_checkpoint(&neighbour_checkpoint)
+        .await
+        .unwrap();
+    let journal = host
+        .host
+        .config
+        .state_dir
+        .join("customer-volumes/app-1/migration.json");
+    host.until(
+        "the detached source and shared checkpoint history to be released",
+        |_| !journal.exists(),
+    )
+    .await;
     let copy_id = protocol::VolumeId::parse("copy-fixture").unwrap();
     let device = Path::new(".nbd").join(copy_id.as_str());
     let customer_mount = Path::new("/run/nibrunner-customer-mounts/app-1");

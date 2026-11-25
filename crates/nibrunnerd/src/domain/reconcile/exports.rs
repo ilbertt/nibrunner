@@ -122,7 +122,7 @@ async fn write_inner(
         .await
         .map_err(|error| error.message())?;
     host.volumes
-        .create_checkpoint(checkpoint_id)
+        .create_checkpoint(checkpoint_id, &desired.volume_id)
         .await
         .map_err(|error| error.message())?;
     if let Err(error) = lease.assert_held() {
@@ -797,7 +797,7 @@ mod tests {
             .expect_create_checkpoint()
             .times(1)
             .in_sequence(&mut sequence)
-            .returning(|_| {
+            .returning(|_, _| {
                 Err(crate::adapters::volumes::VolumeError::NoCheckpoints {
                     what: "a volume kept as a file on this host's own disk",
                 })
@@ -850,7 +850,7 @@ mod tests {
             .expect_observe_checkpoints()
             .returning(|| vec![CheckpointId::parse("export-exp-1").unwrap()]);
         volumes.expect_flush().returning(|_| Ok(()));
-        volumes.expect_create_checkpoint().returning(|_| {
+        volumes.expect_create_checkpoint().returning(|_, _| {
             Err(crate::adapters::volumes::VolumeError::NoCheckpoints {
                 what: "a volume kept as a file on this host's own disk",
             })

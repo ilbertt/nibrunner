@@ -1,3 +1,4 @@
+pub(super) mod checkpoints;
 mod dns;
 pub(super) mod images;
 mod migration;
@@ -158,7 +159,7 @@ impl CustomerPlacements {
             if desired
                 .checkpoints
                 .iter()
-                .any(|c| c.volume_id == placement.volume)
+                .any(|c| c.volume_id == placement.volume && c.desired_state == DesiredPresence::Present)
                 || desired
                     .exports
                     .iter()

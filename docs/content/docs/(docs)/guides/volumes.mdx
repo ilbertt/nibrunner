@@ -107,7 +107,7 @@ object-store credentials and the encryption password go in `host.env`.
 
 ## A customer-owned bucket
 
-On a ZeroFS host, set `storage` when declaring a **new** app volume. Run `nibrunnerd install` and
+On a ZeroFS host, set `storage` when declaring an app volume. Run `nibrunnerd install` and
 `nibrunnerd start` after upgrading to install and load the per-app systemd units. Assign one app
 and one host exclusive write access to the bucket prefix. Keep the ZeroFS password with the
 customer's bucket credentials. Both are needed for independent recovery.
@@ -134,12 +134,30 @@ customer's bucket credentials. Both are needed for independent recovery.
   RAM. Sleeping or omitting the app keeps its writer and placement. An explicit volume deletion
   removes the image, flushes the removal to the bucket, then releases the local cache.
 - The host persists the placement across restarts and refuses edits to its bucket or writer
-  credentials. Use credentials whose lifetime covers the deployment. Choose a new app and volume
-  ID for a different placement. Existing shared disks require a separate data migration.
+  credentials. Use credentials whose lifetime covers the deployment. Moving between customer buckets requires a separate migration.
 - S3 credentials and the password reach the host in the desired document. Restrict access to
   that file and the host state directory. The writer has no need for the host's S3 identity.
 - The customer prefix contains encrypted ZeroFS objects. Keep the entire prefix, including
   `zerofs.key`. Native host checkpoints and exports currently require host-backed ZeroFS storage.
+
+### Move an existing shared volume
+
+1. Assign an exclusive customer bucket prefix and keep the existing app ID and volume ID.
+   In the desired document, change that volume’s `storage` from `null` to the customer settings.
+   Withdraw requests for new exports and checkpoints on that volume in the same revision.
+2. Allow downtime for the copy. The host drains cron runs, freezes the guest filesystem, and
+   stops the guest. It streams the disk through the two ZeroFS writers, checks the bytes,
+   and flushes the destination. A conflicting destination image leaves the source intact.
+3. The host records cutover durably, removes the source image from shared ZeroFS, flushes the
+   removal, and resumes the app under its existing identity. An interrupted transfer retries.
+   Check the volume and instance reports for readiness.
+
+Shared ZeroFS checkpoints cover every volume on that writer. Cleanup deletes checkpoints
+whose recorded volume and generation match the source. The guest can run on its new disk
+while the volume report says that historical shared checkpoints remain. Checkpoints owned
+by other volumes, and older checkpoints with unknown ownership, must be released by their
+owners before cleanup finishes. ZeroFS garbage collection then reclaims unreferenced storage.
+Previously exported archives and S3 versions have their own retention policies.
 
 ### Recover the disk independently
 

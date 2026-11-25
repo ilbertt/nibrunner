@@ -55,7 +55,10 @@ pub async fn apply_checkpoints(host: &Host, plan: &ReconcilePlan) {
 
 async fn cut(host: &Host, desired: &DesiredCheckpoint) -> ReportedCheckpoint {
     let cutting = std::time::Instant::now();
-    let cut = host.volumes.create_checkpoint(&desired.checkpoint_id).await;
+    let cut = host
+        .volumes
+        .create_checkpoint(&desired.checkpoint_id, &desired.volume_id)
+        .await;
     host.metrics
         .resources
         .done(Operation::CheckpointCreate, cut.is_ok(), cutting.elapsed());
@@ -205,8 +208,8 @@ mod tests {
         volumes
             .expect_create_checkpoint()
             .times(1)
-            .withf(|held| held.as_str() == "chk-1")
-            .returning(|_| Ok(()));
+            .withf(|held, _| held.as_str() == "chk-1")
+            .returning(|_, _| Ok(()));
         let host = host_over(volumes).await;
         let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Present)]);
         let plan = planned(host.arc(), &desired).await;
@@ -224,7 +227,10 @@ mod tests {
     #[tokio::test]
     async fn when_this_host_cut_a_checkpoint_is_still_said_on_the_passes_that_follow() {
         let mut volumes = holding(vec![]);
-        volumes.expect_create_checkpoint().times(1).returning(|_| Ok(()));
+        volumes
+            .expect_create_checkpoint()
+            .times(1)
+            .returning(|_, _| Ok(()));
         let host = host_over(volumes).await;
         let desired = desired_state(|state| state.checkpoints = vec![wanted(DesiredPresence::Present)]);
         apply_checkpoints(host.arc(), &planned(host.arc(), &desired).await).await;

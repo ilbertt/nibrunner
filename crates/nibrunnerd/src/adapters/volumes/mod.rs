@@ -91,7 +91,11 @@ pub trait VolumeBackend: Send + Sync {
 
     async fn flush(&self, app_id: &AppId) -> Result<(), VolumeError>;
 
-    async fn create_checkpoint(&self, checkpoint_id: &CheckpointId) -> Result<(), VolumeError>;
+    async fn create_checkpoint(
+        &self,
+        checkpoint_id: &CheckpointId,
+        volume: &VolumeId,
+    ) -> Result<(), VolumeError>;
 
     async fn delete_checkpoint(&self, checkpoint_id: &CheckpointId) -> Result<(), VolumeError>;
 
