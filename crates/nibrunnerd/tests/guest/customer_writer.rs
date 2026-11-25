@@ -139,6 +139,7 @@ enabled = false
         "auth": { "kind": "access-key", "accessKeyId": "fixture-access", "secretAccessKey": "fixture-secret" }
     }))
     .unwrap();
+    let expected_db = seed_database(&host, &mut app, root).await;
     let neighbour = host.tenant(2).running();
     host.deploy(&[app.clone(), neighbour.clone()]).await;
     host.until_state(&app.app_id, InstanceState::Running).await;
@@ -179,6 +180,7 @@ enabled = false
             == 2
     })
     .await;
+    rejected_credentials_preserve_the_shared_guest(&host, &app, &mut desired, &storage, &expected_db).await;
     app.volume.storage = Some(storage.clone());
     desired.volumes[0] = app.volume.clone();
     host.write(&desired).await;
@@ -417,4 +419,109 @@ async fn migrate_sleeping_guest_after_writer_outage(
             .any(|v| v.volume_id == sleeping.volume_id && v.state == protocol::VolumeState::Deleted)
     })
     .await;
+}
+
+async fn seed_database(
+    host: &nibrunnerd::test_support::machine::RunningHost,
+    app: &mut nibrunnerd::test_support::machine::Tenant,
+    root: &Path,
+) -> String {
+    use sha2::{Digest, Sha256};
+    use sqlx::Connection;
+    let path = root.join("fixture.sqlite");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let mut db = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+    sqlx::query("CREATE TABLE fixture (value TEXT NOT NULL)")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO fixture VALUES ('shared before migration')")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    let row: String = sqlx::query_scalar("SELECT value FROM fixture")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(row, "shared before migration");
+    db.close().await.unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let mut archive = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_mode(0o600);
+    header.set_size(bytes.len() as u64);
+    archive
+        .append_data(&mut header, "fixture.sqlite", bytes.as_slice())
+        .unwrap();
+    let tar = archive.into_inner().unwrap();
+    let contents = nibrunnerd::test_support::initial_contents(&tar, "/app/data");
+    let object = Path::new(&host.host.config.artifact_store_url).join(contents.object.object_key.as_str());
+    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+    std::fs::write(object, tar).unwrap();
+    app.volume.initial_contents = Some(contents);
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+async fn rejected_credentials_preserve_the_shared_guest(
+    host: &nibrunnerd::test_support::machine::RunningHost,
+    app: &nibrunnerd::test_support::machine::Tenant,
+    desired: &mut protocol::HostDesiredState,
+    storage: &S3VolumeStorage,
+    expected_db: &str,
+) {
+    let mut wrong = storage.clone();
+    let protocol::S3VolumeAuth::AccessKey {
+        secret_access_key, ..
+    } = &mut wrong.auth
+    else {
+        panic!("fixture requires an access key")
+    };
+    *secret_access_key = serde_json::from_value(serde_json::json!("incorrect-secret")).unwrap();
+    desired.volumes[0].storage = Some(wrong);
+    host.write(desired).await;
+    host.until(
+        "invalid initial credentials to be reported on the serving shared volume",
+        |report| {
+            report.volumes.iter().any(|v| {
+                v.volume_id == app.volume_id
+                    && v.state == protocol::VolumeState::Ready
+                    && v.message
+                        .as_ref()
+                        .is_some_and(|m| m.as_str().contains("serving the shared volume"))
+            })
+        },
+    )
+    .await;
+    for _ in 0..2 {
+        let answer = host.get(app, "/read?path=before").await.unwrap();
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.body, "from-shared");
+        assert_eq!(
+            host.get(app, "/checksum?path=fixture.sqlite").await.unwrap().body,
+            expected_db
+        );
+    }
+    assert_eq!(
+        host.get(app, "/write?path=after-refusal&body=still-writable")
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+    desired.instances[0].desired_state = DesiredInstanceState::Stopped;
+    host.write(desired).await;
+    host.until_state(&app.app_id, InstanceState::Stopped).await;
+    desired.instances[0].desired_state = DesiredInstanceState::Running;
+    host.write(desired).await;
+    host.until_state(&app.app_id, InstanceState::Running).await;
+    assert_eq!(
+        host.get(app, "/read?path=after-refusal").await.unwrap().body,
+        "still-writable"
+    );
+    assert_eq!(
+        host.get(app, "/checksum?path=fixture.sqlite").await.unwrap().body,
+        expected_db
+    );
 }

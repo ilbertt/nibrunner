@@ -2,9 +2,7 @@
 //! running guest from outside it: whether it kept what it had in memory, whether what it wrote
 //! is still there, whether the kernel let it reach somewhere it should not have.
 //!
-//! No runtime, and the one dependency (`nix`, for the PTY syscalls std does not wrap) changes
-//! nothing about that: a thread per connection, and the whole thing is one static musl binary
-//! small enough to hand to the artifact store as a layer.
+//! A thread per connection keeps the static musl binary small enough to hand to the artifact store.
 
 // A tenant the tests boot, and every way it can die is one of them asking it to.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
@@ -253,6 +251,7 @@ fn answer(target: &str, data_dir: &Path) -> (&'static str, String) {
         }
         "/write" => write_file(target, data_dir),
         "/read" => read_file(target, data_dir),
+        "/checksum" => checksum(target, data_dir),
         "/log" => {
             let lines: u64 = query(target, "lines").and_then(|n| n.parse().ok()).unwrap_or(1);
             let mut out = std::io::stdout().lock();
@@ -311,6 +310,18 @@ fn write_file(target: &str, data_dir: &Path) -> (&'static str, String) {
     match written {
         Ok(()) => ("200 OK", body.len().to_string()),
         Err(error) => ("500 Internal Server Error", error.to_string()),
+    }
+}
+
+fn checksum(target: &str, data_dir: &Path) -> (&'static str, String) {
+    use sha2::{Digest, Sha256};
+    let Some(path) = query(target, "path").and_then(|asked| within(data_dir, &asked)) else {
+        return ("400 Bad Request", "that is not a path".into());
+    };
+    let mut digest = Sha256::new();
+    match std::fs::File::open(path).and_then(|mut file| std::io::copy(&mut file, &mut digest)) {
+        Ok(_) => ("200 OK", format!("{:x}", digest.finalize())),
+        Err(error) => ("404 Not Found", error.to_string()),
     }
 }
 
