@@ -2,6 +2,7 @@ pub(super) mod checkpoints;
 mod dns;
 pub(super) mod images;
 mod migration;
+mod preflight;
 mod profile;
 mod runtime;
 pub mod transfer;

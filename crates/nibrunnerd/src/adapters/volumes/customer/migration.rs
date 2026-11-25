@@ -253,9 +253,10 @@ impl CustomerVolumes {
             return Ok(());
         };
         if !migration.verified {
+            let destination = self.active(p).await?;
+            super::preflight::check(&destination, &p.app).await?;
             self.stop_source(host, p, &dir, &mut migration).await?;
             self.shared.quiesce_source(&p.volume, &p.app).await?;
-            let destination = self.active(p).await?;
             let from = self.shared.filesystem().mount_path.clone();
             let to = destination.filesystem().mount_path.clone();
             let id = p.volume.clone();
