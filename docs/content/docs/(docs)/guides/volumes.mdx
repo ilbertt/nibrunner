@@ -145,12 +145,20 @@ customer's bucket credentials. Both are needed for independent recovery.
 1. Assign an exclusive customer bucket prefix and keep the existing app ID and volume ID.
    In the desired document, change that volume’s `storage` from `null` to the customer settings.
    Finish in-flight exports first. Existing checkpoint declarations may remain during the move.
-2. Allow downtime for the copy. The host drains cron runs, freezes the guest filesystem, and
+2. The host checks the customer writer while the shared disk continues serving. It writes,
+   flushes, reads back, and removes a probe. A rejected preflight leaves the shared disk active.
+3. Allow downtime for the copy. The host drains cron runs, freezes the guest filesystem, and
    stops the guest. It streams the disk through the two ZeroFS writers, checks the bytes,
    and flushes the destination. A conflicting destination image leaves the source intact.
-3. The host records cutover durably, removes the source image from shared ZeroFS, flushes the
+4. The host records cutover durably, removes the source image from shared ZeroFS, flushes the
    removal, and resumes the app under its existing identity. An interrupted transfer retries.
    Check the volume and instance reports for readiness.
+
+If a copy or destination attachment fails before commit, the host releases any destination
+attachment and resumes the original shared disk. Check the volume report for the failure.
+Correct the writer settings for the same bucket and prefix, or request a new deployment to
+retry after a transient outage. A restart of the host preserves the failed request. After
+commit the customer disk stays authoritative, including while shared history is being cleaned up.
 
 Shared ZeroFS checkpoints cover every volume on that writer. Cleanup deletes checkpoints
 whose recorded volume and generation match the source. The guest can run on its new disk
