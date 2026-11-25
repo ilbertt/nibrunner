@@ -157,7 +157,8 @@ customer's bucket credentials. Both are needed for independent recovery.
 If a copy or destination attachment fails before commit, the host releases any destination
 attachment and resumes the original shared disk. Check the volume report for the failure.
 Correct the writer settings for the same bucket and prefix, or request a new deployment to
-retry after a transient outage. A restart of the host preserves the failed request. After
+retry after a transient outage. Set the failed volume’s `storage` back to `null` to withdraw
+the request and release the writer reservation. A restart of the host preserves the failed request. After
 commit the customer disk stays authoritative, including while shared history is being cleaned up.
 
 Shared ZeroFS checkpoints cover every volume on that writer. Cleanup deletes checkpoints

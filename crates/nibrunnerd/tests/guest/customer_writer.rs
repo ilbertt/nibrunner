@@ -398,6 +398,23 @@ async fn migrate_sleeping_guest_after_writer_outage(
         host.get(&sleeping, "/read?path=neighbour").await.unwrap().body,
         "still-shared"
     );
+    let destination = sleeping.volume.storage.take().unwrap();
+    host.deploy(&[app.clone(), sleeping.clone()]).await;
+    let placement = host
+        .host
+        .config
+        .state_dir
+        .join("customer-volumes")
+        .join(sleeping.app_id.as_str());
+    host.until("a withdrawn rejection to release its writer reservation", |_| {
+        !placement.exists()
+    })
+    .await;
+    assert_eq!(
+        host.get(&sleeping, "/read?path=neighbour").await.unwrap().body,
+        "still-shared"
+    );
+    sleeping.volume.storage = Some(destination);
     run("systemctl", &["unmask", "--runtime", unit]);
     sleeping.instance.deployment_id = protocol::DeploymentId::parse("dep-2-retry").unwrap();
     host.deploy(&[app.clone(), sleeping.clone()]).await;
