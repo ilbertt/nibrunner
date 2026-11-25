@@ -98,7 +98,9 @@ impl CustomerPlacements {
                     if volume.desired_state == DesiredPresence::Present {
                         return Err(failed("this customer volume has been retired"));
                     }
-                } else if std::fs::read_to_string(dir.join(WRITER_CONFIG)).map_err(io_error)? != config {
+                } else if std::fs::read_to_string(dir.join(WRITER_CONFIG)).map_err(io_error)? != config
+                    && !migration::Migration::load(&dir)?.is_some_and(|m| m.rejected())
+                {
                     return Err(failed(
                         "the requested writer settings differ from the staged customer writer",
                     ));

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use protocol::{AppId, DeploymentId, DesiredInstanceState, DesiredPresence, HostDesiredState, StateMessage};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::profile::{failed, io_error, sync_dir, Placement};
 use super::runtime::CustomerVolumes;
@@ -34,6 +35,8 @@ pub(super) struct Migration {
     attempt: String,
     #[serde(default)]
     source: SourceState,
+    #[serde(default)]
+    request_hash: Option<String>,
     verified: bool,
     #[serde(default)]
     checking_device: bool,
@@ -50,12 +53,17 @@ impl Migration {
         Self {
             attempt: uuid::Uuid::new_v4().to_string(),
             source: SourceState::Checking,
+            request_hash: None,
             verified: false,
             checking_device: false,
             discard_candidate: false,
             needs_guest_freeze: false,
             retained: None,
         }
+    }
+
+    pub(super) fn rejected(&self) -> bool {
+        self.serves_shared() && matches!(self.source, SourceState::Failed { .. })
     }
 
     pub(super) fn fenced(&self) -> bool {
@@ -189,27 +197,35 @@ impl CustomerVolumes {
                 .iter()
                 .find(|i| i.app_id == p.app)
                 .map(|i| i.deployment_id.clone());
-            match Migration::load(&p.directory(&self.placements.root)) {
-                Ok(Some(Migration {
-                    source:
-                        SourceState::Failed {
-                            deployment: previous, ..
-                        },
-                    verified: false,
-                    ..
-                })) if previous == deployment => continue,
-                Ok(Some(migration))
-                    if migration.verified
-                        || desired.volumes.iter().any(|v| {
-                            v.app_id == p.app
-                                && v.storage.is_some()
-                                && v.desired_state == DesiredPresence::Present
-                        }) => {}
+            let migration = match Migration::load(&p.directory(&self.placements.root)) {
+                Ok(Some(m)) => m,
+                Ok(None) => continue,
                 Err(error) => {
                     tracing::error!(app_id = %p.app, %error, "cannot resume volume migration");
                     continue;
                 }
-                _ => continue,
+            };
+            let mut request = None;
+            if !migration.verified {
+                let Some(storage) = desired
+                    .volumes
+                    .iter()
+                    .find(|v| v.app_id == p.app && v.desired_state == DesiredPresence::Present)
+                    .and_then(|v| v.storage.as_ref())
+                else {
+                    continue;
+                };
+                let Ok(config) = p.config(storage) else { continue };
+                let hash = hex::encode(Sha256::digest(config.as_bytes()));
+                if let SourceState::Failed {
+                    deployment: previous, ..
+                } = &migration.source
+                {
+                    if *previous == deployment && migration.request_hash.as_ref() == Some(&hash) {
+                        continue;
+                    }
+                }
+                request = Some((config, hash));
             }
             let Some(operation) = self.try_operation(&p.app) else {
                 continue;
@@ -217,7 +233,7 @@ impl CustomerVolumes {
             let (host, volumes) = (host.clone(), self.clone());
             tokio::spawn(async move {
                 let _operation = operation;
-                if let Err(error) = volumes.migrate(&host, &p, deployment).await {
+                if let Err(error) = volumes.migrate(&host, &p, deployment, request).await {
                     tracing::warn!(app_id = %p.app, %error, "volume migration will retry");
                     host.state
                         .modify(|state| {
@@ -379,6 +395,7 @@ impl CustomerVolumes {
         host: &Host,
         p: &Placement,
         deployment: Option<DeploymentId>,
+        request: Option<(String, String)>,
     ) -> Result<(), VolumeError> {
         let dir = p.directory(&self.placements.root);
         let Some(mut migration) = Migration::load(&dir)? else {
@@ -388,6 +405,21 @@ impl CustomerVolumes {
             uuid::Uuid::parse_str(&migration.attempt).map_err(|_| failed("invalid migration attempt"))?;
         if !migration.verified && matches!(migration.source, SourceState::Restoring { .. }) {
             return self.restore_source(p, &dir, &mut migration).await;
+        }
+        if let Some((config, hash)) = request {
+            if migration.rejected() {
+                let current = dir.join(super::profile::WRITER_CONFIG);
+                if std::fs::read_to_string(&current).map_err(io_error)? != config {
+                    let mut updated = tempfile::NamedTempFile::new_in(&dir).map_err(io_error)?;
+                    updated
+                        .write_all(config.as_bytes())
+                        .and_then(|()| updated.as_file().sync_all())
+                        .map_err(io_error)?;
+                    updated.persist(current).map_err(|e| io_error(e.error))?;
+                    sync_dir(&dir)?;
+                }
+            }
+            migration.request_hash = Some(hash);
         }
         if migration.serves_shared() {
             let probe = async {
