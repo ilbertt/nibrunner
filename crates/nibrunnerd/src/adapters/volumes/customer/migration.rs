@@ -199,7 +199,7 @@ impl CustomerVolumes {
         effective
     }
 
-    pub(crate) fn resume_migrations(self: &Arc<Self>, host: &Arc<Host>, desired: &HostDesiredState) {
+    pub(crate) async fn resume_migrations(self: &Arc<Self>, host: &Arc<Host>, desired: &HostDesiredState) {
         let placements: Vec<_> = self
             .placements
             .held
@@ -231,7 +231,7 @@ impl CustomerVolumes {
                 })
             {
                 if let Some(_guard) = self.try_operation(&p.app) {
-                    if let Err(error) = self.withdraw_rejected(&p) {
+                    if let Err(error) = self.withdraw_rejected(&p).await {
                         tracing::warn!(app_id = %p.app, %error, "failed migration withdrawal will retry");
                     }
                 }
@@ -429,14 +429,31 @@ impl CustomerVolumes {
         if migration.checking_device {
             self.backend(p).detach(&p.volume, &p.app).await?;
         }
-        self.stop_writer(p).await?;
         migration.source = SourceState::Failed {
             deployment: deployment.clone(),
             reason: reason.clone(),
         };
         migration.checking_device = false;
         migration.discard_candidate = true;
-        migration.save(dir)
+        migration.save(dir)?;
+        // The dedicated attachment is gone. An unreachable customer writer cannot hold the source offline.
+        let target = self.backend(p);
+        let cleanup = async {
+            if super::mounted(&target.filesystem().mount_path)? {
+                let attempt = uuid::Uuid::parse_str(&migration.attempt)
+                    .map_err(|_| failed("invalid migration attempt"))?;
+                super::transfer::finish_attempt(&target.filesystem().mount_path, &p.volume, attempt, false)?;
+                target.flush(&p.app).await?;
+                migration.discard_candidate = false;
+                migration.save(dir)?;
+            }
+            Ok::<(), VolumeError>(())
+        }
+        .await;
+        if let Err(error) = cleanup {
+            tracing::warn!(app_id = %p.app, %error, "destination scratch cleanup deferred until retry");
+        }
+        self.stop_writer(p).await
     }
 
     async fn migrate(
@@ -457,6 +474,7 @@ impl CustomerVolumes {
         }
         if let Some((config, hash)) = request {
             if migration.rejected() {
+                self.stop_writer(p).await?;
                 let current = dir.join(super::profile::WRITER_CONFIG);
                 if std::fs::read_to_string(&current).map_err(io_error)? != config {
                     let mut updated = tempfile::NamedTempFile::new_in(&dir).map_err(io_error)?;
@@ -495,12 +513,15 @@ impl CustomerVolumes {
                     let reason =
                         StateMessage::new(format!("migration failed; serving the shared volume: {error}"));
                     tracing::warn!(app_id = %p.app, %error, "customer writer preflight failed");
-                    self.stop_writer(p).await?;
                     SourceState::Failed { deployment, reason }
                 }
             };
             // Start the offline copy on a subsequent pass, after reconciliation has fenced the source.
-            return migration.save(&dir);
+            migration.save(&dir)?;
+            if migration.rejected() {
+                self.stop_writer(p).await?;
+            }
+            return Ok(());
         }
         if !migration.verified {
             if let Err(error) = self.copy_and_attach(host, p, &dir, &mut migration, attempt).await {

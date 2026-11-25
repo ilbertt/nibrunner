@@ -242,13 +242,14 @@ impl CustomerVolumes {
         self.service("stop", "zerofs", &p.app).await
     }
 
-    pub(super) fn withdraw_rejected(&self, p: &Placement) -> Result<(), VolumeError> {
+    pub(super) async fn withdraw_rejected(&self, p: &Placement) -> Result<(), VolumeError> {
         // A rejected attempt has stopped its private writer and released its dedicated attachment.
         if super::images::image_size(&self.shared.filesystem().mount_path, &p.volume)?
             .is_none_or(|bytes| bytes == 0)
         {
             return Err(failed("cannot withdraw a migration whose shared disk is missing"));
         }
+        self.stop_writer(p).await?;
         self.clear_cache(p)?;
         let mut held = self.placements.held.write().expect("placement lock");
         let dir = p.directory(&self.placements.root);

@@ -280,7 +280,7 @@ pub async fn reconcile(host: &Arc<Host>, desired: &HostDesiredState, trigger: Tr
                 }
             })
             .await;
-        customer.resume_migrations(host, desired);
+        customer.resume_migrations(host, desired).await;
     }
     host.state.signal_refresh();
     host.state.signal_report();
