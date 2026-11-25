@@ -10,7 +10,7 @@ use protocol::VolumeId;
 use super::profile::{failed, io_error};
 use crate::adapters::volumes::{align_to_sector, VolumeError};
 
-fn mounted_root(mount: &Path) -> Result<File, VolumeError> {
+pub(super) fn mounted_root(mount: &Path) -> Result<File, VolumeError> {
     // Pin the mount across lookup. Losing a FUSE mount must never turn a disk operation into
     // an operation on the underlying host directory, or follow a customer's symlink as root.
     let root = File::options()
